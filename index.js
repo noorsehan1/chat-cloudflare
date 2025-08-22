@@ -61,9 +61,13 @@ export class ChatServer {
     }
   }
 
+  // ✅ hanya broadcast ke client yang ada di room
   broadcastToRoom(room, msg) {
     for(const c of Array.from(this.clients)) {
-      try { this.safeSend(c,msg); } catch(e) { console.error("broadcastToRoom error:", e); }
+      if (c.roomname === room) {
+        try { this.safeSend(c,msg); } 
+        catch(e) { console.error("broadcastToRoom error:", e); }
+      }
     }
   }
 
@@ -87,7 +91,10 @@ export class ChatServer {
     for(const [idtarget,messages] of this.privateMessageBuffer){
       for(const c of Array.from(this.clients)){
         if(c.idtarget===idtarget){
-          for(const msg of messages){ try{ this.safeSend(c,msg); } catch(e){ console.error("flushPrivateMessageBuffer:", e); } }
+          for(const msg of messages){ 
+            try{ this.safeSend(c,msg); } 
+            catch(e){ console.error("flushPrivateMessageBuffer:", e); } 
+          }
         }
       }
       messages.length=0;
@@ -96,7 +103,10 @@ export class ChatServer {
 
   flushChatBuffer(){
     for(const [room,messages] of this.chatMessageBuffer){
-      for(const msg of messages){ try{ this.broadcastToRoom(room,msg); } catch(e){ console.error("flushChatBuffer:", e); } }
+      for(const msg of messages){ 
+        try{ this.broadcastToRoom(room,msg); } 
+        catch(e){ console.error("flushChatBuffer:", e); } 
+      }
       messages.length=0;
     }
   }
@@ -104,7 +114,10 @@ export class ChatServer {
   flushPointUpdates(){
     for(const [room,seatMap] of this.pointUpdateBuffer){
       for(const [seat,points] of seatMap){
-        for(const p of points){ try{ this.broadcastToRoom(room,["pointUpdated",room,seat,p.x,p.y,p.fast]); } catch(e){ console.error("flushPointUpdates:",e); } }
+        for(const p of points){ 
+          try{ this.broadcastToRoom(room,["pointUpdated",room,seat,p.x,p.y,p.fast]); } 
+          catch(e){ console.error("flushPointUpdates:",e); } 
+        }
         points.length=0;
       }
     }
@@ -117,7 +130,10 @@ export class ChatServer {
         const {points,...rest}=info;
         updates.push([seat,rest]);
       }
-      if(updates.length>0){ try{ this.broadcastToRoom(room,["kursiBatchUpdate",room,updates]); } catch(e){ console.error("flushKursiUpdates:", e); } }
+      if(updates.length>0){ 
+        try{ this.broadcastToRoom(room,["kursiBatchUpdate",room,updates]); } 
+        catch(e){ console.error("flushKursiUpdates:", e); } 
+      }
       seatMap.clear();
     }
   }
@@ -125,7 +141,10 @@ export class ChatServer {
   // ---------- Housekeeping ----------
   tick(){
     this.currentNumber=this.currentNumber<this.maxNumber?this.currentNumber+1:1;
-    for(const c of Array.from(this.clients)){ try{ this.safeSend(c,["currentNumber",this.currentNumber]); } catch(e){ console.error("tick error:", e); } }
+    for(const c of Array.from(this.clients)){ 
+      try{ this.safeSend(c,["currentNumber",this.currentNumber]); } 
+      catch(e){ console.error("tick error:", e); } 
+    }
   }
 
   cleanExpiredLocks(){
@@ -135,7 +154,8 @@ export class ChatServer {
       for(const [seat,info] of seatMap){
         if(String(info.namauser).startsWith("__LOCK__") && info.lockTime && now-info.lockTime>10000){
           Object.assign(info,createEmptySeat());
-          try{ this.broadcastToRoom(room,["removeKursi",room,seat]); } catch(e){ console.error("cleanExpiredLocks:", e); }
+          try{ this.broadcastToRoom(room,["removeKursi",room,seat]); } 
+          catch(e){ console.error("cleanExpiredLocks:", e); }
           this.broadcastRoomUserCount(room);
         }
       }
@@ -159,21 +179,24 @@ export class ChatServer {
     this.safeSend(ws,["allRoomsUserCount",result]);
   }
 
+  // ✅ fix: user tidak bisa dobel seat dalam 1 room
   lockSeat(room,ws){
     const seatMap=this.roomSeats.get(room);
     if(!ws.idtarget) return null;
+
     if(this.userToSeat.has(ws.idtarget)){
       const prev=this.userToSeat.get(ws.idtarget);
       if(prev.room===room){
-        const seatInfo=seatMap.get(prev.seat);
-        if(seatInfo && seatInfo.namauser==="") return prev.seat;
+        return prev.seat;
       }
     }
+
     for(let i=1;i<=this.MAX_SEATS;i++){
       const k=seatMap.get(i);
       if(k && k.namauser===""){
         k.namauser="__LOCK__"+ws.idtarget;
         k.lockTime=Date.now();
+        this.userToSeat.set(ws.idtarget,{room,seat:i});
         return i;
       }
     }
@@ -211,7 +234,6 @@ export class ChatServer {
       switch(evt){
         case "setIdTarget": {
           const newId=data[1];
-          // Hapus client lama dengan idtarget sama
           for(const c of Array.from(this.clients)){
             if(c!==ws && c.idtarget===newId){ this.cleanupClient(c); }
           }
@@ -268,7 +290,6 @@ export class ChatServer {
         case "joinRoom": {
           const newRoom=data[1];
           if(!roomList.includes(newRoom)) return this.safeSend(ws,["error",`Unknown room: ${newRoom}`]);
-          // bersihkan kursi lama
           if(ws.roomname && ws.numkursi){
             const oldRoom=ws.roomname;
             const oldSeatMap=this.roomSeats.get(oldRoom);
@@ -280,7 +301,6 @@ export class ChatServer {
             ws.numkursi.clear();
           }
           ws.roomname=newRoom;
-          const seatMap=this.roomSeats.get(newRoom);
           const foundSeat=this.lockSeat(newRoom,ws);
           if(foundSeat===null) return this.safeSend(ws,["roomFull",newRoom]);
           ws.numkursi=new Set([foundSeat]);
@@ -338,7 +358,10 @@ export class ChatServer {
 
         default: this.safeSend(ws,["error","Unknown event"]);
       }
-    } catch(err){ console.error("handleMessage error:", ws.idtarget, err); this.safeSend(ws,["error","Internal error"]); }
+    } catch(err){ 
+      console.error("handleMessage error:", ws.idtarget, err); 
+      this.safeSend(ws,["error","Internal error"]); 
+    }
   }
 
   // ---------- Lifecycle ----------
@@ -350,12 +373,10 @@ export class ChatServer {
         const seatMap=this.roomSeats.get(room);
         for(const seat of kursis){
           Object.assign(seatMap.get(seat),createEmptySeat());
-          try{ this.broadcastToRoom(room,["removeKursi",room,seat]); } catch(e){ console.error("cleanupClient broadcast error:", e); }
+          try{ this.broadcastToRoom(room,["removeKursi",room,seat]); } 
+          catch(e){ console.error("cleanupClient broadcast error:", e); }
         }
-        if(ws.idtarget && this.userToSeat.has(ws.idtarget)){
-          const prev=this.userToSeat.get(ws.idtarget);
-          if(prev.room===room && kursis.has(prev.seat)) this.userToSeat.delete(ws.idtarget);
-        }
+        if(ws.idtarget) this.userToSeat.delete(ws.idtarget); // ✅ bersihkan mapping
         this.broadcastRoomUserCount(room);
       }
     } catch(e){ console.error("cleanupClient error:", e); }
@@ -399,7 +420,8 @@ export default {
       const obj=env.CHAT_SERVER.get(id);
       return obj.fetch(req);
     }
-    if(new URL(req.url).pathname==="/health") return new Response("ok",{status:200,headers:{"content-type":"text/plain"}});
+    if(new URL(req.url).pathname==="/health") 
+      return new Response("ok",{status:200,headers:{"content-type":"text/plain"}});
     return new Response("WebSocket endpoint at wss://<your-subdomain>.workers.dev",{status:200});
   }
 };
