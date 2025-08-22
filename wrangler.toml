@@ -6,7 +6,3 @@ type = "javascript"
 [[durable_objects.bindings]]
 name = "CHAT_SERVER"
 class_name = "ChatServer"
-
-[[migrations]]
-tag = "v1"
-new_classes = ["ChatServer"]
