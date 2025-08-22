@@ -60,9 +60,9 @@ export class ChatServer {
   safeSend(ws, arr) {
     try {
       if (ws.readyState === 1) ws.send(JSON.stringify(arr));
-      else this.clients.delete(ws);
+      else this.cleanupClient(ws);
     } catch {
-      this.clients.delete(ws);
+      this.cleanupClient(ws);
     }
   }
 
@@ -205,97 +205,116 @@ export class ChatServer {
     this.safeSend(ws, ["allUpdateKursiList", room, meta]);
   }
 
-  // ---------- Message Router ----------
   handleMessage(ws, raw) {
     let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      return this.safeSend(ws, ["error", "Invalid JSON"]);
-    }
-    if (!Array.isArray(data) || data.length === 0) {
-      return this.safeSend(ws, ["error", "Invalid message format"]);
-    }
+    try { data = JSON.parse(raw); } catch { return this.safeSend(ws, ["error", "Invalid JSON"]); }
+    if (!Array.isArray(data) || data.length === 0) return this.safeSend(ws, ["error", "Invalid message format"]);
+
     const evt = data[0];
-
     try {
-      switch (evt) {
-        // ---------------------
-        // SET IDTARGET
-        // ---------------------
+      switch(evt) {
         case "setIdTarget": {
-          ws.idtarget = data[1];
+          const newId = data[1];
 
-          // ---- Bersihkan client lain yang pakai idtarget sama ----
+          // Hapus semua client lama dengan idtarget sama
           for (const c of Array.from(this.clients)) {
-            if (c !== ws && c.idtarget === ws.idtarget) {
-              this.cleanupClient(c);
-            }
+            if (c !== ws && c.idtarget === newId) this.cleanupClient(c);
           }
 
-          // Hapus mapping lama di userToSeat jika ada
+          ws.idtarget = newId;
           if (this.userToSeat.has(ws.idtarget)) this.userToSeat.delete(ws.idtarget);
 
           this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
           break;
         }
 
-        // ---------------------
-        // JOIN ROOM
-        // ---------------------
+        // ---- ping ----
+        case "ping": {
+          const pingId = data[1];
+          if (pingId && ws.idtarget === pingId) this.safeSend(ws, ["pong"]);
+          break;
+        }
+
+        // ---- sendnotif ----
+        case "sendnotif": {
+          const [, idtarget, noimageUrl, username, deskripsi] = data;
+          const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
+          let delivered = false;
+          for (const c of this.clients) {
+            if (c.idtarget === idtarget) { this.safeSend(c, notif); delivered = true; }
+          }
+          if (!delivered) {
+            if (!this.privateMessageBuffer.has(idtarget)) this.privateMessageBuffer.set(idtarget, []);
+            this.privateMessageBuffer.get(idtarget).push(notif);
+          }
+          break;
+        }
+
+        // ---- private ----
+        case "private": {
+          const [, idt, url, msg, sender] = data;
+          const ts = Date.now();
+          const out = ["private", idt, url, msg, ts, sender];
+          this.safeSend(ws, out);
+          let delivered = false;
+          for (const c of this.clients) {
+            if (c.idtarget === idt) { this.safeSend(c, out); delivered = true; }
+          }
+          if (!delivered) {
+            if (!this.privateMessageBuffer.has(idt)) this.privateMessageBuffer.set(idt, []);
+            this.privateMessageBuffer.get(idt).push(out);
+            this.safeSend(ws, ["privateFailed", idt, "User offline"]);
+          }
+          break;
+        }
+
+        // ---- isUserOnline ----
+        case "isUserOnline": {
+          const target = data[1];
+          const tanda = data[2] ?? "";
+          const online = Array.from(this.clients).some(c => c.idtarget === target);
+          this.safeSend(ws, ["userOnlineStatus", target, online, tanda]);
+          break;
+        }
+
+        // ---- getAllRoomsUserCount ----
+        case "getAllRoomsUserCount": this.handleGetAllRoomsUserCount(ws); break;
+
+        // ---- getCurrentNumber ----
+        case "getCurrentNumber": this.safeSend(ws, ["currentNumber", this.currentNumber]); break;
+
+        // ---- joinRoom ----
         case "joinRoom": {
           const newRoom = data[1];
           if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
 
-          // ---- Bersihkan kursi lama user di room manapun sebelum join room baru ----
-          if (ws.idtarget) {
-            // Bersihkan kursi user di room lama
-            if (ws.roomname && ws.numkursi) {
-              const oldRoom = ws.roomname;
-              const oldSeatMap = this.roomSeats.get(oldRoom);
-              for (const s of ws.numkursi) {
-                Object.assign(oldSeatMap.get(s), createEmptySeat());
-                this.broadcastToRoom(oldRoom, ["removeKursi", oldRoom, s]);
-              }
-              this.broadcastRoomUserCount(oldRoom);
-              ws.numkursi.clear();
+          // bersihkan kursi lama di room lama
+          if (ws.roomname && ws.numkursi) {
+            const oldRoom = ws.roomname;
+            const oldSeatMap = this.roomSeats.get(oldRoom);
+            for (const s of ws.numkursi) {
+              Object.assign(oldSeatMap.get(s), createEmptySeat());
+              this.broadcastToRoom(oldRoom, ["removeKursi", oldRoom, s]);
             }
-
-            // Hapus mapping lama userToSeat jika ada
-            if (this.userToSeat.has(ws.idtarget)) this.userToSeat.delete(ws.idtarget);
-
-            // Bersihkan client lain yang pakai idtarget sama
-            for (const c of Array.from(this.clients)) {
-              if (c !== ws && c.idtarget === ws.idtarget) {
-                this.cleanupClient(c);
-              }
-            }
+            this.broadcastRoomUserCount(oldRoom);
+            ws.numkursi.clear();
           }
 
           ws.roomname = newRoom;
-
-          // ---- Lock seat baru di room baru ----
           const seatMap = this.roomSeats.get(newRoom);
-          let foundSeat = this.lockSeat(newRoom, ws);
+          const foundSeat = this.lockSeat(newRoom, ws);
           if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
-
           ws.numkursi = new Set([foundSeat]);
           this.safeSend(ws, ["numberKursiSaya", foundSeat]);
 
-          // Simpan mapping userToSeat baru
           if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
 
-          // Kirim semua state ke client
           this.sendAllStateTo(ws, newRoom);
-
-          // Update user count room
           this.broadcastRoomUserCount(newRoom);
           break;
         }
 
-        // ---------------------
-        // CHAT
-        // ---------------------
+        // ---- chat ----
         case "chat": {
           const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
           if (!roomList.includes(roomname)) return this.safeSend(ws, ["error", "Invalid room for chat"]);
@@ -304,9 +323,7 @@ export class ChatServer {
           break;
         }
 
-        // ---------------------
-        // UPDATE POINT
-        // ---------------------
+        // ---- updatePoint ----
         case "updatePoint": {
           const [, room, seat, x, y, fast] = data;
           if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
@@ -314,8 +331,7 @@ export class ChatServer {
           const si = seatMap.get(seat);
           if (!si) return;
           si.points.push({ x, y, fast });
-          if (si.points.length > 200) si.points.shift(); // batas buffer
-
+          if (si.points.length > 200) si.points.shift();
           if (!this.pointUpdateBuffer.has(room)) this.pointUpdateBuffer.set(room, new Map());
           const roomBuf = this.pointUpdateBuffer.get(room);
           if (!roomBuf.has(seat)) roomBuf.set(seat, []);
@@ -323,13 +339,33 @@ export class ChatServer {
           break;
         }
 
-        default:
-          this.safeSend(ws, ["error", "Unknown event"]);
+        // ---- removeKursiAndPoint ----
+        case "removeKursiAndPoint": {
+          const [, room, seat] = data;
+          if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
+          const seatMap = this.roomSeats.get(room);
+          Object.assign(seatMap.get(seat), createEmptySeat());
+          for (const c of this.clients) c.numkursi?.delete(seat);
+          this.broadcastToRoom(room, ["removeKursi", room, seat]);
+          this.broadcastRoomUserCount(room);
+          break;
+        }
+
+        // ---- updateKursi ----
+        case "updateKursi": {
+          const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
+          if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
+          const seatInfo = { noimageUrl, namauser, color, itembawah, itematas, vip, viptanda, points: [] };
+          if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
+          this.updateKursiBuffer.get(room).set(seat, seatInfo);
+          this.roomSeats.get(room).set(seat, seatInfo);
+          this.broadcastRoomUserCount(room);
+          break;
+        }
+
+        default: this.safeSend(ws, ["error", "Unknown event"]);
       }
-    } catch (err) {
-      console.error("handleMessage error:", err);
-      this.safeSend(ws, ["error", "Internal error"]);
-    }
+    } catch (err) { console.error("handleMessage error:", err); this.safeSend(ws, ["error", "Internal error"]); }
   }
 
   // ---------- Lifecycle ----------
@@ -349,9 +385,8 @@ export class ChatServer {
         }
         this.broadcastRoomUserCount(room);
       }
-    } catch (e) {
-      console.error("cleanup error:", e);
-    } finally {
+    } catch (e) { console.error("cleanup error:", e); }
+    finally {
       this.clients.delete(ws);
       ws.numkursi?.clear?.();
       ws.roomname = undefined;
@@ -360,9 +395,8 @@ export class ChatServer {
 
   async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || request.headers.get("upgrade") || "";
-    if (upgrade.toLowerCase() !== "websocket") {
-      return new Response("Expected WebSocket", { status: 426 });
-    }
+    if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
+
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.accept();
@@ -371,7 +405,6 @@ export class ChatServer {
     ws.roomname = undefined;
     ws.idtarget = undefined;
     ws.numkursi = new Set();
-
     this.clients.add(ws);
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
