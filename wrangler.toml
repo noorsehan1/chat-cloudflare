@@ -1,6 +1,6 @@
 name = "chat-cloudflare"
 main = "src/index.ts"
-type = "javascript"
+type = "module"
 compatibility_date = "2025-08-22"
 
 [durable_objects]
