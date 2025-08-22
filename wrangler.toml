@@ -9,4 +9,3 @@ class_name = "ChatServer"
 [[migrations]]
 tag = "v2"
 new_classes = ["ChatServer"]
-
