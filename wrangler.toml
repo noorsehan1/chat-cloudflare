@@ -1,0 +1,9 @@
+name = "chat-cloudflare"
+main = "src/index.ts"
+type = "javascript"
+compatibility_date = "2025-08-22"
+
+[durable_objects]
+bindings = [
+  { name = "CHAT_SERVER", class_name = "ChatServer" }
+]
