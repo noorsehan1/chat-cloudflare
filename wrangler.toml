@@ -1,13 +1,8 @@
 name = "summer-fog-9436"
 main = "index.js"
-type = "module"
 compatibility_date = "2025-08-22"
+type = "javascript"
 
-[durable_objects]
-bindings = [
-  { name = "CHAT_SERVER", class_name = "ChatServer" }
-]
-
-[[migrations]]
-tag = "v1"
-new_classes = ["ChatServer"]
+[[durable_objects.bindings]]
+name = "CHAT_SERVER"
+class_name = "ChatServer"
