@@ -1,9 +1,26 @@
-name = "chat-cloudflare"
+# Nama Worker harus sama dengan yang ada di Cloudflare
+name = "summer-fog-9436"
+
+# File entry point project kamu
 main = "src/index.ts"
-type = "module"
+
+# Tipe project, bisa "javascript" atau "typescript"
+type = "javascript"
+
+# Tanggal kompatibilitas runtime, bisa disesuaikan
 compatibility_date = "2025-08-22"
 
+# Binding Durable Object
 [durable_objects]
 bindings = [
   { name = "CHAT_SERVER", class_name = "ChatServer" }
 ]
+
+# Optional: build command (kalau pakai TypeScript)
+# [build]
+# command = "npm install && npm run build"
+# upload_format = "modules"
+
+# Optional: environment variables atau secrets
+# [vars]
+# EXAMPLE_VAR = "value"
