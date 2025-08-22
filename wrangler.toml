@@ -7,5 +7,5 @@ name = "CHAT_SERVER"
 class_name = "ChatServer"
 
 [[migrations]]
-tag = "v2"
-new_classes = ["ChatServer"]
+tag = "v3"
+new_sqlite_classes = ["ChatServer"]
