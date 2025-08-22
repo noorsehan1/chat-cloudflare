@@ -1,8 +1,11 @@
 name = "summer-fog-9436"
 main = "index.js"
 compatibility_date = "2025-08-22"
-type = "javascript"
 
 [[durable_objects.bindings]]
 name = "CHAT_SERVER"
 class_name = "ChatServer"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["ChatServer"]
