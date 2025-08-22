@@ -1,8 +1,9 @@
-name = "summer-fog-9436"
-main = "index.js"
-compatibility_date = "2025-08-22"
-type = "javascript"
-
-[[durable_objects.bindings]]
-name = "CHAT_SERVER"
-class_name = "ChatServer"
+async fetch(request) {
+  if (request.headers.get("Upgrade") === "websocket") {
+    const [client, server] = Object.values(new WebSocketPair());
+    server.accept();
+    this.handleSocket(server);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+  return new Response("Expected websocket", { status: 400 });
+}
