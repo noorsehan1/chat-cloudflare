@@ -7,5 +7,6 @@ name = "CHAT_SERVER"
 class_name = "ChatServer"
 
 [[migrations]]
-tag = "v1"
+tag = "v2"
 new_classes = ["ChatServer"]
+
