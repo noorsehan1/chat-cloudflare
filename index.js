@@ -218,6 +218,15 @@ export class ChatServer {
     this.safeSend(ws,["allUpdateKursiList",room,meta]);
   }
 
+  // 🔥 tambahan: cleanup semua client dengan idtarget sama
+  cleanupClientById(idtarget){
+    for(const c of Array.from(this.clients)){
+      if(c.idtarget===idtarget){
+        this.cleanupClient(c);
+      }
+    }
+  }
+
   handleMessage(ws,raw){
     let data;
     try{
@@ -234,11 +243,8 @@ export class ChatServer {
       switch(evt){
         case "setIdTarget": {
           const newId=data[1];
-          for(const c of Array.from(this.clients)){
-            if(c!==ws && c.idtarget===newId){ this.cleanupClient(c); }
-          }
+          this.cleanupClientById(newId); // ✅ tendang semua client lama dengan ID sama
           ws.idtarget=newId;
-          if(this.userToSeat.has(ws.idtarget)) this.userToSeat.delete(ws.idtarget);
           this.safeSend(ws,["setIdTargetAck",ws.idtarget]);
           break;
         }
@@ -301,6 +307,16 @@ export class ChatServer {
             ws.numkursi.clear();
           }
           ws.roomname=newRoom;
+
+          // ✅ pastikan kursi lama user dibersihkan dulu kalau masih __LOCK__
+          const seatMap=this.roomSeats.get(newRoom);
+          for(const [s,info] of seatMap){
+            if(info.namauser==="__LOCK__"+ws.idtarget){
+              Object.assign(seatMap.get(s),createEmptySeat());
+              try{ this.broadcastToRoom(newRoom,["removeKursi",newRoom,s]); } catch(e){ console.error(e); }
+            }
+          }
+
           const foundSeat=this.lockSeat(newRoom,ws);
           if(foundSeat===null) return this.safeSend(ws,["roomFull",newRoom]);
           ws.numkursi=new Set([foundSeat]);
@@ -367,6 +383,18 @@ export class ChatServer {
   // ---------- Lifecycle ----------
   cleanupClient(ws){
     try{
+      const id=ws.idtarget;
+      if(id){
+        for(const [room,seatMap] of this.roomSeats){
+          for(const [seat,info] of seatMap){
+            if(info.namauser==="__LOCK__"+id || info.namauser===id){
+              Object.assign(seatMap.get(seat),createEmptySeat());
+              try{ this.broadcastToRoom(room,["removeKursi",room,seat]); } catch(e){ console.error("cleanupClient broadcast error:", e); }
+            }
+          }
+        }
+        this.userToSeat.delete(id);
+      }
       const room=ws.roomname;
       const kursis=ws.numkursi;
       if(room && kursis && this.roomSeats.has(room)){
@@ -376,7 +404,6 @@ export class ChatServer {
           try{ this.broadcastToRoom(room,["removeKursi",room,seat]); } 
           catch(e){ console.error("cleanupClient broadcast error:", e); }
         }
-        if(ws.idtarget) this.userToSeat.delete(ws.idtarget); // ✅ bersihkan mapping
         this.broadcastRoomUserCount(room);
       }
     } catch(e){ console.error("cleanupClient error:", e); }
