@@ -61,7 +61,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ hanya broadcast ke client yang ada di room
   broadcastToRoom(room, msg) {
     for(const c of Array.from(this.clients)) {
       if (c.roomname === room) {
@@ -179,7 +178,6 @@ export class ChatServer {
     this.safeSend(ws,["allRoomsUserCount",result]);
   }
 
-  // ✅ fix: user tidak bisa dobel seat dalam 1 room
   lockSeat(room,ws){
     const seatMap=this.roomSeats.get(room);
     if(!ws.idtarget) return null;
@@ -218,11 +216,27 @@ export class ChatServer {
     this.safeSend(ws,["allUpdateKursiList",room,meta]);
   }
 
-  // 🔥 tambahan: cleanup semua client dengan idtarget sama
   cleanupClientById(idtarget){
     for(const c of Array.from(this.clients)){
       if(c.idtarget===idtarget){
         this.cleanupClient(c);
+      }
+    }
+  }
+
+  // 🔥 helper baru
+  forceRemoveSeatById(idtarget) {
+    for (const [room, seatMap] of this.roomSeats) {
+      for (const [seat, info] of seatMap) {
+        if (info.namauser === "__LOCK__" + idtarget || info.namauser === idtarget) {
+          Object.assign(seatMap.get(seat), createEmptySeat());
+          try { 
+            this.broadcastToRoom(room, ["removeKursi", room, seat]); 
+          } catch(e) { 
+            console.error("forceRemoveSeatById broadcast error:", e); 
+          }
+          this.broadcastRoomUserCount(room);
+        }
       }
     }
   }
@@ -243,7 +257,8 @@ export class ChatServer {
       switch(evt){
         case "setIdTarget": {
           const newId=data[1];
-          this.cleanupClientById(newId); // ✅ tendang semua client lama dengan ID sama
+          this.cleanupClientById(newId);   // tendang client lama
+          this.forceRemoveSeatById(newId); // 🔥 hapus kursi lama
           ws.idtarget=newId;
           this.safeSend(ws,["setIdTargetAck",ws.idtarget]);
           break;
@@ -308,7 +323,6 @@ export class ChatServer {
           }
           ws.roomname=newRoom;
 
-          // ✅ pastikan kursi lama user dibersihkan dulu kalau masih __LOCK__
           const seatMap=this.roomSeats.get(newRoom);
           for(const [s,info] of seatMap){
             if(info.namauser==="__LOCK__"+ws.idtarget){
@@ -380,7 +394,6 @@ export class ChatServer {
     }
   }
 
-  // ---------- Lifecycle ----------
   cleanupClient(ws){
     try{
       const id=ws.idtarget;
@@ -394,6 +407,9 @@ export class ChatServer {
           }
         }
         this.userToSeat.delete(id);
+
+        // 🔥 pastikan semua kursi id ini dibersihkan
+        this.forceRemoveSeatById(id);
       }
       const room=ws.roomname;
       const kursis=ws.numkursi;
