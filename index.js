@@ -137,7 +137,6 @@ export class ChatServer {
     }
   }
 
-  // ---------- Housekeeping ----------
   tick(){
     this.currentNumber=this.currentNumber<this.maxNumber?this.currentNumber+1:1;
     for(const c of Array.from(this.clients)){ 
@@ -171,7 +170,6 @@ export class ChatServer {
     } catch(err){ console.error("periodicFlush error:", err); }
   }
 
-  // ---------- Event Handlers ----------
   handleGetAllRoomsUserCount(ws){
     const allCounts=this.getJumlahRoom();
     const result=roomList.map(room=>[room,allCounts[room]]);
@@ -224,18 +222,15 @@ export class ChatServer {
     }
   }
 
-  // 🔥 helper baru
-  forceRemoveSeatById(idtarget) {
+  // 🔥 helper baru untuk hapus semua kursi ID lama sebelum join
+  removeAllSeatsById(idtarget) {
     for (const [room, seatMap] of this.roomSeats) {
       for (const [seat, info] of seatMap) {
         if (info.namauser === "__LOCK__" + idtarget || info.namauser === idtarget) {
           Object.assign(seatMap.get(seat), createEmptySeat());
           try { 
             this.broadcastToRoom(room, ["removeKursi", room, seat]); 
-          } catch(e) { 
-            console.error("forceRemoveSeatById broadcast error:", e); 
-          }
-          this.broadcastRoomUserCount(room);
+          } catch(e) { console.error(e); }
         }
       }
     }
@@ -258,7 +253,6 @@ export class ChatServer {
         case "setIdTarget": {
           const newId=data[1];
           this.cleanupClientById(newId);   // tendang client lama
-          this.forceRemoveSeatById(newId); // 🔥 hapus kursi lama
           ws.idtarget=newId;
           this.safeSend(ws,["setIdTargetAck",ws.idtarget]);
           break;
@@ -311,28 +305,16 @@ export class ChatServer {
         case "joinRoom": {
           const newRoom=data[1];
           if(!roomList.includes(newRoom)) return this.safeSend(ws,["error",`Unknown room: ${newRoom}`]);
-          if(ws.roomname && ws.numkursi){
-            const oldRoom=ws.roomname;
-            const oldSeatMap=this.roomSeats.get(oldRoom);
-            for(const s of ws.numkursi){
-              Object.assign(oldSeatMap.get(s),createEmptySeat());
-              try{ this.broadcastToRoom(oldRoom,["removeKursi",oldRoom,s]); } catch(e){ console.error(e); }
-            }
-            this.broadcastRoomUserCount(oldRoom);
-            ws.numkursi.clear();
-          }
+
+          // 🔥 hapus semua kursi lama user di semua room sebelum lock baru
+          if(ws.idtarget) this.removeAllSeatsById(ws.idtarget);
+
           ws.roomname=newRoom;
 
           const seatMap=this.roomSeats.get(newRoom);
-          for(const [s,info] of seatMap){
-            if(info.namauser==="__LOCK__"+ws.idtarget){
-              Object.assign(seatMap.get(s),createEmptySeat());
-              try{ this.broadcastToRoom(newRoom,["removeKursi",newRoom,s]); } catch(e){ console.error(e); }
-            }
-          }
-
           const foundSeat=this.lockSeat(newRoom,ws);
           if(foundSeat===null) return this.safeSend(ws,["roomFull",newRoom]);
+
           ws.numkursi=new Set([foundSeat]);
           this.safeSend(ws,["numberKursiSaya",foundSeat]);
           if(ws.idtarget) this.userToSeat.set(ws.idtarget,{room:newRoom,seat:foundSeat});
@@ -407,9 +389,6 @@ export class ChatServer {
           }
         }
         this.userToSeat.delete(id);
-
-        // 🔥 pastikan semua kursi id ini dibersihkan
-        this.forceRemoveSeatById(id);
       }
       const room=ws.roomname;
       const kursis=ws.numkursi;
