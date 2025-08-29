@@ -44,10 +44,11 @@ export class ChatServer {
 
     this.currentNumber = 1;
     this.maxNumber = 6;
-    this.intervalMillis = 15*60*1000;
 
-    this._tickTimer = setInterval(()=>this.tick(), this.intervalMillis);
-    this._flushTimer = setInterval(()=>this.periodicFlush(), 100);
+    // Tick setiap 15 menit
+    this._tickTimer = setInterval(()=>this.tick(), 15*60*1000);
+    // Flush batch tiap 1 detik
+    this._flushTimer = setInterval(()=>this.periodicFlush(), 1000);
   }
 
   // ---------- Helpers ----------
@@ -215,7 +216,6 @@ export class ChatServer {
     }
   }
 
-  // 🔥 hapus semua kursi ID lama sebelum join
   removeAllSeatsById(idtarget) {
     for (const [room, seatMap] of this.roomSeats) {
       for (const [seat, info] of seatMap) {
@@ -234,7 +234,6 @@ export class ChatServer {
     try{
       data=JSON.parse(raw);
     } catch(e){
-      console.error("Invalid JSON:", raw, e);
       return this.safeSend(ws,["error","Invalid JSON"]);
     }
     if(!Array.isArray(data)||data.length===0) return this.safeSend(ws,["error","Invalid message format"]);
@@ -245,7 +244,7 @@ export class ChatServer {
       switch(evt){
         case "setIdTarget": {
           const newId=data[1];
-          this.cleanupClientById(newId);   // tendang client lama
+          this.cleanupClientById(newId);
           ws.idtarget=newId;
           this.safeSend(ws,["setIdTargetAck",ws.idtarget]);
           break;
@@ -298,19 +297,12 @@ export class ChatServer {
         case "joinRoom": {
           const newRoom=data[1];
           if(!roomList.includes(newRoom)) return this.safeSend(ws,["error",`Unknown room: ${newRoom}`]);
-
-          // 🔥 hapus semua kursi lama user di semua room sebelum lock baru
           if(ws.idtarget) this.removeAllSeatsById(ws.idtarget);
-
           ws.roomname=newRoom;
-
-          const seatMap=this.roomSeats.get(newRoom);
           const foundSeat=this.lockSeat(newRoom,ws);
           if(foundSeat===null) return this.safeSend(ws,["roomFull",newRoom]);
-
           ws.numkursi=new Set([foundSeat]);
           this.safeSend(ws,["numberKursiSaya",foundSeat]);
-          if(ws.idtarget) this.userToSeat.set(ws.idtarget,{room:newRoom,seat:foundSeat});
           this.sendAllStateTo(ws,newRoom);
           this.broadcastRoomUserCount(newRoom);
           break;
@@ -326,7 +318,7 @@ export class ChatServer {
 
         case "updatePoint": {
           const [,room,seat,x,y,fast]=data;
-          if(!roomList.includes(room)) return this.safeSend(ws,["error",`Unknown room: ${room}`]);
+          if(!roomList.includes(room)) return;
           const seatMap=this.roomSeats.get(room);
           const si=seatMap.get(seat);
           if(!si) return;
@@ -341,7 +333,7 @@ export class ChatServer {
 
         case "removeKursiAndPoint": {
           const [,room,seat]=data;
-          if(!roomList.includes(room)) return this.safeSend(ws,["error",`Unknown room: ${room}`]);
+          if(!roomList.includes(room)) return;
           const seatMap=this.roomSeats.get(room);
           Object.assign(seatMap.get(seat),createEmptySeat());
           for(const c of this.clients) c.numkursi?.delete(seat);
@@ -352,7 +344,7 @@ export class ChatServer {
 
         case "updateKursi": {
           const [,room,seat,noimageUrl,namauser,color,itembawah,itematas,vip,viptanda]=data;
-          if(!roomList.includes(room)) return this.safeSend(ws,["error",`Unknown room: ${room}`]);
+          if(!roomList.includes(room)) return;
           const seatInfo={noimageUrl,namauser,color,itembawah,itematas,vip,viptanda,points:[]};
           if(!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room,new Map());
           this.updateKursiBuffer.get(room).set(seat,seatInfo);
@@ -377,7 +369,7 @@ export class ChatServer {
           for(const [seat,info] of seatMap){
             if(info.namauser==="__LOCK__"+id || info.namauser===id){
               Object.assign(seatMap.get(seat),createEmptySeat());
-              try{ this.broadcastToRoom(room,["removeKursi",room,seat]); } catch(e){ console.error("cleanupClient broadcast error:", e); }
+              try{ this.broadcastToRoom(room,["removeKursi",room,seat]); } catch(e){ console.error(e); }
             }
           }
         }
@@ -390,7 +382,7 @@ export class ChatServer {
         for(const seat of kursis){
           Object.assign(seatMap.get(seat),createEmptySeat());
           try{ this.broadcastToRoom(room,["removeKursi",room,seat]); } 
-          catch(e){ console.error("cleanupClient broadcast error:", e); }
+          catch(e){ console.error(e); }
         }
         this.broadcastRoomUserCount(room);
       }
