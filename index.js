@@ -384,31 +384,38 @@ export class ChatServer {
           for(const [seat,info] of seatMap){
             if(info.namauser==="__LOCK__"+id || info.namauser===id){
               Object.assign(seatMap.get(seat),createEmptySeat());
-              try{ this.broadcastToRoom(room,["removeKursi",room,seat]); } catch(e){ console.error("cleanupClient broadcast error:", e); }
+              try{ 
+                this.broadcastToRoom(room,["removeKursi",room,seat]); 
+              } catch(e){ console.error("cleanupClient broadcast error:", e); }
             }
           }
         }
         this.userToSeat.delete(id);
       }
+
       const room=ws.roomname;
       const kursis=ws.numkursi;
       if(room && kursis && this.roomSeats.has(room)){
         const seatMap=this.roomSeats.get(room);
         for(const seat of kursis){
           Object.assign(seatMap.get(seat),createEmptySeat());
-          try{ this.broadcastToRoom(room,["removeKursi",room,seat]); } 
-          catch(e){ console.error("cleanupClient broadcast error:", e); }
+          try{ 
+            this.broadcastToRoom(room,["removeKursi",room,seat]); 
+          } catch(e){ console.error("cleanupClient broadcast error:", e); }
         }
         this.broadcastRoomUserCount(room);
       }
-    } catch(e){ console.error("cleanupClient error:", e); }
-    finally{
+    } catch(e){ 
+      console.error("cleanupClient error:", e); 
+    } finally {
+      // 🔥 pastikan remove client dilakukan PALING TERAKHIR
       this.clients.delete(ws);
       ws.numkursi?.clear?.();
       ws.roomname=undefined;
       ws.idtarget=undefined;
     }
   }
+
 
   async fetch(request){
     const upgrade=request.headers.get("Upgrade")||request.headers.get("upgrade")||"";
@@ -447,3 +454,4 @@ export default {
     return new Response("WebSocket endpoint at wss://<your-subdomain>.workers.dev",{status:200});
   }
 };
+
