@@ -1,5 +1,5 @@
 // ============================
-// Cloudflare Workers + DO Chat
+// Cloudflare Workers + DO Chat (Ultra Ringan)
 // ============================
 
 // ---- Konstanta Room ----
@@ -26,8 +26,8 @@ export class ChatServer {
     this.state = state;
     this.env = env;
 
-    this.clients = new Set(); // ws augmented: {roomname, idtarget, numkursi:Set<number>}
-    this.userToSeat = new Map(); // idtarget -> { room, seat }
+    this.clients = new Set(); 
+    this.userToSeat = new Map(); 
 
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
@@ -37,17 +37,17 @@ export class ChatServer {
       this.roomSeats.set(room, m);
     }
 
-    this.pointUpdateBuffer = new Map();   // room -> Map(seat -> [{x,y,fast}])
-    this.updateKursiBuffer = new Map();   // room -> Map(seat -> seatInfo)
-    this.chatMessageBuffer = new Map();   // room -> [msg...]
-    this.privateMessageBuffer = new Map();// idtarget -> [msg...]
+    this.pointUpdateBuffer = new Map();   
+    this.updateKursiBuffer = new Map();   
+    this.chatMessageBuffer = new Map();   
+    this.privateMessageBuffer = new Map();
 
     this.currentNumber = 1;
     this.maxNumber = 6;
-    this.intervalMillis = 15*60*1000;
 
-    this._tickTimer = setInterval(()=>this.tick(), this.intervalMillis);
-    this._flushTimer = setInterval(()=>this.periodicFlush(), 100);
+    this._tickTimer = setInterval(()=>this.tick(), 15*60*1000);
+    this._flushTimer = setInterval(()=>this.periodicFlush(), 500); // flush tiap 500ms
+    this._lockCleanupTimer = setInterval(()=>this.cleanExpiredLocks(), 2000);
   }
 
   // ---------- Helpers ----------
@@ -88,6 +88,7 @@ export class ChatServer {
 
   flushPrivateMessageBuffer(){
     for(const [idtarget,messages] of this.privateMessageBuffer){
+      if(messages.length===0) continue;
       for(const c of Array.from(this.clients)){
         if(c.idtarget===idtarget){
           for(const msg of messages){ 
@@ -102,6 +103,7 @@ export class ChatServer {
 
   flushChatBuffer(){
     for(const [room,messages] of this.chatMessageBuffer){
+      if(messages.length===0) continue;
       for(const msg of messages){ 
         try{ this.broadcastToRoom(room,msg); } 
         catch(e){ console.error("flushChatBuffer:", e); } 
@@ -112,18 +114,25 @@ export class ChatServer {
 
   flushPointUpdates(){
     for(const [room,seatMap] of this.pointUpdateBuffer){
+      if(seatMap.size===0) continue;
       for(const [seat,points] of seatMap){
-        for(const p of points){ 
-          try{ this.broadcastToRoom(room,["pointUpdated",room,seat,p.x,p.y,p.fast]); } 
-          catch(e){ console.error("flushPointUpdates:",e); } 
+        if(points.length===0) continue;
+
+        // kirim batch 5 point sekaligus
+        while(points.length>0){
+          const batch=points.splice(0,5);
+          for(const p of batch){
+            try{ this.broadcastToRoom(room,["pointUpdated",room,seat,p.x,p.y,p.fast]); } 
+            catch(e){ console.error("flushPointUpdates:",e); } 
+          }
         }
-        points.length=0;
       }
     }
   }
 
   flushKursiUpdates(){
     for(const [room,seatMap] of this.updateKursiBuffer){
+      if(seatMap.size===0) continue;
       const updates=[];
       for(const [seat,info] of seatMap){
         const {points,...rest}=info;
@@ -166,7 +175,6 @@ export class ChatServer {
       this.flushKursiUpdates();
       this.flushChatBuffer();
       this.flushPrivateMessageBuffer();
-      this.cleanExpiredLocks();
     } catch(err){ console.error("periodicFlush error:", err); }
   }
 
@@ -222,7 +230,6 @@ export class ChatServer {
     }
   }
 
-  // 🔥 helper baru untuk hapus semua kursi ID lama sebelum join
   removeAllSeatsById(idtarget) {
     for (const [room, seatMap] of this.roomSeats) {
       for (const [seat, info] of seatMap) {
@@ -252,7 +259,7 @@ export class ChatServer {
       switch(evt){
         case "setIdTarget": {
           const newId=data[1];
-          this.cleanupClientById(newId);   // tendang client lama
+          this.cleanupClientById(newId);
           ws.idtarget=newId;
           this.safeSend(ws,["setIdTargetAck",ws.idtarget]);
           break;
@@ -306,7 +313,6 @@ export class ChatServer {
           const newRoom=data[1];
           if(!roomList.includes(newRoom)) return this.safeSend(ws,["error",`Unknown room: ${newRoom}`]);
 
-          // 🔥 hapus semua kursi lama user di semua room sebelum lock baru
           if(ws.idtarget) this.removeAllSeatsById(ws.idtarget);
 
           ws.roomname=newRoom;
@@ -376,7 +382,7 @@ export class ChatServer {
     }
   }
 
-    cleanupClient(ws){
+  cleanupClient(ws){
     try {
       const id = ws.idtarget;
       if (id && this.userToSeat.has(id)) {
@@ -392,7 +398,6 @@ export class ChatServer {
         this.broadcastRoomUserCount(room);
       }
 
-      // hapus semua kursi yang masih tercatat di ws.numkursi (cadangan)
       if (ws.roomname && ws.numkursi && this.roomSeats.has(ws.roomname)) {
         const seatMap = this.roomSeats.get(ws.roomname);
         for (const seat of ws.numkursi) {
@@ -407,14 +412,12 @@ export class ChatServer {
     } catch (e) {
       console.error("cleanupClient error:", e);
     } finally {
-      // 🔥 hapus client PALING TERAKHIR
       this.clients.delete(ws);
       ws.numkursi?.clear?.();
       ws.roomname = undefined;
       ws.idtarget = undefined;
     }
   }
-
 
   async fetch(request){
     const upgrade=request.headers.get("Upgrade")||request.headers.get("upgrade")||"";
@@ -453,5 +456,3 @@ export default {
     return new Response("WebSocket endpoint at wss://<your-subdomain>.workers.dev",{status:200});
   }
 };
-
-
