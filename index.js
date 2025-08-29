@@ -376,43 +376,42 @@ export class ChatServer {
     }
   }
 
-  cleanupClient(ws){
-    try{
-      const id=ws.idtarget;
-      if(id){
-        for(const [room,seatMap] of this.roomSeats){
-          for(const [seat,info] of seatMap){
-            if(info.namauser==="__LOCK__"+id || info.namauser===id){
-              Object.assign(seatMap.get(seat),createEmptySeat());
-              try{ 
-                this.broadcastToRoom(room,["removeKursi",room,seat]); 
-              } catch(e){ console.error("cleanupClient broadcast error:", e); }
-            }
-          }
+    cleanupClient(ws){
+    try {
+      const id = ws.idtarget;
+      if (id && this.userToSeat.has(id)) {
+        const { room, seat } = this.userToSeat.get(id);
+        const seatMap = this.roomSeats.get(room);
+        if (seatMap && seatMap.has(seat)) {
+          Object.assign(seatMap.get(seat), createEmptySeat());
+          try { 
+            this.broadcastToRoom(room, ["removeKursi", room, seat]); 
+          } catch (e) { console.error("cleanupClient broadcast error:", e); }
         }
         this.userToSeat.delete(id);
-      }
-
-      const room=ws.roomname;
-      const kursis=ws.numkursi;
-      if(room && kursis && this.roomSeats.has(room)){
-        const seatMap=this.roomSeats.get(room);
-        for(const seat of kursis){
-          Object.assign(seatMap.get(seat),createEmptySeat());
-          try{ 
-            this.broadcastToRoom(room,["removeKursi",room,seat]); 
-          } catch(e){ console.error("cleanupClient broadcast error:", e); }
-        }
         this.broadcastRoomUserCount(room);
       }
-    } catch(e){ 
-      console.error("cleanupClient error:", e); 
+
+      // hapus semua kursi yang masih tercatat di ws.numkursi (cadangan)
+      if (ws.roomname && ws.numkursi && this.roomSeats.has(ws.roomname)) {
+        const seatMap = this.roomSeats.get(ws.roomname);
+        for (const seat of ws.numkursi) {
+          Object.assign(seatMap.get(seat), createEmptySeat());
+          try { 
+            this.broadcastToRoom(ws.roomname, ["removeKursi", ws.roomname, seat]); 
+          } catch (e) { console.error("cleanupClient broadcast error:", e); }
+        }
+        this.broadcastRoomUserCount(ws.roomname);
+      }
+
+    } catch (e) {
+      console.error("cleanupClient error:", e);
     } finally {
-      // 🔥 pastikan remove client dilakukan PALING TERAKHIR
+      // 🔥 hapus client PALING TERAKHIR
       this.clients.delete(ws);
       ws.numkursi?.clear?.();
-      ws.roomname=undefined;
-      ws.idtarget=undefined;
+      ws.roomname = undefined;
+      ws.idtarget = undefined;
     }
   }
 
@@ -454,4 +453,5 @@ export default {
     return new Response("WebSocket endpoint at wss://<your-subdomain>.workers.dev",{status:200});
   }
 };
+
 
