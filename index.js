@@ -131,7 +131,7 @@ export class ChatServer {
       }
       if(updates.length>0){ 
         try{ this.broadcastToRoom(room,["kursiBatchUpdate",room,updates]); } 
-        catch(e){ console.error("flushKursiUpdates:", e); }
+        catch(e){ console.error("flushKursiUpdates:", e); } 
       }
       seatMap.clear();
     }
@@ -180,13 +180,6 @@ export class ChatServer {
     const seatMap=this.roomSeats.get(room);
     if(!ws.idtarget) return null;
 
-    if(this.userToSeat.has(ws.idtarget)){
-      const prev=this.userToSeat.get(ws.idtarget);
-      if(prev.room===room){
-        return prev.seat;
-      }
-    }
-
     for(let i=1;i<=this.MAX_SEATS;i++){
       const k=seatMap.get(i);
       if(k && k.namauser===""){
@@ -222,7 +215,7 @@ export class ChatServer {
     }
   }
 
-  // 🔥 helper baru untuk hapus semua kursi ID lama sebelum join
+  // 🔥 hapus semua kursi ID lama sebelum join
   removeAllSeatsById(idtarget) {
     for (const [room, seatMap] of this.roomSeats) {
       for (const [seat, info] of seatMap) {
@@ -236,40 +229,171 @@ export class ChatServer {
     }
   }
 
-  // ==========================
-  // 🔹 Optimized cleanupClient
-  // ==========================
+  handleMessage(ws,raw){
+    let data;
+    try{
+      data=JSON.parse(raw);
+    } catch(e){
+      console.error("Invalid JSON:", raw, e);
+      return this.safeSend(ws,["error","Invalid JSON"]);
+    }
+    if(!Array.isArray(data)||data.length===0) return this.safeSend(ws,["error","Invalid message format"]);
+
+    const evt=data[0];
+
+    try{
+      switch(evt){
+        case "setIdTarget": {
+          const newId=data[1];
+          this.cleanupClientById(newId);   // tendang client lama
+          ws.idtarget=newId;
+          this.safeSend(ws,["setIdTargetAck",ws.idtarget]);
+          break;
+        }
+
+        case "ping": {
+          const pingId=data[1];
+          if(pingId && ws.idtarget===pingId) this.safeSend(ws,["pong"]);
+          break;
+        }
+
+        case "sendnotif": {
+          const [,idtarget,noimageUrl,username,deskripsi]=data;
+          const notif=["notif",noimageUrl,username,deskripsi,Date.now()];
+          let delivered=false;
+          for(const c of this.clients){ if(c.idtarget===idtarget){ this.safeSend(c,notif); delivered=true; } }
+          if(!delivered){
+            if(!this.privateMessageBuffer.has(idtarget)) this.privateMessageBuffer.set(idtarget,[]);
+            this.privateMessageBuffer.get(idtarget).push(notif);
+          }
+          break;
+        }
+
+        case "private": {
+          const [,idt,url,msg,sender]=data;
+          const ts=Date.now();
+          const out=["private",idt,url,msg,ts,sender];
+          this.safeSend(ws,out);
+          let delivered=false;
+          for(const c of this.clients){ if(c.idtarget===idt){ this.safeSend(c,out); delivered=true; } }
+          if(!delivered){
+            if(!this.privateMessageBuffer.has(idt)) this.privateMessageBuffer.set(idt,[]);
+            this.privateMessageBuffer.get(idt).push(out);
+            this.safeSend(ws,["privateFailed",idt,"User offline"]);
+          }
+          break;
+        }
+
+        case "isUserOnline": {
+          const target=data[1];
+          const tanda=data[2]??"";
+          const online=Array.from(this.clients).some(c=>c.idtarget===target);
+          this.safeSend(ws,["userOnlineStatus",target,online,tanda]);
+          break;
+        }
+
+        case "getAllRoomsUserCount": this.handleGetAllRoomsUserCount(ws); break;
+        case "getCurrentNumber": this.safeSend(ws,["currentNumber",this.currentNumber]); break;
+
+        case "joinRoom": {
+          const newRoom=data[1];
+          if(!roomList.includes(newRoom)) return this.safeSend(ws,["error",`Unknown room: ${newRoom}`]);
+
+          // 🔥 hapus semua kursi lama user di semua room sebelum lock baru
+          if(ws.idtarget) this.removeAllSeatsById(ws.idtarget);
+
+          ws.roomname=newRoom;
+
+          const seatMap=this.roomSeats.get(newRoom);
+          const foundSeat=this.lockSeat(newRoom,ws);
+          if(foundSeat===null) return this.safeSend(ws,["roomFull",newRoom]);
+
+          ws.numkursi=new Set([foundSeat]);
+          this.safeSend(ws,["numberKursiSaya",foundSeat]);
+          if(ws.idtarget) this.userToSeat.set(ws.idtarget,{room:newRoom,seat:foundSeat});
+          this.sendAllStateTo(ws,newRoom);
+          this.broadcastRoomUserCount(newRoom);
+          break;
+        }
+
+        case "chat": {
+          const [,roomname,noImageURL,username,message,usernameColor,chatTextColor]=data;
+          if(!roomList.includes(roomname)) return this.safeSend(ws,["error","Invalid room for chat"]);
+          if(!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname,[]);
+          this.chatMessageBuffer.get(roomname).push(["chat",roomname,noImageURL,username,message,usernameColor,chatTextColor]);
+          break;
+        }
+
+        case "updatePoint": {
+          const [,room,seat,x,y,fast]=data;
+          if(!roomList.includes(room)) return this.safeSend(ws,["error",`Unknown room: ${room}`]);
+          const seatMap=this.roomSeats.get(room);
+          const si=seatMap.get(seat);
+          if(!si) return;
+          si.points.push({x,y,fast});
+          if(si.points.length>200) si.points.shift();
+          if(!this.pointUpdateBuffer.has(room)) this.pointUpdateBuffer.set(room,new Map());
+          const roomBuf=this.pointUpdateBuffer.get(room);
+          if(!roomBuf.has(seat)) roomBuf.set(seat,[]);
+          roomBuf.get(seat).push({x,y,fast});
+          break;
+        }
+
+        case "removeKursiAndPoint": {
+          const [,room,seat]=data;
+          if(!roomList.includes(room)) return this.safeSend(ws,["error",`Unknown room: ${room}`]);
+          const seatMap=this.roomSeats.get(room);
+          Object.assign(seatMap.get(seat),createEmptySeat());
+          for(const c of this.clients) c.numkursi?.delete(seat);
+          this.broadcastToRoom(room,["removeKursi",room,seat]);
+          this.broadcastRoomUserCount(room);
+          break;
+        }
+
+        case "updateKursi": {
+          const [,room,seat,noimageUrl,namauser,color,itembawah,itematas,vip,viptanda]=data;
+          if(!roomList.includes(room)) return this.safeSend(ws,["error",`Unknown room: ${room}`]);
+          const seatInfo={noimageUrl,namauser,color,itembawah,itematas,vip,viptanda,points:[]};
+          if(!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room,new Map());
+          this.updateKursiBuffer.get(room).set(seat,seatInfo);
+          this.roomSeats.get(room).set(seat,seatInfo);
+          this.broadcastRoomUserCount(room);
+          break;
+        }
+
+        default: this.safeSend(ws,["error","Unknown event"]);
+      }
+    } catch(err){ 
+      console.error("handleMessage error:", ws.idtarget, err); 
+      this.safeSend(ws,["error","Internal error"]); 
+    }
+  }
+
   cleanupClient(ws){
     try{
       const id=ws.idtarget;
-      const kursis=ws.numkursi;
-      const room=ws.roomname;
-
       if(id){
-        for(const [r,seatMap] of this.roomSeats){
+        for(const [room,seatMap] of this.roomSeats){
           for(const [seat,info] of seatMap){
             if(info.namauser==="__LOCK__"+id || info.namauser===id){
               Object.assign(seatMap.get(seat),createEmptySeat());
-              try{
-                this.broadcastToRoom(r,["removeKursi",r,seat]);
-              } catch(e){ console.error("cleanupClient broadcast error:", e); }
+              try{ this.broadcastToRoom(room,["removeKursi",room,seat]); } catch(e){ console.error("cleanupClient broadcast error:", e); }
             }
           }
         }
         this.userToSeat.delete(id);
       }
-
+      const room=ws.roomname;
+      const kursis=ws.numkursi;
       if(room && kursis && this.roomSeats.has(room)){
         const seatMap=this.roomSeats.get(room);
         for(const seat of kursis){
           Object.assign(seatMap.get(seat),createEmptySeat());
-          try{
-            this.broadcastToRoom(room,["removeKursi",room,seat]);
-          } catch(e){ console.error("cleanupClient broadcast error:", e); }
+          try{ this.broadcastToRoom(room,["removeKursi",room,seat]); } 
+          catch(e){ console.error("cleanupClient broadcast error:", e); }
         }
         this.broadcastRoomUserCount(room);
       }
-
     } catch(e){ console.error("cleanupClient error:", e); }
     finally{
       this.clients.delete(ws);
@@ -277,10 +401,6 @@ export class ChatServer {
       ws.roomname=undefined;
       ws.idtarget=undefined;
     }
-  }
-
-  handleMessage(ws,raw){
-    // ... semua handleMessage tetap sama ...
   }
 
   async fetch(request){
