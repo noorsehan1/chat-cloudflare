@@ -13,7 +13,7 @@ const roomList = [
 function createEmptySeat() {
   return {
     noimageUrl: "", namauser: "", color: "",
-    itembawah: 0, itematas: 0, vip: 0, viptanda: 0,
+    itembawah: 0, itematas: 0, vip: false, viptanda: 0,
     points: [], lockTime: undefined
   };
 }
@@ -45,7 +45,6 @@ export class ChatServer {
     this.maxNumber = 6;
     this.intervalMillis = 15*60*1000;
 
-    // timers (Durable Object environment supports setInterval in workers runtime)
     this._tickTimer = setInterval(()=>this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(()=>this.periodicFlush(), 100);
   }
@@ -53,14 +52,10 @@ export class ChatServer {
   // ---------- Helpers ----------
   safeSend(ws, arr) {
     try {
-      // ws here is the server WebSocket accepted in DO
-      if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify(arr));
-      } else {
-        this.cleanupClient(ws);
-      }
-    } catch (err) {
-      console.error("safeSend error:", ws?.idtarget, err);
+      if(ws.readyState===1) ws.send(JSON.stringify(arr));
+      else this.cleanupClient(ws);
+    } catch(err) {
+      console.error("safeSend error:", ws.idtarget, err);
       this.cleanupClient(ws);
     }
   }
@@ -68,7 +63,7 @@ export class ChatServer {
   broadcastToRoom(room, msg) {
     for(const c of Array.from(this.clients)) {
       if (c.roomname === room) {
-        try { this.safeSend(c, msg); } 
+        try { this.safeSend(c,msg); } 
         catch(e) { console.error("broadcastToRoom error:", e); }
       }
     }
@@ -100,28 +95,20 @@ export class ChatServer {
     }
   }
 
-  // Fixed: ensure kursiBatchUpdate items are [seat, infoObject]
-  flushKursiUpdates(){
-    for(const [room,seatMap] of this.updateKursiBuffer){
-      const updates=[];
-      for(const [seat,info] of seatMap){
-        // build a plain info object with explicit keys and correct order
-        const infoObj = {
-          noimageUrl: info.noimageUrl ?? "",
-          namauser: info.namauser ?? "",
-          color: info.color ?? "",
-          itembawah: info.itembawah ?? 0,
-          itematas: info.itematas ?? 0,
-          vip: info.vip ?? 0,
-          viptanda: info.viptanda ?? 0
-        };
-        updates.push([seat, infoObj]);
-      }
-      if(updates.length>0){ 
-        try{ this.broadcastToRoom(room,["kursiBatchUpdate",room,updates]); } 
-        catch(e){ console.error("flushKursiUpdates:", e); } 
-      }
-      seatMap.clear();
+  flushKursiUpdates() {
+    for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
+        const updates = [];
+        for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+            if (!seatMapUpdates.has(seat)) continue;
+            const info = seatMapUpdates.get(seat);
+            const { points, ...rest } = info;
+            updates.push([seat, rest]);
+        }
+        if (updates.length > 0) {
+            try { this.broadcastToRoom(room, ["kursiBatchUpdate", room, updates]); }
+            catch(e) { console.error("flushKursiUpdates:", e); }
+        }
+        seatMapUpdates.clear();
     }
   }
 
@@ -185,28 +172,31 @@ export class ChatServer {
     return null;
   }
 
-  // Fixed: sendAllStateTo builds explicit meta objects (no rest spread) so Java gets proper JSONObject
-  sendAllStateTo(ws,room){
-    const seatMap=this.roomSeats.get(room);
-    const allPoints=[];
-    const meta={};
-    for(const [seat,info] of seatMap){
-      for(const p of info.points) allPoints.push({seat,...p});
-      if(info.namauser && !String(info.namauser).startsWith("__LOCK__")){
-        // explicit object so keys are exactly what Java expects
-        meta[seat] = {
-          noimageUrl: info.noimageUrl ?? "",
-          namauser: info.namauser ?? "",
-          color: info.color ?? "",
-          itembawah: info.itembawah ?? 0,
-          itematas: info.itematas ?? 0,
-          vip: info.vip ?? 0,
-          viptanda: info.viptanda ?? 0
-        };
-      }
+  // ----------------------
+  // Kirim semua state fixed sesuai seat ke WS Java
+  // ----------------------
+  sendAllStateTo(ws, room) {
+    const seatMap = this.roomSeats.get(room);
+    const allPoints = [];
+    const meta = {};
+    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        const info = seatMap.get(seat);
+        if (!info) continue;
+        for (const p of info.points) allPoints.push({ seat, ...p });
+        if(info.namauser && !String(info.namauser).startsWith("__LOCK__")){
+            meta[seat] = {
+                noimageUrl: info.noimageUrl,
+                namauser: info.namauser,
+                color: info.color,
+                itembawah: info.itembawah,
+                itematas: info.itematas,
+                vip: info.vip,
+                viptanda: info.viptanda
+            };
+        }
     }
-    this.safeSend(ws,["allPointsList",room,allPoints]);
-    this.safeSend(ws,["allUpdateKursiList",room,meta]);
+    this.safeSend(ws, ["allPointsList", room, allPoints]);
+    this.safeSend(ws, ["allUpdateKursiList", room, meta]);
   }
 
   cleanupClientById(idtarget){
@@ -314,7 +304,7 @@ export class ChatServer {
           this.safeSend(ws, ["numberKursiSaya", foundSeat]);
           if(ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
 
-          // Kirim semua kursi & points real-time (meta built explicitly)
+          // Kirim semua kursi & points real-time
           this.sendAllStateTo(ws, newRoom);
 
           this.broadcastRoomUserCount(newRoom);
@@ -364,17 +354,7 @@ export class ChatServer {
         case "updateKursi": {
           const [,room,seat,noimageUrl,namauser,color,itembawah,itematas,vip,viptanda]=data;
           if(!roomList.includes(room)) return this.safeSend(ws,["error",`Unknown room: ${room}`]);
-          // create seatInfo with explicit keys (vip as int)
-          const seatInfo = {
-            noimageUrl: noimageUrl ?? "",
-            namauser: namauser ?? "",
-            color: color ?? "",
-            itembawah: itembawah ?? 0,
-            itematas: itematas ?? 0,
-            vip: Number(vip) || 0,
-            viptanda: viptanda ?? 0,
-            points: []
-          };
+          const seatInfo={noimageUrl,namauser,color,itembawah,itematas,vip,viptanda,points:[]};
           if(!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room,new Map());
           this.updateKursiBuffer.get(room).set(seat,seatInfo);
           this.roomSeats.get(room).set(seat,seatInfo);
