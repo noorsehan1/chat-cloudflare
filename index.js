@@ -351,13 +351,29 @@ export class ChatServer {
           break;
         }
 
+        // ----------------------
+        // ✅ FIXED updateKursi agar tidak ketukar
+        // ----------------------
         case "updateKursi": {
           const [,room,seat,noimageUrl,namauser,color,itembawah,itematas,vip,viptanda]=data;
           if(!roomList.includes(room)) return this.safeSend(ws,["error",`Unknown room: ${room}`]);
-          const seatInfo={noimageUrl,namauser,color,itembawah,itematas,vip,viptanda,points:[]};
+
+          const seatMap = this.roomSeats.get(room);
+          const currentInfo = seatMap.get(seat) || createEmptySeat();
+
+          currentInfo.noimageUrl = noimageUrl;
+          currentInfo.namauser  = namauser;
+          currentInfo.color     = color;
+          currentInfo.itembawah = itembawah;
+          currentInfo.itematas  = itematas;
+          currentInfo.vip       = vip;
+          currentInfo.viptanda  = viptanda;
+
+          seatMap.set(seat, currentInfo);
+
           if(!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room,new Map());
-          this.updateKursiBuffer.get(room).set(seat,seatInfo);
-          this.roomSeats.get(room).set(seat,seatInfo);
+          this.updateKursiBuffer.get(room).set(seat,{...currentInfo,points:[]});
+
           this.broadcastRoomUserCount(room);
           break;
         }
