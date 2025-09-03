@@ -9,14 +9,14 @@ const roomList = [
   "Relax & Chat","Just Chillin","The Chatter Room"
 ];
 
-// ---- Util seat ----
 function createEmptySeat() {
   return {
     noimageUrl: "", namauser: "", color: "",
-    itembawah: 0, itematas: 0, vip: false, viptanda: 0,
+    itembawah: 0, itematas: 0, vip: 0, viptanda: 0,  // ← ubah false jadi 0
     points: [], lockTime: undefined
   };
 }
+
 
 // =====================
 // Durable Object Server
@@ -457,3 +457,4 @@ export default {
     return new Response("WebSocket endpoint at wss://<your-subdomain>.workers.dev",{status:200});
   }
 };
+
