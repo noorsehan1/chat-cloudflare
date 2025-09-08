@@ -220,6 +220,25 @@ export class ChatServer {
     }
   }
 
+  // ========================
+  // Helper: get all online users
+  // ========================
+  getAllOnlineUsers() {
+    const users = [];
+    for (const ws of this.clients) {
+      if(ws.idtarget) users.push(ws.idtarget);
+    }
+    return users;
+  }
+
+  getOnlineUsersByRoom(roomName) {
+    const users = [];
+    for (const ws of this.clients) {
+      if(ws.roomname===roomName && ws.idtarget) users.push(ws.idtarget);
+    }
+    return users;
+  }
+
   handleMessage(ws,raw){
     let data;
     try{
@@ -285,6 +304,23 @@ export class ChatServer {
 
         case "getAllRoomsUserCount": this.handleGetAllRoomsUserCount(ws); break;
         case "getCurrentNumber": this.safeSend(ws,["currentNumber",this.currentNumber]); break;
+
+        // =====================
+        // NEW: Get All Online Users
+        // =====================
+        case "getAllOnlineUsers": {
+          const onlineUsers = this.getAllOnlineUsers();
+          this.safeSend(ws, ["allOnlineUsers", onlineUsers]);
+          break;
+        }
+
+        case "getRoomOnlineUsers": {
+          const roomName = data[1];
+          if(!roomList.includes(roomName)) return this.safeSend(ws, ["error", "Unknown room"]);
+          const onlineUsers = this.getOnlineUsersByRoom(roomName);
+          this.safeSend(ws, ["roomOnlineUsers", roomName, onlineUsers]);
+          break;
+        }
 
         // ----------------------
         // Join Room
@@ -457,4 +493,3 @@ export default {
     return new Response("WebSocket endpoint at wss://<your-subdomain>.workers.dev",{status:200});
   }
 };
-
