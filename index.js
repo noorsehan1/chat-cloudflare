@@ -414,6 +414,26 @@ export class ChatServer {
           break;
         }
 
+                  // ----------------------
+        // Gift (broadcast ke semua user di dalam room saja)
+        // ----------------------
+        case "gift": {
+          const [, roomname, username, giftName] = data;
+          if (!roomList.includes(roomname)) 
+            return this.safeSend(ws, ["error", "Invalid room for gift"]);
+
+          if (!this.chatMessageBuffer.has(roomname)) 
+            this.chatMessageBuffer.set(roomname, []);
+
+          // Format: ["gift", roomname, username, giftName, timestamp]
+          this.chatMessageBuffer.get(roomname).push([
+            "gift", roomname, username, giftName, Date.now()
+          ]);
+
+          break;
+        }
+
+
         default: this.safeSend(ws,["error","Unknown event"]);
       }
     } catch(err){ 
@@ -493,3 +513,4 @@ export default {
     return new Response("WebSocket endpoint at wss://<your-subdomain>.workers.dev",{status:200});
   }
 };
+
