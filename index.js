@@ -407,13 +407,18 @@ export class ChatServer {
           break;
         }
 
-        // 🎮 LowCard Game Events
-        case "gameLowCardStart":
-        case "gameLowCardJoin":
-        case "gameLowCardNumber":
-        case "gameLowCardWinner":
-          this.lowcard.handleEvent(ws, data);
-          break;
+       // 🎮 LowCard Game Events
+case "gameLowCardStart": {
+  const betAmount = data[1] ?? 0; // Ambil input taruhan dari host
+  this.lowcard.handleEvent(ws, ["gameLowCardStart", betAmount]);
+  break;
+}
+
+case "gameLowCardJoin":
+case "gameLowCardNumber":
+  this.lowcard.handleEvent(ws, data);
+  break;
+
 
         default: this.safeSend(ws,["error","Unknown event"]);
       }
@@ -494,3 +499,4 @@ export default {
     return new Response("WebSocket endpoint",{status:200});
   }
 };
+
