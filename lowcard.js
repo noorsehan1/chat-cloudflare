@@ -70,7 +70,7 @@ export class LowCardGameManager {
     ]);
   }
 
-  // ===== Submit Number =====
+  // ===== Submit Number (Draw) =====
   submitNumber(ws, number) {
     if (!this.activeGame || this.activeGame.registrationOpen) {
       this.chatServer.safeSend(ws, ["gameLowCardError", "Game not active"]);
@@ -87,6 +87,14 @@ export class LowCardGameManager {
 
     this.activeGame.numbers.set(ws.idtarget, n);
 
+    // 🔔 Broadcast setiap pemain draw angka
+    this.chatServer.broadcastToRoom(this.activeGame.room, [
+      "gameLowCardPlayerDraw",
+      ws.idtarget, // bisa juga diganti nama user
+      n
+    ]);
+
+    // Jika semua pemain submit, evaluasi ronde
     if (this.activeGame.numbers.size === this.activeGame.players.size - this.activeGame.eliminated.size) {
       this.evaluateRound();
     }
