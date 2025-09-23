@@ -34,7 +34,7 @@ export class LowCardGameManager {
       eliminated: new Set(),
       winner: null,
       betAmount: bet,
-      countdownTimers: [] // untuk countdown 20→10→5
+      countdownTimers: [] // untuk countdown 20→10→5→0
     };
 
     // Start countdown sequence
@@ -48,7 +48,7 @@ export class LowCardGameManager {
 
   startCountdown(room) {
     const times = [20, 10, 5, 0];
-    this.activeGame.countdownTimers = times.map((t, i) => 
+    this.activeGame.countdownTimers = times.map((t, i) =>
       setTimeout(() => {
         this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", t]);
         if (t === 0) this.closeRegistration();
