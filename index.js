@@ -3,10 +3,9 @@
 // ============================
 
 // ---- Konstanta Room ----
-const roomList = ["Indonesia",
-  "Chill Zone","Catch Up","Casual Vibes","Lounge Talk",
-  "Easy Talk","Friendly Corner","The Hangout",
-  "Relax & Chat","Just Chillin","The Chatter Room"
+const roomList = [
+  "Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
+  "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
 ];
 
 function createEmptySeat() {
@@ -29,7 +28,6 @@ export class ChatServer {
 
     this.clients = new Set(); 
     this.userToSeat = new Map(); 
-
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
     for (const room of roomList) {
