@@ -72,6 +72,14 @@ export class LowCardGameManager {
 
     this.activeGame.numbers.set(ws.idtarget, n);
 
+    // 🔹 Real-time broadcast setiap submit
+    this.chatServer.broadcastToRoom(this.activeGame.room, [
+      "gameLowCardNumberSubmitted",
+      ws.idtarget,
+      n
+    ]);
+
+    // 🔹 Jika semua tersisa sudah submit, evaluasi ronde
     if (this.activeGame.numbers.size === this.activeGame.players.size - this.activeGame.eliminated.size) {
       this.evaluateRound();
     }
@@ -84,15 +92,19 @@ export class LowCardGameManager {
     const entries = Array.from(numbers.entries());
     if (entries.length === 0) return;
 
-    let lowest = Infinity;
-    for (const [, n] of entries) if (n < lowest) lowest = n;
+    let lowest = Math.min(...entries.map(([_, n]) => n));
+    const losers = entries.filter(([_, n]) => n === lowest).map(([id]) => id);
 
-    const losers = entries.filter(([, n]) => n === lowest).map(([id]) => id);
     for (const id of losers) eliminated.add(id);
 
     const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
+
     this.chatServer.broadcastToRoom(this.activeGame.room, [
-      "gameLowCardRoundResult", round, { numbers: Object.fromEntries(entries), losers, remaining }
+      "gameLowCardRoundResult",
+      round,
+      JSON.stringify(Object.fromEntries(entries)),
+      JSON.stringify(losers),
+      JSON.stringify(remaining)
     ]);
 
     numbers.clear();
