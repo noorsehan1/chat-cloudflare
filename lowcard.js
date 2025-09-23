@@ -4,40 +4,43 @@
 export class LowCardGameManager {
   constructor(chatServer) {
     this.chatServer = chatServer;
-    this.activeGame = null;
-    this.defaultBetCoin = 1000; // coin per pemain
+    this.activeGame = null; // Status game saat ini
   }
 
   // ===== Tangani semua event masuk =====
   handleEvent(ws, data) {
     const evt = data[0];
     switch (evt) {
-      case "gameLowCardStart": this.startGame(ws); break;
+      case "gameLowCardStart": this.startGame(ws, data[1]); break; // data[1] = betAmount
       case "gameLowCardJoin": this.joinGame(ws); break;
       case "gameLowCardNumber": this.submitNumber(ws, data[1]); break;
     }
   }
 
   // ===== Start Game =====
-  startGame(ws) {
+  startGame(ws, betAmount) {
     if (!ws.roomname || !ws.idtarget) return;
+
     if (this.activeGame && this.activeGame.registrationOpen) {
       this.chatServer.safeSend(ws, ["gameLowCardError", "Game registration already open"]);
       return;
     }
 
+    const bet = parseInt(betAmount, 10) || 0;
+
     this.activeGame = {
       room: ws.roomname,
       players: new Map(),
       registrationOpen: true,
-      timer: setTimeout(() => this.closeRegistration(), 20000),
+      timer: setTimeout(() => this.closeRegistration(), 20000), // 20 detik registrasi
       round: 1,
       numbers: new Map(),
       eliminated: new Set(),
-      winner: null
+      winner: null,
+      betAmount: bet
     };
 
-    this.chatServer.broadcastToRoom(ws.roomname, ["gameLowCardStart", "Registration open for 20s"]);
+    this.chatServer.broadcastToRoom(ws.roomname, ["gameLowCardStart", `Registration open for 20s. Bet per player: ${bet}`]);
   }
 
   // ===== Join Game =====
@@ -50,6 +53,8 @@ export class LowCardGameManager {
     if (this.activeGame.players.has(ws.idtarget)) return;
 
     this.activeGame.players.set(ws.idtarget, { id: ws.idtarget });
+
+    // 🔔 Event real-time user join
     this.chatServer.broadcastToRoom(this.activeGame.room, ["gameLowCardJoin", ws.idtarget]);
   }
 
@@ -59,8 +64,10 @@ export class LowCardGameManager {
     this.activeGame.registrationOpen = false;
 
     // 🔔 Event daftar pemain ditutup
-    const playerIdsStr = Array.from(this.activeGame.players.keys()).join(",");
-    this.chatServer.broadcastToRoom(this.activeGame.room, ["gameLowCardClosed", playerIdsStr]);
+    this.chatServer.broadcastToRoom(this.activeGame.room, [
+      "gameLowCardClosed",
+      Array.from(this.activeGame.players.keys())
+    ]);
   }
 
   // ===== Submit Number =====
@@ -88,26 +95,22 @@ export class LowCardGameManager {
   // ===== Evaluasi Round =====
   evaluateRound() {
     if (!this.activeGame) return;
-    const { numbers, players, eliminated, round } = this.activeGame;
+    const { numbers, players, eliminated, round, betAmount } = this.activeGame;
 
     const entries = Array.from(numbers.entries());
     if (entries.length === 0) return;
 
-    // Cari angka terendah
     let lowest = Infinity;
     for (const [, n] of entries) if (n < lowest) lowest = n;
 
-    // Tentukan yang kalah ronde ini
     const losers = entries.filter(([, n]) => n === lowest).map(([id]) => id);
     for (const id of losers) eliminated.add(id);
 
-    // Sisa pemain
     const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
 
-    // 🔔 Event hasil ronde
     this.chatServer.broadcastToRoom(this.activeGame.room, [
       "gameLowCardRoundResult",
-      String(round),
+      round,
       JSON.stringify(Object.fromEntries(entries)),
       JSON.stringify(losers),
       JSON.stringify(remaining)
@@ -115,19 +118,19 @@ export class LowCardGameManager {
 
     numbers.clear();
 
-    // Jika hanya tersisa 1 pemain, dia pemenang
     if (remaining.length <= 1) {
-      const winner = remaining[0] || null;
-      this.activeGame.winner = winner;
-
-      const totalCoin = players.size * this.defaultBetCoin;
-      this.chatServer.broadcastToRoom(this.activeGame.room, ["gameLowCardWinner", winner, totalCoin]);
-
+      const winnerId = remaining[0] || null;
+      const totalCoin = betAmount * players.size;
+      this.activeGame.winner = winnerId;
+      this.chatServer.broadcastToRoom(this.activeGame.room, [
+        "gameLowCardWinner",
+        winnerId,
+        totalCoin
+      ]);
       this.activeGame = null;
     } else {
-      // Next round
       this.activeGame.round++;
-      this.chatServer.broadcastToRoom(this.activeGame.room, ["gameLowCardNextRound", String(this.activeGame.round)]);
+      this.chatServer.broadcastToRoom(this.activeGame.room, ["gameLowCardNextRound", this.activeGame.round]);
     }
   }
 }
