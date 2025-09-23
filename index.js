@@ -2,8 +2,6 @@
 // Cloudflare Workers + DO Chat
 // ============================
 
-import { LowCardGameManager } from "./lowcard.js";
-
 // ---- Konstanta Room ----
 const roomList = ["Indonesia",
   "Chill Zone","Catch Up","Casual Vibes","Lounge Talk",
@@ -22,6 +20,8 @@ function createEmptySeat() {
 // =====================
 // Durable Object Server
 // =====================
+import { LowCardGameManager } from "./lowcard.js";
+
 export class ChatServer {
   constructor(state, env) {
     this.state = state;
@@ -49,7 +49,7 @@ export class ChatServer {
     this._tickTimer = setInterval(()=>this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(()=>this.periodicFlush(), 100);
 
-    // 🎮 Game LowCard Manager
+    // 🎮 LowCard Game Manager
     this.lowcard = new LowCardGameManager(this);
   }
 
@@ -176,6 +176,9 @@ export class ChatServer {
     return null;
   }
 
+  // ----------------------
+  // Kirim semua state fixed sesuai seat ke WS
+  // ----------------------
   sendAllStateTo(ws, room) {
     const seatMap = this.roomSeats.get(room);
     const allPoints = [];
@@ -237,9 +240,6 @@ export class ChatServer {
     return users;
   }
 
-  // =====================
-  // Handle Message
-  // =====================
   handleMessage(ws,raw){
     let data;
     try{
@@ -254,9 +254,6 @@ export class ChatServer {
 
     try{
       switch(evt){
-        // ======================
-        // 📌 EVENT CHAT / SYSTEM (kode lama)
-        // ======================
         case "setIdTarget": {
           const newId=data[1];
           this.cleanupClientById(newId);
@@ -404,28 +401,19 @@ export class ChatServer {
 
         case "gift": {
           const [, roomname, sender, receiver, giftName] = data;
-
-          if (!roomList.includes(roomname)) {
-            return this.safeSend(ws, ["error", "Invalid room for gift"]);
-          }
-
-          if (!this.chatMessageBuffer.has(roomname)) {
-            this.chatMessageBuffer.set(roomname, []);
-          }
-
+          if (!roomList.includes(roomname)) return this.safeSend(ws, ["error", "Invalid room for gift"]);
+          if (!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname, []);
           this.chatMessageBuffer.get(roomname).push([
             "gift", roomname, sender, receiver, giftName, Date.now()
           ]);
-
           break;
         }
 
-        // ======================
-        // 🎮 EVENT LOWCARD GAME (baru ditambahkan)
-        // ======================
+        // 🎮 LowCard Game Events
         case "gameLowCardStart":
         case "gameLowCardJoin":
         case "gameLowCardNumber":
+        case "gameLowCardWinner":
           this.lowcard.handleEvent(ws, data);
           break;
 
@@ -494,7 +482,7 @@ export class ChatServer {
 }
 
 // ======================
-// Worker Entry (Router)
+// Worker Entry
 // ======================
 export default {
   async fetch(req,env){
@@ -505,6 +493,6 @@ export default {
     }
     if(new URL(req.url).pathname==="/health") 
       return new Response("ok",{status:200,headers:{"content-type":"text/plain"}});
-    return new Response("WebSocket endpoint at wss://<your-subdomain>.workers.dev",{status:200});
+    return new Response("WebSocket endpoint",{status:200});
   }
 };
