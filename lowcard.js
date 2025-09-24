@@ -12,7 +12,7 @@ export class LowCardGameManager {
     switch(evt){
       case "gameLowCardStart": this.startGame(ws, data[1]); break;
       case "gameLowCardJoin": this.joinGame(ws); break;
-      case "gameLowCardNumber": this.submitNumber(ws, data[1]); break;
+      case "gameLowCardNumber": this.submitNumber(ws, data[1], data[2] || ""); break; // tambahan tanda
       case "gameLowCardEnd": this.endGame(); break;
     }
   }
@@ -113,7 +113,7 @@ export class LowCardGameManager {
     });
   }
 
-  submitNumber(ws, number){
+  submitNumber(ws, number, tanda=""){
     if(!this.activeGame || this.activeGame.registrationOpen) {
       this.chatServer.safeSend(ws, ["gameLowCardError","Game not active"]);
       return;
@@ -127,7 +127,14 @@ export class LowCardGameManager {
     }
 
     this.activeGame.numbers.set(ws.idtarget,n);
-    this.chatServer.broadcastToRoom(this.activeGame.room, ["gameLowCardPlayerDraw", ws.idtarget, n]);
+
+    // broadcast ke room, termasuk tanda
+    this.chatServer.broadcastToRoom(this.activeGame.room, [
+      "gameLowCardPlayerDraw",
+      ws.idtarget,
+      n,
+      tanda
+    ]);
 
     if(this.activeGame.numbers.size === this.activeGame.players.size - this.activeGame.eliminated.size){
       this.evaluateRound();
