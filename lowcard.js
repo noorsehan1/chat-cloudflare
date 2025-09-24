@@ -54,13 +54,14 @@ export class LowCardGameManager {
       drawTime: 30          // draw 30s
     };
 
-    // ✅ host langsung join
+    // ✅ host auto join
     this.activeGame.players.set(ws.idtarget, { id: ws.idtarget });
 
+    // 🔔 broadcast pesan lengkap
     this.chatServer.broadcastToRoom(ws.roomname, [
       "gameLowCardStart",
-      ws.idtarget,
-      betAmount
+      `Game is starting! Type .ij to join in ${this.activeGame.registrationTime}s.\nBet: ${betAmount} Starting!`,
+      ws.idtarget
     ]);
 
     this.startRegistrationCountdown();
