@@ -131,12 +131,6 @@ export class LowCardGameManager {
       "gameLowCardRegistrationClosed"
     ]);
 
-    // 🔔 Round 1 mulai
-    this.chatServer.broadcastToRoom(this.activeGame.room, [
-      "gameLowCardRoundStart",
-      this.activeGame.round
-    ]);
-
     this.startDrawCountdown();
   }
 
@@ -202,7 +196,6 @@ export class LowCardGameManager {
 
     this.chatServer.broadcastToRoom(this.activeGame.room, [
       "gameLowCardRoundResult",
-      this.activeGame.round,
       losers,
       min
     ]);
@@ -223,12 +216,6 @@ export class LowCardGameManager {
     // reset untuk round berikutnya
     this.activeGame.round++;
     this.activeGame.numbers.clear();
-
-    // 🔔 Notif round baru
-    this.chatServer.broadcastToRoom(this.activeGame.room, [
-      "gameLowCardRoundStart",
-      this.activeGame.round
-    ]);
 
     this.startDrawCountdown();
   }
