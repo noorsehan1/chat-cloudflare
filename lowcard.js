@@ -39,9 +39,9 @@ export class LowCardGameManager {
     };
 
     this.chatServer.broadcastToRoom(ws.roomname, [
-      "gameLowCardStart",
-      `Game is starting! Type .ij to join in ${this.activeGame.registrationTime}s. Bet: ${bet}`
-    ]);
+  "gameLowCardStart",
+  `Game is starting!\nType .ij to join in ${this.activeGame.registrationTime}s.\nBet: ${bet} Starting!`
+]);
 
     this.startRegistrationCountdown();
   }
@@ -185,4 +185,5 @@ export class LowCardGameManager {
     this.activeGame = null;
   }
 }
+
 
