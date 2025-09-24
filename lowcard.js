@@ -41,8 +41,8 @@ export class LowCardGameManager {
       winner: null,
       betAmount: bet,
       countdownTimers: [],
-      registrationTime: 30,
-      drawTime: 20
+      registrationTime: 40,
+      drawTime: 30
     };
 
     this.chatServer.broadcastToRoom(ws.roomname, [
@@ -207,3 +207,4 @@ export class LowCardGameManager {
     this.activeGame = null;
   }
 }
+
