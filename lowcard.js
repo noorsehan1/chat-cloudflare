@@ -33,10 +33,7 @@ export class LowCardGameManager {
   }
 
   startGame(ws, bet) {
-    // ❌ kalau sudah ada game di room ini → abaikan
-    if (this.activeGame && this.activeGame.room === ws.roomname) {
-      return;
-    }
+    if (this.activeGame && this.activeGame.room === ws.roomname) return;
 
     const betAmount = parseInt(bet, 10) || 0;
 
@@ -50,14 +47,13 @@ export class LowCardGameManager {
       winner: null,
       betAmount,
       countdownTimers: [],
-      registrationTime: 40, // join 40s
-      drawTime: 30          // draw 30s
+      registrationTime: 40,
+      drawTime: 30
     };
 
-    // ✅ host auto join
+    // host auto join
     this.activeGame.players.set(ws.idtarget, { id: ws.idtarget });
 
-    // 🔔 broadcast pesan lengkap
     this.chatServer.broadcastToRoom(ws.roomname, [
       "gameLowCardStart",
       `Game is starting!\nType .ij to join in ${this.activeGame.registrationTime}s.\nBet: ${betAmount} Starting!`,
@@ -88,7 +84,7 @@ export class LowCardGameManager {
 
   joinGame(ws) {
     if (!this.activeGame || !this.activeGame.registrationOpen) return;
-    if (this.activeGame.players.has(ws.idtarget)) return; // ❌ sudah join
+    if (this.activeGame.players.has(ws.idtarget)) return;
 
     this.activeGame.players.set(ws.idtarget, { id: ws.idtarget });
 
@@ -146,8 +142,6 @@ export class LowCardGameManager {
       this.activeGame.eliminated.has(ws.idtarget)
     )
       return;
-
-    // ❌ jika sudah draw → abaikan
     if (this.activeGame.numbers.has(ws.idtarget)) return;
 
     const n = parseInt(number, 10);
@@ -179,10 +173,25 @@ export class LowCardGameManager {
 
     const { numbers, players, eliminated, round, betAmount } = this.activeGame;
     const entries = Array.from(numbers.entries());
+
     if (entries.length === 0) {
       this.chatServer.broadcastToRoom(this.activeGame.room, [
         "gameLowCardError",
         "No numbers drawn this round"
+      ]);
+      this.activeGame = null;
+      return;
+    }
+
+    // jika hanya 1 player yang draw → langsung menang
+    if (entries.length === 1) {
+      const winnerId = entries[0][0];
+      const totalCoin = betAmount * players.size;
+      this.activeGame.winner = winnerId;
+      this.chatServer.broadcastToRoom(this.activeGame.room, [
+        "gameLowCardWinner",
+        winnerId,
+        totalCoin
       ]);
       this.activeGame = null;
       return;
