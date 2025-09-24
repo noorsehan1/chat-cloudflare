@@ -121,7 +121,7 @@ export class LowCardGameManager {
     if(!this.activeGame.players.has(ws.idtarget) || this.activeGame.eliminated.has(ws.idtarget)) return;
 
     const n = parseInt(number,10);
-    if(isNaN(n) || n < 1 || n > 11){
+    if(isNaN(n) || n < 1 || n > 12){
       this.chatServer.safeSend(ws, ["gameLowCardError","Invalid number"]);
       return;
     }
@@ -185,3 +185,4 @@ export class LowCardGameManager {
     this.activeGame = null;
   }
 }
+
