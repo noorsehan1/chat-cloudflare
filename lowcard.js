@@ -28,7 +28,7 @@ export class LowCardGameManager {
   startGame(ws, betAmount){
     if(!ws.roomname || !ws.idtarget) return;
     if(this.activeGame && this.activeGame.registrationOpen){
-      this.chatServer.safeSend(ws, ["gameLowCardError","Game registration already open"]);
+      this.chatServer.safeSend(ws, ["gameLowCardError","Game is starting! Click .ij to join!"]);
       return;
     }
 
@@ -187,3 +187,4 @@ export class LowCardGameManager {
     this.activeGame=null;
   }
 }
+
