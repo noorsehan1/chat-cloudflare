@@ -48,7 +48,9 @@ export class LowCardGameManager {
       betAmount,
       countdownTimers: [],
       registrationTime: 40,
-      drawTime: 30
+      drawTime: 30,
+      hostId: ws.idtarget,
+      hostName: ws.username || ws.idtarget
     };
 
     // host auto join
@@ -97,17 +99,31 @@ export class LowCardGameManager {
   closeRegistration() {
     if (!this.activeGame) return;
     const playerCount = this.activeGame.players.size;
+
     if (playerCount < 2) {
       const onlyPlayer =
         playerCount === 1 ? Array.from(this.activeGame.players.keys())[0] : null;
+
+      if (onlyPlayer) {
+        // ============================
+        // Event baru: game start tapi tidak ada yang join
+        // ============================
+        this.chatServer.safeSend(
+          this.chatServer.getSocketById(this.activeGame.hostId),
+          ["gameLowCardNoJoin", this.activeGame.hostName, this.activeGame.betAmount]
+        );
+      }
+
       this.chatServer.broadcastToRoom(this.activeGame.room, [
         "gameLowCardError",
         "Need at least 2 players",
         onlyPlayer
       ]);
+
       this.activeGame = null;
       return;
     }
+
     this.activeGame.registrationOpen = false;
     this.chatServer.broadcastToRoom(this.activeGame.room, [
       "gameLowCardClosed",
@@ -183,7 +199,6 @@ export class LowCardGameManager {
       return;
     }
 
-    // jika hanya 1 player yang draw → langsung menang
     if (entries.length === 1) {
       const winnerId = entries[0][0];
       const totalCoin = betAmount * players.size;
