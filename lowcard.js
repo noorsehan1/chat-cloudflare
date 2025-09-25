@@ -39,7 +39,7 @@ export class LowCardGameManager {
   startGame(ws, bet) {
     const room = ws.roomname;
     if (!room) return;
-    if (this.activeGames.has(room)) return; // game sudah berjalan di room ini
+    if (this.activeGames.has(room)) return; // game sudah berjalan
 
     const betAmount = parseInt(bet, 10) || 0;
 
@@ -64,10 +64,17 @@ export class LowCardGameManager {
 
     this.activeGames.set(room, game);
 
+    // Broadcast ke semua orang di room
     this.chatServer.broadcastToRoom(room, [
       "gameLowCardStart",
-      `Game is starting Type .ij to join in ${game.registrationTime}s.\nBet: ${betAmount} Starting!`,
+      `Game is starting. Type .ij to join in ${game.registrationTime}s.\nBet: ${betAmount} Starting!`,
       ws.idtarget
+    ]);
+
+    // --- Event private ke host ---
+    this.chatServer.safeSend(ws, [
+      "gameLowCardStartSuccess",
+      { hostName: game.hostName, betAmount: game.betAmount }
     ]);
 
     this.startRegistrationCountdown(room);
@@ -83,10 +90,7 @@ export class LowCardGameManager {
       const delay = (game.registrationTime - t) * 1000;
       const timer = setTimeout(() => {
         if (!this.activeGames.has(room)) return;
-        this.chatServer.broadcastToRoom(room, [
-          "gameLowCardTimeLeft",
-          `${t}s`
-        ]);
+        this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", `${t}s`]);
         if (t === 0) this.closeRegistration(room);
       }, delay);
       game.countdownTimers.push(timer);
@@ -100,10 +104,7 @@ export class LowCardGameManager {
     if (game.players.has(ws.idtarget)) return;
 
     game.players.set(ws.idtarget, { id: ws.idtarget });
-    this.chatServer.broadcastToRoom(room, [
-      "gameLowCardJoin",
-      ws.idtarget
-    ]);
+    this.chatServer.broadcastToRoom(room, ["gameLowCardJoin", ws.idtarget]);
   }
 
   closeRegistration(room) {
@@ -112,35 +113,23 @@ export class LowCardGameManager {
 
     const playerCount = game.players.size;
     if (playerCount < 2) {
-      const onlyPlayer =
-        playerCount === 1 ? Array.from(game.players.keys())[0] : null;
+      const onlyPlayer = playerCount === 1 ? Array.from(game.players.keys())[0] : null;
 
       if (onlyPlayer) {
         const hostSocket = Array.from(this.chatServer.clients)
           .find(ws => ws.idtarget === game.hostId);
         if (hostSocket) {
-          this.chatServer.safeSend(
-            hostSocket,
-            ["gameLowCardNoJoin", game.hostName, game.betAmount]
-          );
+          this.chatServer.safeSend(hostSocket, ["gameLowCardNoJoin", game.hostName, game.betAmount]);
         }
       }
 
-      this.chatServer.broadcastToRoom(room, [
-        "gameLowCardError",
-        "Need at least 2 players",
-        onlyPlayer
-      ]);
-
+      this.chatServer.broadcastToRoom(room, ["gameLowCardError", "Need at least 2 players", onlyPlayer]);
       this.activeGames.delete(room);
       return;
     }
 
     game.registrationOpen = false;
-    this.chatServer.broadcastToRoom(room, [
-      "gameLowCardClosed",
-      Array.from(game.players.keys())
-    ]);
+    this.chatServer.broadcastToRoom(room, ["gameLowCardClosed", Array.from(game.players.keys())]);
     this.startDrawCountdown(room);
   }
 
@@ -154,10 +143,7 @@ export class LowCardGameManager {
       const delay = (game.drawTime - t) * 1000;
       const timer = setTimeout(() => {
         if (!this.activeGames.has(room)) return;
-        this.chatServer.broadcastToRoom(room, [
-          "gameLowCardTimeLeft",
-          `${t}s`
-        ]);
+        this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", `${t}s`]);
         if (t === 0) this.evaluateRound(room);
       }, delay);
       game.countdownTimers.push(timer);
@@ -178,13 +164,7 @@ export class LowCardGameManager {
     }
 
     game.numbers.set(ws.idtarget, n);
-
-    this.chatServer.broadcastToRoom(room, [
-      "gameLowCardPlayerDraw",
-      ws.idtarget,
-      n,
-      tanda
-    ]);
+    this.chatServer.broadcastToRoom(room, ["gameLowCardPlayerDraw", ws.idtarget, n, tanda]);
 
     if (game.numbers.size === game.players.size - game.eliminated.size) {
       this.evaluateRound(room);
@@ -251,4 +231,3 @@ export class LowCardGameManager {
     this.activeGames.delete(room);
   }
 }
-
