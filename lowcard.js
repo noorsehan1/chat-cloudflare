@@ -66,7 +66,7 @@ export class LowCardGameManager {
 
     this.chatServer.broadcastToRoom(room, [
       "gameLowCardStart",
-      `Game is starting!\nType .ij to join in ${game.registrationTime}s.\nBet: ${betAmount} Starting!`,
+      `Game is starting Type .ij to join in ${game.registrationTime}s.\nBet: ${betAmount} Starting!`,
       ws.idtarget
     ]);
 
@@ -251,3 +251,4 @@ export class LowCardGameManager {
     this.activeGames.delete(room);
   }
 }
+
