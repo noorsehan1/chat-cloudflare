@@ -106,8 +106,15 @@ this.chatServer.safeSend(ws, [
     if (!game || !game.registrationOpen) return;
     if (game.players.has(ws.idtarget)) return;
 
-    game.players.set(ws.idtarget, { id: ws.idtarget });
-    this.chatServer.broadcastToRoom(room, ["gameLowCardJoin", ws.idtarget]);
+    // Simpan player
+    game.players.set(ws.idtarget, { id: ws.idtarget, name: ws.username || ws.idtarget });
+
+    // Broadcast hanya nama + bet
+    this.chatServer.broadcastToRoom(room, [
+      "gameLowCardJoin",
+      ws.username || ws.idtarget,
+      game.betAmount
+    ]);
   }
 
   closeRegistration(room) {
@@ -234,4 +241,3 @@ this.chatServer.safeSend(ws, [
     this.activeGames.delete(room);
   }
 }
-
