@@ -71,11 +71,14 @@ export class LowCardGameManager {
       ws.idtarget
     ]);
 
-    // --- Event private ke host ---
-    this.chatServer.safeSend(ws, [
-      "gameLowCardStartSuccess",
-      { hostName: game.hostName, betAmount: game.betAmount }
-    ]);
+   // --- Event private ke host ---
+// Kirim langsung hostName dan betAmount sebagai elemen array
+this.chatServer.safeSend(ws, [
+  "gameLowCardStartSuccess",
+  game.hostName,
+  game.betAmount
+]);
+
 
     this.startRegistrationCountdown(room);
   }
@@ -231,3 +234,4 @@ export class LowCardGameManager {
     this.activeGames.delete(room);
   }
 }
+
