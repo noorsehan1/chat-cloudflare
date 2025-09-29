@@ -8,22 +8,21 @@ export class LowCardGameManager {
   }
 
 handleEvent(ws, data) {
-  const evt = data[0];
-  switch (evt) {
-    case "gameLowCardStart":
-      // sementara non-aktif → jangan lakukan apa-apa
-      return;
-
-    case "gameLowCardJoin":
-      this.joinGame(ws);
-      break;
-    case "gameLowCardNumber":
-      this.submitNumber(ws, data[1], data[2] || "");
-      break;
-    case "gameLowCardEnd":
-      this.endGame(ws.roomname);
-      break;
-  }
+    const evt = data[0];
+    switch (evt) {
+      case "gameLowCardStart":
+        this.startGame(ws, data[1]);
+        break;
+      case "gameLowCardJoin":
+        this.joinGame(ws);
+        break;
+      case "gameLowCardNumber":
+        this.submitNumber(ws, data[1], data[2] || "");
+        break;
+      case "gameLowCardEnd":
+        this.endGame(ws.roomname);
+        break;
+    }
 }
 
 
@@ -243,4 +242,5 @@ this.chatServer.safeSend(ws, [
     this.activeGames.delete(room);
   }
 }
+
 
