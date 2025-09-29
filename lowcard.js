@@ -7,7 +7,7 @@ export class LowCardGameManager {
     this.activeGames = new Map(); // key: room, value: game state
   }
 
-handleEvent(ws, data) {
+  handleEvent(ws, data) {
     const evt = data[0];
     switch (evt) {
       case "gameLowCardStart":
@@ -23,8 +23,7 @@ handleEvent(ws, data) {
         this.endGame(ws.roomname);
         break;
     }
-}
-
+  }
 
   clearAllTimers(game) {
     if (game?.countdownTimers) {
@@ -67,10 +66,9 @@ handleEvent(ws, data) {
 
     // Broadcast ke semua orang di room
     this.chatServer.broadcastToRoom(room, [
-      "gameLowCardStart",
-      `Game is starting. Type .ij to join in ${game.registrationTime}s.\nBet: ${betAmount} Starting!`,
-      ws.idtarget
-    ]);
+  "gameLowCardStart",
+  game.betAmount
+]);
 
    // --- Event private ke host ---
 // Kirim langsung hostName dan betAmount sebagai elemen array
@@ -242,5 +240,3 @@ this.chatServer.safeSend(ws, [
     this.activeGames.delete(room);
   }
 }
-
-
