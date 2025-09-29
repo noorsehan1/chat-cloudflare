@@ -11,8 +11,10 @@ export class LowCardGameManager {
     const evt = data[0];
     switch (evt) {
       case "gameLowCardStart":
-        this.startGame(ws, data[1]);
-        break;
+       // this.startGame(ws, data[1]);
+       // break;
+        return;
+
       case "gameLowCardJoin":
         this.joinGame(ws);
         break;
@@ -240,3 +242,4 @@ this.chatServer.safeSend(ws, [
     this.activeGames.delete(room);
   }
 }
+
