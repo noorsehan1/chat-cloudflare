@@ -124,31 +124,43 @@ this.chatServer.safeSend(ws, [
     ]);
   }
 
-  closeRegistration(room) {
-    const game = this.getGame(room);
-    if (!game) return;
+ closeRegistration(room) {
+  const game = this.getGame(room);
+  if (!game) return;
 
-    const playerCount = game.players.size;
-    if (playerCount < 2) {
-      const onlyPlayer = playerCount === 1 ? Array.from(game.players.keys())[0] : null;
+  const playerCount = game.players.size;
+  if (playerCount < 2) {
+    const onlyPlayer = playerCount === 1 ? Array.from(game.players.keys())[0] : null;
 
-      if (onlyPlayer) {
-        const hostSocket = Array.from(this.chatServer.clients)
-          .find(ws => ws.idtarget === game.hostId);
-        if (hostSocket) {
-          this.chatServer.safeSend(hostSocket, ["gameLowCardNoJoin", game.hostName, game.betAmount]);
-        }
+    if (onlyPlayer) {
+      const hostSocket = Array.from(this.chatServer.clients)
+        .find(ws => ws.idtarget === game.hostId);
+      if (hostSocket) {
+        this.chatServer.safeSend(hostSocket, ["gameLowCardNoJoin", game.hostName, game.betAmount]);
       }
-
-      this.chatServer.broadcastToRoom(room, ["gameLowCardError", "Need at least 2 players", onlyPlayer]);
-      this.activeGames.delete(room);
-      return;
     }
 
-    game.registrationOpen = false;
-    this.chatServer.broadcastToRoom(room, ["gameLowCardClosed", Array.from(game.players.keys())]);
-    this.startDrawCountdown(room);
+    this.chatServer.broadcastToRoom(room, ["gameLowCardError", "Need at least 2 players", onlyPlayer]);
+    this.activeGames.delete(room);
+    return;
   }
+
+  game.registrationOpen = false;
+
+  const playersList = Array.from(game.players.keys());
+
+  // 1. Pendaftaran ditutup
+  this.chatServer.broadcastToRoom(room, ["gameLowCardClosed", playersList]);
+
+  // 2. Umumkan siapa yang fix ikut game
+  this.chatServer.broadcastToRoom(room, ["gameLowCardPlayersInGame", playersList, game.betAmount]);
+
+  // 3. Mulai langsung round 1
+  this.chatServer.broadcastToRoom(room, ["gameLowCardNextRound", 1]);
+
+  // Countdown untuk ronde 1
+  this.startDrawCountdown(room);
+}
 
 startDrawCountdown(room) {
   const game = this.getGame(room);
@@ -253,6 +265,7 @@ startDrawCountdown(room) {
     this.activeGames.delete(room);
   }
 }
+
 
 
 
