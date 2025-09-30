@@ -84,22 +84,28 @@ this.chatServer.safeSend(ws, [
     this.startRegistrationCountdown(room);
   }
 
-  startRegistrationCountdown(room) {
-    const game = this.getGame(room);
-    if (!game) return;
-    this.clearAllTimers(game);
+ startRegistrationCountdown(room) {
+  const game = this.getGame(room);
+  if (!game) return;
+  this.clearAllTimers(game);
 
-    const timesToNotify = [30, 20, 10, 5, 0];
-    timesToNotify.forEach(t => {
-      const delay = (game.registrationTime - t) * 1000;
-      const timer = setTimeout(() => {
-        if (!this.activeGames.has(room)) return;
+  const timesToNotify = [30, 20, 10, 5, 0];
+  timesToNotify.forEach(t => {
+    const delay = (game.registrationTime - t) * 1000;
+    const timer = setTimeout(() => {
+      if (!this.activeGames.has(room)) return;
+
+      if (t === 0) {
+        this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
+        this.closeRegistration(room);
+      } else {
         this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", `${t}s`]);
-        if (t === 0) this.closeRegistration(room);
-      }, delay);
-      game.countdownTimers.push(timer);
-    });
-  }
+      }
+
+    }, delay);
+    game.countdownTimers.push(timer);
+  });
+}
 
   joinGame(ws) {
     const room = ws.roomname;
@@ -144,23 +150,28 @@ this.chatServer.safeSend(ws, [
     this.startDrawCountdown(room);
   }
 
-  startDrawCountdown(room) {
-    const game = this.getGame(room);
-    if (!game) return;
-    this.clearAllTimers(game);
+startDrawCountdown(room) {
+  const game = this.getGame(room);
+  if (!game) return;
+  this.clearAllTimers(game);
 
-    const timesToNotify = [20, 10, 5, 0];
-    timesToNotify.forEach(t => {
-      const delay = (game.drawTime - t) * 1000;
-      const timer = setTimeout(() => {
-        if (!this.activeGames.has(room)) return;
+  const timesToNotify = [20, 10, 5, 0];
+  timesToNotify.forEach(t => {
+    const delay = (game.drawTime - t) * 1000;
+    const timer = setTimeout(() => {
+      if (!this.activeGames.has(room)) return;
+
+      if (t === 0) {
+        this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
+        this.evaluateRound(room);
+      } else {
         this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", `${t}s`]);
-        if (t === 0) this.evaluateRound(room);
-      }, delay);
-      game.countdownTimers.push(timer);
-    });
-  }
+      }
 
+    }, delay);
+    game.countdownTimers.push(timer);
+  });
+}
   submitNumber(ws, number, tanda = "") {
     const room = ws.roomname;
     const game = this.getGame(room);
@@ -242,5 +253,6 @@ this.chatServer.safeSend(ws, [
     this.activeGames.delete(room);
   }
 }
+
 
 
