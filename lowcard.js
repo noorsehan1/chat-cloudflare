@@ -89,7 +89,7 @@ this.chatServer.safeSend(ws, [
   if (!game) return;
   this.clearAllTimers(game);
 
-  const timesToNotify = [30, 20, 10, 5, 0];
+  const timesToNotify = [30, 20, 10, 0];
   timesToNotify.forEach(t => {
     const delay = (game.registrationTime - t) * 1000;
     const timer = setTimeout(() => {
@@ -155,7 +155,7 @@ startDrawCountdown(room) {
   if (!game) return;
   this.clearAllTimers(game);
 
-  const timesToNotify = [20, 10, 5, 0];
+  const timesToNotify = [20, 10, 0];
   timesToNotify.forEach(t => {
     const delay = (game.drawTime - t) * 1000;
     const timer = setTimeout(() => {
@@ -253,6 +253,7 @@ startDrawCountdown(room) {
     this.activeGames.delete(room);
   }
 }
+
 
 
 
