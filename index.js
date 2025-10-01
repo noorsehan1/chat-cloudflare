@@ -15,6 +15,33 @@ function createEmptySeat() {
     points: [], lockTime: undefined
   };
 }
+function filterMessage(text) {
+  const bannedWords = [
+    "judi", "juday", "gambler", "casino", "taruhan", "bet",
+    "poker", "slot", "bandar", "togel"
+  ];
+
+  let result = text;
+
+  const leetMap = {
+    a: "a@4", i: "i1!|", o: "o0", e: "e3", s: "s5$"
+  };
+
+  for (const word of bannedWords) {
+    const pattern = word
+      .split("")
+      .map(ch => {
+        const chars = leetMap[ch.toLowerCase()] || ch;
+        return `[${chars}${chars.toUpperCase()}]+[^a-zA-Z0-9]*`;
+      })
+      .join("");
+
+    const regex = new RegExp(pattern, "gi");
+    result = result.replace(regex, "xxxxxx");
+  }
+
+  return result;
+}
 
 // =====================
 // Durable Object Server
@@ -238,6 +265,8 @@ export class ChatServer {
     return users;
   }
 
+  
+
   handleMessage(ws,raw){
     let data;
     try{
@@ -339,13 +368,21 @@ export class ChatServer {
           break;
         }
 
-        case "chat": {
-          const [,roomname,noImageURL,username,message,usernameColor,chatTextColor]=data;
-          if(!roomList.includes(roomname)) return this.safeSend(ws,["error","Invalid room for chat"]);
-          if(!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname,[]);
-          this.chatMessageBuffer.get(roomname).push(["chat",roomname,noImageURL,username,message,usernameColor,chatTextColor]);
-          break;
-        }
+       case "chat": {
+  const [,roomname,noImageURL,username,message,usernameColor,chatTextColor] = data;
+  if(!roomList.includes(roomname)) return this.safeSend(ws,["error","Invalid room for chat"]);
+
+  // 🔹 Filter pesan
+  const cleanMessage = filterMessage(message);
+
+  if(!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname,[]);
+  this.chatMessageBuffer.get(roomname).push([
+    "chat", roomname, noImageURL, username, cleanMessage, usernameColor, chatTextColor
+  ]);
+  break;
+}
+
+
 
         case "updatePoint": {
           const [, room, seat, x, y, fast] = data;
@@ -501,5 +538,6 @@ export default {
     return new Response("WebSocket endpoint",{status:200});
   }
 };
+
 
 
