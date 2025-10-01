@@ -18,7 +18,7 @@ function createEmptySeat() {
 function filterMessage(text) {
   const bannedWords = [
     "judi", "juday", "gambler", "casino", "taruhan", "bet",
-    "poker", "slot", "bandar", "togel", "judai"
+    "poker", "slot", "bandar", "togel", "judai", "kontol", "memek"
   ];
 
   let result = text;
@@ -538,6 +538,7 @@ export default {
     return new Response("WebSocket endpoint",{status:200});
   }
 };
+
 
 
 
