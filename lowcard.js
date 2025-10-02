@@ -13,7 +13,6 @@ export class LowCardGameManager {
       case "gameLowCardStart":
         this.startGame(ws, data[1]);
         break;
-
       case "gameLowCardJoin":
         this.joinGame(ws);
         break;
@@ -71,7 +70,7 @@ export class LowCardGameManager {
       game.betAmount
     ]);
 
-    // --- Event private ke host ---
+    // Event private ke host
     this.chatServer.safeSend(ws, [
       "gameLowCardStartSuccess",
       game.hostName,
@@ -219,13 +218,20 @@ export class LowCardGameManager {
     const { numbers, players, eliminated, round, betAmount } = game;
     const entries = Array.from(numbers.entries());
 
+    // --- Eliminasi otomatis yang tidak submit ---
+    const submittedIds = new Set(numbers.keys());
+    const activePlayers = Array.from(players.keys()).filter(id => !eliminated.has(id));
+    const noSubmit = activePlayers.filter(id => !submittedIds.has(id));
+    noSubmit.forEach(id => eliminated.add(id));
+
     if (entries.length === 0) {
       this.chatServer.broadcastToRoom(room, ["gameLowCardError", "No numbers drawn this round"]);
       this.activeGames.delete(room);
       return;
     }
 
-    if (entries.length === 1) {
+    if (entries.length === 1 && noSubmit.length === activePlayers.length - 1) {
+      // hanya 1 orang yang draw → langsung pemenang
       const winnerId = entries[0][0];
       const totalCoin = betAmount * players.size;
       game.winner = winnerId;
@@ -237,12 +243,14 @@ export class LowCardGameManager {
     const values = Array.from(numbers.values());
     const allSame = values.every(v => v === values[0]);
     let losers = [];
+
     if (!allSame) {
       const lowest = Math.min(...values);
       losers = entries.filter(([, n]) => n === lowest).map(([id]) => id);
       losers.forEach(id => eliminated.add(id));
     }
 
+    // sisa pemain
     const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
 
     if (remaining.length === 1) {
@@ -255,7 +263,13 @@ export class LowCardGameManager {
     }
 
     const numbersArr = entries.map(([id, n]) => `${id}:${n}`);
-    this.chatServer.broadcastToRoom(room, ["gameLowCardRoundResult", round, numbersArr, losers, remaining]);
+    this.chatServer.broadcastToRoom(room, [
+      "gameLowCardRoundResult",
+      round,
+      numbersArr,
+      losers.concat(noSubmit), // kalah karena angka rendah + tidak draw
+      remaining
+    ]);
 
     numbers.clear();
     game.round++;
