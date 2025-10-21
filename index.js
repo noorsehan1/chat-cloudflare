@@ -5,7 +5,7 @@
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
-  "Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
+  "General","Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
   "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
 ];
 
@@ -496,3 +496,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
