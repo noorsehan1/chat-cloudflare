@@ -451,14 +451,28 @@ export class ChatServer {
   }
 
   // ---------------- Cleanup koneksi ----------------
-  cleanupClient(ws) {
+ cleanupClient(ws) {
     const id = ws.idtarget;
-    if (id) this.removeAllSeatsById(id);
+    const room = ws.roomname;
+    if (id && room) {
+        const seatMap = this.roomSeats.get(room);
+        if (seatMap) {
+            for (const [seat, info] of seatMap) {
+                if (info.namauser === id || info.namauser === "__LOCK__" + id) {
+                    Object.assign(info, createEmptySeat());
+                    this.broadcastToRoom(room, ["removeKursi", room, seat]);
+                    this.broadcastRoomUserCount(room);
+                    ws.numkursi?.delete(seat);
+                }
+            }
+        }
+    }
     ws.numkursi?.clear?.();
     this.clients.delete(ws);
     ws.roomname = undefined;
     ws.idtarget = undefined;
-  }
+}
+
 
   // ---------------- Durable Object fetch (entrypoint) ----------------
   async fetch(request) {
@@ -496,4 +510,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
