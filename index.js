@@ -439,11 +439,11 @@ export class ChatServer {
       }
 
       // Event LowCard (diserahkan ke LowCardGameManager)
-      case "gameLowCardStart":
-      case "gameLowCardJoin":
-      case "gameLowCardNumber":
-        this.lowcard.handleEvent(ws, data);
-        break;
+     // case "gameLowCardStart":
+      //case "gameLowCardJoin":
+     // case "gameLowCardNumber":
+        //this.lowcard.handleEvent(ws, data);
+       // break;
 
       default:
         this.safeSend(ws, ["error", "Unknown event"]);
@@ -515,4 +515,4 @@ export default {
 
 
 
-
+sering disconnect user sebab apa
