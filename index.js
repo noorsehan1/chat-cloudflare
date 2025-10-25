@@ -439,7 +439,7 @@ export class ChatServer {
       }
 
       // Event LowCard (diserahkan ke LowCardGameManager)
-     case "gameLowCardStart":
+      case "gameLowCardStart":
       case "gameLowCardJoin":
       case "gameLowCardNumber":
         this.lowcard.handleEvent(ws, data);
@@ -451,28 +451,14 @@ export class ChatServer {
   }
 
   // ---------------- Cleanup koneksi ----------------
- cleanupClient(ws) {
+  cleanupClient(ws) {
     const id = ws.idtarget;
-    const room = ws.roomname;
-    if (id && room) {
-        const seatMap = this.roomSeats.get(room);
-        if (seatMap) {
-            for (const [seat, info] of seatMap) {
-                if (info.namauser === id || info.namauser === "__LOCK__" + id) {
-                    Object.assign(info, createEmptySeat());
-                    this.broadcastToRoom(room, ["removeKursi", room, seat]);
-                    this.broadcastRoomUserCount(room);
-                    ws.numkursi?.delete(seat);
-                }
-            }
-        }
-    }
+    if (id) this.removeAllSeatsById(id);
     ws.numkursi?.clear?.();
     this.clients.delete(ws);
     ws.roomname = undefined;
     ws.idtarget = undefined;
-}
-
+  }
 
   // ---------------- Durable Object fetch (entrypoint) ----------------
   async fetch(request) {
@@ -510,10 +496,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
-
-
-
-
 
