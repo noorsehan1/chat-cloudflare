@@ -2,7 +2,7 @@
 // Versi lengkap: lock kursi aman (tidak menimpa kursi yang sudah terisi)
 // Filter kata dilarang dihapus sesuai permintaan
 
-//import { LowCardGameManager } from "./lowcard.js";
+import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
   "General","Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
@@ -510,6 +510,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
