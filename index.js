@@ -61,9 +61,21 @@ export class ChatServer {
   // ---------------- Helpers ----------------
   safeSend(ws, arr) {
     try {
-      if (ws.readyState === 1) ws.send(JSON.stringify(arr));
-      else this.cleanupClient(ws);
-    } catch {}
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify(arr));
+      } else if (ws.readyState === 0) {
+        // CONNECTING — coba lagi setelah 300ms
+        setTimeout(() => {
+          if (ws.readyState === 1) {
+            try { ws.send(JSON.stringify(arr)); } catch {}
+          }
+        }, 300);
+      } else {
+        // Jika CLOSING atau CLOSED, biarkan event close/error yang cleanup
+      }
+    } catch (e) {
+      // Jangan langsung cleanup supaya koneksi tidak terputus mendadak
+    }
   }
 
   broadcastToRoom(room, msg) {
@@ -72,7 +84,6 @@ export class ChatServer {
     }
   }
 
-  // Hitung jumlah user nyata di tiap room (tidak menghitung __LOCK__)
   getJumlahRoom() {
     const cnt = Object.fromEntries(roomList.map(r => [r, 0]));
     for (const room of roomList) {
@@ -117,7 +128,6 @@ export class ChatServer {
     for (const c of Array.from(this.clients)) this.safeSend(c, ["currentNumber", this.currentNumber]);
   }
 
-  // Bersihkan lock yang sudah kedaluwarsa (threshold 10s)
   cleanExpiredLocks() {
     const now = Date.now();
     for (const room of roomList) {
@@ -132,7 +142,6 @@ export class ChatServer {
     }
   }
 
-  // Dipanggil sering (100ms) untuk flush buffer dan private message
   periodicFlush() {
     this.flushKursiUpdates();
     this.flushChatBuffer();
@@ -155,47 +164,28 @@ export class ChatServer {
     this.safeSend(ws, ["allRoomsUserCount", result]);
   }
 
-  /**
-   * lockSeat(room, ws)
-   * - Mencari kursi YANG BENAR-AM kosong (namauser === "")
-   * - Mengecek dan membersihkan lock kadaluarsa (threshold 5s) sebelum pencarian
-   * - Tidak akan menggusur kursi yang berisi namauser (mis. user lain)
-   * - Mengembalikan nomor kursi atau null jika penuh
-   */
   lockSeat(room, ws) {
     const seatMap = this.roomSeats.get(room);
     if (!ws.idtarget) return null;
-
     const now = Date.now();
-
-    // Bersihkan lock yang sudah kadaluarsa (lebih dari 5 detik)
     for (const [seat, info] of seatMap) {
       if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 5000) {
         Object.assign(info, createEmptySeat());
       }
     }
-
-    // Cari kursi yang benar-benar kosong (namauser === "")
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const k = seatMap.get(i);
       if (!k) continue;
-      // Hanya ambil kursi yang kosong dan tidak sedang dikunci
       if (k.namauser === "") {
-        k.namauser = "__LOCK__" + ws.idtarget; // tanda lock sementara
+        k.namauser = "__LOCK__" + ws.idtarget;
         k.lockTime = now;
-        // Catat mapping sementara agar mudah dibersihkan bila perlu
         this.userToSeat.set(ws.idtarget, { room, seat: i });
         return i;
       }
     }
-
-    // Tidak ada kursi kosong yang tersedia
     return null;
   }
 
-  /**
-   * Kirim semua state kursi dan titik ke client baru
-   */
   sendAllStateTo(ws, room) {
     const seatMap = this.roomSeats.get(room);
     const allPoints = [];
@@ -226,10 +216,6 @@ export class ChatServer {
     }
   }
 
-  /**
-   * Hapus semua kursi yang terikat dengan idtarget (baik __LOCK__id atau id)
-   * Broadcast removeKursi jika ada perubahan
-   */
   removeAllSeatsById(idtarget) {
     for (const [room, seatMap] of this.roomSeats) {
       let removed = false;
@@ -256,7 +242,6 @@ export class ChatServer {
     return users;
   }
 
-  // ---------------- Handler pesan dari WebSocket ----------------
   handleMessage(ws, raw) {
     let data;
     try { data = JSON.parse(raw); } catch { return this.safeSend(ws, ["error", "Invalid JSON"]); }
@@ -267,11 +252,9 @@ export class ChatServer {
     switch (evt) {
       case "setIdTarget": {
         const newId = data[1];
-        // Hapus semua client lama dengan id yang sama untuk mencegah duplikasi
         this.cleanupClientById(newId);
         ws.idtarget = newId;
         this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
-        // Kirim private message buffered jika ada
         if (this.privateMessageBuffer.has(ws.idtarget)) {
           for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
           this.privateMessageBuffer.delete(ws.idtarget);
@@ -304,7 +287,6 @@ export class ChatServer {
         const [, idt, url, msg, sender] = data;
         const ts = Date.now();
         const out = ["private", idt, url, msg, ts, sender];
-        // Kirim balik ke pengirim sebagai echo
         this.safeSend(ws, out);
         let delivered = false;
         for (const c of this.clients) {
@@ -348,21 +330,14 @@ export class ChatServer {
       case "joinRoom": {
         const newRoom = data[1];
         if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
-
-        // Hapus kursi lama yang terikat idtarget ini (jika ada)
         if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
-
         ws.roomname = newRoom;
         const seatMap = this.roomSeats.get(newRoom);
-
-        // Ambil kursi kosong yang valid (tidak menimpa kursi berisi namauser)
         const foundSeat = this.lockSeat(newRoom, ws);
         if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
-
         ws.numkursi = new Set([foundSeat]);
         this.safeSend(ws, ["numberKursiSaya", foundSeat]);
         if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-
         this.sendAllStateTo(ws, newRoom);
         this.broadcastRoomUserCount(newRoom);
         break;
@@ -371,8 +346,6 @@ export class ChatServer {
       case "chat": {
         const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
         if (!roomList.includes(roomname)) return this.safeSend(ws, ["error", "Invalid room for chat"]);
-
-        // Pesan dikirim apa adanya (filter kata terhapus)
         if (!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname, []);
         this.chatMessageBuffer.get(roomname).push([
           "chat", roomname, noImageURL, username, message, usernameColor, chatTextColor
@@ -406,9 +379,7 @@ export class ChatServer {
       case "updateKursi": {
         const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
         if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
-
         const seatMap = this.roomSeats.get(room);
-        // Ambil data kursi saat ini (jika tidak ada, buat baru)
         const currentInfo = seatMap.get(seat) || createEmptySeat();
         currentInfo.noimageUrl = noimageUrl;
         currentInfo.namauser = namauser;
@@ -417,13 +388,9 @@ export class ChatServer {
         currentInfo.itematas = itematas;
         currentInfo.vip = vip;
         currentInfo.viptanda = viptanda;
-        // set kembali
         seatMap.set(seat, currentInfo);
-
-        // simpan ke buffer update kursi agar broadcast periodik
         if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
         this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
-
         this.broadcastRoomUserCount(room);
         break;
       }
@@ -438,11 +405,10 @@ export class ChatServer {
         break;
       }
 
-      // Event LowCard (diserahkan ke LowCardGameManager)
-       case "gameLowCardStart":
-       case "gameLowCardJoin":
-       case "gameLowCardNumber":
-       this.lowcard.handleEvent(ws, data);
+      case "gameLowCardStart":
+      case "gameLowCardJoin":
+      case "gameLowCardNumber":
+        this.lowcard.handleEvent(ws, data);
         break;
 
       default:
@@ -450,7 +416,6 @@ export class ChatServer {
     }
   }
 
-  // ---------------- Cleanup koneksi ----------------
   cleanupClient(ws) {
     const id = ws.idtarget;
     if (id) this.removeAllSeatsById(id);
@@ -460,7 +425,6 @@ export class ChatServer {
     ws.idtarget = undefined;
   }
 
-  // ---------------- Durable Object fetch (entrypoint) ----------------
   async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || "";
     if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
@@ -483,7 +447,6 @@ export class ChatServer {
   }
 }
 
-// ---------------- Worker entry default ----------------
 export default {
   async fetch(req, env) {
     if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
@@ -496,8 +459,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
-
-
-
