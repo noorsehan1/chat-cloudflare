@@ -12,7 +12,7 @@ const roomList = [
 function createEmptySeat() {
   return {
     noimageUrl: "",
-    namauser: "",   // "" artinya kursi kosong
+    namauser: "",
     color: "",
     itembawah: 0,
     itematas: 0,
@@ -27,11 +27,7 @@ export class ChatServer {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-
-    // Klien WebSocket aktif
     this.clients = new Set();
-
-    // Pemetaan idtarget => { room, seat }
     this.userToSeat = new Map();
 
     this.MAX_SEATS = 35;
@@ -42,40 +38,30 @@ export class ChatServer {
       this.roomSeats.set(room, m);
     }
 
-    // Buffer untuk mengumpulkan update yang dikirim periodik
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
     this.privateMessageBuffer = new Map();
 
-    // Timer / tick
     this.currentNumber = 1;
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
 
-    // LowCard game manager (diberikan dari file lain)
     this.lowcard = new LowCardGameManager(this);
   }
 
-  // ---------------- Helpers ----------------
   safeSend(ws, arr) {
     try {
-      if (ws.readyState === 1) {
-        ws.send(JSON.stringify(arr));
-      } else if (ws.readyState === 0) {
-        // CONNECTING — coba lagi setelah 300ms
+      if (ws.readyState === 1) ws.send(JSON.stringify(arr));
+      else if (ws.readyState === 0) {
         setTimeout(() => {
           if (ws.readyState === 1) {
             try { ws.send(JSON.stringify(arr)); } catch {}
           }
         }, 300);
-      } else {
-        // Jika CLOSING atau CLOSED, biarkan event close/error yang cleanup
       }
-    } catch (e) {
-      // Jangan langsung cleanup supaya koneksi tidak terputus mendadak
-    }
+    } catch (e) {}
   }
 
   broadcastToRoom(room, msg) {
@@ -116,9 +102,8 @@ export class ChatServer {
         const { points, ...rest } = info;
         updates.push([seat, rest]);
       }
-      if (updates.length > 0) {
+      if (updates.length > 0)
         this.broadcastToRoom(room, ["kursiBatchUpdate", room, updates]);
-      }
       seatMapUpdates.clear();
     }
   }
@@ -168,11 +153,12 @@ export class ChatServer {
     const seatMap = this.roomSeats.get(room);
     if (!ws.idtarget) return null;
     const now = Date.now();
+
     for (const [seat, info] of seatMap) {
-      if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 5000) {
+      if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 5000)
         Object.assign(info, createEmptySeat());
-      }
     }
+
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const k = seatMap.get(i);
       if (!k) continue;
@@ -246,7 +232,6 @@ export class ChatServer {
     let data;
     try { data = JSON.parse(raw); } catch { return this.safeSend(ws, ["error", "Invalid JSON"]); }
     if (!Array.isArray(data) || data.length === 0) return this.safeSend(ws, ["error", "Invalid message format"]);
-
     const evt = data[0];
 
     switch (evt) {
@@ -381,13 +366,7 @@ export class ChatServer {
         if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
         const seatMap = this.roomSeats.get(room);
         const currentInfo = seatMap.get(seat) || createEmptySeat();
-        currentInfo.noimageUrl = noimageUrl;
-        currentInfo.namauser = namauser;
-        currentInfo.color = color;
-        currentInfo.itembawah = itembawah;
-        currentInfo.itematas = itematas;
-        currentInfo.vip = vip;
-        currentInfo.viptanda = viptanda;
+        Object.assign(currentInfo, { noimageUrl, namauser, color, itembawah, itematas, vip, viptanda });
         seatMap.set(seat, currentInfo);
         if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
         this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
@@ -418,7 +397,15 @@ export class ChatServer {
 
   cleanupClient(ws) {
     const id = ws.idtarget;
-    if (id) this.removeAllSeatsById(id);
+    if (id) {
+      // ✅ FIX: pastikan tidak hapus kursi jika user masih punya koneksi aktif lain (reconnect cepat)
+      const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
+      if (stillActive) {
+        this.clients.delete(ws);
+        return;
+      }
+      this.removeAllSeatsById(id);
+    }
     ws.numkursi?.clear?.();
     this.clients.delete(ws);
     ws.roomname = undefined;
