@@ -1,6 +1,5 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi lengkap: lock kursi aman (tidak menimpa kursi yang sudah terisi)
-// Filter kata dilarang dihapus sesuai permintaan
+// Versi lengkap: aman untuk reconnect cepat, kursi hanya dihapus jika user benar-benar disconnect
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -48,17 +47,7 @@ export class ChatServer {
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
 
-    // Low card game manager terintegrasi
     this.lowcard = new LowCardGameManager(this);
-
-    // Penyimpanan untuk user yang sementara disconnect (kursi tidak dihapus langsung)
-    // offlineUsers: idtarget -> { roomname, timestamp }
-    this.offlineUsers = new Map();
-    // offlineTimers: idtarget -> timeoutId (untuk auto hapus seat setelah timeout)
-    this.offlineTimers = new Map();
-
-    // waktu toleransi sebelum kursi dihapus permanen (ms). default 5 menit.
-    this.OFFLINE_TIMEOUT_MS = 5 * 60 * 1000;
   }
 
   safeSend(ws, arr) {
@@ -212,7 +201,6 @@ export class ChatServer {
     }
   }
 
-  // Hapus semua kursi user — dipanggil hanya saat benar-benar ingin hapus permanen
   removeAllSeatsById(idtarget) {
     for (const [room, seatMap] of this.roomSeats) {
       let removed = false;
@@ -239,34 +227,6 @@ export class ChatServer {
     return users;
   }
 
-  scheduleOfflineRemoval(idtarget) {
-    // safety: jangan schedule kalau sudah ada
-    if (this.offlineTimers.has(idtarget)) return;
-    const timeoutId = setTimeout(() => {
-      // jika masih tercatat offline dan sudah melewati timeout, hapus kursi permanen
-      const saved = this.offlineUsers.get(idtarget);
-      if (saved && Date.now() - saved.timestamp >= this.OFFLINE_TIMEOUT_MS) {
-        this.offlineUsers.delete(idtarget);
-        this.offlineTimers.delete(idtarget);
-        this.removeAllSeatsById(idtarget);
-        // console log untuk debugging
-        try { console.log(`🗑️ Offline timeout: kursi ${idtarget} dihapus`); } catch {}
-      } else {
-        // jika sudah reconnect atau dihapus, bersihkan timer reference
-        this.offlineTimers.delete(idtarget);
-      }
-    }, this.OFFLINE_TIMEOUT_MS + 10000); // sedikit buffer (ms)
-    this.offlineTimers.set(idtarget, timeoutId);
-  }
-
-  cancelOfflineRemoval(idtarget) {
-    if (this.offlineTimers.has(idtarget)) {
-      clearTimeout(this.offlineTimers.get(idtarget));
-      this.offlineTimers.delete(idtarget);
-    }
-    if (this.offlineUsers.has(idtarget)) this.offlineUsers.delete(idtarget);
-  }
-
   handleMessage(ws, raw) {
     let data;
     try { data = JSON.parse(raw); } catch { return this.safeSend(ws, ["error", "Invalid JSON"]); }
@@ -276,32 +236,14 @@ export class ChatServer {
     switch (evt) {
       case "setIdTarget": {
         const newId = data[1];
-
-        // Tutup koneksi klien lain dengan id yang sama (jika ada),
-        // tapi cleanupClient sekarang hanya menandai offline (tidak hapus kursi langsung).
         this.cleanupClientById(newId);
-
-        // Jika ada pencatatan offline sebelumnya, batalkan rencana penghapusan
-        if (this.offlineUsers.has(newId)) {
-          this.cancelOfflineRemoval(newId);
-          // Biarkan kursi tetap seperti semula — user akan "kembali" karena sama id
-          try { console.log(`🔄 User ${newId} reconnect detected — cancel offline removal`); } catch {}
-        }
-
         ws.idtarget = newId;
         this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
-
         if (this.privateMessageBuffer.has(ws.idtarget)) {
           for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
           this.privateMessageBuffer.delete(ws.idtarget);
         }
         if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-        break;
-      }
-
-      case "ping": {
-        const pingId = data[1];
-        if (pingId && ws.idtarget === pingId) this.safeSend(ws, ["pong"]);
         break;
       }
 
@@ -366,7 +308,7 @@ export class ChatServer {
       case "joinRoom": {
         const newRoom = data[1];
         if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
-        if (ws.idtarget) this.removeAllSeatsById(ws.idtarget); // behavior: joining new room removes previous seats
+        if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
         ws.roomname = newRoom;
         const seatMap = this.roomSeats.get(newRoom);
         const foundSeat = this.lockSeat(newRoom, ws);
@@ -438,6 +380,7 @@ export class ChatServer {
       case "gameLowCardStart":
       case "gameLowCardJoin":
       case "gameLowCardNumber":
+      case "gameLowCardEnd":
         this.lowcard.handleEvent(ws, data);
         break;
 
@@ -446,30 +389,17 @@ export class ChatServer {
     }
   }
 
-  // cleanupClient: saat koneksi terputus / close / error
-  // Perubahan: jangan langsung hapus kursi — catat sebagai offline sementara.
   cleanupClient(ws) {
     const id = ws.idtarget;
-    if (!id) {
-      // tidak punya idtarget, langsung hapus socket
-      this.clients.delete(ws);
-      return;
+    if (id) {
+      // ✅ Aman untuk reconnect cepat: hanya hapus kursi jika user tidak punya koneksi lain
+      const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
+      if (stillActive) {
+        this.clients.delete(ws);
+        return;
+      }
+      this.removeAllSeatsById(id);
     }
-
-    // Jika ada koneksi lain untuk id ini tetap aktif, hanya hapus socket dan jangan tandai offline
-    const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
-    if (stillActive) {
-      this.clients.delete(ws);
-      return;
-    }
-
-    // Tandai user sebagai offline sementara — simpan room agar saat reconnect bisa lanjut
-    this.offlineUsers.set(id, { roomname: ws.roomname, timestamp: Date.now() });
-
-    // Schedule penghapusan kursi permanen jika tidak reconnect dalam waktu OFFLINE_TIMEOUT_MS
-    this.scheduleOfflineRemoval(id);
-
-    // Lepas socket dari daftar clients
     ws.numkursi?.clear?.();
     this.clients.delete(ws);
     ws.roomname = undefined;
