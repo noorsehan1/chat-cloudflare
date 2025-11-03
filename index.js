@@ -1,5 +1,6 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi lengkap: aman untuk reconnect cepat, kursi hanya dihapus jika user benar-benar disconnect
+// Versi lengkap + dukungan badge
+// Aman untuk reconnect cepat, kursi hanya dihapus jika user benar-benar disconnect
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -17,6 +18,7 @@ function createEmptySeat() {
     itematas: 0,
     vip: 0,
     viptanda: 0,
+    badge: 0,        // tambahan field badge
     points: [],
     lockTime: undefined
   };
@@ -99,7 +101,7 @@ export class ChatServer {
         if (!seatMapUpdates.has(seat)) continue;
         const info = seatMapUpdates.get(seat);
         const { points, ...rest } = info;
-        updates.push([seat, rest]);
+        updates.push([seat, rest]); // badge termasuk di rest
       }
       if (updates.length > 0)
         this.broadcastToRoom(room, ["kursiBatchUpdate", room, updates]);
@@ -187,7 +189,8 @@ export class ChatServer {
           itembawah: info.itembawah,
           itematas: info.itematas,
           vip: info.vip,
-          viptanda: info.viptanda
+          viptanda: info.viptanda,
+          badge: info.badge || 0
         };
       }
     }
@@ -202,22 +205,21 @@ export class ChatServer {
   }
 
   removeAllSeatsById(idtarget) {
-  const seatInfo = this.userToSeat.get(idtarget);
-  if (!seatInfo) return;
+    const seatInfo = this.userToSeat.get(idtarget);
+    if (!seatInfo) return;
 
-  const { room, seat } = seatInfo;
-  const seatMap = this.roomSeats.get(room);
-  if (!seatMap) return;
+    const { room, seat } = seatInfo;
+    const seatMap = this.roomSeats.get(room);
+    if (!seatMap) return;
 
-  if (seatMap.has(seat)) {
-    Object.assign(seatMap.get(seat), createEmptySeat());
-    this.broadcastToRoom(room, ["removeKursi", room, seat]);
-    this.broadcastRoomUserCount(room);
+    if (seatMap.has(seat)) {
+      Object.assign(seatMap.get(seat), createEmptySeat());
+      this.broadcastToRoom(room, ["removeKursi", room, seat]);
+      this.broadcastRoomUserCount(room);
+    }
+
+    this.userToSeat.delete(idtarget);
   }
-
-  this.userToSeat.delete(idtarget);
-}
-
 
   getAllOnlineUsers() {
     const users = [];
@@ -283,50 +285,40 @@ export class ChatServer {
       }
 
       case "isUserOnline": {
-  const username = data[1]; // username target
-  const tanda = data[2] ?? "";
+        const username = data[1];
+        const tanda = data[2] ?? "";
 
-  // Ambil semua koneksi user yang aktif
-  const activeSockets = Array.from(this.clients).filter(c => c.idtarget === username);
-  const online = activeSockets.length > 0;
+        const activeSockets = Array.from(this.clients).filter(c => c.idtarget === username);
+        const online = activeSockets.length > 0;
 
-  // Kirim status ke pemanggil
-  this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
+        this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
 
-  // Jika user login di lebih dari satu perangkat
-  if (activeSockets.length > 1) {
-    const newest = activeSockets[activeSockets.length - 1]; // koneksi baru
-    const oldSockets = activeSockets.slice(0, -1); // sisanya dianggap lama
+        if (activeSockets.length > 1) {
+          const newest = activeSockets[activeSockets.length - 1];
+          const oldSockets = activeSockets.slice(0, -1);
 
-    // Dapatkan data kursi user (room & seat)
-    const userSeatInfo = this.userToSeat.get(username);
+          const userSeatInfo = this.userToSeat.get(username);
 
-    if (userSeatInfo) {
-      const { room, seat } = userSeatInfo;
+          if (userSeatInfo) {
+            const { room, seat } = userSeatInfo;
+            const seatMap = this.roomSeats.get(room);
+            if (seatMap && seatMap.has(seat)) {
+              Object.assign(seatMap.get(seat), createEmptySeat());
+              this.broadcastToRoom(room, ["removeKursi", room, seat]);
+              this.broadcastRoomUserCount(room);
+            }
+            this.userToSeat.delete(username);
+          }
 
-      // Kosongkan kursinya di room tersebut
-      const seatMap = this.roomSeats.get(room);
-      if (seatMap && seatMap.has(seat)) {
-        Object.assign(seatMap.get(seat), createEmptySeat());
-        this.broadcastToRoom(room, ["removeKursi", room, seat]); // broadcast hanya ke room itu
-        this.broadcastRoomUserCount(room);
+          for (const old of oldSockets) {
+            try {
+              old.close(4000, "Duplicate login — old session closed");
+              this.clients.delete(old);
+            } catch {}
+          }
+        }
+        break;
       }
-
-      this.userToSeat.delete(username);
-    }
-
-    // Tutup socket lama user
-    for (const old of oldSockets) {
-      try {
-        old.close(4000, "Duplicate login — old session closed");
-        this.clients.delete(old);
-      } catch {}
-    }
-  }
-
-  break;
-}
-
 
       case "getAllRoomsUserCount":
         this.handleGetAllRoomsUserCount(ws);
@@ -397,11 +389,11 @@ export class ChatServer {
       }
 
       case "updateKursi": {
-        const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
+        const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda, badge] = data;
         if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
         const seatMap = this.roomSeats.get(room);
         const currentInfo = seatMap.get(seat) || createEmptySeat();
-        Object.assign(currentInfo, { noimageUrl, namauser, color, itembawah, itematas, vip, viptanda });
+        Object.assign(currentInfo, { noimageUrl, namauser, color, itembawah, itematas, vip, viptanda, badge });
         seatMap.set(seat, currentInfo);
         if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
         this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
@@ -434,7 +426,6 @@ export class ChatServer {
   cleanupClient(ws) {
     const id = ws.idtarget;
     if (id) {
-      // ✅ Aman untuk reconnect cepat: hanya hapus kursi jika user tidak punya koneksi lain
       const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
       if (stillActive) {
         this.clients.delete(ws);
@@ -477,9 +468,11 @@ export default {
       const obj = env.CHAT_SERVER.get(id);
       return obj.fetch(req);
     }
-    if (new URL(req.url).pathname === "/health")
-      return new Response("ok", { status: 200, headers: { "content-type": "text/plain" } });
-    return new Response("WebSocket endpoint", { status: 200 });
+
+    const url = new URL(req.url);
+    return new Response(`ChatServer DO ready at ${url.pathname}`, {
+      status: 200,
+      headers: { "content-type": "text/plain" }
+    });
   }
 };
-
