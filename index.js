@@ -1,12 +1,11 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi lengkap: aman untuk reconnect cepat, kursi hanya dihapus jika user benar-benar disconnect
-// Tambahan: badge untuk kursi
+// Versi diperbaharui: kursiBatchUpdate selalu mengikuti badge terbaru
 
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
-  "General","Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
-  "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
+  "General","Indonesia","Chill Zone","Catch Up","Casual Vibes","Lounge Talk",
+  "Easy Talk","Friendly Corner","The Hangout","Relax & Chat","Just Chillin","The Chatter Room"
 ];
 
 function createEmptySeat() {
@@ -393,6 +392,8 @@ export class ChatServer {
         if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
         const seatMap = this.roomSeats.get(room);
         const currentInfo = seatMap.get(seat) || createEmptySeat();
+
+        // update semua data kursi termasuk badge terbaru
         Object.assign(currentInfo, {
           noimageUrl,
           namauser,
@@ -405,21 +406,12 @@ export class ChatServer {
         });
         seatMap.set(seat, currentInfo);
 
+        // buffer batch selalu menampung state terbaru
         if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
         this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
 
         // broadcast instan
-        this.broadcastToRoom(room, ["kursiUpdate", room, seat, {
-          noimageUrl,
-          namauser,
-          color,
-          itembawah,
-          itematas,
-          vip,
-          viptanda,
-          badge: badge ?? 0
-        }]);
-
+        this.broadcastToRoom(room, ["kursiUpdate", room, seat, { ...currentInfo }]);
         this.broadcastRoomUserCount(room);
         break;
       }
