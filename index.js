@@ -18,7 +18,7 @@ function createEmptySeat() {
     itematas: 0,
     vip: 0,
     viptanda: 0,
-    badge: 0,        // tambahan field badge
+    badge: 0,
     points: [],
     lockTime: undefined
   };
@@ -62,7 +62,7 @@ export class ChatServer {
           }
         }, 300);
       }
-    } catch (e) {}
+    } catch {}
   }
 
   broadcastToRoom(room, msg) {
@@ -97,14 +97,33 @@ export class ChatServer {
   flushKursiUpdates() {
     for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
       const updates = [];
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) continue;
+
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         if (!seatMapUpdates.has(seat)) continue;
+
         const info = seatMapUpdates.get(seat);
-        const { points, ...rest } = info;
-        updates.push([seat, rest]); // badge termasuk di rest
+        const currentInfo = seatMap.get(seat) || createEmptySeat();
+
+        // Merge data, pastikan badge dan field lain tidak hilang
+        const safeInfo = {
+          noimageUrl: info.noimageUrl ?? currentInfo.noimageUrl,
+          namauser: info.namauser ?? currentInfo.namauser,
+          color: info.color ?? currentInfo.color,
+          itembawah: info.itembawah ?? currentInfo.itembawah,
+          itematas: info.itematas ?? currentInfo.itematas,
+          vip: info.vip ?? currentInfo.vip,
+          viptanda: info.viptanda ?? currentInfo.viptanda,
+          badge: info.badge ?? currentInfo.badge
+        };
+
+        updates.push([seat, safeInfo]);
       }
+
       if (updates.length > 0)
         this.broadcastToRoom(room, ["kursiBatchUpdate", room, updates]);
+
       seatMapUpdates.clear();
     }
   }
@@ -152,7 +171,7 @@ export class ChatServer {
 
   lockSeat(room, ws) {
     const seatMap = this.roomSeats.get(room);
-    if (!ws.idtarget) return null;
+    if (!ws.idtarget || !seatMap) return null;
     const now = Date.now();
 
     for (const [seat, info] of seatMap) {
@@ -175,6 +194,7 @@ export class ChatServer {
 
   sendAllStateTo(ws, room) {
     const seatMap = this.roomSeats.get(room);
+    if (!seatMap) return;
     const allPoints = [];
     const meta = {};
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
@@ -190,7 +210,7 @@ export class ChatServer {
           itematas: info.itematas,
           vip: info.vip,
           viptanda: info.viptanda,
-          badge: info.badge || 0
+          badge: info.badge
         };
       }
     }
@@ -298,7 +318,6 @@ export class ChatServer {
           const oldSockets = activeSockets.slice(0, -1);
 
           const userSeatInfo = this.userToSeat.get(username);
-
           if (userSeatInfo) {
             const { room, seat } = userSeatInfo;
             const seatMap = this.roomSeats.get(room);
@@ -391,12 +410,27 @@ export class ChatServer {
       case "updateKursi": {
         const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda, badge] = data;
         if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
+
         const seatMap = this.roomSeats.get(room);
+        if (!seatMap) return;
+
         const currentInfo = seatMap.get(seat) || createEmptySeat();
-        Object.assign(currentInfo, { noimageUrl, namauser, color, itembawah, itematas, vip, viptanda, badge });
+
+        // Update hanya field yang ada
+        if (noimageUrl !== undefined) currentInfo.noimageUrl = noimageUrl;
+        if (namauser !== undefined) currentInfo.namauser = namauser;
+        if (color !== undefined) currentInfo.color = color;
+        if (itembawah !== undefined) currentInfo.itembawah = itembawah;
+        if (itematas !== undefined) currentInfo.itematas = itematas;
+        if (vip !== undefined) currentInfo.vip = vip;
+        if (viptanda !== undefined) currentInfo.viptanda = viptanda;
+        if (badge !== undefined) currentInfo.badge = badge;
+
         seatMap.set(seat, currentInfo);
+
         if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
         this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
+
         this.broadcastRoomUserCount(room);
         break;
       }
