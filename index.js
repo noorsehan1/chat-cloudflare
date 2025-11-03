@@ -396,7 +396,8 @@ export class ChatServer {
         if (itematas !== undefined) currentInfo.itematas = itematas;
         if (vip !== undefined) currentInfo.vip = vip;
         if (viptanda !== undefined) currentInfo.viptanda = viptanda;
-        if (badge !== undefined) currentInfo.badge = badge;
+        if (badge !== undefined) currentInfo.badge = parseInt(badge) || 0;
+
         seatMap.set(seat, currentInfo);
         if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
         this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
@@ -469,3 +470,4 @@ export default {
     });
   }
 };
+
