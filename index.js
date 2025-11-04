@@ -41,6 +41,7 @@ export class ChatServer {
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
     this.privateMessageBuffer = new Map();
+    this.lastDisconnectTime = new Map();
 
     this.currentNumber = 1;
     this.maxNumber = 6;
@@ -244,32 +245,43 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
-      if (seatInfo) {
-  lastRoom = seatInfo.room;
 
-  // Jika user reconnect cepat (< gracePeriod)
-  if (this.pendingRemove.has(newId)) {
-    clearTimeout(this.pendingRemove.get(newId));
-    this.pendingRemove.delete(newId);
-    ws.roomname = lastRoom;
-    this.sendAllStateTo(ws, lastRoom);
-  } else {
-    // Sudah lewat grace period — hapus kursi lama sebelum minta join ulang
-    this.removeAllSeatsById(newId);
-    this.safeSend(ws, ["needJoinRoom", "Reconnect"]);
+        
+      case "setIdTarget": {
+  const newId = data[1];
+  ws.idtarget = newId;
+
+  // --- Cek waktu disconnect terakhir
+  const now = Date.now();
+  const lastDisconnect = this.lastDisconnectTime?.get(newId) || 0;
+  const diff = now - lastDisconnect;
+
+  if (diff > this.gracePeriod) {
+    // Lebih dari 5 detik → bersihkan semua data lama
+    this.cleanupClient(ws);
+    this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
     ws.roomname = undefined;
+  } else {
+    // Kurang dari 5 detik → reconnect cepat, kursi tetap aman
+    if (this.pendingRemove.has(newId)) {
+      clearTimeout(this.pendingRemove.get(newId));
+      this.pendingRemove.delete(newId);
+    }
+
+    const seatInfo = this.userToSeat.get(newId);
+    if (seatInfo) {
+      ws.roomname = seatInfo.room;
+      this.sendAllStateTo(ws, seatInfo.room);
+    }
   }
+
+  // Hapus catatan disconnect setelah reconnect sukses
+  if (this.lastDisconnectTime) this.lastDisconnectTime.delete(newId);
+
+  if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+  break;
 }
 
-
-        if (this.privateMessageBuffer.has(ws.idtarget)) {
-          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
-          this.privateMessageBuffer.delete(ws.idtarget);
-        }
-
-        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-        break;
-      }
 
       case "joinRoom": {
         const newRoom = data[1];
@@ -420,39 +432,33 @@ export class ChatServer {
 
   cleanupClient(ws) {
   const id = ws.idtarget;
-  if (id) {
-    const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
-    if (stillActive) {
-      this.clients.delete(ws);
-      return;
+  if (!id) return;
+
+  // Simpan waktu terakhir disconnect
+  this.lastDisconnectTime.set(id, Date.now());
+
+  // Cek apakah masih ada koneksi lain dengan ID yang sama
+  const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
+  if (stillActive) return; // masih aktif di tab/device lain
+
+  // Kalau sudah ada pending timeout, batalkan dulu
+  if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
+
+  // Buat timeout baru untuk auto-remove seat setelah 5 detik
+  const timeout = setTimeout(() => {
+    const seatInfo = this.userSeats.get(id);
+    if (seatInfo) {
+      this.userSeats.delete(id);
+      this.userPoints.delete(id);
+      this.userRooms.delete(id);
+      this.broadcast(["updateSeat", { id, status: "left" }], seatInfo.room);
     }
+    this.pendingRemove.delete(id);
+    this.lastDisconnectTime.delete(id);
+  }, this.gracePeriod);
 
-    // Bersihkan timeout lama kalau ada
-    if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
-
-    // Jadwalkan penghapusan kursi jika tidak reconnect < gracePeriod
-    const timeout = setTimeout(() => {
-      const seatInfo = this.userToSeat.get(id);
-      if (seatInfo) {
-        const { room, seat } = seatInfo;
-        const seatMap = this.roomSeats.get(room);
-        if (seatMap && seatMap.has(seat)) {
-          Object.assign(seatMap.get(seat), createEmptySeat());
-          this.broadcastToRoom(room, ["removeKursi", room, seat]);
-          this.broadcastRoomUserCount(room);
-        }
-        this.userToSeat.delete(id);
-      }
-      this.pendingRemove.delete(id);
-    }, this.gracePeriod);
-
-    this.pendingRemove.set(id, timeout);
-  }
-
-  ws.numkursi?.clear?.();
-  this.clients.delete(ws);
-  ws.roomname = undefined;
-  ws.idtarget = undefined;
+  // Simpan pending timeout agar bisa dibatalkan jika reconnect cepat
+  this.pendingRemove.set(id, timeout);
 }
 
 
@@ -490,5 +496,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
