@@ -283,37 +283,51 @@ export class ChatServer {
 
     switch (evt) {
 
-      case "setIdTarget": {
-        const newId = data[1];
-        ws.idtarget = newId;
+     case "setIdTarget": {
+    const newId = data[1];
+    ws.idtarget = newId;
 
-        const now = Date.now();
-        const lastDisconnect = this.lastDisconnectTime?.get(newId) || 0;
+    const now = Date.now();
+
+    // Cek apakah user benar-benar baru (belum pernah join / belum disconnect sebelumnya)
+    const isNewUser = !this.userToSeat.has(newId) && !this.lastDisconnectTime.has(newId);
+
+    if (isNewUser) {
+        // User baru → belum join room, tidak perlu cleanup
+        ws.roomname = undefined;
+    } else {
+        // User reconnect
+        const lastDisconnect = this.lastDisconnectTime.get(newId) || 0;
         const diff = now - lastDisconnect;
 
         if (diff > this.gracePeriod) {
-          // reconnect expired → hapus seat lama
-          this.cleanupClient(ws);
-          this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
-          ws.roomname = undefined;
+            // Reconnect expired → bersihkan semua data lama
+            this.cleanupClient(ws);
+            this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
+            ws.roomname = undefined;
         } else {
-          // reconnect cepat → batalkan pending remove
-          if (this.pendingRemove.has(newId)) {
-            clearTimeout(this.pendingRemove.get(newId));
-            this.pendingRemove.delete(newId);
-          }
+            // Reconnect cepat → kursi tetap aman
+            if (this.pendingRemove.has(newId)) {
+                clearTimeout(this.pendingRemove.get(newId));
+                this.pendingRemove.delete(newId);
+            }
 
-          const seatInfo = this.userToSeat.get(newId);
-          if (seatInfo) {
-            ws.roomname = seatInfo.room;
-            this.sendAllStateTo(ws, seatInfo.room);
-          }
+            const seatInfo = this.userToSeat.get(newId);
+            if (seatInfo) {
+                ws.roomname = seatInfo.room;
+                this.sendAllStateTo(ws, seatInfo.room);
+            }
         }
+    }
 
-        this.lastDisconnectTime.delete(newId);
-        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-        break;
-      }
+    // Hapus catatan disconnect karena user sudah reconnect / baru
+    if (this.lastDisconnectTime) this.lastDisconnectTime.delete(newId);
+
+    // Broadcast jumlah user jika sudah join room
+    if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+    break;
+}
+
 
       case "joinRoom": {
         const newRoom = data[1];
@@ -496,3 +510,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
