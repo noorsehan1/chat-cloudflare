@@ -283,13 +283,17 @@ export class ChatServer {
 
     switch (evt) {
 
-     case "setIdTarget": {
+    case "setIdTarget": {
     const newId = data[1];
     ws.idtarget = newId;
 
     const now = Date.now();
 
-    // Cek apakah user benar-benar baru (belum pernah join / belum disconnect sebelumnya)
+    // Pastikan Map sudah ada
+    if (!this.userToSeat) this.userToSeat = new Map();
+    if (!this.lastDisconnectTime) this.lastDisconnectTime = new Map();
+
+    // Cek apakah user benar-benar baru
     const isNewUser = !this.userToSeat.has(newId) && !this.lastDisconnectTime.has(newId);
 
     if (isNewUser) {
@@ -321,12 +325,13 @@ export class ChatServer {
     }
 
     // Hapus catatan disconnect karena user sudah reconnect / baru
-    if (this.lastDisconnectTime) this.lastDisconnectTime.delete(newId);
+    this.lastDisconnectTime.delete(newId);
 
-    // Broadcast jumlah user jika sudah join room
     if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
     break;
 }
+
+
 
 
       case "joinRoom": {
@@ -510,4 +515,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
