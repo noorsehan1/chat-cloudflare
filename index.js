@@ -452,59 +452,42 @@ case "setIdTarget": {
         this.safeSend(ws, ["error", "Unknown event"]);
     }
   }
+
+  
 cleanupClient(ws) {
   const id = ws.idtarget;
   if (id) {
-    // Cek apakah masih ada koneksi lain dengan ID sama
     const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
     if (stillActive) {
       this.clients.delete(ws);
       return;
     }
 
-    // Batalkan timeout lama jika ada
     if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
 
-    // Set timeout grace period 10 detik
     const timeout = setTimeout(() => {
-      // Hapus semua kursi dan state user setelah grace period
+      // Hapus kursi user
       this.removeAllSeatsById(id);
 
-      // Kirim event ke semua client agar UI update
-      this.broadcastToRoom(null, ["removeKursiById", id]); // null = semua room
+      // Broadcast ke semua client (semua room) bahwa user ini sudah dihapus
+      for (const c of this.clients) {
+        this.safeSend(c, ["removeKursiById", id]);
+      }
+
       this.pendingRemove.delete(id);
     }, this.gracePeriod);
 
     this.pendingRemove.set(id, timeout);
   }
 
-  // Hapus socket dari list
   ws.numkursi?.clear?.();
   this.clients.delete(ws);
   ws.roomname = undefined;
   ws.idtarget = undefined;
 }
-  async fetch(request) {
-    const upgrade = request.headers.get("Upgrade") || "";
-    if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
 
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    server.accept();
 
-    const ws = server;
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-    ws.numkursi = new Set();
-    this.clients.add(ws);
-
-    ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-    ws.addEventListener("close", () => this.cleanupClient(ws));
-    ws.addEventListener("error", () => this.cleanupClient(ws));
-
-    return new Response(null, { status: 101, webSocket: client });
-  }
-}
+  
 
 export default {
   async fetch(req, env) {
@@ -518,6 +501,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
