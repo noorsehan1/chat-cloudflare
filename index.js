@@ -251,44 +251,43 @@ case "setIdTarget": {
   // Simpan ID user pada socket baru
   ws.idtarget = newId;
 
-  // Ambil info seat terakhir
+  // Ambil info seat terakhir user
   const seatInfo = this.userToSeat.get(newId);
-  let lastRoom = "General";
+  let lastRoom;
 
   if (seatInfo) {
     lastRoom = seatInfo.room;
 
-    // Reconnect cepat? batalkan pending removal
     if (this.pendingRemove.has(newId)) {
+      // Reconnect cepat: batalkan pending removal
       clearTimeout(this.pendingRemove.get(newId));
       this.pendingRemove.delete(newId);
-      // Tidak kirim event ke client → kursi tetap aman
+      this.safeSend(ws, ["info", "Reconnect cepat, kursi tetap aman"]);
+      ws.roomname = lastRoom; // tetap di room lama
+      this.sendAllStateTo(ws, lastRoom); // kirim kursi & point lama
     } else {
       // Reconnect lambat (> grace period)
       this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
-      lastRoom = "General"; // fallback
+      ws.roomname = undefined; // harus join room baru
     }
+  } else {
+    // First time connect
+    ws.roomname = undefined; // belum join room
   }
-
-  // Set room name
-  ws.roomname = lastRoom;
-
-  // Pastikan buffers ada
-  if (!this.chatMessageBuffer.has(lastRoom)) this.chatMessageBuffer.set(lastRoom, []);
-  if (!this.updateKursiBuffer.has(lastRoom)) this.updateKursiBuffer.set(lastRoom, new Map());
 
   // Kirim private buffer jika ada
   if (this.privateMessageBuffer.has(ws.idtarget)) {
-    for (const msg of this.privateMessageBuffer.get(ws.idtarget)) 
+    for (const msg of this.privateMessageBuffer.get(ws.idtarget))
       this.safeSend(ws, msg);
     this.privateMessageBuffer.delete(ws.idtarget);
   }
 
-  // Update jumlah user di room
-  this.broadcastRoomUserCount(ws.roomname);
+  // Update jumlah user di room lama (jika reconnect cepat)
+  if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
 
   break;
 }
+
 
 
 
@@ -516,6 +515,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
