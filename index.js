@@ -50,7 +50,7 @@ export class ChatServer {
     this.lowcard = new LowCardGameManager(this);
 
     // ✅ Grace period untuk reconnect
-    this.gracePeriod = 3000; // 3 detik
+    this.gracePeriod = 10; // 3 detik
     this.pendingRemove = new Map(); // Map<idtarget, timeout>
   }
 
@@ -481,3 +481,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
