@@ -242,42 +242,49 @@ export class ChatServer {
 
     switch (evt) {
 
-     case "setIdTarget": {
-        const newId = data[1];
-        let graceExpired = false;
+    case "setIdTarget": {
+  const newId = data[1];
+  let graceExpired = false;
 
-        // 🔸 Cek apakah user reconnect sebelum gracePeriod habis
-        if (this.pendingRemove.has(newId)) {
-          clearTimeout(this.pendingRemove.get(newId)); // batalkan penghapusan kursi
-          this.pendingRemove.delete(newId);
-        } else {
-          graceExpired = true; // reconnect terlambat (> gracePeriod)
-        }
+  // 🔸 Cek apakah user reconnect sebelum gracePeriod habis
+  if (this.pendingRemove.has(newId)) {
+    clearTimeout(this.pendingRemove.get(newId)); // batalkan penghapusan kursi
+    this.pendingRemove.delete(newId);
+  } else {
+    graceExpired = true; // reconnect terlambat (> gracePeriod) atau koneksi pertama
+  }
 
-        // Bersihkan koneksi lama yang punya id sama
-        this.cleanupClientById(newId);
+  // Bersihkan koneksi lama yang punya id sama
+  this.cleanupClientById(newId);
 
-        // set id pada socket yang baru
-        ws.idtarget = newId;
+  // set id pada socket yang baru
+  ws.idtarget = newId;
 
-        // 🔹 Jika reconnect masih dalam grace period → langsung kirim ulang state
-        if (!graceExpired && ws.roomname) {
-          this.sendAllStateTo(ws, ws.roomname);
-          this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
-        } else {
-          // 🔹 Jika reconnect setelah grace period habis → harus join room lagi
-          this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
-        }
+  // ✅ Deteksi apakah user pernah join room sebelumnya
+  const hasJoinedBefore = this.userToSeat.has(newId);
 
-        // kirim private buffer jika ada
-        if (this.privateMessageBuffer.has(ws.idtarget)) {
-          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
-          this.privateMessageBuffer.delete(ws.idtarget);
-        }
+  if (!graceExpired && ws.roomname) {
+    // 🔹 Reconnect cepat — kursi masih aman
+    this.sendAllStateTo(ws, ws.roomname);
+    this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
+  } else if (!hasJoinedBefore) {
+    // 🔹 Pertama kali connect — jangan kirim needJoinRoom
+    this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
+  } else {
+    // 🔹 Reconnect terlambat — kursinya sudah dihapus
+    this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
+  }
 
-        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-        break;
-     }
+  // kirim private buffer jika ada
+  if (this.privateMessageBuffer.has(ws.idtarget)) {
+    for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
+    this.privateMessageBuffer.delete(ws.idtarget);
+  }
+
+  if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+  break;
+}
+
 
       // Semua case lain tetap sama seperti kode awal
       case "sendnotif": {
@@ -504,3 +511,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
