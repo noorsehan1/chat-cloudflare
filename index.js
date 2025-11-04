@@ -4,8 +4,8 @@
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
-  "General","Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
-  "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
+  "General","Indonesia","Chill Zone","Catch Up","Casual Vibes","Lounge Talk",
+  "Easy Talk","Friendly Corner","The Hangout","Relax & Chat","Just Chillin","The Chatter Room"
 ];
 
 function createEmptySeat() {
@@ -28,8 +28,9 @@ export class ChatServer {
     this.env = env;
     this.clients = new Set();
     this.userToSeat = new Map();
-
     this.MAX_SEATS = 35;
+
+    // Inisialisasi seat untuk setiap room
     this.roomSeats = new Map();
     for (const room of roomList) {
       const m = new Map();
@@ -48,8 +49,7 @@ export class ChatServer {
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
 
     this.lowcard = new LowCardGameManager(this);
-
-    this.gracePeriod = 5000; // 10 detik
+    this.gracePeriod = 10000; // 10 detik sebelum hapus kursi
     this.pendingRemove = new Map(); // Map<idtarget, timeout>
   }
 
@@ -239,7 +239,6 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
-
       case "setIdTarget": {
         const newId = data[1];
         this.cleanupClientById(newId);
@@ -420,41 +419,40 @@ export class ChatServer {
     }
   }
 
-cleanupClient(ws) {
+  cleanupClient(ws) {
     const id = ws.idtarget;
     if (id) {
-        const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
-        if (stillActive) {
-            this.clients.delete(ws);
-            return;
+      const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
+      if (stillActive) {
+        this.clients.delete(ws);
+        return;
+      }
+
+      if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
+
+      const timeout = setTimeout(() => {
+        const seatInfo = this.userToSeat.get(id);
+        if (seatInfo) {
+          const { room, seat } = seatInfo;
+          const seatMap = this.roomSeats.get(room);
+          if (seatMap && seatMap.has(seat)) {
+            Object.assign(seatMap.get(seat), createEmptySeat());
+            this.broadcastToRoom(room, ["removeKursi", room, seat]);
+            this.broadcastRoomUserCount(room);
+          }
+          this.userToSeat.delete(id);
         }
+        this.pendingRemove.delete(id);
+      }, this.gracePeriod);
 
-        if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
-
-        // ← DI SINI adalah bagian timeout yang kamu sebut
-        const timeout = setTimeout(() => {
-            const seatInfo = this.userToSeat.get(id);
-            if (seatInfo) {
-                const { room, seat } = seatInfo;
-                const seatMap = this.roomSeats.get(room);
-                if (seatMap && seatMap.has(seat)) {
-                    Object.assign(seatMap.get(seat), createEmptySeat());
-                    this.broadcastToRoom(room, ["removeKursi", room, seat]);
-                    this.broadcastRoomUserCount(room);
-                }
-                this.userToSeat.delete(id);
-            }
-            this.pendingRemove.delete(id);
-        }, this.gracePeriod);
-        this.pendingRemove.set(id, timeout);
+      this.pendingRemove.set(id, timeout);
     }
 
     ws.numkursi?.clear?.();
     this.clients.delete(ws);
     ws.roomname = undefined;
     ws.idtarget = undefined;
-}
-
+  }
 
   async fetch(req) {
     const upgrade = req.headers.get("Upgrade") || "";
@@ -490,5 +488,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
