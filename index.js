@@ -251,24 +251,31 @@ export class ChatServer {
   // Simpan ID user pada socket baru
   ws.idtarget = newId;
 
-  // Cek kursi yang pernah dimiliki user
+  // Cek kursi terakhir user (room dan seat)
   const seatInfo = this.userToSeat.get(newId);
 
+  let lastRoom = "General"; // fallback jika first connect
   if (seatInfo) {
-    // 🔹 User pernah join sebelumnya
+    lastRoom = seatInfo.room; // ambil room terakhir
     const timeoutExists = this.pendingRemove.has(newId);
     if (timeoutExists) {
-      // Reconnect cepat: batalkan pending removal kursi
+      // Reconnect cepat
       clearTimeout(this.pendingRemove.get(newId));
       this.pendingRemove.delete(newId);
-      // Tidak kirim event ke client
+      // Tidak kirim event
     } else {
       // Reconnect lambat (> grace period)
       this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
+      lastRoom = "General"; // user harus join lagi
     }
-  } 
-  // 🔹 Pertama kali connect: tidak kirim apa pun, cukup simpan ID
-  // kursi akan kosong sampai user join room
+  }
+
+  // Set ws.roomname ke lastRoom (sebelum disconnect atau fallback)
+  ws.roomname = lastRoom;
+
+  // Inisialisasi buffer agar chat / point bisa jalan
+  if (!this.chatMessageBuffer.has(lastRoom)) this.chatMessageBuffer.set(lastRoom, []);
+  if (!this.updateKursiBuffer.has(lastRoom)) this.updateKursiBuffer.set(lastRoom, new Map());
 
   // Kirim private buffer jika ada
   if (this.privateMessageBuffer.has(ws.idtarget)) {
@@ -277,11 +284,12 @@ export class ChatServer {
     this.privateMessageBuffer.delete(ws.idtarget);
   }
 
-  // Update jumlah user di room jika user sudah join room
-  if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+  // Update jumlah user di lastRoom
+  this.broadcastRoomUserCount(ws.roomname);
 
   break;
 }
+
 
 
 
@@ -510,5 +518,6 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
