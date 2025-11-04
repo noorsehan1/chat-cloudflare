@@ -242,7 +242,7 @@ export class ChatServer {
 
     switch (evt) {
 
-   case "setIdTarget": {
+case "setIdTarget": {
   const newId = data[1];
 
   // Hapus koneksi lama dengan ID sama
@@ -251,29 +251,29 @@ export class ChatServer {
   // Simpan ID user pada socket baru
   ws.idtarget = newId;
 
-  // Cek kursi terakhir user (room dan seat)
+  // Ambil info seat terakhir
   const seatInfo = this.userToSeat.get(newId);
+  let lastRoom = "General";
 
-  let lastRoom = "General"; // fallback jika first connect
   if (seatInfo) {
-    lastRoom = seatInfo.room; // ambil room terakhir
-    const timeoutExists = this.pendingRemove.has(newId);
-    if (timeoutExists) {
-      // Reconnect cepat
+    lastRoom = seatInfo.room;
+
+    // Reconnect cepat? batalkan pending removal
+    if (this.pendingRemove.has(newId)) {
       clearTimeout(this.pendingRemove.get(newId));
       this.pendingRemove.delete(newId);
-      // Tidak kirim event
+      // Tidak kirim event ke client → kursi tetap aman
     } else {
       // Reconnect lambat (> grace period)
       this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
-      lastRoom = "General"; // user harus join lagi
+      lastRoom = "General"; // fallback
     }
   }
 
-  // Set ws.roomname ke lastRoom (sebelum disconnect atau fallback)
+  // Set room name
   ws.roomname = lastRoom;
 
-  // Inisialisasi buffer agar chat / point bisa jalan
+  // Pastikan buffers ada
   if (!this.chatMessageBuffer.has(lastRoom)) this.chatMessageBuffer.set(lastRoom, []);
   if (!this.updateKursiBuffer.has(lastRoom)) this.updateKursiBuffer.set(lastRoom, new Map());
 
@@ -284,7 +284,7 @@ export class ChatServer {
     this.privateMessageBuffer.delete(ws.idtarget);
   }
 
-  // Update jumlah user di lastRoom
+  // Update jumlah user di room
   this.broadcastRoomUserCount(ws.roomname);
 
   break;
@@ -454,7 +454,7 @@ export class ChatServer {
     }
   }
 
- cleanupClient(ws) {
+cleanupClient(ws) {
   const id = ws.idtarget;
   if (id) {
     const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
@@ -468,7 +468,7 @@ export class ChatServer {
 
     // Set timeout grace period 10 detik
     const timeout = setTimeout(() => {
-      // Hapus semua kursi dan state user
+      // Hapus semua kursi dan state user setelah grace period
       this.removeAllSeatsById(id);
       this.pendingRemove.delete(id);
     }, this.gracePeriod);
@@ -482,7 +482,6 @@ export class ChatServer {
   ws.roomname = undefined;
   ws.idtarget = undefined;
 }
-
   async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || "";
     if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
@@ -517,6 +516,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
