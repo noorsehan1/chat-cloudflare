@@ -1,5 +1,5 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi lengkap: aman untuk reconnect cepat, kursi hanya dihapus jika user benar-benar disconnect
+// Versi lengkap: aman untuk reconnect cepat, kursi dihapus otomatis jika user offline > 10 detik
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -210,15 +210,14 @@ export class ChatServer {
 
     const { room, seat } = seatInfo;
     const seatMap = this.roomSeats.get(room);
-    if (!seatMap) return;
-
-    if (seatMap.has(seat)) {
+    if (seatMap && seatMap.has(seat)) {
       Object.assign(seatMap.get(seat), createEmptySeat());
       this.broadcastToRoom(room, ["removeKursi", room, seat]);
       this.broadcastRoomUserCount(room);
     }
 
     this.userToSeat.delete(idtarget);
+    this.privateMessageBuffer.delete(idtarget);
   }
 
   getAllOnlineUsers() {
@@ -244,7 +243,6 @@ export class ChatServer {
       case "setIdTarget": {
         const newId = data[1];
         this.cleanupClientById(newId);
-
         ws.idtarget = newId;
         const seatInfo = this.userToSeat.get(newId);
         let lastRoom;
@@ -258,6 +256,7 @@ export class ChatServer {
             ws.roomname = lastRoom;
             this.sendAllStateTo(ws, lastRoom);
           } else {
+            this.removeAllSeatsById(newId);
             this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
             ws.roomname = undefined;
           }
