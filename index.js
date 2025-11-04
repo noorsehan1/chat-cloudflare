@@ -244,29 +244,23 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
-      case "setIdTarget": {
-        const newId = data[1];
-        this.cleanupClientById(newId);
-        ws.idtarget = newId;
-        const seatInfo = this.userToSeat.get(newId);
-        let lastRoom;
+      if (seatInfo) {
+  lastRoom = seatInfo.room;
 
-        if (seatInfo) {
-          lastRoom = seatInfo.room;
-          if (this.pendingRemove.has(newId)) {
-            clearTimeout(this.pendingRemove.get(newId));
-            this.pendingRemove.delete(newId);
-            this.safeSend(ws, ["info", "Reconnect cepat, kursi tetap aman"]);
-            ws.roomname = lastRoom;
-            this.sendAllStateTo(ws, lastRoom);
-          } else {
-            this.removeAllSeatsById(newId);
-            this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
-            ws.roomname = undefined;
-          }
-        } else {
-          ws.roomname = undefined;
-        }
+  // Jika user reconnect cepat (< gracePeriod)
+  if (this.pendingRemove.has(newId)) {
+    clearTimeout(this.pendingRemove.get(newId));
+    this.pendingRemove.delete(newId);
+    ws.roomname = lastRoom;
+    this.sendAllStateTo(ws, lastRoom);
+  } else {
+    // Sudah lewat grace period — hapus kursi lama sebelum minta join ulang
+    this.removeAllSeatsById(newId);
+    this.safeSend(ws, ["needJoinRoom", "Reconnect"]);
+    ws.roomname = undefined;
+  }
+}
+
 
         if (this.privateMessageBuffer.has(ws.idtarget)) {
           for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
@@ -425,39 +419,42 @@ export class ChatServer {
   }
 
   cleanupClient(ws) {
-    const id = ws.idtarget;
-    if (id) {
-      const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
-      if (stillActive) {
-        this.clients.delete(ws);
-        return;
-      }
-
-      if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
-
-      const timeout = setTimeout(() => {
-        const seatInfo = this.userToSeat.get(id);
-        if (seatInfo) {
-          const { room, seat } = seatInfo;
-          const seatMap = this.roomSeats.get(room);
-          if (seatMap && seatMap.has(seat)) {
-            Object.assign(seatMap.get(seat), createEmptySeat());
-            this.broadcastToRoom(room, ["removeKursi", room, seat]);
-            this.broadcastRoomUserCount(room);
-          }
-          this.userToSeat.delete(id);
-        }
-        this.pendingRemove.delete(id);
-      }, this.gracePeriod);
-
-      this.pendingRemove.set(id, timeout);
+  const id = ws.idtarget;
+  if (id) {
+    const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
+    if (stillActive) {
+      this.clients.delete(ws);
+      return;
     }
 
-    ws.numkursi?.clear?.();
-    this.clients.delete(ws);
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
+    // Bersihkan timeout lama kalau ada
+    if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
+
+    // Jadwalkan penghapusan kursi jika tidak reconnect < gracePeriod
+    const timeout = setTimeout(() => {
+      const seatInfo = this.userToSeat.get(id);
+      if (seatInfo) {
+        const { room, seat } = seatInfo;
+        const seatMap = this.roomSeats.get(room);
+        if (seatMap && seatMap.has(seat)) {
+          Object.assign(seatMap.get(seat), createEmptySeat());
+          this.broadcastToRoom(room, ["removeKursi", room, seat]);
+          this.broadcastRoomUserCount(room);
+        }
+        this.userToSeat.delete(id);
+      }
+      this.pendingRemove.delete(id);
+    }, this.gracePeriod);
+
+    this.pendingRemove.set(id, timeout);
   }
+
+  ws.numkursi?.clear?.();
+  this.clients.delete(ws);
+  ws.roomname = undefined;
+  ws.idtarget = undefined;
+}
+
 
   async fetch(req) {
     const upgrade = req.headers.get("Upgrade") || "";
@@ -493,4 +490,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
