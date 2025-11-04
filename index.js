@@ -430,7 +430,7 @@ export class ChatServer {
     }
   }
 
-  cleanupClient(ws) {
+ cleanupClient(ws) {
   const id = ws.idtarget;
   if (!id) return;
 
@@ -441,48 +441,31 @@ export class ChatServer {
   const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
   if (stillActive) return; // masih aktif di tab/device lain
 
-  // Kalau sudah ada pending timeout, batalkan dulu
+  // Jika sudah ada pending cleanup sebelumnya, batalkan
   if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
 
-  // Buat timeout baru untuk auto-remove seat setelah 5 detik
+  // Buat timeout baru: bersihkan kursi & data setelah 5 detik
   const timeout = setTimeout(() => {
-    const seatInfo = this.userSeats.get(id);
+    const seatInfo = this.userToSeat.get(id);
     if (seatInfo) {
-      this.userSeats.delete(id);
-      this.userPoints.delete(id);
-      this.userRooms.delete(id);
-      this.broadcast(["updateSeat", { id, status: "left" }], seatInfo.room);
+      const { room, seat } = seatInfo;
+      const seatMap = this.roomSeats.get(room);
+      if (seatMap && seatMap.has(seat)) {
+        Object.assign(seatMap.get(seat), createEmptySeat());
+        this.broadcastToRoom(room, ["removeKursi", room, seat]);
+        this.broadcastRoomUserCount(room);
+      }
+      this.userToSeat.delete(id);
     }
+
     this.pendingRemove.delete(id);
     this.lastDisconnectTime.delete(id);
   }, this.gracePeriod);
 
-  // Simpan pending timeout agar bisa dibatalkan jika reconnect cepat
+  // Simpan timeout agar bisa dibatalkan jika user reconnect sebelum 5 detik
   this.pendingRemove.set(id, timeout);
 }
 
-
-  async fetch(req) {
-    const upgrade = req.headers.get("Upgrade") || "";
-    if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
-
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    server.accept();
-
-    const ws = server;
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-    ws.numkursi = new Set();
-    this.clients.add(ws);
-
-    ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-    ws.addEventListener("close", () => this.cleanupClient(ws));
-    ws.addEventListener("error", () => this.cleanupClient(ws));
-
-    return new Response(null, { status: 101, webSocket: client });
-  }
-}
 
 export default {
   async fetch(req, env) {
@@ -496,3 +479,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
