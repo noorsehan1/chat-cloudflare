@@ -49,7 +49,7 @@ export class ChatServer {
 
     this.lowcard = new LowCardGameManager(this);
 
-    this.gracePeriod = 10000; // 10 detik
+    this.gracePeriod = 5000; // 10 detik
     this.pendingRemove = new Map(); // Map<idtarget, timeout>
   }
 
@@ -490,4 +490,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
