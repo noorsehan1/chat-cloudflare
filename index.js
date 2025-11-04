@@ -243,7 +243,6 @@ export class ChatServer {
 
       case "setIdTarget": {
         const newId = data[1];
-
         this.cleanupClientById(newId);
 
         ws.idtarget = newId;
@@ -259,7 +258,6 @@ export class ChatServer {
             ws.roomname = lastRoom;
             this.sendAllStateTo(ws, lastRoom);
           } else {
-            this.removeAllSeatsById(newId);
             this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
             ws.roomname = undefined;
           }
