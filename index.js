@@ -452,12 +452,13 @@ export class ChatServer {
     this.pendingRemove.set(id, timeout);
   }
 
-  // Hapus koneksi dari list
-  ws.numkursi?.clear?.();
+ ws.numkursi?.clear?.();
   this.clients.delete(ws);
   ws.roomname = undefined;
   ws.idtarget = undefined;
-}
+  }
+} // ✅ ← ini menutup class ChatServer
+
 
 export default {
   async fetch(req, env) {
