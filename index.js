@@ -242,48 +242,47 @@ export class ChatServer {
 
     switch (evt) {
 
-    case "setIdTarget": {
+   case "setIdTarget": {
   const newId = data[1];
-  let graceExpired = false;
 
-  // 🔸 Cek apakah user reconnect sebelum gracePeriod habis
-  if (this.pendingRemove.has(newId)) {
-    clearTimeout(this.pendingRemove.get(newId)); // batalkan penghapusan kursi
-    this.pendingRemove.delete(newId);
-  } else {
-    graceExpired = true; // reconnect terlambat (> gracePeriod) atau koneksi pertama
-  }
-
-  // Bersihkan koneksi lama yang punya id sama
+  // Hapus koneksi lama dengan ID sama
   this.cleanupClientById(newId);
 
-  // set id pada socket yang baru
+  // Simpan ID user pada socket baru
   ws.idtarget = newId;
 
-  // ✅ Deteksi apakah user pernah join room sebelumnya
-  const hasJoinedBefore = this.userToSeat.has(newId);
+  // Cek kursi yang pernah dimiliki user
+  const seatInfo = this.userToSeat.get(newId);
 
-  if (!graceExpired && ws.roomname) {
-    // 🔹 Reconnect cepat — kursi masih aman
-    this.sendAllStateTo(ws, ws.roomname);
-    this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
-  } else if (!hasJoinedBefore) {
-    // 🔹 Pertama kali connect — jangan kirim needJoinRoom
-    this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
-  } else {
-    // 🔹 Reconnect terlambat — kursinya sudah dihapus
-    this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
-  }
+  if (seatInfo) {
+    // 🔹 User pernah join sebelumnya
+    const timeoutExists = this.pendingRemove.has(newId);
+    if (timeoutExists) {
+      // Reconnect cepat: batalkan pending removal kursi
+      clearTimeout(this.pendingRemove.get(newId));
+      this.pendingRemove.delete(newId);
+      // Tidak kirim event ke client
+    } else {
+      // Reconnect lambat (> grace period)
+      this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
+    }
+  } 
+  // 🔹 Pertama kali connect: tidak kirim apa pun, cukup simpan ID
+  // kursi akan kosong sampai user join room
 
-  // kirim private buffer jika ada
+  // Kirim private buffer jika ada
   if (this.privateMessageBuffer.has(ws.idtarget)) {
-    for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
+    for (const msg of this.privateMessageBuffer.get(ws.idtarget)) 
+      this.safeSend(ws, msg);
     this.privateMessageBuffer.delete(ws.idtarget);
   }
 
+  // Update jumlah user di room jika user sudah join room
   if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+
   break;
 }
+
 
 
       // Semua case lain tetap sama seperti kode awal
@@ -511,4 +510,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
