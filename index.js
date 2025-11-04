@@ -244,16 +244,26 @@ export class ChatServer {
 
       case "setIdTarget": {
         const newId = data[1];
+        let graceExpired = false;
 
         // ✅ Batalkan grace period jika ada
         if (this.pendingRemove.has(newId)) {
           clearTimeout(this.pendingRemove.get(newId));
           this.pendingRemove.delete(newId);
+        } else {
+          graceExpired = true; // reconnect > 3 detik
         }
 
         this.cleanupClientById(newId);
         ws.idtarget = newId;
-        this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
+
+        if (!graceExpired && ws.roomname) {
+          this.sendAllStateTo(ws, ws.roomname);
+          this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
+        } else {
+          this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
+        }
+
         if (this.privateMessageBuffer.has(ws.idtarget)) {
           for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
           this.privateMessageBuffer.delete(ws.idtarget);
@@ -262,6 +272,7 @@ export class ChatServer {
         break;
       }
 
+      // Semua case lain tetap sama seperti kode awal
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
         const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
@@ -310,39 +321,25 @@ export class ChatServer {
 
           if (userSeatInfo) {
             const { room, seat } = userSeatInfo;
-
             const seatMap = this.roomSeats.get(room);
             if (seatMap && seatMap.has(seat)) {
               Object.assign(seatMap.get(seat), createEmptySeat());
               this.broadcastToRoom(room, ["removeKursi", room, seat]);
               this.broadcastRoomUserCount(room);
             }
-
             this.userToSeat.delete(username);
           }
 
           for (const old of oldSockets) {
-            try {
-              old.close(4000, "Duplicate login — old session closed");
-              this.clients.delete(old);
-            } catch {}
+            try { old.close(4000, "Duplicate login — old session closed"); this.clients.delete(old); } catch {}
           }
         }
         break;
       }
 
-      case "getAllRoomsUserCount":
-        this.handleGetAllRoomsUserCount(ws);
-        break;
-
-      case "getCurrentNumber":
-        this.safeSend(ws, ["currentNumber", this.currentNumber]);
-        break;
-
-      case "getAllOnlineUsers":
-        this.safeSend(ws, ["allOnlineUsers", this.getAllOnlineUsers()]);
-        break;
-
+      case "getAllRoomsUserCount": this.handleGetAllRoomsUserCount(ws); break;
+      case "getCurrentNumber": this.safeSend(ws, ["currentNumber", this.currentNumber]); break;
+      case "getAllOnlineUsers": this.safeSend(ws, ["allOnlineUsers", this.getAllOnlineUsers()]); break;
       case "getRoomOnlineUsers": {
         const roomName = data[1];
         if (!roomList.includes(roomName)) return this.safeSend(ws, ["error", "Unknown room"]);
@@ -370,9 +367,7 @@ export class ChatServer {
         const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
         if (!roomList.includes(roomname)) return this.safeSend(ws, ["error", "Invalid room for chat"]);
         if (!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname, []);
-        this.chatMessageBuffer.get(roomname).push([
-          "chat", roomname, noImageURL, username, message, usernameColor, chatTextColor
-        ]);
+        this.chatMessageBuffer.get(roomname).push(["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
         break;
       }
 
@@ -415,9 +410,7 @@ export class ChatServer {
       case "gift": {
         const [, roomname, sender, receiver, giftName] = data;
         if (!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname, []);
-        this.chatMessageBuffer.get(roomname).push([
-          "gift", roomname, sender, receiver, giftName, Date.now()
-        ]);
+        this.chatMessageBuffer.get(roomname).push(["gift", roomname, sender, receiver, giftName, Date.now()]);
         break;
       }
 
@@ -428,8 +421,7 @@ export class ChatServer {
         this.lowcard.handleEvent(ws, data);
         break;
 
-      default:
-        this.safeSend(ws, ["error", "Unknown event"]);
+      default: this.safeSend(ws, ["error", "Unknown event"]);
     }
   }
 
@@ -437,12 +429,8 @@ export class ChatServer {
     const id = ws.idtarget;
     if (id) {
       const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
-      if (stillActive) {
-        this.clients.delete(ws);
-        return;
-      }
+      if (stillActive) { this.clients.delete(ws); return; }
 
-      // ✅ Grace period sebelum hapus kursi
       if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
 
       const timeout = setTimeout(() => {
