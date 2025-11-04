@@ -452,10 +452,10 @@ case "setIdTarget": {
         this.safeSend(ws, ["error", "Unknown event"]);
     }
   }
-
 cleanupClient(ws) {
   const id = ws.idtarget;
   if (id) {
+    // Cek apakah masih ada koneksi lain dengan ID sama
     const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
     if (stillActive) {
       this.clients.delete(ws);
@@ -469,6 +469,9 @@ cleanupClient(ws) {
     const timeout = setTimeout(() => {
       // Hapus semua kursi dan state user setelah grace period
       this.removeAllSeatsById(id);
+
+      // Kirim event ke semua client agar UI update
+      this.broadcastToRoom(null, ["removeKursiById", id]); // null = semua room
       this.pendingRemove.delete(id);
     }, this.gracePeriod);
 
@@ -515,6 +518,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
