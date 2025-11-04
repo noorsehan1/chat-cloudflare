@@ -47,11 +47,11 @@ export class ChatServer {
     this.intervalMillis = 15 * 60 * 1000;
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
-    this._offlineSweepTimer = setInterval(() => this.sweepOfflineUsers(), 5000);
+    //this._offlineSweepTimer = setInterval(() => this.sweepOfflineUsers(), 5000);
 
     this.lowcard = new LowCardGameManager(this);
 
-    this.gracePeriod = 10000; // 10 detik
+    this.gracePeriod = 5000; // 10 detik
     this.pendingRemove = new Map(); // Map<idtarget, timeout>
   }
 
@@ -147,21 +147,7 @@ export class ChatServer {
     }
   }
 
-  sweepOfflineUsers() {
-    const now = Date.now();
-    for (const [id, seatInfo] of this.userToSeat) {
-      const { room, seat } = seatInfo;
-      const seatMap = this.roomSeats.get(room);
-      const seatData = seatMap.get(seat);
-      if (!seatData) continue;
-      if (!Array.from(this.clients).some(c => c.idtarget === id) && (!seatData.lastSeen || now - seatData.lastSeen > this.gracePeriod)) {
-        Object.assign(seatData, createEmptySeat());
-        this.userToSeat.delete(id);
-        this.broadcastToRoom(room, ["removeKursi", room, seat]);
-        this.broadcastRoomUserCount(room);
-      }
-    }
-  }
+
 
   handleGetAllRoomsUserCount(ws) {
     const allCounts = this.getJumlahRoom();
@@ -507,3 +493,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
