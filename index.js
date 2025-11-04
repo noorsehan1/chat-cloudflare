@@ -242,35 +242,40 @@ export class ChatServer {
 
     switch (evt) {
 
-      case "setIdTarget": {
-        const newId = data[1];
-        let graceExpired = false;
+     case "setIdTarget": {
+  const newId = data[1];
+  let graceExpired = false;
 
-        // ✅ Batalkan grace period jika ada
-        if (this.pendingRemove.has(newId)) {
-          clearTimeout(this.pendingRemove.get(newId));
-          this.pendingRemove.delete(newId);
-        } else {
-          graceExpired = true; // reconnect > 3 detik
-        }
+  // 🔸 Cek apakah user reconnect sebelum gracePeriod habis
+  if (this.pendingRemove.has(newId)) {
+    clearTimeout(this.pendingRemove.get(newId)); // batalkan penghapusan kursi
+    this.pendingRemove.delete(newId);
+  } else {
+    graceExpired = true; // reconnect terlambat (>10 detik)
+  }
 
-        this.cleanupClientById(newId);
-        ws.idtarget = newId;
+  this.cleanupClientById(newId);
+  ws.idtarget = newId;
 
-        if (!graceExpired && ws.roomname) {
-          this.sendAllStateTo(ws, ws.roomname);
-          this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
-        } else {
-          this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
-        }
+  // 🔹 Jika reconnect masih dalam grace period → langsung kirim ulang state
+  if (!graceExpired && ws.roomname) {
+    this.sendAllStateTo(ws, ws.roomname);
+    this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
+  } else {
+    // 🔹 Jika reconnect setelah grace period habis
+    this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
+  }
 
-        if (this.privateMessageBuffer.has(ws.idtarget)) {
-          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
-          this.privateMessageBuffer.delete(ws.idtarget);
-        }
-        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-        break;
-      }
+  // kirim private buffer jika ada
+  if (this.privateMessageBuffer.has(ws.idtarget)) {
+    for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
+    this.privateMessageBuffer.delete(ws.idtarget);
+  }
+
+  if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+  break;
+}
+
 
       // Semua case lain tetap sama seperti kode awal
       case "sendnotif": {
@@ -426,47 +431,32 @@ export class ChatServer {
   }
 
   cleanupClient(ws) {
-    const id = ws.idtarget;
-    if (id) {
-      const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
-      if (stillActive) { this.clients.delete(ws); return; }
-
-      if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
-
-      const timeout = setTimeout(() => {
-        this.removeAllSeatsById(id);
-        this.pendingRemove.delete(id);
-      }, this.gracePeriod);
-
-      this.pendingRemove.set(id, timeout);
+  const id = ws.idtarget;
+  if (id) {
+    const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
+    if (stillActive) {
+      this.clients.delete(ws);
+      return;
     }
 
-    ws.numkursi?.clear?.();
-    this.clients.delete(ws);
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
+    // ❗ Jangan langsung hapus kursi di sini
+    // Mulai gracePeriod timer
+    if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
+
+    const timeout = setTimeout(() => {
+      // kalau belum reconnect dalam gracePeriod
+      this.removeAllSeatsById(id);
+      this.pendingRemove.delete(id);
+    }, this.gracePeriod); // default 10 detik
+
+    this.pendingRemove.set(id, timeout);
   }
 
-  async fetch(request) {
-    const upgrade = request.headers.get("Upgrade") || "";
-    if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
-
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    server.accept();
-
-    const ws = server;
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-    ws.numkursi = new Set();
-    this.clients.add(ws);
-
-    ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-    ws.addEventListener("close", () => this.cleanupClient(ws));
-    ws.addEventListener("error", () => this.cleanupClient(ws));
-
-    return new Response(null, { status: 101, webSocket: client });
-  }
+  // Hapus koneksi dari list
+  ws.numkursi?.clear?.();
+  this.clients.delete(ws);
+  ws.roomname = undefined;
+  ws.idtarget = undefined;
 }
 
 export default {
@@ -481,5 +471,6 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
