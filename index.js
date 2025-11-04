@@ -1,5 +1,5 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Fitur lengkap: reconnect cepat, hapus kursi langsung saat exit, chat/private/gift/LowCard
+// Versi lengkap: reconnect cepat, server hapus kursi otomatis, semua event termasuk chat, private, gift, LowCard
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -50,7 +50,7 @@ export class ChatServer {
 
     this.lowcard = new LowCardGameManager(this);
 
-    this.gracePeriod = 5000; // 5 detik
+    this.gracePeriod = 10000; // 5 detik
     this.pendingRemove = new Map(); // Map<idtarget, {timeout, disconnectTime}>
   }
 
@@ -146,6 +146,12 @@ export class ChatServer {
     }
   }
 
+  handleGetAllRoomsUserCount(ws) {
+    const allCounts = this.getJumlahRoom();
+    const result = roomList.map(room => [room, allCounts[room]]);
+    this.safeSend(ws, ["allRoomsUserCount", result]);
+  }
+
   lockSeat(room, ws) {
     const seatMap = this.roomSeats.get(room);
     if (!ws.idtarget) return null;
@@ -194,71 +200,10 @@ export class ChatServer {
     this.safeSend(ws, ["allUpdateKursiList", room, meta]);
   }
 
-  cleanupClient(ws, immediate = false) {
-    const id = ws.idtarget;
-    if (id) {
-      const seatInfo = this.userToSeat.get(id);
-
-      if (immediate) {
-        // hapus kursi langsung (exit app / task killer / minimize)
-        if (seatInfo) {
-          const { room, seat } = seatInfo;
-          const seatMap = this.roomSeats.get(room);
-          if (seatMap && seatMap.has(seat)) {
-            Object.assign(seatMap.get(seat), createEmptySeat());
-            this.broadcastToRoom(room, ["removeKursi", room, seat]);
-            this.broadcastRoomUserCount(room);
-          }
-          this.userToSeat.delete(id);
-        }
-        if (this.pendingRemove.has(id)) {
-          clearTimeout(this.pendingRemove.get(id)?.timeout);
-          this.pendingRemove.delete(id);
-        }
-      } else {
-        // gunakan grace period (network drop / reconnect cepat)
-        if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id)?.timeout);
-
-        const timeout = setTimeout(() => {
-          if (seatInfo) {
-            const { room, seat } = seatInfo;
-            const seatMap = this.roomSeats.get(room);
-            if (seatMap && seatMap.has(seat)) {
-              Object.assign(seatMap.get(seat), createEmptySeat());
-              this.broadcastToRoom(room, ["removeKursi", room, seat]);
-              this.broadcastRoomUserCount(room);
-            }
-            this.userToSeat.delete(id);
-          }
-          this.pendingRemove.delete(id);
-        }, this.gracePeriod);
-
-        this.pendingRemove.set(id, { timeout, disconnectTime: Date.now() });
-      }
+  cleanupClientById(idtarget) {
+    for (const c of Array.from(this.clients)) {
+      if (c.idtarget === idtarget) this.cleanupClient(c);
     }
-
-    ws.numkursi?.clear?.();
-    this.clients.delete(ws);
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-  }
-
-  handleGetAllRoomsUserCount(ws) {
-    const allCounts = this.getJumlahRoom();
-    const result = roomList.map(room => [room, allCounts[room]]);
-    this.safeSend(ws, ["allRoomsUserCount", result]);
-  }
-
-  getAllOnlineUsers() {
-    const users = [];
-    for (const ws of this.clients) if (ws.idtarget) users.push(ws.idtarget);
-    return users;
-  }
-
-  getOnlineUsersByRoom(roomName) {
-    const users = [];
-    for (const ws of this.clients) if (ws.roomname === roomName && ws.idtarget) users.push(ws.idtarget);
-    return users;
   }
 
   removeAllSeatsById(idtarget) {
@@ -277,6 +222,18 @@ export class ChatServer {
     this.privateMessageBuffer.delete(idtarget);
   }
 
+  getAllOnlineUsers() {
+    const users = [];
+    for (const ws of this.clients) if (ws.idtarget) users.push(ws.idtarget);
+    return users;
+  }
+
+  getOnlineUsersByRoom(roomName) {
+    const users = [];
+    for (const ws of this.clients) if (ws.roomname === roomName && ws.idtarget) users.push(ws.idtarget);
+    return users;
+  }
+
   handleMessage(ws, raw) {
     let data;
     try { data = JSON.parse(raw); } catch { return this.safeSend(ws, ["error", "Invalid JSON"]); }
@@ -286,9 +243,43 @@ export class ChatServer {
     switch (evt) {
       case "setIdTarget": {
         const newId = data[1];
+        this.cleanupClientById(newId);
         ws.idtarget = newId;
-        ws.roomname = undefined; // kursi lama sudah dihapus
-        this.safeSend(ws, ["needJoinRoom", "Silakan join room"]);
+        const seatInfo = this.userToSeat.get(newId);
+        let lastRoom;
+
+        if (seatInfo) {
+          lastRoom = seatInfo.room;
+
+          const pending = this.pendingRemove.get(newId);
+          const now = Date.now();
+          const disconnectTime = pending?.disconnectTime ? now - pending.disconnectTime : this.gracePeriod + 1;
+
+          if (disconnectTime < this.gracePeriod) {
+            // reconnect cepat
+            if (pending) {
+              clearTimeout(pending.timeout);
+              this.pendingRemove.delete(newId);
+            }
+            ws.roomname = lastRoom;
+            this.safeSend(ws, ["info", "Reconnect cepat, kursi tetap aman"]);
+            this.sendAllStateTo(ws, lastRoom);
+          } else {
+            // grace period habis
+            this.removeAllSeatsById(newId);
+            ws.roomname = undefined;
+            this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
+          }
+        } else {
+          ws.roomname = undefined;
+        }
+
+        if (this.privateMessageBuffer.has(ws.idtarget)) {
+          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
+          this.privateMessageBuffer.delete(ws.idtarget);
+        }
+
+        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
         break;
       }
 
@@ -308,6 +299,11 @@ export class ChatServer {
 
         this.sendAllStateTo(ws, newRoom);
         this.broadcastRoomUserCount(newRoom);
+
+        if (ws.idtarget && this.pendingRemove.has(ws.idtarget)) {
+          clearTimeout(this.pendingRemove.get(ws.idtarget).timeout);
+          this.pendingRemove.delete(ws.idtarget);
+        }
         break;
       }
 
@@ -330,6 +326,7 @@ export class ChatServer {
         const [, roomname, seat, giftId] = data;
         const seatMap = this.roomSeats.get(roomname);
         if (seatMap && seatMap.has(seat)) {
+          // broadcast gift ke semua user room
           this.broadcastToRoom(roomname, ["gift", seat, giftId]);
         }
         break;
@@ -353,21 +350,49 @@ export class ChatServer {
         break;
       }
 
-      case "exitApp":
-        this.cleanupClient(ws, true); // hapus kursi langsung
-        ws.close();
+      case "lowcard": {
+        this.lowcard.handleLowCardEvent(ws, data);
         break;
-
-      case "gameLowCardStart":
-      case "gameLowCardJoin":
-      case "gameLowCardNumber":
-      case "gameLowCardEnd":
-        this.lowcard.handleEvent(ws, data);
-        break;
+      }
 
       default:
         this.safeSend(ws, ["error", "Unknown event"]);
     }
+  }
+
+  cleanupClient(ws) {
+    const id = ws.idtarget;
+    if (id) {
+      const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
+      if (stillActive) {
+        this.clients.delete(ws);
+        return;
+      }
+
+      if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id).timeout);
+
+      const timeout = setTimeout(() => {
+        const seatInfo = this.userToSeat.get(id);
+        if (seatInfo) {
+          const { room, seat } = seatInfo;
+          const seatMap = this.roomSeats.get(room);
+          if (seatMap && seatMap.has(seat)) {
+            Object.assign(seatMap.get(seat), createEmptySeat());
+            this.broadcastToRoom(room, ["removeKursi", room, seat]);
+            this.broadcastRoomUserCount(room);
+          }
+          this.userToSeat.delete(id);
+        }
+        this.pendingRemove.delete(id);
+      }, this.gracePeriod);
+
+      this.pendingRemove.set(id, { timeout, disconnectTime: Date.now() });
+    }
+
+    ws.numkursi?.clear?.();
+    this.clients.delete(ws);
+    ws.roomname = undefined;
+    ws.idtarget = undefined;
   }
 
   async fetch(req) {
@@ -385,8 +410,8 @@ export class ChatServer {
     this.clients.add(ws);
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-    ws.addEventListener("close", () => this.cleanupClient(ws, false)); // disconnect normal
-    ws.addEventListener("error", () => this.cleanupClient(ws, false));
+    ws.addEventListener("close", () => this.cleanupClient(ws));
+    ws.addEventListener("error", () => this.cleanupClient(ws));
 
     return new Response(null, { status: 101, webSocket: client });
   }
