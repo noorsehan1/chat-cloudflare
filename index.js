@@ -420,31 +420,41 @@ export class ChatServer {
     }
   }
 
-  cleanupClient(ws) {
+cleanupClient(ws) {
     const id = ws.idtarget;
     if (id) {
-      const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
-      if (stillActive) {
-        this.clients.delete(ws);
-        return;
-      }
+        const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
+        if (stillActive) {
+            this.clients.delete(ws);
+            return;
+        }
 
-      if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
+        if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
 
-      const timeout = setTimeout(() => {
-        this.removeAllSeatsById(id);
-        for (const c of this.clients) this.safeSend(c, ["removeKursiById", id]);
-        this.pendingRemove.delete(id);
-      }, this.gracePeriod);
-
-      this.pendingRemove.set(id, timeout);
+        // ← DI SINI adalah bagian timeout yang kamu sebut
+        const timeout = setTimeout(() => {
+            const seatInfo = this.userToSeat.get(id);
+            if (seatInfo) {
+                const { room, seat } = seatInfo;
+                const seatMap = this.roomSeats.get(room);
+                if (seatMap && seatMap.has(seat)) {
+                    Object.assign(seatMap.get(seat), createEmptySeat());
+                    this.broadcastToRoom(room, ["removeKursi", room, seat]);
+                    this.broadcastRoomUserCount(room);
+                }
+                this.userToSeat.delete(id);
+            }
+            this.pendingRemove.delete(id);
+        }, this.gracePeriod);
+        this.pendingRemove.set(id, timeout);
     }
 
     ws.numkursi?.clear?.();
     this.clients.delete(ws);
     ws.roomname = undefined;
     ws.idtarget = undefined;
-  }
+}
+
 
   async fetch(req) {
     const upgrade = req.headers.get("Upgrade") || "";
@@ -480,3 +490,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
