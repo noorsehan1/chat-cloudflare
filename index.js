@@ -205,22 +205,22 @@ export class ChatServer {
     }
   }
 
-  removeAllSeatsById(idtarget) {
-    const seatInfo = this.userToSeat.get(idtarget);
-    if (!seatInfo) return;
+ removeAllSeatsById(idtarget) {
+  const seatInfo = this.userToSeat.get(idtarget);
+  if (!seatInfo) return;
 
-    const { room, seat } = seatInfo;
-    const seatMap = this.roomSeats.get(room);
-    if (!seatMap) return;
+  const { room, seat } = seatInfo;
+  const seatMap = this.roomSeats.get(room);
+  if (!seatMap) return;
 
-    if (seatMap.has(seat)) {
-      Object.assign(seatMap.get(seat), createEmptySeat());
-      this.broadcastToRoom(room, ["removeKursi", room, seat]);
-      this.broadcastRoomUserCount(room);
-    }
-
-    this.userToSeat.delete(idtarget);
+  if (seatMap.has(seat)) {
+    Object.assign(seatMap.get(seat), createEmptySeat());
+    this.broadcastToRoom(room, ["removeKursi", room, seat]);
+    this.broadcastRoomUserCount(room);
   }
+
+  this.userToSeat.delete(idtarget);
+}
 
   getAllOnlineUsers() {
     const users = [];
@@ -454,35 +454,34 @@ export class ChatServer {
     }
   }
 
-  cleanupClient(ws) {
-    const id = ws.idtarget;
-    if (id) {
-      // ✅ Aman untuk reconnect cepat: hanya hapus kursi jika user tidak punya koneksi lain
-      const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
-      if (stillActive) {
-        this.clients.delete(ws);
-        return;
-      }
-
-      // ❗ Jangan langsung hapus kursi di sini
-      // Mulai gracePeriod timer (jika user reconnect dalam periode ini, kita batalkan)
-      if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
-
-      const timeout = setTimeout(() => {
-        // kalau belum reconnect dalam gracePeriod
-        this.removeAllSeatsById(id);
-        this.pendingRemove.delete(id);
-      }, this.gracePeriod);
-
-      this.pendingRemove.set(id, timeout);
+ cleanupClient(ws) {
+  const id = ws.idtarget;
+  if (id) {
+    const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
+    if (stillActive) {
+      this.clients.delete(ws);
+      return;
     }
 
-    // Hapus koneksi dari list
-    ws.numkursi?.clear?.();
-    this.clients.delete(ws);
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
+    // Batalkan timeout lama jika ada
+    if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
+
+    // Set timeout grace period 10 detik
+    const timeout = setTimeout(() => {
+      // Hapus semua kursi dan state user
+      this.removeAllSeatsById(id);
+      this.pendingRemove.delete(id);
+    }, this.gracePeriod);
+
+    this.pendingRemove.set(id, timeout);
   }
+
+  // Hapus socket dari list
+  ws.numkursi?.clear?.();
+  this.clients.delete(ws);
+  ws.roomname = undefined;
+  ws.idtarget = undefined;
+}
 
   async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || "";
@@ -518,6 +517,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
