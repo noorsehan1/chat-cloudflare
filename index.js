@@ -1,4 +1,4 @@
-// index.js – ChatServer Durable Object (Lengkap, siap deploy)
+// ChatServer Durable Object (Bahasa Indonesia)
 // Versi lengkap: lock kursi aman (tidak menimpa kursi yang sudah terisi)
 // Filter kata dilarang dihapus sesuai permintaan
 
@@ -45,11 +45,19 @@ export class ChatServer {
     this.currentNumber = 1;
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
+    this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
+    this._flushTimer = setInterval(() => this.periodicFlush(), 100);
 
+    // Low card game manager terintegrasi
     this.lowcard = new LowCardGameManager(this);
 
+    // Penyimpanan untuk user yang sementara disconnect (kursi tidak dihapus langsung)
+    // offlineUsers: idtarget -> { roomname, timestamp }
     this.offlineUsers = new Map();
+    // offlineTimers: idtarget -> timeoutId (untuk auto hapus seat setelah timeout)
     this.offlineTimers = new Map();
+
+    // waktu toleransi sebelum kursi dihapus permanen (ms). default 5 menit.
     this.OFFLINE_TIMEOUT_MS = 5 * 60 * 1000;
   }
 
@@ -204,6 +212,7 @@ export class ChatServer {
     }
   }
 
+  // Hapus semua kursi user — dipanggil hanya saat benar-benar ingin hapus permanen
   removeAllSeatsById(idtarget) {
     for (const [room, seatMap] of this.roomSeats) {
       let removed = false;
@@ -231,17 +240,22 @@ export class ChatServer {
   }
 
   scheduleOfflineRemoval(idtarget) {
+    // safety: jangan schedule kalau sudah ada
     if (this.offlineTimers.has(idtarget)) return;
     const timeoutId = setTimeout(() => {
+      // jika masih tercatat offline dan sudah melewati timeout, hapus kursi permanen
       const saved = this.offlineUsers.get(idtarget);
       if (saved && Date.now() - saved.timestamp >= this.OFFLINE_TIMEOUT_MS) {
         this.offlineUsers.delete(idtarget);
         this.offlineTimers.delete(idtarget);
         this.removeAllSeatsById(idtarget);
+        // console log untuk debugging
+        try { console.log(`🗑️ Offline timeout: kursi ${idtarget} dihapus`); } catch {}
       } else {
+        // jika sudah reconnect atau dihapus, bersihkan timer reference
         this.offlineTimers.delete(idtarget);
       }
-    }, this.OFFLINE_TIMEOUT_MS + 10000);
+    }, this.OFFLINE_TIMEOUT_MS + 10000); // sedikit buffer (ms)
     this.offlineTimers.set(idtarget, timeoutId);
   }
 
@@ -262,10 +276,21 @@ export class ChatServer {
     switch (evt) {
       case "setIdTarget": {
         const newId = data[1];
+
+        // Tutup koneksi klien lain dengan id yang sama (jika ada),
+        // tapi cleanupClient sekarang hanya menandai offline (tidak hapus kursi langsung).
         this.cleanupClientById(newId);
-        if (this.offlineUsers.has(newId)) this.cancelOfflineRemoval(newId);
+
+        // Jika ada pencatatan offline sebelumnya, batalkan rencana penghapusan
+        if (this.offlineUsers.has(newId)) {
+          this.cancelOfflineRemoval(newId);
+          // Biarkan kursi tetap seperti semula — user akan "kembali" karena sama id
+          try { console.log(`🔄 User ${newId} reconnect detected — cancel offline removal`); } catch {}
+        }
+
         ws.idtarget = newId;
         this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
+
         if (this.privateMessageBuffer.has(ws.idtarget)) {
           for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
           this.privateMessageBuffer.delete(ws.idtarget);
@@ -273,11 +298,13 @@ export class ChatServer {
         if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
         break;
       }
+
       case "ping": {
         const pingId = data[1];
         if (pingId && ws.idtarget === pingId) this.safeSend(ws, ["pong"]);
         break;
       }
+
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
         const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
@@ -291,6 +318,7 @@ export class ChatServer {
         }
         break;
       }
+
       case "private": {
         const [, idt, url, msg, sender] = data;
         const ts = Date.now();
@@ -335,59 +363,21 @@ export class ChatServer {
         break;
       }
 
-case "joinRoom": {
-  const newRoom = data[1];
-  if (!roomList.includes(newRoom))
-    return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
-
-  ws.roomname = newRoom;
-  const seatMap = this.roomSeats.get(newRoom);
-
-  // Cek kursi lama jika reconnect
-  let foundSeat = null;
-  if (ws.idtarget && this.userToSeat.has(ws.idtarget)) {
-    const seatInfo = this.userToSeat.get(ws.idtarget);
-    if (seatInfo.room === newRoom) foundSeat = seatInfo.seat;
-  }
-
-  // Jika belum ada kursi (user baru), lock kursi baru
-  if (!foundSeat) {
-    foundSeat = this.lockSeat(newRoom, ws);
-    if (!foundSeat) return this.safeSend(ws, ["roomFull", newRoom]);
-  }
-
-  // Update ws.numkursi
-  ws.numkursi = new Set([foundSeat]);
-
-  // Simpan di userToSeat jika belum ada
-  if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-
-  // **Langsung update kursi di state server agar muncul**
-  const currentInfo = seatMap.get(foundSeat) || createEmptySeat();
-  Object.assign(currentInfo, {
-    namauser: ws.idtarget,
-    noimageUrl: "",   // bisa diubah sesuai data client
-    color: "#000000", // default warna
-    itembawah: 0,
-    itematas: 0,
-    vip: 0,
-    viptanda: 0
-  });
-  seatMap.set(foundSeat, currentInfo);
-
-  // Tambahkan ke buffer untuk broadcast
-  if (!this.updateKursiBuffer.has(newRoom)) this.updateKursiBuffer.set(newRoom, new Map());
-  this.updateKursiBuffer.get(newRoom).set(foundSeat, { ...currentInfo, points: [] });
-
-  // Kirim feedback ke client
-  this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-  this.sendAllStateTo(ws, newRoom);
-  this.broadcastRoomUserCount(newRoom);
-
-  console.log(`✅ User ${ws.idtarget || "new"} joinRoom ${newRoom}, assigned seat: ${foundSeat}`);
-  break;
-}
-
+      case "joinRoom": {
+        const newRoom = data[1];
+        if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
+        if (ws.idtarget) this.removeAllSeatsById(ws.idtarget); // behavior: joining new room removes previous seats
+        ws.roomname = newRoom;
+        const seatMap = this.roomSeats.get(newRoom);
+        const foundSeat = this.lockSeat(newRoom, ws);
+        if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
+        ws.numkursi = new Set([foundSeat]);
+        this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+        if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+        this.sendAllStateTo(ws, newRoom);
+        this.broadcastRoomUserCount(newRoom);
+        break;
+      }
 
       case "chat": {
         const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
@@ -456,22 +446,30 @@ case "joinRoom": {
     }
   }
 
+  // cleanupClient: saat koneksi terputus / close / error
+  // Perubahan: jangan langsung hapus kursi — catat sebagai offline sementara.
   cleanupClient(ws) {
     const id = ws.idtarget;
     if (!id) {
+      // tidak punya idtarget, langsung hapus socket
       this.clients.delete(ws);
       return;
     }
 
+    // Jika ada koneksi lain untuk id ini tetap aktif, hanya hapus socket dan jangan tandai offline
     const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
     if (stillActive) {
       this.clients.delete(ws);
       return;
     }
 
+    // Tandai user sebagai offline sementara — simpan room agar saat reconnect bisa lanjut
     this.offlineUsers.set(id, { roomname: ws.roomname, timestamp: Date.now() });
+
+    // Schedule penghapusan kursi permanen jika tidak reconnect dalam waktu OFFLINE_TIMEOUT_MS
     this.scheduleOfflineRemoval(id);
 
+    // Lepas socket dari daftar clients
     ws.numkursi?.clear?.();
     this.clients.delete(ws);
     ws.roomname = undefined;
@@ -480,8 +478,7 @@ case "joinRoom": {
 
   async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || "";
-    if (upgrade.toLowerCase() !== "websocket") 
-      return new Response("Expected WebSocket", { status: 426 });
+    if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
@@ -494,35 +491,8 @@ case "joinRoom": {
     this.clients.add(ws);
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-
-    ws.addEventListener("close", () => {
-      console.log(`❌ WebSocket closed: ${ws.idtarget || "unknown user"} — cleanup langsung`);
-      this.cleanupClient(ws);
-    });
-
-    ws.addEventListener("error", (ev) => {
-      console.log(`⚠️ WebSocket error (tidak cleanup langsung): ${ws.idtarget || "unknown user"}`, ev);
-
-      if (ws.readyState === 1) this.safeSend(ws, ["reconnecting", "WebSocket error detected. Attempting reconnect..."]);
-      if (!ws.idtarget) return;
-
-      const now = Date.now();
-      this.offlineUsers.set(ws.idtarget, { roomname: ws.roomname, timestamp: now });
-
-      if (!this.offlineTimers.has(ws.idtarget)) {
-        const timeoutMs = 10 * 1000;
-        const timeoutId = setTimeout(() => {
-          const offline = this.offlineUsers.get(ws.idtarget);
-          if (offline && Date.now() - offline.timestamp >= timeoutMs) {
-            console.log(`🗑️ Offline > 10 detik, cleanup WS ${ws.idtarget}`);
-            this.removeAllSeatsById(ws.idtarget);
-            this.offlineUsers.delete(ws.idtarget);
-            this.offlineTimers.delete(ws.idtarget);
-          }
-        }, timeoutMs);
-        this.offlineTimers.set(ws.idtarget, timeoutId);
-      }
-    });
+    ws.addEventListener("close", () => this.cleanupClient(ws));
+    ws.addEventListener("error", () => this.cleanupClient(ws));
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -540,4 +510,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
