@@ -54,7 +54,7 @@ export class ChatServer {
     this.offlineUsers = new Map();      // idtarget -> { roomname, timestamp }
     this.offlineTimers = new Map();     // idtarget -> timeoutId
 
-    this.OFFLINE_TIMEOUT_MS = 10 * 1000; // 10 detik
+    this.OFFLINE_TIMEOUT_MS = 30 * 1000; // 30 detik
   }
 
   safeSend(ws, arr) {
@@ -530,4 +530,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
