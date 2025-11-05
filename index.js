@@ -1,4 +1,11 @@
-// ChatServer Durable Object (Cloudflare Workers) - FINAL COMPLETE (dengan variabel waktu)
+// ChatServer Durable Object (Cloudflare Workers) - FULL FIX (ready to paste)
+// Perbaikan utama:
+// - LOCK_DURATION_MS = 69_000 (69 detik) untuk reconnect window
+// - Konsistenkan semua timeout terkait lock/disconnect
+// - Jangan delete seatMap entries, gunakan createEmptySeat() untuk reset
+// - setIdTarget tidak mengirim "numberKursiSaya" (sesuai permintaan), tapi kirim restoreSuccess
+// - sendAllStateTo dipanggil saat restore sukses
+
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
@@ -21,12 +28,12 @@ function createEmptySeat() {
 }
 
 // -----------------------------
-// Waktu / interval (ubah di sini kalau mau tweak semua behavior waktu)
+// Konfigurasi waktu (ubah di sini jika perlu)
 // -----------------------------
-const LOCK_DURATION_MS = 60_000;            // waktu lock kursi untuk memungkinkan reconnect (default 60s)
-const CLIENT_DISCONNECT_GRACE_MS = LOCK_DURATION_MS; // waktu tunggu sebelum kursi dihapus setelah disconnect (default sama dengan LOCK_DURATION_MS)
-const TICK_INTERVAL_MS = 15 * 60 * 1000;    // interval tick untuk currentNumber
-const FLUSH_INTERVAL_MS = 100;              // interval flush buffer
+const LOCK_DURATION_MS = 69_000;            // 69 detik window untuk reconnect/restore
+const CLIENT_DISCONNECT_GRACE_MS = LOCK_DURATION_MS; // setelah ini kursi akan direset
+const TICK_INTERVAL_MS = 15 * 60 * 1000;    // tick untuk currentNumber
+const FLUSH_INTERVAL_MS = 100;              // flush interval
 // -----------------------------
 
 export class ChatServer {
@@ -128,7 +135,8 @@ export class ChatServer {
       const seatMap = this.roomSeats.get(room);
       for (const [seat, info] of seatMap) {
         if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > LOCK_DURATION_MS) {
-          Object.assign(info, createEmptySeat());
+          // reset kursi (jangan hapus entry Map)
+          Object.assign(seatMap.get(seat), createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.broadcastRoomUserCount(room);
         }
@@ -289,60 +297,69 @@ export class ChatServer {
 
       // setIdTarget: server akan coba restore kursi berdasarkan __LOCK__<id>
       // client boleh kirim optional room: ["setIdTarget", id, roomname]
-   case "setIdTarget": {
+    case "setIdTarget": {
   const newId = data[1];
   const maybeRoom = (data.length > 2 && data[2] !== null) ? data[2] : null;
 
+  // Jangan cleanup dulu — kita coba restore dulu
   ws.idtarget = newId;
+
   let restored = false;
   const now = Date.now();
-  const RECONNECT_LOCK_MS = 69000; // 69 detik batas reconnect
 
-  // 🔍 Cek preferensi room lebih dulu
+  // Jika client kirim preferensi room, cek room itu dulu
   if (maybeRoom && this.roomSeats.has(maybeRoom)) {
     const seatMap = this.roomSeats.get(maybeRoom);
     for (const [seat, info] of seatMap) {
       if (info.namauser === "__LOCK__" + newId) {
-        if (info.lockTime && now - info.lockTime < RECONNECT_LOCK_MS) {
-          // ✅ Restore kursi tanpa efek join ulang
+        // Cek apakah masih dalam waktu lock
+        if (info.lockTime && now - info.lockTime < LOCK_DURATION_MS) {
+          // Restore kursi (tanpa mengirim numberKursiSaya)
           info.namauser = newId;
           info.lockTime = undefined;
 
           ws.roomname = maybeRoom;
           ws.numkursi = new Set([seat]);
+
           this.userToSeat.set(newId, { room: maybeRoom, seat });
 
-          // kirim state room dan update count
+          // Kirim state room penuh ke client yang reconnect
           this.sendAllStateTo(ws, maybeRoom);
           this.broadcastRoomUserCount(maybeRoom);
+
           restored = true;
         } else {
-          // 🗑️ Lock kadaluarsa
-          Object.assign(info, createEmptySeat());
+          // Lock kadaluarsa — reset kursi (jangan delete entry)
+          Object.assign(seatMap.get(seat), createEmptySeat());
         }
         break;
       }
     }
   }
 
-  // 🔁 Kalau belum ditemukan, cek semua room
+  // Jika belum restore, scan semua room
   if (!restored) {
     for (const [room, seatMap] of this.roomSeats) {
       for (const [seat, info] of seatMap) {
         if (info.namauser === "__LOCK__" + newId) {
-          if (info.lockTime && now - info.lockTime < RECONNECT_LOCK_MS) {
+          // Cek apakah masih dalam waktu lock
+          if (info.lockTime && now - info.lockTime < LOCK_DURATION_MS) {
+            // Restore kursi
             info.namauser = newId;
             info.lockTime = undefined;
 
             ws.roomname = room;
             ws.numkursi = new Set([seat]);
+
             this.userToSeat.set(newId, { room, seat });
 
             this.sendAllStateTo(ws, room);
             this.broadcastRoomUserCount(room);
+
             restored = true;
           } else {
-            Object.assign(info, createEmptySeat());
+            // Lock kadaluarsa — reset kursi (jangan delete entry)
+            Object.assign(seatMap.get(seat), createEmptySeat());
           }
           break;
         }
@@ -351,15 +368,17 @@ export class ChatServer {
     }
   }
 
-  // 🧹 Bersihkan koneksi lama setelah restore
+  // Setelah restore sukses, baru bersihkan koneksi lama jika ada
   if (restored) {
     this.cleanupClientById(newId);
+    // beri tahu client kalau restore sukses
+    this.safeSend(ws, ["restoreSuccess", ws.roomname]);
   } else {
-    // ⛔ Tidak bisa restore, suruh join lagi
+    // Jika gagal restore => minta client joinRoom lagi
     this.safeSend(ws, ["needJoinRoomAgain"]);
   }
 
-  // 🔔 Kirim buffer pesan privat kalau ada
+  // Kirim private message buffer jika ada
   if (this.privateMessageBuffer.has(newId)) {
     for (const msg of this.privateMessageBuffer.get(newId)) this.safeSend(ws, msg);
     this.privateMessageBuffer.delete(newId);
@@ -367,7 +386,6 @@ export class ChatServer {
 
   break;
 }
-
 
 
       case "sendnotif": {
@@ -622,4 +640,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
