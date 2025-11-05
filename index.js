@@ -224,6 +224,13 @@ export class ChatServer {
     return users;
   }
 
+  getSeatForReconnect(idtarget) {
+    if (!this.offlineUsers.has(idtarget)) return null;
+    const userSeatInfo = this.userToSeat.get(idtarget);
+    if (userSeatInfo && userSeatInfo.room && userSeatInfo.seat) return { room: userSeatInfo.room, seat: userSeatInfo.seat };
+    return null;
+}
+
   scheduleOfflineRemoval(idtarget) {
     if (this.offlineTimers.has(idtarget)) return;
     const timeoutId = setTimeout(() => {
@@ -293,20 +300,25 @@ restoreSeatForReconnect(ws, idtarget) {
     const idtarget = data[1];
     const result = { seatExists: false, room: null, seat: null };
 
-    if (this.offlineUsers.has(idtarget)) {
-        // Gunakan helper untuk restore
-        const restored = this.restoreSeatForReconnect(ws, idtarget);
-        if (restored) {
-            const userSeatInfo = this.userToSeat.get(idtarget);
-            result.seatExists = true;
-            result.room = userSeatInfo.room;
-            result.seat = userSeatInfo.seat;
-        }
+    const seatInfo = this.getSeatForReconnect(idtarget);
+    if (seatInfo) {
+        result.seatExists = true;
+        result.room = seatInfo.room;
+        result.seat = seatInfo.seat;
+
+        // Restore state lama ke client
+        this.sendAllStateTo(ws, seatInfo.room);
+        ws.roomname = seatInfo.room;
+        ws.numkursi = new Set([seatInfo.seat]);
+        this.broadcastRoomUserCount(seatInfo.room);
     }
 
     this.safeSend(ws, ["checkReconnectResult", idtarget, result]);
     break;
 }
+
+
+   
 
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
@@ -530,5 +542,6 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
