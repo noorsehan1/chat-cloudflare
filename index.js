@@ -246,6 +246,28 @@ export class ChatServer {
     if (this.offlineUsers.has(idtarget)) this.offlineUsers.delete(idtarget);
   }
 
+
+restoreSeatForReconnect(ws, idtarget) {
+    const userSeatInfo = this.userToSeat.get(idtarget);
+    if (!userSeatInfo) return false;
+
+    const { room, seat } = userSeatInfo;
+    const seatMap = this.roomSeats.get(room);
+    if (!seatMap) return false;
+
+    // Restore kursi jika masih ada
+    const seatInfo = seatMap.get(seat);
+    if (seatInfo && seatInfo.namauser === idtarget) {
+        // Kirim state lama ke client
+        this.sendAllStateTo(ws, room);
+        ws.roomname = room;
+        ws.numkursi = new Set([seat]);
+        this.broadcastRoomUserCount(room);
+        return true;
+    }
+    return false;
+}
+  
   handleMessage(ws, raw) {
     let data;
     try { data = JSON.parse(raw); } catch { return this.safeSend(ws, ["error", "Invalid JSON"]); }
@@ -267,20 +289,24 @@ export class ChatServer {
         break;
       }
 
-      case "checkReconnect": {
-        const idtarget = data[1];
-        const result = { seatExists: false, room: null, seat: null };
-        if (this.offlineUsers.has(idtarget)) {
-          const userSeatInfo = this.userToSeat.get(idtarget);
-          if (userSeatInfo) {
+     case "checkReconnect": {
+    const idtarget = data[1];
+    const result = { seatExists: false, room: null, seat: null };
+
+    if (this.offlineUsers.has(idtarget)) {
+        // Gunakan helper untuk restore
+        const restored = this.restoreSeatForReconnect(ws, idtarget);
+        if (restored) {
+            const userSeatInfo = this.userToSeat.get(idtarget);
             result.seatExists = true;
             result.room = userSeatInfo.room;
             result.seat = userSeatInfo.seat;
-          }
         }
-        this.safeSend(ws, ["checkReconnectResult", idtarget, result]);
-        break;
-      }
+    }
+
+    this.safeSend(ws, ["checkReconnectResult", idtarget, result]);
+    break;
+}
 
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
@@ -504,3 +530,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
