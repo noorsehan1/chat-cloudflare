@@ -268,29 +268,19 @@ export class ChatServer {
       }
 
       case "checkReconnect": {
-    const idtarget = data[1];
-    const result = {
-        seatExists: false,
-        room: null,
-        seat: null
-    };
-
-    // cek apakah user sedang tercatat offline sementara
-    if (this.offlineUsers.has(idtarget)) {
-        const offlineData = this.offlineUsers.get(idtarget);
-        const userSeatInfo = this.userToSeat.get(idtarget);
-        if (userSeatInfo) {
+        const idtarget = data[1];
+        const result = { seatExists: false, room: null, seat: null };
+        if (this.offlineUsers.has(idtarget)) {
+          const userSeatInfo = this.userToSeat.get(idtarget);
+          if (userSeatInfo) {
             result.seatExists = true;
             result.room = userSeatInfo.room;
             result.seat = userSeatInfo.seat;
+          }
         }
-    }
-
-    // kirim balik ke client
-    this.safeSend(ws, ["checkReconnectResult", idtarget, result]);
-    break;
-}
-
+        this.safeSend(ws, ["checkReconnectResult", idtarget, result]);
+        break;
+      }
 
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
@@ -450,6 +440,14 @@ export class ChatServer {
     }
   }
 
+  cleanupClientOnClose(ws) {
+    ws.numkursi?.clear?.();
+    this.clients.delete(ws);
+    // Close normal → seat tetap aman
+    ws.roomname = undefined;
+    ws.idtarget = undefined;
+  }
+
   cleanupClient(ws) {
     const id = ws.idtarget;
     if (!id) { this.clients.delete(ws); return; }
@@ -457,15 +455,20 @@ export class ChatServer {
     const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
     if (stillActive) { this.clients.delete(ws); return; }
 
+    // Error → pending offline removal
     this.offlineUsers.set(id, { roomname: ws.roomname, timestamp: Date.now() });
     this.scheduleOfflineRemoval(id);
 
     ws.numkursi?.clear?.();
     this.clients.delete(ws);
+    // Jangan hapus seat agar seat tetap aman untuk reconnect
     ws.roomname = undefined;
     ws.idtarget = undefined;
   }
 
+  // -----------------------------
+  // WS Event Handlers & Fetch
+  // -----------------------------
   async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || "";
     if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
@@ -481,7 +484,8 @@ export class ChatServer {
     this.clients.add(ws);
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-    ws.addEventListener("close", () => this.cleanupClient(ws));
+
+    ws.addEventListener("close", () => this.cleanupClientOnClose(ws));
     ws.addEventListener("error", () => this.cleanupClient(ws));
 
     return new Response(null, { status: 101, webSocket: client });
@@ -500,5 +504,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
