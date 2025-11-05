@@ -5,6 +5,7 @@
 // - Jangan delete seatMap entries, gunakan createEmptySeat() untuk reset
 // - setIdTarget tidak mengirim "numberKursiSaya" (sesuai permintaan), tapi kirim restoreSuccess
 // - sendAllStateTo dipanggil saat restore sukses
+// - Re-bind socket ke user id (idToSocket map) agar semua case bisa diakses setelah reconnect
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -42,6 +43,7 @@ export class ChatServer {
     this.env = env;
 
     this.clients = new Set();       // semua WebSocket aktif
+    this.idToSocket = new Map();   // mapping idtarget -> ws (agar mudah kirim ke socket terbaru)
     this.userToSeat = new Map();    // mapping id -> {room, seat} untuk user aktif (tidak termasuk yang di-lock)
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
@@ -68,6 +70,7 @@ export class ChatServer {
 
   safeSend(ws, arr) {
     try {
+      if (!ws) return;
       if (ws.readyState === 1) ws.send(JSON.stringify(arr));
       else if (ws.readyState === 0) {
         setTimeout(() => {
@@ -77,6 +80,14 @@ export class ChatServer {
         }, 300);
       }
     } catch (e) {}
+  }
+
+  // helper untuk kirim ke id target (menggunakan idToSocket jika available)
+  sendToId(id, arr) {
+    const target = this.idToSocket.get(id);
+    if (target) return this.safeSend(target, arr);
+    // fallback: loop through clients (backwards compatibility)
+    for (const c of this.clients) if (c.idtarget === id) this.safeSend(c, arr);
   }
 
   broadcastToRoom(room, msg) {
@@ -150,11 +161,19 @@ export class ChatServer {
     this.cleanExpiredLocks();
 
     for (const [id, msgs] of Array.from(this.privateMessageBuffer)) {
-      for (const c of this.clients) {
-        if (c.idtarget === id) {
-          for (const m of msgs) this.safeSend(c, m);
-          this.privateMessageBuffer.delete(id);
-          if (c.roomname) this.broadcastRoomUserCount(c.roomname);
+      const target = this.idToSocket.get(id);
+      if (target) {
+        for (const m of msgs) this.safeSend(target, m);
+        this.privateMessageBuffer.delete(id);
+        if (target.roomname) this.broadcastRoomUserCount(target.roomname);
+      } else {
+        // fallback: try deliver and delete if delivered
+        for (const c of this.clients) {
+          if (c.idtarget === id) {
+            for (const m of msgs) this.safeSend(c, m);
+            this.privateMessageBuffer.delete(id);
+            if (c.roomname) this.broadcastRoomUserCount(c.roomname);
+          }
         }
       }
     }
@@ -255,6 +274,9 @@ export class ChatServer {
       } catch {}
       this.clients.delete(old);
     }
+
+    // hapus mapping idToSocket jika ada
+    this.idToSocket.delete(idtarget);
   }
 
   // Hapus semua kursi (dipanggil setelah lock expired) — tetap broadcast removeKursi
@@ -272,6 +294,7 @@ export class ChatServer {
     }
     // pastikan mapping juga dihapus
     this.userToSeat.delete(idtarget);
+    this.idToSocket.delete(idtarget);
   }
 
   getAllOnlineUsers() {
@@ -302,6 +325,7 @@ export class ChatServer {
   const maybeRoom = (data.length > 2 && data[2] !== null) ? data[2] : null;
 
   // Jangan cleanup dulu — kita coba restore dulu
+  // set id pada ws awal supaya mapping konsisten
   ws.idtarget = newId;
 
   let restored = false;
@@ -321,6 +345,8 @@ export class ChatServer {
           ws.roomname = maybeRoom;
           ws.numkursi = new Set([seat]);
 
+          // rebind id -> ws (penting agar server tahu socket terbaru untuk id ini)
+          this.idToSocket.set(newId, ws);
           this.userToSeat.set(newId, { room: maybeRoom, seat });
 
           // Kirim state room penuh ke client yang reconnect
@@ -351,6 +377,8 @@ export class ChatServer {
             ws.roomname = room;
             ws.numkursi = new Set([seat]);
 
+            // rebind id -> ws
+            this.idToSocket.set(newId, ws);
             this.userToSeat.set(newId, { room, seat });
 
             this.sendAllStateTo(ws, room);
@@ -602,6 +630,7 @@ export class ChatServer {
     ws.numkursi?.clear?.();
     ws.roomname = undefined;
     ws.idtarget = undefined;
+    this.idToSocket.delete(id);
     this.clients.delete(ws);
   }
 
