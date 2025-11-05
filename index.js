@@ -1,4 +1,5 @@
-// ChatServer Durable Object (Full, reconnect-safe dengan heartbeat)
+// ChatServer Durable Object (Versi lengkap + ping/pong privat)
+// Aman untuk reconnect cepat, kursi dihapus saat disconnect / pong timeout
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -27,7 +28,6 @@ export class ChatServer {
     this.env = env;
     this.clients = new Set();
     this.userToSeat = new Map();
-
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
     for (const room of roomList) {
@@ -35,21 +35,19 @@ export class ChatServer {
       for (let i = 1; i <= this.MAX_SEATS; i++) m.set(i, createEmptySeat());
       this.roomSeats.set(room, m);
     }
-
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
     this.privateMessageBuffer = new Map();
-
     this.currentNumber = 1;
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
-
     this.lowcard = new LowCardGameManager(this);
 
-    // Heartbeat interval
-    this._heartbeatInterval = setInterval(() => this.checkHeartbeats(), 15000); // 15 detik
+    // Ping/pong privat per client
+    this.PING_INTERVAL = 5000;
+    this.PONG_TIMEOUT = 7000;
   }
 
   safeSend(ws, arr) {
@@ -206,17 +204,14 @@ export class ChatServer {
   removeAllSeatsById(idtarget) {
     const seatInfo = this.userToSeat.get(idtarget);
     if (!seatInfo) return;
-
     const { room, seat } = seatInfo;
     const seatMap = this.roomSeats.get(room);
     if (!seatMap) return;
-
     if (seatMap.has(seat)) {
       Object.assign(seatMap.get(seat), createEmptySeat());
       this.broadcastToRoom(room, ["removeKursi", room, seat]);
       this.broadcastRoomUserCount(room);
     }
-
     this.userToSeat.delete(idtarget);
   }
 
@@ -232,20 +227,40 @@ export class ChatServer {
     return users;
   }
 
+  setupPingPong(ws) {
+    ws.isAlive = true;
+    ws.lastPing = Date.now();
+    ws.pingInterval = setInterval(() => {
+      if (!ws.isAlive) {
+        clearInterval(ws.pingInterval);
+        this.cleanupClient(ws);
+        return;
+      }
+      ws.isAlive = false;
+      try { ws.send(JSON.stringify(["ping"])); } catch {}
+      ws.pingTimeout = setTimeout(() => {
+        if (!ws.isAlive) this.cleanupClient(ws);
+      }, this.PONG_TIMEOUT);
+    }, this.PING_INTERVAL);
+
+    ws.addEventListener("pong", () => {
+      ws.isAlive = true;
+      clearTimeout(ws.pingTimeout);
+    });
+  }
+
   handleMessage(ws, raw) {
     let data;
     try { data = JSON.parse(raw); } catch { return this.safeSend(ws, ["error", "Invalid JSON"]); }
     if (!Array.isArray(data) || data.length === 0) return this.safeSend(ws, ["error", "Invalid message format"]);
     const evt = data[0];
 
-    // Ping-Pong heartbeat
-    if(evt === "pong") {
-      ws.isAlive = true;
-      ws.lastPong = Date.now();
-      return;
-    }
+    switch (evt) {
+      case "pong":
+        ws.isAlive = true;
+        clearTimeout(ws.pingTimeout);
+        break;
 
-    switch(evt) {
       case "setIdTarget": {
         const newId = data[1];
         this.cleanupClientById(newId);
@@ -276,6 +291,7 @@ export class ChatServer {
         const [, idt, url, msg, sender] = data;
         const ts = Date.now();
         const out = ["private", idt, url, msg, ts, sender];
+        this.safeSend(ws, out);
         let delivered = false;
         for (const c of this.clients) {
           if (c.idtarget === idt) { this.safeSend(c, out); delivered = true; }
@@ -298,7 +314,6 @@ export class ChatServer {
         if (activeSockets.length > 1) {
           const newest = activeSockets[activeSockets.length - 1];
           const oldSockets = activeSockets.slice(0, -1);
-
           const userSeatInfo = this.userToSeat.get(username);
           if (userSeatInfo) {
             const { room, seat } = userSeatInfo;
@@ -310,9 +325,11 @@ export class ChatServer {
             }
             this.userToSeat.delete(username);
           }
-
           for (const old of oldSockets) {
-            try { old.close(4000, "Duplicate login — old session closed"); this.clients.delete(old); } catch {}
+            try {
+              old.close(4000, "Duplicate login — old session closed");
+              this.clients.delete(old);
+            } catch {}
           }
         }
         break;
@@ -422,6 +439,8 @@ export class ChatServer {
   }
 
   cleanupClient(ws) {
+    clearInterval(ws.pingInterval);
+    clearTimeout(ws.pingTimeout);
     const id = ws.idtarget;
     if (id) {
       const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
@@ -429,26 +448,12 @@ export class ChatServer {
         this.clients.delete(ws);
         return;
       }
-
-      if(ws.timedOut) this.removeAllSeatsById(id);
+      this.removeAllSeatsById(id);
     }
     ws.numkursi?.clear?.();
     this.clients.delete(ws);
     ws.roomname = undefined;
     ws.idtarget = undefined;
-  }
-
-  checkHeartbeats() {
-    const now = Date.now();
-    for(const ws of this.clients) {
-      if(ws.lastPong && now - ws.lastPong > 20000) {
-        ws.timedOut = true;
-        ws.close(4001, "Heartbeat timeout");
-      } else {
-        ws.isAlive = false;
-        try { ws.send(JSON.stringify(["ping"])); } catch {}
-      }
-    }
   }
 
   async fetch(request) {
@@ -463,17 +468,11 @@ export class ChatServer {
     ws.roomname = undefined;
     ws.idtarget = undefined;
     ws.numkursi = new Set();
-    ws.isAlive = true;
-    ws.lastPong = Date.now();
-    ws.timedOut = false;
     this.clients.add(ws);
 
-    ws.addEventListener("message", (ev) => {
-      this.handleMessage(ws, ev.data);
-      ws.lastPong = Date.now();
-      ws.isAlive = true;
-    });
+    this.setupPingPong(ws);
 
+    ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
     ws.addEventListener("close", () => this.cleanupClient(ws));
     ws.addEventListener("error", () => this.cleanupClient(ws));
 
@@ -493,4 +492,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
