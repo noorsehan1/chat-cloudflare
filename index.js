@@ -335,36 +335,59 @@ export class ChatServer {
         break;
       }
 
-      case "joinRoom": {
-        const newRoom = data[1];
-        if (!roomList.includes(newRoom)) 
-          return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
+case "joinRoom": {
+  const newRoom = data[1];
+  if (!roomList.includes(newRoom))
+    return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
 
-        ws.roomname = newRoom;
-        const seatMap = this.roomSeats.get(newRoom);
+  ws.roomname = newRoom;
+  const seatMap = this.roomSeats.get(newRoom);
 
-        let foundSeat = null;
-        if (ws.idtarget && this.userToSeat.has(ws.idtarget)) {
-          const seatInfo = this.userToSeat.get(ws.idtarget);
-          if (seatInfo.room === newRoom) foundSeat = seatInfo.seat;
-        }
+  // Cek kursi lama jika reconnect
+  let foundSeat = null;
+  if (ws.idtarget && this.userToSeat.has(ws.idtarget)) {
+    const seatInfo = this.userToSeat.get(ws.idtarget);
+    if (seatInfo.room === newRoom) foundSeat = seatInfo.seat;
+  }
 
-        if (!foundSeat) {
-          foundSeat = this.lockSeat(newRoom, ws);
-          if (!foundSeat) return this.safeSend(ws, ["roomFull", newRoom]);
-        }
+  // Jika belum ada kursi (user baru), lock kursi baru
+  if (!foundSeat) {
+    foundSeat = this.lockSeat(newRoom, ws);
+    if (!foundSeat) return this.safeSend(ws, ["roomFull", newRoom]);
+  }
 
-        ws.numkursi = new Set([foundSeat]);
+  // Update ws.numkursi
+  ws.numkursi = new Set([foundSeat]);
 
-        if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+  // Simpan di userToSeat jika belum ada
+  if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
 
-        this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-        this.sendAllStateTo(ws, newRoom);
-        this.broadcastRoomUserCount(newRoom);
+  // **Langsung update kursi di state server agar muncul**
+  const currentInfo = seatMap.get(foundSeat) || createEmptySeat();
+  Object.assign(currentInfo, {
+    namauser: ws.idtarget,
+    noimageUrl: "",   // bisa diubah sesuai data client
+    color: "#000000", // default warna
+    itembawah: 0,
+    itematas: 0,
+    vip: 0,
+    viptanda: 0
+  });
+  seatMap.set(foundSeat, currentInfo);
 
-        console.log(`✅ User ${ws.idtarget || "new"} joinRoom ${newRoom}, assigned seat: ${foundSeat}`);
-        break;
-      }
+  // Tambahkan ke buffer untuk broadcast
+  if (!this.updateKursiBuffer.has(newRoom)) this.updateKursiBuffer.set(newRoom, new Map());
+  this.updateKursiBuffer.get(newRoom).set(foundSeat, { ...currentInfo, points: [] });
+
+  // Kirim feedback ke client
+  this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+  this.sendAllStateTo(ws, newRoom);
+  this.broadcastRoomUserCount(newRoom);
+
+  console.log(`✅ User ${ws.idtarget || "new"} joinRoom ${newRoom}, assigned seat: ${foundSeat}`);
+  break;
+}
+
 
       case "chat": {
         const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
@@ -517,3 +540,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
