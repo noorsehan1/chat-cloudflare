@@ -288,17 +288,9 @@ export class ChatServer {
         break;
       }
 
-      case "getAllRoomsUserCount":
-        this.handleGetAllRoomsUserCount(ws);
-        break;
-
-      case "getCurrentNumber":
-        this.safeSend(ws, ["currentNumber", this.currentNumber]);
-        break;
-
-      case "getAllOnlineUsers":
-        this.safeSend(ws, ["allOnlineUsers", this.getAllOnlineUsers()]);
-        break;
+      case "getAllRoomsUserCount": this.handleGetAllRoomsUserCount(ws); break;
+      case "getCurrentNumber": this.safeSend(ws, ["currentNumber", this.currentNumber]); break;
+      case "getAllOnlineUsers": this.safeSend(ws, ["allOnlineUsers", this.getAllOnlineUsers()]); break;
 
       case "getRoomOnlineUsers": {
         const roomName = data[1];
@@ -358,8 +350,7 @@ export class ChatServer {
         this.lowcard.handleEvent(ws, data);
         break;
 
-      default:
-        this.safeSend(ws, ["error", "Unknown event"]);
+      default: this.safeSend(ws, ["error", "Unknown event"]);
     }
   }
 
@@ -379,34 +370,34 @@ export class ChatServer {
     ws.idtarget = undefined;
   }
 
-async fetch(request) {
-  const upgrade = request.headers.get("Upgrade") || "";
-  if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
+  async fetch(request) {
+    const upgrade = request.headers.get("Upgrade") || "";
+    if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
 
-  const pair = new WebSocketPair();
-  const [client, server] = Object.values(pair);
-  server.accept();
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    server.accept();
 
-  const ws = server;
-  ws.roomname = undefined;
-  ws.idtarget = undefined;
-  ws.numkursi = new Set();
-  ws.pendingCleanup = null;
-  this.clients.add(ws);
+    const ws = server;
+    ws.roomname = undefined;
+    ws.idtarget = undefined;
+    ws.numkursi = new Set();
+    ws.pendingCleanup = null;
+    this.clients.add(ws);
 
-  ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
+    ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
 
-  // CLOSE normal → langsung cleanup
-  ws.addEventListener("close", () => this.cleanupClient(ws));
+    // CLOSE normal → langsung cleanup
+    ws.addEventListener("close", () => this.cleanupClient(ws));
 
-  // ERROR → schedule cleanup 10 detik
-  ws.addEventListener("error", () => {
-    if (!ws.pendingCleanup) ws.pendingCleanup = setTimeout(() => this.cleanupClient(ws), 10000);
-  });
+    // ERROR → schedule cleanup 10 detik
+    ws.addEventListener("error", () => {
+      if (!ws.pendingCleanup) ws.pendingCleanup = setTimeout(() => this.cleanupClient(ws), 10000);
+    });
 
-  return new Response(null, { status: 101, webSocket: client });
+    return new Response(null, { status: 101, webSocket: client });
+  }
 }
-
 
 export default {
   async fetch(req, env) {
@@ -418,4 +409,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
