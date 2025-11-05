@@ -500,26 +500,62 @@ export class ChatServer {
   }
 
   async fetch(request) {
-    const upgrade = request.headers.get("Upgrade") || "";
-    if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
+  const upgrade = request.headers.get("Upgrade") || "";
+  if (upgrade.toLowerCase() !== "websocket") 
+    return new Response("Expected WebSocket", { status: 426 });
 
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    server.accept();
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+  server.accept();
 
-    const ws = server;
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-    ws.numkursi = new Set();
-    this.clients.add(ws);
+  const ws = server;
+  ws.roomname = undefined;
+  ws.idtarget = undefined;
+  ws.numkursi = new Set();
+  this.clients.add(ws);
 
-    ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-    ws.addEventListener("close", () => this.cleanupClient(ws));
-    ws.addEventListener("error", () => this.cleanupClient(ws));
+  // Handle incoming messages
+  ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
 
-    return new Response(null, { status: 101, webSocket: client });
-  }
+  // Handle close → langsung cleanup, kursi dihapus
+  ws.addEventListener("close", () => {
+    console.log(`❌ WebSocket closed: ${ws.idtarget || "unknown user"} — cleanup langsung`);
+    this.cleanupClient(ws);
+  });
+
+  // Handle error → log + notif reconnect, tapi kursi tetap aman
+  ws.addEventListener("error", (ev) => {
+    console.log(`⚠️ WebSocket error (tidak cleanup langsung): ${ws.idtarget || "unknown user"}`, ev);
+
+    // Kirim info reconnect ke client (opsional)
+    if (ws.readyState === 1) {
+      this.safeSend(ws, ["reconnecting", "WebSocket error detected. Attempting reconnect..."]);
+    }
+
+    if (!ws.idtarget) return;
+
+    const now = Date.now();
+    this.offlineUsers.set(ws.idtarget, { roomname: ws.roomname, timestamp: now });
+
+    // Schedule cleanup setelah 10 detik offline
+    if (!this.offlineTimers.has(ws.idtarget)) {
+      const timeoutMs = 10 * 1000;
+      const timeoutId = setTimeout(() => {
+        const offline = this.offlineUsers.get(ws.idtarget);
+        if (offline && Date.now() - offline.timestamp >= timeoutMs) {
+          console.log(`🗑️ Offline > 10 detik, cleanup WS ${ws.idtarget}`);
+          this.removeAllSeatsById(ws.idtarget);
+          this.offlineUsers.delete(ws.idtarget);
+          this.offlineTimers.delete(ws.idtarget);
+        }
+      }, timeoutMs);
+      this.offlineTimers.set(ws.idtarget, timeoutId);
+    }
+  });
+
+  return new Response(null, { status: 101, webSocket: client });
 }
+
 
 export default {
   async fetch(req, env) {
@@ -533,5 +569,6 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
