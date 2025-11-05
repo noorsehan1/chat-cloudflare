@@ -267,11 +267,30 @@ export class ChatServer {
         break;
       }
 
-      case "ping": {
-        const pingId = data[1];
-        if (pingId && ws.idtarget === pingId) this.safeSend(ws, ["pong"]);
-        break;
-      }
+      case "checkReconnect": {
+    const idtarget = data[1];
+    const result = {
+        seatExists: false,
+        room: null,
+        seat: null
+    };
+
+    // cek apakah user sedang tercatat offline sementara
+    if (this.offlineUsers.has(idtarget)) {
+        const offlineData = this.offlineUsers.get(idtarget);
+        const userSeatInfo = this.userToSeat.get(idtarget);
+        if (userSeatInfo) {
+            result.seatExists = true;
+            result.room = userSeatInfo.room;
+            result.seat = userSeatInfo.seat;
+        }
+    }
+
+    // kirim balik ke client
+    this.safeSend(ws, ["checkReconnectResult", idtarget, result]);
+    break;
+}
+
 
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
@@ -481,4 +500,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
