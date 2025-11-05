@@ -1,11 +1,11 @@
-// ChatServer Durable Object (Versi lengkap + ping/pong privat)
-// Aman untuk reconnect cepat, kursi dihapus saat disconnect / pong timeout
+// ChatServer Durable Object (Bahasa Indonesia)
+// Versi lengkap: aman untuk reconnect cepat, kursi hanya dihapus jika user benar-benar disconnect
 
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
-  "General","Indonesia","Chill Zone","Catch Up","Casual Vibes","Lounge Talk",
-  "Easy Talk","Friendly Corner","The Hangout","Relax & Chat","Just Chillin","The Chatter Room"
+  "General","Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
+  "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
 ];
 
 function createEmptySeat() {
@@ -28,6 +28,7 @@ export class ChatServer {
     this.env = env;
     this.clients = new Set();
     this.userToSeat = new Map();
+
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
     for (const room of roomList) {
@@ -35,19 +36,18 @@ export class ChatServer {
       for (let i = 1; i <= this.MAX_SEATS; i++) m.set(i, createEmptySeat());
       this.roomSeats.set(room, m);
     }
+
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
     this.privateMessageBuffer = new Map();
+
     this.currentNumber = 1;
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
-    this.lowcard = new LowCardGameManager(this);
 
-    // Ping/pong privat per client
-    this.PING_INTERVAL = 10000;
-    this.PONG_TIMEOUT = 13000;
+    this.lowcard = new LowCardGameManager(this);
   }
 
   safeSend(ws, arr) {
@@ -202,18 +202,22 @@ export class ChatServer {
   }
 
   removeAllSeatsById(idtarget) {
-    const seatInfo = this.userToSeat.get(idtarget);
-    if (!seatInfo) return;
-    const { room, seat } = seatInfo;
-    const seatMap = this.roomSeats.get(room);
-    if (!seatMap) return;
-    if (seatMap.has(seat)) {
-      Object.assign(seatMap.get(seat), createEmptySeat());
-      this.broadcastToRoom(room, ["removeKursi", room, seat]);
-      this.broadcastRoomUserCount(room);
-    }
-    this.userToSeat.delete(idtarget);
+  const seatInfo = this.userToSeat.get(idtarget);
+  if (!seatInfo) return;
+
+  const { room, seat } = seatInfo;
+  const seatMap = this.roomSeats.get(room);
+  if (!seatMap) return;
+
+  if (seatMap.has(seat)) {
+    Object.assign(seatMap.get(seat), createEmptySeat());
+    this.broadcastToRoom(room, ["removeKursi", room, seat]);
+    this.broadcastRoomUserCount(room);
   }
+
+  this.userToSeat.delete(idtarget);
+}
+
 
   getAllOnlineUsers() {
     const users = [];
@@ -227,28 +231,6 @@ export class ChatServer {
     return users;
   }
 
-  setupPingPong(ws) {
-    ws.isAlive = true;
-    ws.lastPing = Date.now();
-    ws.pingInterval = setInterval(() => {
-      if (!ws.isAlive) {
-        clearInterval(ws.pingInterval);
-        this.cleanupClient(ws);
-        return;
-      }
-      ws.isAlive = false;
-      try { ws.send(JSON.stringify(["ping"])); } catch {}
-      ws.pingTimeout = setTimeout(() => {
-        if (!ws.isAlive) this.cleanupClient(ws);
-      }, this.PONG_TIMEOUT);
-    }, this.PING_INTERVAL);
-
-    ws.addEventListener("pong", () => {
-      ws.isAlive = true;
-      clearTimeout(ws.pingTimeout);
-    });
-  }
-
   handleMessage(ws, raw) {
     let data;
     try { data = JSON.parse(raw); } catch { return this.safeSend(ws, ["error", "Invalid JSON"]); }
@@ -256,15 +238,11 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
-      case "pong":
-        ws.isAlive = true;
-        clearTimeout(ws.pingTimeout);
-        break;
-
       case "setIdTarget": {
         const newId = data[1];
         this.cleanupClientById(newId);
         ws.idtarget = newId;
+        
         if (this.privateMessageBuffer.has(ws.idtarget)) {
           for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
           this.privateMessageBuffer.delete(ws.idtarget);
@@ -305,35 +283,50 @@ export class ChatServer {
       }
 
       case "isUserOnline": {
-        const username = data[1];
-        const tanda = data[2] ?? "";
-        const activeSockets = Array.from(this.clients).filter(c => c.idtarget === username);
-        const online = activeSockets.length > 0;
-        this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
+  const username = data[1]; // username target
+  const tanda = data[2] ?? "";
 
-        if (activeSockets.length > 1) {
-          const newest = activeSockets[activeSockets.length - 1];
-          const oldSockets = activeSockets.slice(0, -1);
-          const userSeatInfo = this.userToSeat.get(username);
-          if (userSeatInfo) {
-            const { room, seat } = userSeatInfo;
-            const seatMap = this.roomSeats.get(room);
-            if (seatMap && seatMap.has(seat)) {
-              Object.assign(seatMap.get(seat), createEmptySeat());
-              this.broadcastToRoom(room, ["removeKursi", room, seat]);
-              this.broadcastRoomUserCount(room);
-            }
-            this.userToSeat.delete(username);
-          }
-          for (const old of oldSockets) {
-            try {
-              old.close(4000, "Duplicate login — old session closed");
-              this.clients.delete(old);
-            } catch {}
-          }
-        }
-        break;
+  // Ambil semua koneksi user yang aktif
+  const activeSockets = Array.from(this.clients).filter(c => c.idtarget === username);
+  const online = activeSockets.length > 0;
+
+  // Kirim status ke pemanggil
+  this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
+
+  // Jika user login di lebih dari satu perangkat
+  if (activeSockets.length > 1) {
+    const newest = activeSockets[activeSockets.length - 1]; // koneksi baru
+    const oldSockets = activeSockets.slice(0, -1); // sisanya dianggap lama
+
+    // Dapatkan data kursi user (room & seat)
+    const userSeatInfo = this.userToSeat.get(username);
+
+    if (userSeatInfo) {
+      const { room, seat } = userSeatInfo;
+
+      // Kosongkan kursinya di room tersebut
+      const seatMap = this.roomSeats.get(room);
+      if (seatMap && seatMap.has(seat)) {
+        Object.assign(seatMap.get(seat), createEmptySeat());
+        this.broadcastToRoom(room, ["removeKursi", room, seat]); // broadcast hanya ke room itu
+        this.broadcastRoomUserCount(room);
       }
+
+      this.userToSeat.delete(username);
+    }
+
+    // Tutup socket lama user
+    for (const old of oldSockets) {
+      try {
+        old.close(4000, "Duplicate login — old session closed");
+        this.clients.delete(old);
+      } catch {}
+    }
+  }
+
+  break;
+}
+
 
       case "getAllRoomsUserCount":
         this.handleGetAllRoomsUserCount(ws);
@@ -439,10 +432,9 @@ export class ChatServer {
   }
 
   cleanupClient(ws) {
-    clearInterval(ws.pingInterval);
-    clearTimeout(ws.pingTimeout);
     const id = ws.idtarget;
     if (id) {
+      // ✅ Aman untuk reconnect cepat: hanya hapus kursi jika user tidak punya koneksi lain
       const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
       if (stillActive) {
         this.clients.delete(ws);
@@ -469,8 +461,6 @@ export class ChatServer {
     ws.idtarget = undefined;
     ws.numkursi = new Set();
     this.clients.add(ws);
-
-    this.setupPingPong(ws);
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
     ws.addEventListener("close", () => this.cleanupClient(ws));
