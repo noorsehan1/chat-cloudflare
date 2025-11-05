@@ -250,7 +250,6 @@ export class ChatServer {
         const newId = data[1];
         this.cleanupClientById(newId);
         ws.idtarget = newId;
-        this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
         if (this.privateMessageBuffer.has(ws.idtarget)) {
           for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
           this.privateMessageBuffer.delete(ws.idtarget);
@@ -494,3 +493,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
