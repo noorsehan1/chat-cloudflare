@@ -46,8 +46,8 @@ export class ChatServer {
     this.lowcard = new LowCardGameManager(this);
 
     // Ping/pong privat per client
-    this.PING_INTERVAL = 5000;
-    this.PONG_TIMEOUT = 7000;
+    this.PING_INTERVAL = 10000;
+    this.PONG_TIMEOUT = 13000;
   }
 
   safeSend(ws, arr) {
@@ -492,3 +492,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
