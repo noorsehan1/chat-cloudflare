@@ -282,19 +282,40 @@ restoreSeatForReconnect(ws, idtarget) {
     const evt = data[0];
 
     switch (evt) {
-      case "setIdTarget": {
-        const newId = data[1];
-        this.cleanupClientById(newId);
-        if (this.offlineUsers.has(newId)) this.cancelOfflineRemoval(newId);
-        ws.idtarget = newId;
-        this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
-        if (this.privateMessageBuffer.has(ws.idtarget)) {
-          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
-          this.privateMessageBuffer.delete(ws.idtarget);
+     case "setIdTarget": {
+    const newId = data[1];
+
+    // 1️⃣ Cek apakah user punya seat lama di offlineUsers
+    if (this.offlineUsers.has(newId)) {
+        // Batalkan penghapusan offline
+        this.cancelOfflineRemoval(newId);
+    }
+
+    // 2️⃣ Tangani duplicate socket (jika ada)
+    const activeSockets = Array.from(this.clients).filter(c => c.idtarget === newId);
+    if (activeSockets.length > 0) {
+        // Tutup socket lama, tapi jangan hapus seat
+        for (const old of activeSockets) {
+            try { old.close(4000, "Duplicate login — old session closed"); } catch {}
+            this.clients.delete(old);
         }
-        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+    }
+
+    // 3️⃣ Set idtarget untuk ws baru
+    ws.idtarget = newId;
+    this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
+
+    // 4️⃣ Restore seat lama jika ada
+    const restored = this.restoreSeatForReconnect(ws, newId);
+    if (restored) {
+        // Seat lama dipulihkan, tidak perlu join room baru
         break;
-      }
+    }
+
+    // 5️⃣ Kalau tidak ada seat lama, user akan join room default nanti
+    break;
+}
+
 
      case "checkReconnect": {
     const idtarget = data[1];
@@ -542,6 +563,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
