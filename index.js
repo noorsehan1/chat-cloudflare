@@ -363,21 +363,42 @@ export class ChatServer {
         break;
       }
 
-      case "joinRoom": {
-        const newRoom = data[1];
-        if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
-        if (ws.idtarget) this.removeAllSeatsById(ws.idtarget); // behavior: joining new room removes previous seats
-        ws.roomname = newRoom;
-        const seatMap = this.roomSeats.get(newRoom);
-        const foundSeat = this.lockSeat(newRoom, ws);
-        if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
-        ws.numkursi = new Set([foundSeat]);
-        this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-        if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-        this.sendAllStateTo(ws, newRoom);
-        this.broadcastRoomUserCount(newRoom);
-        break;
-      }
+     case "joinRoom": {
+  const newRoom = data[1];
+  if (!roomList.includes(newRoom)) 
+    return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
+
+  const seatMap = this.roomSeats.get(newRoom);
+
+  // Cari kursi lama jika reconnect
+  let foundSeat = null;
+  if (ws.idtarget && this.userToSeat.has(ws.idtarget)) {
+    const seatInfo = this.userToSeat.get(ws.idtarget);
+    if (seatInfo.room === newRoom) {
+      // kursi lama masih ada, pakai kursi ini
+      foundSeat = seatInfo.seat;
+    }
+  }
+
+  // Jika belum ada kursi, lock kursi baru
+  if (!foundSeat) {
+    foundSeat = this.lockSeat(newRoom, ws);
+    if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
+  }
+
+  ws.numkursi = new Set([foundSeat]);
+  this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+  
+  if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+
+  // Kirim semua state ke client: kursi & point
+  this.sendAllStateTo(ws, newRoom);
+
+  // Broadcast jumlah user di room
+  this.broadcastRoomUserCount(newRoom);
+  break;
+}
+
 
       case "chat": {
         const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
@@ -510,3 +531,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
