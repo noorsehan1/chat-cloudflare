@@ -368,34 +368,36 @@ export class ChatServer {
   if (!roomList.includes(newRoom)) 
     return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
 
+  ws.roomname = newRoom;
   const seatMap = this.roomSeats.get(newRoom);
 
-  // Cari kursi lama jika reconnect
+  // Cek kursi lama jika reconnect
   let foundSeat = null;
   if (ws.idtarget && this.userToSeat.has(ws.idtarget)) {
     const seatInfo = this.userToSeat.get(ws.idtarget);
-    if (seatInfo.room === newRoom) {
-      // kursi lama masih ada, pakai kursi ini
-      foundSeat = seatInfo.seat;
-    }
+    if (seatInfo.room === newRoom) foundSeat = seatInfo.seat;
   }
 
-  // Jika belum ada kursi, lock kursi baru
+  // Jika belum ada kursi (user baru), lock kursi baru
   if (!foundSeat) {
     foundSeat = this.lockSeat(newRoom, ws);
-    if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
+    if (!foundSeat) return this.safeSend(ws, ["roomFull", newRoom]);
   }
 
+  // Update ws.numkursi
   ws.numkursi = new Set([foundSeat]);
+
+  // Simpan di userToSeat jika belum ada
+  if (ws.idtarget) {
+    this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+  }
+
+  // Kirim feedback ke client
   this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-  
-  if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-
-  // Kirim semua state ke client: kursi & point
   this.sendAllStateTo(ws, newRoom);
-
-  // Broadcast jumlah user di room
   this.broadcastRoomUserCount(newRoom);
+
+  console.log(`✅ User ${ws.idtarget || "new"} joinRoom ${newRoom}, assigned seat: ${foundSeat}`);
   break;
 }
 
@@ -531,4 +533,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
