@@ -289,39 +289,35 @@ export class ChatServer {
 
       // setIdTarget: server akan coba restore kursi berdasarkan __LOCK__<id>
       // client boleh kirim optional room: ["setIdTarget", id, roomname]
-    case "setIdTarget": {
+   case "setIdTarget": {
   const newId = data[1];
   const maybeRoom = (data.length > 2 && data[2] !== null) ? data[2] : null;
 
-  // Jangan cleanup dulu — kita coba restore dulu
   ws.idtarget = newId;
-
   let restored = false;
   const now = Date.now();
+  const RECONNECT_LOCK_MS = 69000; // 69 detik batas reconnect
 
-  // Jika client kirim preferensi room, cek room itu dulu
+  // 🔍 Cek preferensi room lebih dulu
   if (maybeRoom && this.roomSeats.has(maybeRoom)) {
     const seatMap = this.roomSeats.get(maybeRoom);
     for (const [seat, info] of seatMap) {
       if (info.namauser === "__LOCK__" + newId) {
-        // Cek apakah masih dalam waktu lock
-        if (info.lockTime && now - info.lockTime < LOCK_DURATION_MS) {
-          // Restore kursi
+        if (info.lockTime && now - info.lockTime < RECONNECT_LOCK_MS) {
+          // ✅ Restore kursi tanpa efek join ulang
           info.namauser = newId;
           info.lockTime = undefined;
 
           ws.roomname = maybeRoom;
           ws.numkursi = new Set([seat]);
-
           this.userToSeat.set(newId, { room: maybeRoom, seat });
 
-          this.safeSend(ws, ["numberKursiSaya", seat]);
+          // kirim state room dan update count
           this.sendAllStateTo(ws, maybeRoom);
           this.broadcastRoomUserCount(maybeRoom);
-
           restored = true;
         } else {
-          // Lock sudah kadaluarsa — reset kursi
+          // 🗑️ Lock kadaluarsa
           Object.assign(info, createEmptySeat());
         }
         break;
@@ -329,29 +325,23 @@ export class ChatServer {
     }
   }
 
-  // Jika belum restore, scan semua room
+  // 🔁 Kalau belum ditemukan, cek semua room
   if (!restored) {
     for (const [room, seatMap] of this.roomSeats) {
       for (const [seat, info] of seatMap) {
         if (info.namauser === "__LOCK__" + newId) {
-          // Cek apakah masih dalam waktu lock
-          if (info.lockTime && now - info.lockTime < LOCK_DURATION_MS) {
-            // Restore kursi
+          if (info.lockTime && now - info.lockTime < RECONNECT_LOCK_MS) {
             info.namauser = newId;
             info.lockTime = undefined;
 
             ws.roomname = room;
             ws.numkursi = new Set([seat]);
-
             this.userToSeat.set(newId, { room, seat });
 
-            this.safeSend(ws, ["numberKursiSaya", seat]);
             this.sendAllStateTo(ws, room);
             this.broadcastRoomUserCount(room);
-
             restored = true;
           } else {
-            // Lock kadaluarsa — reset kursi
             Object.assign(info, createEmptySeat());
           }
           break;
@@ -361,17 +351,15 @@ export class ChatServer {
     }
   }
 
-  // Setelah restore sukses, baru bersihkan koneksi lama jika ada
+  // 🧹 Bersihkan koneksi lama setelah restore
   if (restored) {
     this.cleanupClientById(newId);
-  }
-
-  // Jika gagal restore => minta client joinRoom lagi
-  if (!restored) {
+  } else {
+    // ⛔ Tidak bisa restore, suruh join lagi
     this.safeSend(ws, ["needJoinRoomAgain"]);
   }
 
-  // Kirim private message buffer jika ada
+  // 🔔 Kirim buffer pesan privat kalau ada
   if (this.privateMessageBuffer.has(newId)) {
     for (const msg of this.privateMessageBuffer.get(newId)) this.safeSend(ws, msg);
     this.privateMessageBuffer.delete(newId);
@@ -379,6 +367,7 @@ export class ChatServer {
 
   break;
 }
+
 
 
       case "sendnotif": {
@@ -633,3 +622,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
