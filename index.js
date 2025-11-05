@@ -1,4 +1,4 @@
-// ChatServer Durable Object (Cloudflare Workers) - FINAL COMPLETE
+// ChatServer Durable Object (Cloudflare Workers) - FINAL COMPLETE (dengan variabel waktu)
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
@@ -19,6 +19,15 @@ function createEmptySeat() {
     lockTime: undefined
   };
 }
+
+// -----------------------------
+// Waktu / interval (ubah di sini kalau mau tweak semua behavior waktu)
+// -----------------------------
+const LOCK_DURATION_MS = 60_000;            // waktu lock kursi untuk memungkinkan reconnect (default 60s)
+const CLIENT_DISCONNECT_GRACE_MS = LOCK_DURATION_MS; // waktu tunggu sebelum kursi dihapus setelah disconnect (default sama dengan LOCK_DURATION_MS)
+const TICK_INTERVAL_MS = 15 * 60 * 1000;    // interval tick untuk currentNumber
+const FLUSH_INTERVAL_MS = 100;              // interval flush buffer
+// -----------------------------
 
 export class ChatServer {
   constructor(state, env) {
@@ -42,9 +51,9 @@ export class ChatServer {
 
     this.currentNumber = 1;
     this.maxNumber = 6;
-    this.intervalMillis = 15 * 60 * 1000;
+    this.intervalMillis = TICK_INTERVAL_MS;
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
-    this._flushTimer = setInterval(() => this.periodicFlush(), 100);
+    this._flushTimer = setInterval(() => this.periodicFlush(), FLUSH_INTERVAL_MS);
 
     // LowCard manager (pastikan file lowcard.js ada dan diekspor)
     this.lowcard = new LowCardGameManager(this);
@@ -112,13 +121,13 @@ export class ChatServer {
     for (const c of Array.from(this.clients)) this.safeSend(c, ["currentNumber", this.currentNumber]);
   }
 
-  // Hapus lock yang sudah lebih dari 10 detik
+  // Hapus lock yang sudah melebihi LOCK_DURATION_MS
   cleanExpiredLocks() {
     const now = Date.now();
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
       for (const [seat, info] of seatMap) {
-        if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
+        if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > LOCK_DURATION_MS) {
           Object.assign(info, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.broadcastRoomUserCount(room);
@@ -155,9 +164,9 @@ export class ChatServer {
     if (!ws.idtarget) return null;
     const now = Date.now();
 
-    // cleanup lock yang sudah lebih dari 10 detik
+    // cleanup lock yang sudah lebih dari LOCK_DURATION_MS
     for (const [seat, info] of seatMap) {
-      if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000)
+      if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > LOCK_DURATION_MS)
         Object.assign(info, createEmptySeat());
     }
 
@@ -289,16 +298,15 @@ export class ChatServer {
 
   let restored = false;
   const now = Date.now();
-  const LOCK_DURATION = 60000; // ⏱️ kursi dikunci selama 60 detik
 
   // Jika client kirim preferensi room, cek room itu dulu
   if (maybeRoom && this.roomSeats.has(maybeRoom)) {
     const seatMap = this.roomSeats.get(maybeRoom);
     for (const [seat, info] of seatMap) {
       if (info.namauser === "__LOCK__" + newId) {
-        // ⏱️ Cek apakah masih dalam waktu lock
-        if (info.lockTime && now - info.lockTime < LOCK_DURATION) {
-          // ✅ Restore kursi
+        // Cek apakah masih dalam waktu lock
+        if (info.lockTime && now - info.lockTime < LOCK_DURATION_MS) {
+          // Restore kursi
           info.namauser = newId;
           info.lockTime = undefined;
 
@@ -313,8 +321,8 @@ export class ChatServer {
 
           restored = true;
         } else {
-          // 🔥 Lock sudah kadaluarsa — hapus
-          seatMap.delete(seat);
+          // Lock sudah kadaluarsa — reset kursi
+          Object.assign(info, createEmptySeat());
         }
         break;
       }
@@ -326,9 +334,9 @@ export class ChatServer {
     for (const [room, seatMap] of this.roomSeats) {
       for (const [seat, info] of seatMap) {
         if (info.namauser === "__LOCK__" + newId) {
-          // ⏱️ Cek apakah masih dalam waktu lock
-          if (info.lockTime && now - info.lockTime < LOCK_DURATION) {
-            // ✅ Restore kursi
+          // Cek apakah masih dalam waktu lock
+          if (info.lockTime && now - info.lockTime < LOCK_DURATION_MS) {
+            // Restore kursi
             info.namauser = newId;
             info.lockTime = undefined;
 
@@ -343,8 +351,8 @@ export class ChatServer {
 
             restored = true;
           } else {
-            // 🔥 Lock kadaluarsa — hapus
-            seatMap.delete(seat);
+            // Lock kadaluarsa — reset kursi
+            Object.assign(info, createEmptySeat());
           }
           break;
         }
@@ -573,15 +581,15 @@ export class ChatServer {
       // hapus mapping sementara; saat restore setIdTarget akan menulis mapping lagi
       this.userToSeat.delete(id);
 
-      // setelah 10 detik, jika belum reconnect, hapus kursi
+      // setelah CLIENT_DISCONNECT_GRACE_MS, jika belum reconnect, hapus kursi
       setTimeout(() => {
         const stillActiveNow = Array.from(this.clients).some(c => c.idtarget === id);
         if (!stillActiveNow) {
           this.removeAllSeatsById(id);
-          try { ws.close(4000, "User disconnected >10s"); } catch {}
+          try { ws.close(4000, `User disconnected >${Math.floor(CLIENT_DISCONNECT_GRACE_MS/1000)}s`); } catch {}
           this.clients.delete(ws);
         }
-      }, 10000);
+      }, CLIENT_DISCONNECT_GRACE_MS);
     }
 
     ws.numkursi?.clear?.();
@@ -625,4 +633,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
