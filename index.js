@@ -468,10 +468,9 @@ export class ChatServer {
 
 
 
-async fetch(request) {
+  async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || "";
-    if (upgrade.toLowerCase() !== "websocket") 
-        return new Response("Expected WebSocket", { status: 426 });
+    if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
@@ -483,33 +482,12 @@ async fetch(request) {
     ws.numkursi = new Set();
     this.clients.add(ws);
 
-    // Fungsi cleanup yang aman
-    const cleanup = () => {
-        if (ws.idtarget) {
-            // Bersihkan semua WS dengan idtarget yang sama
-            this.cleanupClientById(ws.idtarget);
-        }
-        // Selalu cleanup WS ini juga
-        this.cleanupClient(ws);
-    };
-
-    // Event message
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-
-    // Event close
-    ws.addEventListener("close", () => {
-        cleanup();
-    });
-
-    // Event error
-    ws.addEventListener("error", () => {
-        try {
-            ws.send(JSON.stringify(["disconnected", "WebSocket error occurred"]));
-        } catch {}
-        cleanup();
-    });
+    ws.addEventListener("close", () => this.cleanupClient(ws));
+    ws.addEventListener("error", () => this.cleanupClient(ws));
 
     return new Response(null, { status: 101, webSocket: client });
+  }
 }
 
   
@@ -527,6 +505,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
