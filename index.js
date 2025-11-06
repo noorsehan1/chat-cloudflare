@@ -53,7 +53,7 @@ export class ChatServer {
     // offline user & timers
     this.offlineUsers = new Map();
     this.offlineTimers = new Map();
-    this.OFFLINE_TIMEOUT_MS = 5 * 60 * 1000;
+    this.OFFLINE_TIMEOUT_MS = 30 * 1000;
 
     // ping/pong 1 menit
     this.PING_INTERVAL = 60 * 1000;
@@ -503,3 +503,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
