@@ -266,56 +266,40 @@ export class ChatServer {
     switch (evt) {
 
         
-      case "setIdTarget": {
+     case "setIdTarget": {
     const newId = data[1];
-
-    // Hapus client lama yang sama ID untuk menghindari duplicate
     this.cleanupClientById(newId);
-
-    // Batalkan timer offline jika ada
-    if (this.offlineUsers.has(newId)) this.cancelOfflineRemoval(newId);
-
     ws.idtarget = newId;
 
-    // Kirim private messages yang tertunda
-    if (this.privateMessageBuffer.has(ws.idtarget)) {
-        for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
-        this.privateMessageBuffer.delete(ws.idtarget);
-    }
+    // Restore kursi lama jika ada
+    const offline = this.offlineUsers.get(newId);
+    if (offline) {
+        const { roomname, seats } = offline;
+        ws.roomname = roomname;
+        ws.numkursi = new Set(seats);
 
-    // Cek apakah user sempat offline dan punya kursi sebelumnya
-    if (this.offlineUsers.has(newId)) {
-        const saved = this.offlineUsers.get(newId);
-        const { roomname } = saved;
-        const seatInfo = this.userToSeat.get(newId);
-
-        if (roomname && seatInfo) {
-            const seatMap = this.roomSeats.get(roomname);
-            const { seat } = seatInfo;
-            if (seatMap && seatMap.has(seat)) {
-                // Pastikan kursi lama tetap untuk user
-                const oldSeat = seatMap.get(seat);
-                if (oldSeat.namauser === "" || oldSeat.namauser.startsWith("__LOCK__")) {
-                    oldSeat.namauser = newId;
-                }
-                // Restore points lama tetap ada
-                // Semua points akan dikirim oleh sendAllStateTo
+        const seatMap = this.roomSeats.get(roomname);
+        for (const s of seats) {
+            const info = seatMap.get(s);
+            if (info.namauser === "" || info.namauser.startsWith("__LOCK__")) {
+                info.namauser = newId;
             }
-            ws.roomname = roomname;
-            ws.numkursi = new Set([seat]);
-            this.userToSeat.set(newId, { room: roomname, seat });
-            this.sendAllStateTo(ws, roomname); // Kirim points & kursi
-            this.broadcastRoomUserCount(roomname);
         }
+
+        // Kirim nomor kursi ke client
+        for (const s of seats) this.safeSend(ws, ["numberKursiSaya", s]);
+
+        // Kirim semua points & state kursi
+        this.sendAllStateTo(ws, roomname);
+        this.broadcastRoomUserCount(roomname);
+
+        // Hapus dari offline
         this.offlineUsers.delete(newId);
-    } else if (ws.roomname) {
-        // Jika sudah punya room aktif, kirim semua state
-        this.sendAllStateTo(ws, ws.roomname);
-        this.broadcastRoomUserCount(ws.roomname);
     }
 
     break;
 }
+
 
 
       case "sendnotif": {
@@ -481,20 +465,26 @@ export class ChatServer {
     }
   }
 
-  cleanupClient(ws) {
+ cleanupClient(ws) {
     const id = ws.idtarget;
     if (!id) { this.clients.delete(ws); return; }
-    const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
-    if (stillActive) { this.clients.delete(ws); return; }
 
-    this.offlineUsers.set(id, { roomname: ws.roomname, timestamp: Date.now() });
-    this.scheduleOfflineRemoval(id);
+    // Simpan kursi sementara
+    if (ws.roomname && ws.numkursi && ws.numkursi.size > 0) {
+        this.offlineUsers.set(id, {
+            roomname: ws.roomname,
+            seats: Array.from(ws.numkursi),
+            timestamp: Date.now()
+        });
+        this.scheduleOfflineRemoval(id);
+    }
 
     ws.numkursi?.clear?.();
     this.clients.delete(ws);
     ws.roomname = undefined;
     ws.idtarget = undefined;
-  }
+}
+
 
   cleanupondestroy(ws) {
     // langsung hapus tanpa simpan offline
@@ -545,6 +535,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
