@@ -271,7 +271,13 @@ export class ChatServer {
     this.cleanupClientById(newId);
     ws.idtarget = newId;
 
-    // Restore kursi lama jika ada
+    // Kirim private messages yang tertunda
+    if (this.privateMessageBuffer.has(ws.idtarget)) {
+        for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
+        this.privateMessageBuffer.delete(ws.idtarget);
+    }
+
+    // Restore kursi & points lama tapi jangan kirim numberKursiSaya
     const offline = this.offlineUsers.get(newId);
     if (offline) {
         const { roomname, seats } = offline;
@@ -286,9 +292,6 @@ export class ChatServer {
             }
         }
 
-        // Kirim nomor kursi ke client
-        for (const s of seats) this.safeSend(ws, ["numberKursiSaya", s]);
-
         // Kirim semua points & state kursi
         this.sendAllStateTo(ws, roomname);
         this.broadcastRoomUserCount(roomname);
@@ -299,6 +302,7 @@ export class ChatServer {
 
     break;
 }
+
 
 
 
@@ -535,6 +539,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
