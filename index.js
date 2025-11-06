@@ -54,7 +54,7 @@ export class ChatServer {
     // Penyimpanan untuk user yang sementara disconnect (kursi tidak dihapus langsung)
     this.offlineUsers = new Map();
     this.offlineTimers = new Map();
-    this.OFFLINE_TIMEOUT_MS = 5 * 60 * 1000;
+    this.OFFLINE_TIMEOUT_MS = 1 * 60 * 1000;
   }
 
   safeSend(ws, arr) {
@@ -500,4 +500,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
