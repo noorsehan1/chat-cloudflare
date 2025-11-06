@@ -287,7 +287,6 @@ export class ChatServer {
         this.cleanupClientById(newId);
         if (this.offlineUsers.has(newId)) this.cancelOfflineRemoval(newId);
         ws.idtarget = newId;
-        this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
         if (this.privateMessageBuffer.has(ws.idtarget)) {
           for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
           this.privateMessageBuffer.delete(ws.idtarget);
@@ -503,4 +502,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
