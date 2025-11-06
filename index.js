@@ -282,6 +282,17 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
+
+      
+
+
+case "onDestroy": {
+  this.cleanupondestroy(ws); // langsung bersihkan WS & kursinya
+  break;
+}
+
+
+        
       case "setIdTarget": {
         const newId = data[1];
         this.cleanupClientById(newId);
@@ -452,6 +463,27 @@ export class ChatServer {
     }
   }
 
+  cleanupondestroy(ws) {
+    const id = ws.idtarget;
+
+    if (id) {
+        this.removeAllSeatsById(id); // Hapus kursi langsung
+    }
+
+    // Bersihkan offline timers & users
+    if (id && this.offlineTimers.has(id)) {
+        clearTimeout(this.offlineTimers.get(id));
+        this.offlineTimers.delete(id);
+    }
+    if (id && this.offlineUsers.has(id)) this.offlineUsers.delete(id);
+
+    ws.numkursi?.clear?.();
+    this.clients.delete(ws);
+    ws.roomname = undefined;
+    ws.idtarget = undefined;
+}
+
+
   cleanupClient(ws) {
     const id = ws.idtarget;
     if (!id) { this.clients.delete(ws); return; }
@@ -484,7 +516,7 @@ export class ChatServer {
     this.clients.add(ws);
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-    ws.addEventListener("close", () => this.cleanupClient(ws));
+    ws.addEventListener("close", () => this.cleanupondestroy(ws) );
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -502,5 +534,6 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
