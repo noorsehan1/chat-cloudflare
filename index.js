@@ -54,7 +54,7 @@ export class ChatServer {
     // Penyimpanan untuk user yang sementara disconnect (kursi tidak dihapus langsung)
     this.offlineUsers = new Map();
     this.offlineTimers = new Map();
-    this.OFFLINE_TIMEOUT_MS = 3 * 60 * 1000;
+    this.OFFLINE_TIMEOUT_MS = 1 * 60 * 1000;
   }
 
   safeSend(ws, arr) {
@@ -137,6 +137,7 @@ export class ChatServer {
     this.flushKursiUpdates();
     this.flushChatBuffer();
     this.cleanExpiredLocks();
+    this.checkOfflineUsers(); // 🔹 pastikan ini ada
 
     for (const [id, msgs] of Array.from(this.privateMessageBuffer)) {
       for (const c of this.clients) {
@@ -148,6 +149,18 @@ export class ChatServer {
       }
     }
   }
+
+  checkOfflineUsers() {
+  const now = Date.now();
+  for (const [id, saved] of this.offlineUsers.entries()) {
+    if (now - saved.timestamp >= this.OFFLINE_TIMEOUT_MS) {
+      this.offlineUsers.delete(id);
+      this.offlineTimers.delete(id);
+      this.removeAllSeatsById(id);
+    }
+  }
+}
+
 
   handleGetAllRoomsUserCount(ws) {
     const allCounts = this.getJumlahRoom();
@@ -522,7 +535,7 @@ export class ChatServer {
     this.clients.add(ws);
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-    ws.addEventListener("close", () => this.cleanupondestroy(ws));
+    ws.addEventListener("close", () => this.cleanupClient(ws));   // 🔹 tambahan
     ws.addEventListener("error", () => this.cleanupClient(ws));
 
     return new Response(null, { status: 101, webSocket: client });
@@ -544,6 +557,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
