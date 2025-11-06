@@ -481,8 +481,15 @@ export class ChatServer {
     this.clients.add(ws);
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-    ws.addEventListener("close", () => this.cleanupClient(ws));
+    ws.addEventListener("close", () => {
+    try {
+        ws.send(JSON.stringify(["disconnected", "WebSocket closed"]));
+    } catch {}
+    this.cleanupClient(ws);
+});
    ws.addEventListener("error", () => {
+         this.clients.delete(ws);
+
     try {
         ws.send(JSON.stringify(["disconnected", "WebSocket error occurred"]));
     } catch {}
@@ -506,6 +513,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
