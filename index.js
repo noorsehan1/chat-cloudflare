@@ -264,19 +264,59 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
-      case "setIdTarget": {
-        const newId = data[1];
-        this.cleanupClientById(newId);
-        if (this.offlineUsers.has(newId)) this.cancelOfflineRemoval(newId);
-        ws.idtarget = newId;
 
-        if (this.privateMessageBuffer.has(ws.idtarget)) {
-          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
-          this.privateMessageBuffer.delete(ws.idtarget);
+        
+      case "setIdTarget": {
+    const newId = data[1];
+
+    // Hapus client lama yang sama ID untuk menghindari duplicate
+    this.cleanupClientById(newId);
+
+    // Batalkan timer offline jika ada
+    if (this.offlineUsers.has(newId)) this.cancelOfflineRemoval(newId);
+
+    ws.idtarget = newId;
+
+    // Kirim private messages yang tertunda
+    if (this.privateMessageBuffer.has(ws.idtarget)) {
+        for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
+        this.privateMessageBuffer.delete(ws.idtarget);
+    }
+
+    // Cek apakah user sempat offline dan punya kursi sebelumnya
+    if (this.offlineUsers.has(newId)) {
+        const saved = this.offlineUsers.get(newId);
+        const { roomname } = saved;
+        const seatInfo = this.userToSeat.get(newId);
+
+        if (roomname && seatInfo) {
+            const seatMap = this.roomSeats.get(roomname);
+            const { seat } = seatInfo;
+            if (seatMap && seatMap.has(seat)) {
+                // Pastikan kursi lama tetap untuk user
+                const oldSeat = seatMap.get(seat);
+                if (oldSeat.namauser === "" || oldSeat.namauser.startsWith("__LOCK__")) {
+                    oldSeat.namauser = newId;
+                }
+                // Restore points lama tetap ada
+                // Semua points akan dikirim oleh sendAllStateTo
+            }
+            ws.roomname = roomname;
+            ws.numkursi = new Set([seat]);
+            this.userToSeat.set(newId, { room: roomname, seat });
+            this.sendAllStateTo(ws, roomname); // Kirim points & kursi
+            this.broadcastRoomUserCount(roomname);
         }
-        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-        break;
-      }
+        this.offlineUsers.delete(newId);
+    } else if (ws.roomname) {
+        // Jika sudah punya room aktif, kirim semua state
+        this.sendAllStateTo(ws, ws.roomname);
+        this.broadcastRoomUserCount(ws.roomname);
+    }
+
+    break;
+}
+
 
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
@@ -505,6 +545,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
