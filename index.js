@@ -1,5 +1,6 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi lengkap: lock kursi aman + ping/pong 1 menit + semua case utuh
+// Versi lengkap: lock kursi aman (tidak menimpa kursi yang sudah terisi)
+// Filter kata dilarang dihapus sesuai permintaan
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -47,18 +48,13 @@ export class ChatServer {
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
 
-    // Low card game manager
+    // Low card game manager terintegrasi
     this.lowcard = new LowCardGameManager(this);
 
-    // offline user & timers
+    // Penyimpanan untuk user yang sementara disconnect (kursi tidak dihapus langsung)
     this.offlineUsers = new Map();
     this.offlineTimers = new Map();
-    this.OFFLINE_TIMEOUT_MS = 30 * 1000;
-
-    // ping/pong 1 menit
-    this.PING_INTERVAL = 60 * 1000;
-    this.pingTimers = new Map(); // ws -> timeout
-    setInterval(() => this.sendPingToAll(), this.PING_INTERVAL);
+    this.OFFLINE_TIMEOUT_MS = 5 * 60 * 1000;
   }
 
   safeSend(ws, arr) {
@@ -246,7 +242,6 @@ export class ChatServer {
         this.offlineUsers.delete(idtarget);
         this.offlineTimers.delete(idtarget);
         this.removeAllSeatsById(idtarget);
-        try { console.log(`🗑️ Offline timeout: kursi ${idtarget} dihapus`); } catch {}
       } else {
         this.offlineTimers.delete(idtarget);
       }
@@ -262,19 +257,6 @@ export class ChatServer {
     if (this.offlineUsers.has(idtarget)) this.offlineUsers.delete(idtarget);
   }
 
-  sendPingToAll() {
-    const now = Date.now();
-    for (const ws of this.clients) {
-      if (!ws.lastPong) ws.lastPong = now;
-      // Jika lebih dari 2x interval tanpa pong, hapus user
-      if (now - ws.lastPong > this.PING_INTERVAL * 2 && ws.idtarget) {
-        this.cleanupClient(ws);
-        continue;
-      }
-      this.safeSend(ws, ["ping"]);
-    }
-  }
-
   handleMessage(ws, raw) {
     let data;
     try { data = JSON.parse(raw); } catch { return this.safeSend(ws, ["error", "Invalid JSON"]); }
@@ -282,22 +264,13 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
-
-      
-
-
-case "onDestroy": {
-  this.cleanupondestroy(ws); // langsung bersihkan WS & kursinya
-  break;
-}
-
-
-        
       case "setIdTarget": {
         const newId = data[1];
         this.cleanupClientById(newId);
         if (this.offlineUsers.has(newId)) this.cancelOfflineRemoval(newId);
         ws.idtarget = newId;
+        this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
+
         if (this.privateMessageBuffer.has(ws.idtarget)) {
           for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
           this.privateMessageBuffer.delete(ws.idtarget);
@@ -306,16 +279,11 @@ case "onDestroy": {
         break;
       }
 
-      case "ping": this.safeSend(ws, ["pong"]); break;
-      case "pong": ws.lastPong = Date.now(); break;
-
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
         const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
         let delivered = false;
-        for (const c of this.clients) {
-          if (c.idtarget === idtarget) { this.safeSend(c, notif); delivered = true; }
-        }
+        for (const c of this.clients) if (c.idtarget === idtarget) { this.safeSend(c, notif); delivered = true; }
         if (!delivered) {
           if (!this.privateMessageBuffer.has(idtarget)) this.privateMessageBuffer.set(idtarget, []);
           this.privateMessageBuffer.get(idtarget).push(notif);
@@ -329,9 +297,7 @@ case "onDestroy": {
         const out = ["private", idt, url, msg, ts, sender];
         this.safeSend(ws, out);
         let delivered = false;
-        for (const c of this.clients) {
-          if (c.idtarget === idt) { this.safeSend(c, out); delivered = true; }
-        }
+        for (const c of this.clients) if (c.idtarget === idt) { this.safeSend(c, out); delivered = true; }
         if (!delivered) {
           if (!this.privateMessageBuffer.has(idt)) this.privateMessageBuffer.set(idt, []);
           this.privateMessageBuffer.get(idt).push(out);
@@ -343,6 +309,7 @@ case "onDestroy": {
       case "isUserOnline": {
         const username = data[1];
         const tanda = data[2] ?? "";
+
         const activeSockets = Array.from(this.clients).filter(c => c.idtarget === username);
         const online = activeSockets.length > 0;
         this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
@@ -350,8 +317,8 @@ case "onDestroy": {
         if (activeSockets.length > 1) {
           const newest = activeSockets[activeSockets.length - 1];
           const oldSockets = activeSockets.slice(0, -1);
-          const userSeatInfo = this.userToSeat.get(username);
 
+          const userSeatInfo = this.userToSeat.get(username);
           if (userSeatInfo) {
             const { room, seat } = userSeatInfo;
             const seatMap = this.roomSeats.get(room);
@@ -364,15 +331,26 @@ case "onDestroy": {
           }
 
           for (const old of oldSockets) {
-            try { old.close(4000, "Duplicate login — old session closed"); this.clients.delete(old); } catch {}
+            try {
+              old.close(4000, "Duplicate login — old session closed");
+              this.clients.delete(old);
+            } catch {}
           }
         }
         break;
       }
 
-      case "getAllRoomsUserCount": this.handleGetAllRoomsUserCount(ws); break;
-      case "getCurrentNumber": this.safeSend(ws, ["currentNumber", this.currentNumber]); break;
-      case "getAllOnlineUsers": this.safeSend(ws, ["allOnlineUsers", this.getAllOnlineUsers()]); break;
+      case "getAllRoomsUserCount":
+        this.handleGetAllRoomsUserCount(ws);
+        break;
+
+      case "getCurrentNumber":
+        this.safeSend(ws, ["currentNumber", this.currentNumber]);
+        break;
+
+      case "getAllOnlineUsers":
+        this.safeSend(ws, ["allOnlineUsers", this.getAllOnlineUsers()]);
+        break;
 
       case "getRoomOnlineUsers": {
         const roomName = data[1];
@@ -386,6 +364,7 @@ case "onDestroy": {
         if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
         if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
         ws.roomname = newRoom;
+        const seatMap = this.roomSeats.get(newRoom);
         const foundSeat = this.lockSeat(newRoom, ws);
         if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
         ws.numkursi = new Set([foundSeat]);
@@ -463,37 +442,25 @@ case "onDestroy": {
     }
   }
 
-  cleanupondestroy(ws) {
-    const id = ws.idtarget;
-
-    if (id) {
-        this.removeAllSeatsById(id); // Hapus kursi langsung
-    }
-
-    // Bersihkan offline timers & users
-    if (id && this.offlineTimers.has(id)) {
-        clearTimeout(this.offlineTimers.get(id));
-        this.offlineTimers.delete(id);
-    }
-    if (id && this.offlineUsers.has(id)) this.offlineUsers.delete(id);
-
-    ws.numkursi?.clear?.();
-    this.clients.delete(ws);
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-}
-
-
   cleanupClient(ws) {
     const id = ws.idtarget;
     if (!id) { this.clients.delete(ws); return; }
-
     const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
     if (stillActive) { this.clients.delete(ws); return; }
 
     this.offlineUsers.set(id, { roomname: ws.roomname, timestamp: Date.now() });
     this.scheduleOfflineRemoval(id);
 
+    ws.numkursi?.clear?.();
+    this.clients.delete(ws);
+    ws.roomname = undefined;
+    ws.idtarget = undefined;
+  }
+
+  cleanupondestroy(ws) {
+    // langsung hapus tanpa simpan offline
+    const id = ws.idtarget;
+    if (id) this.removeAllSeatsById(id);
     ws.numkursi?.clear?.();
     this.clients.delete(ws);
     ws.roomname = undefined;
@@ -512,11 +479,11 @@ case "onDestroy": {
     ws.roomname = undefined;
     ws.idtarget = undefined;
     ws.numkursi = new Set();
-    ws.lastPong = Date.now();
     this.clients.add(ws);
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-    ws.addEventListener("close", () => this.cleanupondestroy(ws) );
+    ws.addEventListener("close", () => this.cleanupClient(ws));
+    ws.addEventListener("error", () => this.cleanupClient(ws));
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -534,6 +501,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
-
