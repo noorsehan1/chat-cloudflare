@@ -266,42 +266,47 @@ export class ChatServer {
     switch (evt) {
 
         
-     case "setIdTarget": {
-    const newId = data[1];
-    this.cleanupClientById(newId);
-    ws.idtarget = newId;
+    case "setIdTarget": {
+  const newId = data[1];
+  this.cleanupClientById(newId);
+  ws.idtarget = newId;
 
-    // Kirim private messages yang tertunda
-    if (this.privateMessageBuffer.has(ws.idtarget)) {
-        for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
-        this.privateMessageBuffer.delete(ws.idtarget);
+  // Kirim private messages yang tertunda
+  if (this.privateMessageBuffer.has(ws.idtarget)) {
+    for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
+    this.privateMessageBuffer.delete(ws.idtarget);
+  }
+
+  // Cek apakah user masih punya data offline
+  const offline = this.offlineUsers.get(newId);
+  if (offline) {
+    // === Restore kursi lama ===
+    const { roomname, seats } = offline;
+    ws.roomname = roomname;
+    ws.numkursi = new Set(seats);
+
+    const seatMap = this.roomSeats.get(roomname);
+    for (const s of seats) {
+      const info = seatMap.get(s);
+      if (info.namauser === "" || info.namauser.startsWith("__LOCK__")) {
+        info.namauser = newId;
+      }
     }
 
-    // Restore kursi & points lama tapi jangan kirim numberKursiSaya
-    const offline = this.offlineUsers.get(newId);
-    if (offline) {
-        const { roomname, seats } = offline;
-        ws.roomname = roomname;
-        ws.numkursi = new Set(seats);
+    // Kirim semua points & state kursi
+    this.sendAllStateTo(ws, roomname);
+    this.broadcastRoomUserCount(roomname);
 
-        const seatMap = this.roomSeats.get(roomname);
-        for (const s of seats) {
-            const info = seatMap.get(s);
-            if (info.namauser === "" || info.namauser.startsWith("__LOCK__")) {
-                info.namauser = newId;
-            }
-        }
+    // Hapus dari daftar offline
+    this.offlineUsers.delete(newId);
+  } else {
+    // === Tidak ada data offline, minta client joinRoom lagi ===
+    this.safeSend(ws, ["needJoinRoom"]);
+  }
 
-        // Kirim semua points & state kursi
-        this.sendAllStateTo(ws, roomname);
-        this.broadcastRoomUserCount(roomname);
-
-        // Hapus dari offline
-        this.offlineUsers.delete(newId);
-    }
-
-    break;
+  break;
 }
+
 
 
 
@@ -539,6 +544,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
