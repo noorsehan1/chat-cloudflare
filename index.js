@@ -382,7 +382,48 @@ export class ChatServer {
       this.pingTimeouts.delete(idtarget);
     }
   }
+// Buat satu fungsi cleanup universal
+universalCleanup(ws, immediate = true) {
+  const id = ws.idtarget;
+  
+  if (immediate) {
+    // Langsung remove semua
+    this.removeAllSeatsById(id);
+    this.cancelOfflineRemoval(id);
+    this.offlineUsers.delete(id);
+  } else {
+    // Simpan untuk reconnect (opsional)
+    if (ws.roomname) {
+      this.offlineUsers.set(id, {
+        roomname: ws.roomname,
+        seats: ws.numkursi ? Array.from(ws.numkursi) : [],
+        timestamp: Date.now()
+      });
+      this.scheduleOfflineRemoval(id);
+    }
+  }
+  
+  // Cleanup WebSocket data
+  ws.numkursi?.clear?.();
+  this.clients.delete(ws);
+  this.lastActivity.delete(id);
+  this.pingTimeouts.delete(id);
+  
+  // Broadcast update
+  if (ws.roomname) {
+    this.broadcastRoomUserCount(ws.roomname);
+  }
+}
 
+// Lalu gunakan di semua tempat:
+ws.addEventListener("close", () => {
+  this.universalCleanup(ws, true); // immediate cleanup
+});
+
+case "onDestroy": {
+  this.universalCleanup(ws, true); // immediate cleanup
+  break;
+}
   // ⚠️ PERBAIKAN PENTING: cleanupClient yang benar
   cleanupClient(ws) {
     const id = ws.idtarget;
@@ -499,8 +540,8 @@ export class ChatServer {
 
     switch (evt) {
  case "onDestroy": {
-      // ⚠️ Handle onDestroy message - cleanup yang proper
-      this.cleanupondestroy(ws);
+    
+      this.universalCleanup(ws, true); 
       break;
     }
     case "setIdTarget": {
@@ -768,6 +809,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
