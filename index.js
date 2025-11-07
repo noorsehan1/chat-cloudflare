@@ -46,15 +46,15 @@ export class ChatServer {
 
     this.lowcard = new LowCardGameManager(this);
 
-    // ⚠️ SISTEM RECONNECT YANG PROPER
+    // Sistem offline yang proper
     this.offlineUsers = new Map();
     this.offlineTimers = new Map();
     this.lastActivity = new Map();
-    this.pingTimeouts = new Map(); // Untuk track ping timeout per user
+    this.pingTimeouts = new Map();
     
-    this.OFFLINE_TIMEOUT_MS = 30 * 1000;    // 30 detik untuk hapus kursi
-    this.PING_TIMEOUT_MS = 30 * 1000;       // 30 detik timeout ping
-    this.HEARTBEAT_INTERVAL = 15 * 1000;    // 15 detik interval ping
+    this.OFFLINE_TIMEOUT_MS = 30 * 1000;
+    this.PING_TIMEOUT_MS = 30 * 1000;
+    this.HEARTBEAT_INTERVAL = 15 * 1000;
   }
 
   safeSend(ws, arr) {
@@ -72,27 +72,21 @@ export class ChatServer {
     return false;
   }
 
-  // ⚠️ METHOD BARU: Kirim ping ke client
   sendPingToClient(ws) {
     if (ws.idtarget && ws.readyState === 1) {
       const pingSent = this.safeSend(ws, ["ping", ws.idtarget]);
       if (pingSent) {
-        // Set timeout untuk menunggu pong
         this.setPingTimeout(ws.idtarget);
       }
     }
   }
 
-  // ⚠️ METHOD BARU: Set timeout untuk pong
   setPingTimeout(userId) {
-    // Clear existing timeout
     if (this.pingTimeouts.has(userId)) {
       clearTimeout(this.pingTimeouts.get(userId));
     }
 
-    // Set new timeout
     const timeoutId = setTimeout(() => {
-      // Jika timeout tercapai, user dianggap offline
       const userWs = Array.from(this.clients).find(c => c.idtarget === userId);
       if (userWs) {
         this.handlePingTimeout(userWs);
@@ -103,44 +97,25 @@ export class ChatServer {
     this.pingTimeouts.set(userId, timeoutId);
   }
 
-  // ⚠️ METHOD BARU: Handle ketika ping timeout
   handlePingTimeout(ws) {
     const userId = ws.idtarget;
     if (!userId) return;
 
-    // Kirim event ke client bahwa dia perlu reconnect
     try {
       if (ws.readyState === 1) {
         ws.send(JSON.stringify(["needReconnect", "Ping timeout - please reconnect"]));
       }
     } catch (e) {}
 
-    // Simpan state untuk reconnect nanti
-    if (ws.roomname && ws.numkursi && ws.numkursi.size > 0) {
-      this.offlineUsers.set(userId, {
-        roomname: ws.roomname,
-        seats: Array.from(ws.numkursi),
-        timestamp: Date.now()
-      });
-      this.scheduleOfflineRemoval(userId);
-    }
-
-    // Close connection untuk memaksa reconnect
-    try {
-      ws.close(4001, "Ping timeout");
-    } catch (e) {}
-
     this.cleanupClient(ws);
   }
 
-  // ⚠️ METHOD BARU: Heartbeat system untuk semua connected clients
   heartbeat() {
     const now = Date.now();
     for (const ws of Array.from(this.clients)) {
       if (ws.readyState === 1 && ws.idtarget) {
         const lastActive = this.lastActivity.get(ws.idtarget) || 0;
         
-        // Jika tidak ada activity dalam HEARTBEAT_INTERVAL, kirim ping
         if (now - lastActive >= this.HEARTBEAT_INTERVAL) {
           this.sendPingToClient(ws);
         }
@@ -212,13 +187,11 @@ export class ChatServer {
   }
 
   periodicFlush() {
-    // ⚠️ JANGAN cleanup WebSocket di sini - biarkan heartbeat system yang handle
-
+    // ⚠️ TIDAK cleanup WebSocket di sini - biarkan event yang handle
     this.flushKursiUpdates();
     this.flushChatBuffer();
     this.cleanExpiredLocks();
     
-    // ⚠️ UTAMA: Check inactive users dan heartbeat
     this.heartbeat();
     this.checkInactiveUsers();
     this.checkOfflineUsers();
@@ -239,7 +212,6 @@ export class ChatServer {
     const toRemove = [];
 
     for (const [id, lastActive] of this.lastActivity.entries()) {
-      // Jika tidak ada activity dalam waktu lama (lebih dari ping timeout)
       if (now - lastActive >= this.PING_TIMEOUT_MS + 5000) {
         toRemove.push(id);
       }
@@ -250,11 +222,9 @@ export class ChatServer {
     }
   }
 
-  // ⚠️ METHOD BARU: Paksa user untuk reconnect
   forceUserReconnect(userId) {
     const userWs = Array.from(this.clients).find(c => c.idtarget === userId);
     if (userWs) {
-      // Kirim event needReconnect sebelum cleanup
       try {
         if (userWs.readyState === 1) {
           userWs.send(JSON.stringify(["needReconnect", "Inactive - please reconnect"]));
@@ -264,13 +234,10 @@ export class ChatServer {
       this.cleanupClient(userWs);
     }
 
-    // Juga hapus dari offlineUsers jika ada
     this.offlineUsers.delete(userId);
     this.offlineTimers.delete(userId);
     this.lastActivity.delete(userId);
     this.pingTimeouts.delete(userId);
-    
-    // Hapus kursi user
     this.removeAllSeatsById(userId);
   }
 
@@ -416,8 +383,51 @@ export class ChatServer {
     }
   }
 
+  // ⚠️ PERBAIKAN PENTING: cleanupClient yang benar
+  cleanupClient(ws) {
+    const id = ws.idtarget;
+    if (!id) {
+      this.clients.delete(ws);
+      return;
+    }
+
+    // ⚠️ SELALU simpan ke offlineUsers untuk reconnect
+    if (ws.roomname) {
+      this.offlineUsers.set(id, {
+        roomname: ws.roomname,
+        seats: ws.numkursi ? Array.from(ws.numkursi) : [],
+        timestamp: Date.now()
+      });
+      this.scheduleOfflineRemoval(id);
+    }
+
+    // Cleanup WebSocket data
+    ws.numkursi?.clear?.();
+    this.clients.delete(ws);
+    ws.roomname = undefined;
+    ws.idtarget = undefined;
+    
+    this.pingTimeouts.delete(id);
+  }
+
+  cleanupondestroy(ws) {
+    if (!ws) return;
+    const id = ws.idtarget;
+    if (id) {
+      this.removeAllSeatsById(id);
+      this.cancelOfflineRemoval(id);
+      this.lastActivity.delete(id);
+      this.pingTimeouts.delete(id);
+      this.userToSeat.delete(id);
+    }
+    ws.numkursi?.clear?.();
+    this.clients.delete(ws);
+    ws.roomname = undefined;
+    ws.idtarget = undefined;
+    try { ws.close(); } catch {}
+  }
+
   handleMessage(ws, raw) {
-    // Update last activity untuk SETIAP message
     if (ws.idtarget) {
       this.lastActivity.set(ws.idtarget, Date.now());
     }
@@ -434,7 +444,6 @@ export class ChatServer {
       this.cleanupClientById(newId);
       ws.idtarget = newId;
 
-      // Update last activity
       this.lastActivity.set(newId, Date.now());
 
       if (this.privateMessageBuffer.has(ws.idtarget)) {
@@ -444,7 +453,6 @@ export class ChatServer {
 
       const offline = this.offlineUsers.get(newId);
       if (offline) {
-        // ⚠️ RESTORE KURSI: User reconnect dalam 30 detik
         const { roomname, seats } = offline;
         ws.roomname = roomname;
         ws.numkursi = new Set(seats);
@@ -463,10 +471,8 @@ export class ChatServer {
         this.offlineUsers.delete(newId);
         this.cancelOfflineRemoval(newId);
         
-        // Kirim event success reconnect
         this.safeSend(ws, ["reconnectSuccess", roomname]);
       } else {
-        // ⚠️ USER RECONNECT LEWAT 30 DETIK: perlu join room lagi
         this.safeSend(ws, ["needJoinRoom", "Session expired - please join room again"]);
       }
 
@@ -474,7 +480,6 @@ export class ChatServer {
     }
 
     case "pong": {
-      // ⚠️ HANDLE PONG: Clear ping timeout
       if (ws.idtarget) {
         this.lastActivity.set(ws.idtarget, Date.now());
         if (this.pingTimeouts.has(ws.idtarget)) {
@@ -486,7 +491,6 @@ export class ChatServer {
     }
 
     case "ping": {
-      // Handle client-initiated ping
       const idtarget = data[1];
       if (idtarget) {
         this.lastActivity.set(idtarget, Date.now());
@@ -662,50 +666,6 @@ export class ChatServer {
     }
   }
 
-  cleanupClient(ws) {
-    const id = ws.idtarget;
-    if (!id) {
-      this.clients.delete(ws);
-      return;
-    }
-
-    // Simpan state untuk reconnect (dalam 30 detik)
-    if (ws.roomname && ws.numkursi && ws.numkursi.size > 0) {
-      this.offlineUsers.set(id, {
-        roomname: ws.roomname,
-        seats: Array.from(ws.numkursi),
-        timestamp: Date.now()
-      });
-      this.scheduleOfflineRemoval(id);
-    }
-
-    // Cleanup WebSocket data
-    ws.numkursi?.clear?.();
-    this.clients.delete(ws);
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-    
-    // Clear ping timeout
-    this.pingTimeouts.delete(id);
-  }
-
-  cleanupondestroy(ws) {
-    if (!ws) return;
-    const id = ws.idtarget;
-    if (id) {
-      this.removeAllSeatsById(id);
-      this.cancelOfflineRemoval(id);
-      this.lastActivity.delete(id);
-      this.pingTimeouts.delete(id);
-      this.userToSeat.delete(id);
-    }
-    ws.numkursi?.clear?.();
-    this.clients.delete(ws);
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-    try { ws.close(); } catch {}
-  }
-
   async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || "";
     if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
@@ -722,10 +682,10 @@ export class ChatServer {
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
     ws.addEventListener("close", () => {
-      this.cleanupondestroy(ws);
+      this.cleanupClient(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
     });
     ws.addEventListener("error", (e) => {
-      this.cleanupClient(ws);
+      this.cleanupClient(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
     });
 
     return new Response(null, { status: 101, webSocket: client });
