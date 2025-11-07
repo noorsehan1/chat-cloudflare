@@ -685,7 +685,7 @@ export class ChatServer {
       this.cleanupClient(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
     });
     ws.addEventListener("error", (e) => {
-      this.cleanupClient(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
+      this.cleanupondestroy(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
     });
 
     return new Response(null, { status: 101, webSocket: client });
@@ -704,3 +704,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
