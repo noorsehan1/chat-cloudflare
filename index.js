@@ -746,7 +746,7 @@ export class ChatServer {
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
     ws.addEventListener("close", () => {
-      this.cleanupClient(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
+      this.cleanupondestroy(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
     });
     ws.addEventListener("error", (e) => {
       this.cleanupClient(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
@@ -768,5 +768,6 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
