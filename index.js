@@ -415,10 +415,7 @@ universalCleanup(ws, immediate = true) {
   }
 }
 
-// Lalu gunakan di semua tempat:
-ws.addEventListener("close", () => {
-  this.universalCleanup(ws, true); // immediate cleanup
-});
+
 
 case "onDestroy": {
   this.universalCleanup(ws, true); // immediate cleanup
@@ -808,6 +805,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
