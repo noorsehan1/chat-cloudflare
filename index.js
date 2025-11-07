@@ -554,7 +554,9 @@ export class ChatServer {
       this.safeSend(ws, ["needJoinRoom", "Session expired - please join room again"]);
     }
   } else {
-    // ✅ USER BARU atau tidak ada session reconnect - langsung setIdSuccess
+      this.reconnectSessions.delete(newId);
+    this.reconnectTimeouts.delete(newId);
+    this.cleanupReconnectSession(newId); // Ini akan remove semua data terkait user
   }
   break;
 }
@@ -785,4 +787,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
