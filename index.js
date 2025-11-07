@@ -525,6 +525,12 @@ export class ChatServer {
 
    case "setIdTarget": {
   const newId = data[1];
+  
+  // ✅ BERSIHKAN DATA OFFLINE UNTUK USER INI (first-time safety)
+  this.offlineUsers.delete(newId);
+  this.cancelOfflineRemoval(newId);
+  this.removeAllSeatsById(newId);
+  
   this.cleanupClientById(newId);
   ws.idtarget = newId;
 
@@ -539,7 +545,7 @@ export class ChatServer {
   if (offline) {
     const { roomname, seats, timestamp } = offline;
     
-    // ✅ CEK APAKAH MASIH DALAM TIMEOUT WINDOW
+    // CEK APAKAH MASIH DALAM TIMEOUT WINDOW
     if (Date.now() - timestamp < this.OFFLINE_TIMEOUT_MS) {
       // Masih dalam waktu timeout - reconnect success
       ws.roomname = roomname;
@@ -564,13 +570,13 @@ export class ChatServer {
       // ❌ SUDAH LEWAT TIMEOUT - kirim needJoinRoom
       this.offlineUsers.delete(newId);
       this.cancelOfflineRemoval(newId);
-      this.removeAllSeatsById(newId); // Hapus kursi yang expired
+      this.removeAllSeatsById(newId);
       
       this.safeSend(ws, ["needJoinRoom", "Session expired - please join room again"]);
     }
   } else {
-    // ✅ USER BARU - tidak kirim apa-apa atau kirim setIdSuccess
-   
+    // ✅ USER BARU - tidak ada data offline yang tersisa
+    this.safeSend(ws, ["setIdSuccess", newId]);
   }
   break;
 }
@@ -800,4 +806,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
