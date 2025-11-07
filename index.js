@@ -1,7 +1,3 @@
-// ChatServer Durable Object (Bahasa Indonesia)
-// Versi lengkap: lock kursi aman (tidak menimpa kursi yang sudah terisi)
-// Filter kata dilarang dihapus sesuai permintaan
-
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
@@ -64,29 +60,24 @@ export class ChatServer {
       if (ws.readyState === 1) {
         ws.send(JSON.stringify(arr));
       } else if (ws.readyState === 0) {
-        // Jika belum OPEN, beri sedikit waktu; jika tetap belum OPEN, bersihkan supaya tidak zombie
+        // Jika belum OPEN, beri sedikit waktu
         setTimeout(() => {
           try {
             if (ws.readyState === 1) {
               ws.send(JSON.stringify(arr));
             } else {
-              console.log("[safeSend] ws not ready after timeout, closing", ws.idtarget);
-              try { ws.close(4001, "Timeout - not ready"); } catch {}
-              this.cleanupondestroy(ws);
+              console.log("[safeSend] ws not ready after timeout", ws.idtarget);
+              // ⚠️ PERBAIKAN: Jangan panggil cleanupondestroy, biarkan reconnect process handle
             }
           } catch (e) {
-            try { ws.close(4002, "Send error after timeout"); } catch {}
-            this.cleanupondestroy(ws);
+            // ⚠️ PERBAIKAN: Jangan panggil cleanupondestroy untuk error sementara
           }
         }, 300);
-      } else {
-        // closed or closing
-        this.cleanupondestroy(ws);
       }
+      // ⚠️ PERBAIKAN: Jangan panggil cleanupondestroy untuk state closed/closing
     } catch (e) {
       console.log("[safeSend] error sending:", e);
-      try { ws.close(4002, "Send error"); } catch {}
-      this.cleanupondestroy(ws);
+      // ⚠️ PERBAIKAN: Jangan panggil cleanupondestroy untuk error send
     }
   }
 
@@ -155,11 +146,11 @@ export class ChatServer {
   }
 
   periodicFlush() {
-    // Bersihkan WS zombie terlebih dahulu
+    // ⚠️ PERBAIKAN PENTING: Gunakan cleanupClient, BUKAN cleanupondestroy
     for (const c of Array.from(this.clients)) {
       if (c.readyState !== 1) {
-        console.log("[periodicFlush] found non-open ws, cleaning up", c.idtarget);
-        this.cleanupondestroy(c);
+        console.log("[periodicFlush] found non-open ws, gentle cleanup", c.idtarget);
+        this.cleanupClient(c); // ✅ GUNAKAN cleanupClient untuk simpan state offline
       }
     }
 
@@ -187,14 +178,6 @@ export class ChatServer {
         this.offlineUsers.delete(id);
         this.offlineTimers.delete(id);
         this.removeAllSeatsById(id);
-      }
-    }
-
-    // tambahan: deteksi zombie sekali lagi
-    for (const ws of Array.from(this.clients)) {
-      if (ws.readyState !== 1) {
-        console.log("[checkOfflineUsers] cleaning zombie ws", ws.idtarget);
-        this.cleanupondestroy(ws);
       }
     }
   }
@@ -258,7 +241,7 @@ export class ChatServer {
       if (c.idtarget === idtarget) {
         try { c.close(4000, "Duplicate connection cleanup"); } catch {}
         console.log(`[cleanupClientById] cleaning existing connection for ${idtarget}`);
-        this.cleanupondestroy(c); // langsung hapus total
+        this.cleanupondestroy(c); // langsung hapus total untuk duplicate
       }
     }
   }
@@ -539,7 +522,7 @@ export class ChatServer {
       return;
     }
 
-    // Simpan kursi sementara
+    // Simpan kursi sementara untuk reconnect
     if (ws.roomname && ws.numkursi && ws.numkursi.size > 0) {
       this.offlineUsers.set(id, {
         roomname: ws.roomname,
@@ -564,7 +547,6 @@ export class ChatServer {
     if (id) {
       console.log(`[cleanupondestroy] destroying ws and removing seats for ${id}`);
       this.removeAllSeatsById(id);
-      // cancel any pending offline removal since we destroyed now
       this.cancelOfflineRemoval(id);
     } else {
       console.log("[cleanupondestroy] destroying ws without id");
@@ -596,8 +578,7 @@ export class ChatServer {
       this.cleanupondestroy(ws);
     });
     ws.addEventListener("error", (e) => {
-      // Untuk error: kita gunakan cleanupClient (simpan offline) supaya user bisa reconnect cepat.
-      // Namun jika error membuat ws stuck, periodicFlush / safeSend akan detect & cleanupondestroy.
+      // ⚠️ PERBAIKAN: Untuk error, gunakan cleanupClient (simpan offline) bukan cleanupondestroy
       console.log("[fetch] ws error event for", ws.idtarget, e && e.message);
       this.cleanupClient(ws);
     });
@@ -618,4 +599,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
