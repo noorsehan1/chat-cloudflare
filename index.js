@@ -733,44 +733,43 @@ export class ChatServer {
     }
   }
 
-  async fetch(request) {
-    const upgrade = request.headers.get("Upgrade") || "";
-    if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
+async fetch(request) {
+  const upgrade = request.headers.get("Upgrade") || "";
+  if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
 
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    server.accept();
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+  server.accept();
 
-    const ws = server;
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-    ws.numkursi = new Set();
-    ws._connectTime = Date.now();
-    ws._cleanupCalled = false;
+  const ws = server;
+  ws.roomname = undefined;
+  ws.idtarget = undefined;
+  ws.numkursi = new Set();
+  ws._connectTime = Date.now();
+  ws._cleanupCalled = false;
 
-    this.clients.add(ws);
+  this.clients.add(ws);
 
-    const safeCleanup = () => {
-      if (!ws._cleanupCalled) {
-        ws._cleanupCalled = true;
-        this.cleanupClient(ws);
-      }
-    };
-
-    ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-    ws.addEventListener("close", safeCleanup);
-    ws.addEventListener("error", safeCleanup);
-
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  cleanupAllTimers() {
-    for (const timer of this._timers) {
-      clearInterval(timer);
+  const safeCleanup = () => {
+    if (!ws._cleanupCalled) {
+      ws._cleanupCalled = true;
+      this.cleanupClient(ws);
     }
-    this._timers = [];
-  }
+  };
+
+  ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
+  ws.addEventListener("close", () => {
+    if (!ws._cleanupCalled) {
+      ws._cleanupCalled = true;
+      this.cleanupondestroy(ws); // ⚠️ HANYA INI YANG DIUBAH
+    }
+  });
+  ws.addEventListener("error", safeCleanup);
+
+  return new Response(null, { status: 101, webSocket: client });
 }
+
+  
 
 export default {
   async fetch(req, env) {
@@ -784,3 +783,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
