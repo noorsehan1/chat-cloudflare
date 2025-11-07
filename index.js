@@ -492,56 +492,72 @@ export class ChatServer {
       }
 
       case "setIdTarget": {
-        const newId = data[1];
-        
-        this.cleanupClientById(newId);
-        
-        ws.idtarget = newId;
-        this.lastActivity.set(newId, Date.now());
+  const newId = data[1];
+  
+  // Cleanup existing connections untuk user ini
+  this.cleanupClientById(newId);
+  
+  // Set ID target
+  ws.idtarget = newId;
+  this.lastActivity.set(newId, Date.now());
 
-        if (this.privateMessageBuffer.has(newId)) {
-          for (const msg of this.privateMessageBuffer.get(newId)) this.safeSend(ws, msg);
-          this.privateMessageBuffer.delete(newId);
-        }
+  // Kirim private messages yang tertahan
+  if (this.privateMessageBuffer.has(newId)) {
+    for (const msg of this.privateMessageBuffer.get(newId)) this.safeSend(ws, msg);
+    this.privateMessageBuffer.delete(newId);
+  }
 
-        const reconnectSession = this.reconnectSessions.get(newId);
-        if (reconnectSession) {
-          console.log(`Found reconnect session for: ${newId}`);
-          
-          if (this.reconnectTimeouts.has(newId)) {
-            clearTimeout(this.reconnectTimeouts.get(newId));
-            this.reconnectTimeouts.delete(newId);
-          }
-          
-          const { roomname, seats, userToSeat } = reconnectSession;
-          ws.roomname = roomname;
-          ws.numkursi = new Set(seats);
-          
-          if (userToSeat) {
-            this.userToSeat.set(newId, userToSeat);
-          }
-
-          const seatMap = this.roomSeats.get(roomname);
-          for (const seat of seats) {
-            const info = seatMap.get(seat);
-            if (info && (info.namauser === "" || info.namauser.startsWith("__LOCK__"))) {
-              info.namauser = newId;
-            }
-          }
-
-          this.sendAllStateTo(ws, roomname);
-          this.broadcastRoomUserCount(roomname);
-
-          this.reconnectSessions.delete(newId);
-          
-          this.safeSend(ws, ["reconnectSuccess", roomname]);
-          console.log(`Reconnect successful for: ${newId}`);
-        } else {
-          this.safeSend(ws, ["setIdSuccess", newId]);
-          console.log(`New session for: ${newId}`);
-        }
-        break;
+  // Cek apakah ada session reconnect yang tersimpan
+  const reconnectSession = this.reconnectSessions.get(newId);
+  if (reconnectSession) {
+    console.log(`Found reconnect session for: ${newId}`);
+    
+    // Hapus timeout reconnect
+    if (this.reconnectTimeouts.has(newId)) {
+      clearTimeout(this.reconnectTimeouts.get(newId));
+      this.reconnectTimeouts.delete(newId);
+    }
+    
+    // Cek apakah session masih valid (dalam waktu timeout)
+    const now = Date.now();
+    if (now - reconnectSession.timestamp < this.RECONNECT_TIMEOUT_MS) {
+      // Session masih valid - restore session
+      const { roomname, seats, userToSeat } = reconnectSession;
+      ws.roomname = roomname;
+      ws.numkursi = new Set(seats);
+      
+      if (userToSeat) {
+        this.userToSeat.set(newId, userToSeat);
       }
+
+      // Update seat information
+      const seatMap = this.roomSeats.get(roomname);
+      for (const seat of seats) {
+        const info = seatMap.get(seat);
+        if (info && (info.namauser === "" || info.namauser.startsWith("__LOCK__"))) {
+          info.namauser = newId;
+        }
+      }
+
+      this.sendAllStateTo(ws, roomname);
+      this.broadcastRoomUserCount(roomname);
+
+      // Hapus session reconnect
+      this.reconnectSessions.delete(newId);
+      
+      this.safeSend(ws, ["reconnectSuccess", roomname]);
+      console.log(`Reconnect successful for: ${newId}`);
+    } else {
+      // ❌ Session sudah expired - hapus dan kirim needJoinRoom
+      console.log(`Reconnect session expired for: ${newId}`);
+      this.cleanupReconnectSession(newId);
+      this.safeSend(ws, ["needJoinRoom", "Session expired - please join room again"]);
+    }
+  } else {
+    // ✅ USER BARU atau tidak ada session reconnect - langsung setIdSuccess
+  }
+  break;
+}
 
       case "pong": {
         const pingTime = data[1];
@@ -769,3 +785,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
