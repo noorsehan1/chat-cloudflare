@@ -1,7 +1,7 @@
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
-  "General","Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
+  "General", "Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
   "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
 ];
 
@@ -41,6 +41,8 @@ export class ChatServer {
     this.currentNumber = 1;
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
+    
+    // Cloudflare Workers: gunakan state.storage untuk timer
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
 
@@ -49,6 +51,11 @@ export class ChatServer {
     this.offlineUsers = new Map();
     this.offlineTimers = new Map();
     this.OFFLINE_TIMEOUT_MS = 30 * 1000;
+  }
+
+  // Cloudflare Workers: cleanup timers ketika instance di-destroy
+  async alarm() {
+    // Cleanup logic jika diperlukan
   }
 
   safeSend(ws, arr) {
@@ -131,6 +138,7 @@ export class ChatServer {
   }
 
   periodicFlush() {
+    // Cleanup WebSocket yang tidak sehat
     for (const c of Array.from(this.clients)) {
       if (c.readyState !== 1) {
         this.cleanupClient(c);
@@ -142,6 +150,7 @@ export class ChatServer {
     this.cleanExpiredLocks();
     this.checkOfflineUsers();
 
+    // Kirim private messages yang tertunda
     for (const [id, msgs] of Array.from(this.privateMessageBuffer)) {
       for (const c of this.clients) {
         if (c.idtarget === id) {
@@ -157,18 +166,21 @@ export class ChatServer {
     const now = Date.now();
     const toRemove = [];
     
+    // Check offline users timeout
     for (const [id, saved] of this.offlineUsers.entries()) {
       if (now - saved.timestamp >= this.OFFLINE_TIMEOUT_MS) {
         toRemove.push(id);
       }
     }
 
+    // Remove expired offline users
     for (const id of toRemove) {
       this.offlineUsers.delete(id);
       this.offlineTimers.delete(id);
       this.removeAllSeatsById(id);
     }
 
+    // Extra cleanup: hapus kursi stale
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
       for (const [seat, info] of seatMap) {
@@ -197,11 +209,13 @@ export class ChatServer {
     if (!ws.idtarget) return null;
     const now = Date.now();
 
+    // Clean expired locks
     for (const [seat, info] of seatMap) {
       if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 5000)
         Object.assign(info, createEmptySeat());
     }
 
+    // Find empty seat
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const k = seatMap.get(i);
       if (!k) continue;
@@ -275,10 +289,12 @@ export class ChatServer {
   }
 
   scheduleOfflineRemoval(idtarget) {
+    // Clear existing timer
     if (this.offlineTimers.has(idtarget)) {
       clearTimeout(this.offlineTimers.get(idtarget));
     }
     
+    // Schedule new removal
     const timeoutId = setTimeout(() => {
       if (this.offlineUsers.has(idtarget)) {
         this.offlineUsers.delete(idtarget);
@@ -313,11 +329,13 @@ export class ChatServer {
       this.cleanupClientById(newId);
       ws.idtarget = newId;
 
+      // Send pending private messages
       if (this.privateMessageBuffer.has(ws.idtarget)) {
         for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
         this.privateMessageBuffer.delete(ws.idtarget);
       }
 
+      // Restore offline session if exists
       const offline = this.offlineUsers.get(newId);
       if (offline) {
         const { roomname, seats } = offline;
@@ -379,6 +397,7 @@ export class ChatServer {
       const online = activeSockets.length > 0;
       this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
 
+      // Handle duplicate connections
       if (activeSockets.length > 1) {
         const newest = activeSockets[activeSockets.length - 1];
         const oldSockets = activeSockets.slice(0, -1);
@@ -514,6 +533,7 @@ export class ChatServer {
       return;
     }
 
+    // Save offline state for reconnect
     if (ws.roomname && ws.numkursi && ws.numkursi.size > 0) {
       this.offlineUsers.set(id, {
         roomname: ws.roomname,
@@ -522,9 +542,11 @@ export class ChatServer {
       });
       this.scheduleOfflineRemoval(id);
     } else {
+      // No seats to save, remove immediately
       this.removeAllSeatsById(id);
     }
 
+    // Cleanup WebSocket data
     ws.numkursi?.clear?.();
     this.clients.delete(ws);
     ws.roomname = undefined;
