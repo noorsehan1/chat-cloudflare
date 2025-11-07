@@ -54,7 +54,7 @@ export class ChatServer {
     // Penyimpanan untuk user yang sementara disconnect (kursi tidak dihapus langsung)
     this.offlineUsers = new Map();
     this.offlineTimers = new Map();
-    this.OFFLINE_TIMEOUT_MS = 10 * 1000;
+    this.OFFLINE_TIMEOUT_MS = 30 * 1000;
 
     console.log("[ChatServer] initialized");
   }
@@ -618,3 +618,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
