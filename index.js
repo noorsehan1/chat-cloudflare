@@ -44,15 +44,11 @@ export class ChatServer {
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
 
-    // Low card game manager terintegrasi
     this.lowcard = new LowCardGameManager(this);
 
-    // Penyimpanan untuk user yang sementara disconnect (kursi tidak dihapus langsung)
     this.offlineUsers = new Map();
     this.offlineTimers = new Map();
     this.OFFLINE_TIMEOUT_MS = 30 * 1000;
-
-    console.log("[ChatServer] initialized");
   }
 
   safeSend(ws, arr) {
@@ -60,25 +56,15 @@ export class ChatServer {
       if (ws.readyState === 1) {
         ws.send(JSON.stringify(arr));
       } else if (ws.readyState === 0) {
-        // Jika belum OPEN, beri sedikit waktu
         setTimeout(() => {
           try {
             if (ws.readyState === 1) {
               ws.send(JSON.stringify(arr));
-            } else {
-              console.log("[safeSend] ws not ready after timeout", ws.idtarget);
-              // ⚠️ PERBAIKAN: Jangan panggil cleanupondestroy, biarkan reconnect process handle
             }
-          } catch (e) {
-            // ⚠️ PERBAIKAN: Jangan panggil cleanupondestroy untuk error sementara
-          }
+          } catch (e) {}
         }, 300);
       }
-      // ⚠️ PERBAIKAN: Jangan panggil cleanupondestroy untuk state closed/closing
-    } catch (e) {
-      console.log("[safeSend] error sending:", e);
-      // ⚠️ PERBAIKAN: Jangan panggil cleanupondestroy untuk error send
-    }
+    } catch (e) {}
   }
 
   broadcastToRoom(room, msg) {
@@ -139,18 +125,15 @@ export class ChatServer {
           Object.assign(info, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.broadcastRoomUserCount(room);
-          console.log(`[cleanExpiredLocks] expired lock removed: ${room}#${seat}`);
         }
       }
     }
   }
 
   periodicFlush() {
-    // ⚠️ PERBAIKAN PENTING: Gunakan cleanupClient, BUKAN cleanupondestroy
     for (const c of Array.from(this.clients)) {
       if (c.readyState !== 1) {
-        console.log("[periodicFlush] found non-open ws, gentle cleanup", c.idtarget);
-        this.cleanupClient(c); // ✅ GUNAKAN cleanupClient untuk simpan state offline
+        this.cleanupClient(c);
       }
     }
 
@@ -172,12 +155,33 @@ export class ChatServer {
 
   checkOfflineUsers() {
     const now = Date.now();
+    const toRemove = [];
+    
     for (const [id, saved] of this.offlineUsers.entries()) {
       if (now - saved.timestamp >= this.OFFLINE_TIMEOUT_MS) {
-        console.log(`[checkOfflineUsers] offline timeout, removing seats for ${id}`);
-        this.offlineUsers.delete(id);
-        this.offlineTimers.delete(id);
-        this.removeAllSeatsById(id);
+        toRemove.push(id);
+      }
+    }
+
+    for (const id of toRemove) {
+      this.offlineUsers.delete(id);
+      this.offlineTimers.delete(id);
+      this.removeAllSeatsById(id);
+    }
+
+    for (const room of roomList) {
+      const seatMap = this.roomSeats.get(room);
+      for (const [seat, info] of seatMap) {
+        if (info.namauser && !info.namauser.startsWith("__LOCK__")) {
+          if (this.offlineUsers.has(info.namauser)) {
+            const saved = this.offlineUsers.get(info.namauser);
+            if (now - saved.timestamp >= this.OFFLINE_TIMEOUT_MS) {
+              Object.assign(info, createEmptySeat());
+              this.broadcastToRoom(room, ["removeKursi", room, seat]);
+              this.broadcastRoomUserCount(room);
+            }
+          }
+        }
       }
     }
   }
@@ -205,7 +209,6 @@ export class ChatServer {
         k.namauser = "__LOCK__" + ws.idtarget;
         k.lockTime = now;
         this.userToSeat.set(ws.idtarget, { room, seat: i });
-        console.log(`[lockSeat] ${ws.idtarget} locked ${room}#${i}`);
         return i;
       }
     }
@@ -240,8 +243,7 @@ export class ChatServer {
     for (const c of Array.from(this.clients)) {
       if (c.idtarget === idtarget) {
         try { c.close(4000, "Duplicate connection cleanup"); } catch {}
-        console.log(`[cleanupClientById] cleaning existing connection for ${idtarget}`);
-        this.cleanupondestroy(c); // langsung hapus total untuk duplicate
+        this.cleanupondestroy(c);
       }
     }
   }
@@ -254,7 +256,6 @@ export class ChatServer {
           Object.assign(seatMap.get(seat), createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           removed = true;
-          console.log(`[removeAllSeatsById] removed seat ${room}#${seat} for ${idtarget}`);
         }
       }
       if (removed) this.broadcastRoomUserCount(room);
@@ -274,18 +275,18 @@ export class ChatServer {
   }
 
   scheduleOfflineRemoval(idtarget) {
-    if (this.offlineTimers.has(idtarget)) return;
+    if (this.offlineTimers.has(idtarget)) {
+      clearTimeout(this.offlineTimers.get(idtarget));
+    }
+    
     const timeoutId = setTimeout(() => {
-      const saved = this.offlineUsers.get(idtarget);
-      if (saved && Date.now() - saved.timestamp >= this.OFFLINE_TIMEOUT_MS) {
-        console.log(`[scheduleOfflineRemoval] final timeout, removing seats for ${idtarget}`);
+      if (this.offlineUsers.has(idtarget)) {
         this.offlineUsers.delete(idtarget);
-        this.offlineTimers.delete(idtarget);
         this.removeAllSeatsById(idtarget);
-      } else {
-        this.offlineTimers.delete(idtarget);
       }
-    }, this.OFFLINE_TIMEOUT_MS + 10000);
+      this.offlineTimers.delete(idtarget);
+    }, this.OFFLINE_TIMEOUT_MS);
+    
     this.offlineTimers.set(idtarget, timeoutId);
   }
 
@@ -294,7 +295,9 @@ export class ChatServer {
       clearTimeout(this.offlineTimers.get(idtarget));
       this.offlineTimers.delete(idtarget);
     }
-    if (this.offlineUsers.has(idtarget)) this.offlineUsers.delete(idtarget);
+    if (this.offlineUsers.has(idtarget)) {
+      this.offlineUsers.delete(idtarget);
+    }
   }
 
   handleMessage(ws, raw) {
@@ -307,20 +310,16 @@ export class ChatServer {
 
     case "setIdTarget": {
       const newId = data[1];
-      console.log(`[setIdTarget] ${newId} setting id on ws`);
       this.cleanupClientById(newId);
       ws.idtarget = newId;
 
-      // Kirim private messages yang tertunda
       if (this.privateMessageBuffer.has(ws.idtarget)) {
         for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
         this.privateMessageBuffer.delete(ws.idtarget);
       }
 
-      // Cek apakah user masih punya data offline
       const offline = this.offlineUsers.get(newId);
       if (offline) {
-        // === Restore kursi lama ===
         const { roomname, seats } = offline;
         ws.roomname = roomname;
         ws.numkursi = new Set(seats);
@@ -333,16 +332,12 @@ export class ChatServer {
           }
         }
 
-        // Kirim semua points & state kursi
         this.sendAllStateTo(ws, roomname);
         this.broadcastRoomUserCount(roomname);
 
-        // Hapus dari daftar offline
         this.offlineUsers.delete(newId);
         this.cancelOfflineRemoval(newId);
-        console.log(`[setIdTarget] restored seats for ${newId} in ${roomname}`);
       } else {
-        // === Tidak ada data offline, minta client joinRoom lagi ===
         this.safeSend(ws, ["needJoinRoom"]);
       }
 
@@ -396,7 +391,6 @@ export class ChatServer {
             Object.assign(seatMap.get(seat), createEmptySeat());
             this.broadcastToRoom(room, ["removeKursi", room, seat]);
             this.broadcastRoomUserCount(room);
-            console.log(`[isUserOnline] removed duplicate seat ${room}#${seat} for ${username}`);
           }
           this.userToSeat.delete(username);
         }
@@ -405,7 +399,6 @@ export class ChatServer {
           try {
             old.close(4000, "Duplicate login — old session closed");
             this.clients.delete(old);
-            console.log(`[isUserOnline] closed old socket for ${username}`);
           } catch {}
         }
       }
@@ -518,11 +511,9 @@ export class ChatServer {
     const id = ws.idtarget;
     if (!id) {
       this.clients.delete(ws);
-      console.log("[cleanupClient] client without id removed");
       return;
     }
 
-    // Simpan kursi sementara untuk reconnect
     if (ws.roomname && ws.numkursi && ws.numkursi.size > 0) {
       this.offlineUsers.set(id, {
         roomname: ws.roomname,
@@ -530,9 +521,8 @@ export class ChatServer {
         timestamp: Date.now()
       });
       this.scheduleOfflineRemoval(id);
-      console.log(`[cleanupClient] saved offline data for ${id} seats=${Array.from(ws.numkursi).join(",")}`);
     } else {
-      console.log(`[cleanupClient] ${id} had no seats to save`);
+      this.removeAllSeatsById(id);
     }
 
     ws.numkursi?.clear?.();
@@ -545,11 +535,8 @@ export class ChatServer {
     if (!ws) return;
     const id = ws.idtarget;
     if (id) {
-      console.log(`[cleanupondestroy] destroying ws and removing seats for ${id}`);
       this.removeAllSeatsById(id);
       this.cancelOfflineRemoval(id);
-    } else {
-      console.log("[cleanupondestroy] destroying ws without id");
     }
     ws.numkursi?.clear?.();
     this.clients.delete(ws);
@@ -574,12 +561,9 @@ export class ChatServer {
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
     ws.addEventListener("close", () => {
-      console.log("[fetch] ws close event for", ws.idtarget);
       this.cleanupondestroy(ws);
     });
     ws.addEventListener("error", (e) => {
-      // ⚠️ PERBAIKAN: Untuk error, gunakan cleanupClient (simpan offline) bukan cleanupondestroy
-      console.log("[fetch] ws error event for", ws.idtarget, e && e.message);
       this.cleanupClient(ws);
     });
 
