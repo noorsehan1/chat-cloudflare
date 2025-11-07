@@ -411,21 +411,81 @@ export class ChatServer {
   }
 
   cleanupondestroy(ws) {
-    if (!ws) return;
-    const id = ws.idtarget;
-    if (id) {
-      this.removeAllSeatsById(id);
-      this.cancelOfflineRemoval(id);
-      this.lastActivity.delete(id);
+  if (!ws) return;
+  
+  const id = ws.idtarget;
+  console.log(`[Cleanup] Starting cleanup for user: ${id}`);
+  
+  if (id) {
+    // 1. Hapus semua seat yang dimiliki user ini
+    this.removeAllSeatsById(id);
+    
+    // 2. Cancel semua timer yang terkait
+    this.cancelOfflineRemoval(id);
+    
+    // 3. Hapus dari activity tracking
+    this.lastActivity.delete(id);
+    
+    // 4. Hapus ping timeout jika ada
+    if (this.pingTimeouts.has(id)) {
+      clearTimeout(this.pingTimeouts.get(id));
       this.pingTimeouts.delete(id);
-      this.userToSeat.delete(id);
+      console.log(`[Cleanup] Removed ping timeout for: ${id}`);
     }
-    ws.numkursi?.clear?.();
-    this.clients.delete(ws);
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-    try { ws.close(); } catch {}
+    
+    // 5. Hapus dari userToSeat mapping
+    this.userToSeat.delete(id);
+    
+    // 6. Hapus dari offline users jika ada
+    if (this.offlineUsers.has(id)) {
+      this.offlineUsers.delete(id);
+      console.log(`[Cleanup] Removed from offline users: ${id}`);
+    }
+    
+    // 7. Hapus offline timer jika ada
+    if (this.offlineTimers.has(id)) {
+      clearTimeout(this.offlineTimers.get(id));
+      this.offlineTimers.delete(id);
+      console.log(`[Cleanup] Removed offline timer for: ${id}`);
+    }
   }
+  
+  // 8. Cleanup WebSocket data structures
+  if (ws.numkursi) {
+    const seatCount = ws.numkursi.size;
+    ws.numkursi.clear();
+    console.log(`[Cleanup] Cleared ${seatCount} seats from numkursi`);
+  }
+  
+  // 9. Hapus dari clients set
+  const wasInClients = this.clients.delete(ws);
+  console.log(`[Cleanup] Removed from clients set: ${wasInClients}`);
+  
+  // 10. Reset WebSocket properties
+  const previousRoom = ws.roomname;
+  ws.roomname = undefined;
+  ws.idtarget = undefined;
+  
+  // 11. Close WebSocket connection jika masih terbuka
+  try {
+    if (ws.readyState === 1) { // WebSocket.OPEN
+      ws.close(1000, "Cleanup on destroy");
+      console.log(`[Cleanup] Closed WebSocket connection for user: ${id}`);
+    } else {
+      console.log(`[Cleanup] WebSocket already in state: ${ws.readyState}`);
+    }
+  } catch (e) {
+    console.error(`[Cleanup] Error closing WebSocket:`, e);
+  }
+  
+  // 12. Broadcast room count update jika user ada di room
+  if (previousRoom && roomList.includes(previousRoom)) {
+    this.broadcastRoomUserCount(previousRoom);
+    console.log(`[Cleanup] Broadcast room count update for: ${previousRoom}`);
+  }
+  
+  console.log(`[Cleanup] Completed cleanup for user: ${id}`);
+}
 
   handleMessage(ws, raw) {
     if (ws.idtarget) {
@@ -438,7 +498,11 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
-
+ case "onDestroy": {
+      // ⚠️ Handle onDestroy message - cleanup yang proper
+      this.cleanupondestroy(ws);
+      break;
+    }
     case "setIdTarget": {
       const newId = data[1];
       this.cleanupClientById(newId);
@@ -685,7 +749,7 @@ export class ChatServer {
       this.cleanupClient(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
     });
     ws.addEventListener("error", (e) => {
-      this.cleanupondestroy(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
+      this.cleanupClient(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
     });
 
     return new Response(null, { status: 101, webSocket: client });
@@ -704,4 +768,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
