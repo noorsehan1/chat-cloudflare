@@ -771,7 +771,7 @@ case "onDestroy": {
     }
   }
 
-  async fetch(request) {
+async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || "";
     if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
 
@@ -787,14 +787,13 @@ case "onDestroy": {
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
     ws.addEventListener("close", () => {
-      this.cleanupClient(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
+      this.cleanupClient(ws); // ✅ GUNAKAN universalCleanup
     });
     ws.addEventListener("error", (e) => {
-      this.cleanupClient(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
+      this.cleanupClient(ws); // ✅ GUNAKAN universalCleanup
     });
 
     return new Response(null, { status: 101, webSocket: client });
-  }
 }
 
 export default {
@@ -809,6 +808,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
