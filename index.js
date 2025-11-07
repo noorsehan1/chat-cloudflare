@@ -523,45 +523,57 @@ export class ChatServer {
         break;
       }
 
-      case "setIdTarget": {
-        const newId = data[1];
-        this.cleanupClientById(newId);
-        ws.idtarget = newId;
+   case "setIdTarget": {
+  const newId = data[1];
+  this.cleanupClientById(newId);
+  ws.idtarget = newId;
 
-        this.lastActivity.set(newId, Date.now());
+  this.lastActivity.set(newId, Date.now());
 
-        if (this.privateMessageBuffer.has(ws.idtarget)) {
-          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
-          this.privateMessageBuffer.delete(ws.idtarget);
+  if (this.privateMessageBuffer.has(ws.idtarget)) {
+    for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
+    this.privateMessageBuffer.delete(ws.idtarget);
+  }
+
+  const offline = this.offlineUsers.get(newId);
+  if (offline) {
+    const { roomname, seats, timestamp } = offline;
+    
+    // ✅ CEK APAKAH MASIH DALAM TIMEOUT WINDOW
+    if (Date.now() - timestamp < this.OFFLINE_TIMEOUT_MS) {
+      // Masih dalam waktu timeout - reconnect success
+      ws.roomname = roomname;
+      ws.numkursi = new Set(seats);
+
+      const seatMap = this.roomSeats.get(roomname);
+      for (const s of seats) {
+        const info = seatMap.get(s);
+        if (info.namauser === "" || info.namauser.startsWith("__LOCK__")) {
+          info.namauser = newId;
         }
-
-        const offline = this.offlineUsers.get(newId);
-        if (offline) {
-          const { roomname, seats } = offline;
-          ws.roomname = roomname;
-          ws.numkursi = new Set(seats);
-
-          const seatMap = this.roomSeats.get(roomname);
-          for (const s of seats) {
-            const info = seatMap.get(s);
-            if (info.namauser === "" || info.namauser.startsWith("__LOCK__")) {
-              info.namauser = newId;
-            }
-          }
-
-          this.sendAllStateTo(ws, roomname);
-          this.broadcastRoomUserCount(roomname);
-
-          this.offlineUsers.delete(newId);
-          this.cancelOfflineRemoval(newId);
-          
-          this.safeSend(ws, ["reconnectSuccess", roomname]);
-        } else {
-          this.safeSend(ws, ["needJoinRoom", "Session expired - please join room again"]);
-        }
-
-        break;
       }
+
+      this.sendAllStateTo(ws, roomname);
+      this.broadcastRoomUserCount(roomname);
+
+      this.offlineUsers.delete(newId);
+      this.cancelOfflineRemoval(newId);
+      
+      this.safeSend(ws, ["reconnectSuccess", roomname]);
+    } else {
+      // ❌ SUDAH LEWAT TIMEOUT - kirim needJoinRoom
+      this.offlineUsers.delete(newId);
+      this.cancelOfflineRemoval(newId);
+      this.removeAllSeatsById(newId); // Hapus kursi yang expired
+      
+      this.safeSend(ws, ["needJoinRoom", "Session expired - please join room again"]);
+    }
+  } else {
+    // ✅ USER BARU - tidak kirim apa-apa atau kirim setIdSuccess
+   
+  }
+  break;
+}
 
       case "pong": {
         if (ws.idtarget) {
@@ -788,3 +800,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
