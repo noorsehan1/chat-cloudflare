@@ -807,7 +807,7 @@ export class ChatServer {
             
             this.safeSend(ws, ["needJoinRoom", "Please join a room"]);
           } else {
-            this.safeSend(ws, ["needJoinRoom", "Please join a room"]);
+           
           }
           break;
         }
@@ -1111,3 +1111,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
