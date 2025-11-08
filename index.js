@@ -447,7 +447,11 @@ export class ChatServer {
     ws.roomname = undefined;
     ws.idtarget = undefined;
     
-   
+    try {
+      if (ws.readyState === 1) {
+        ws.close(1000, "Cleanup on destroy");
+      }
+    } catch (e) {}
     
     if (previousRoom && roomList.includes(previousRoom)) {
       this.broadcastRoomUserCount(previousRoom);
@@ -548,13 +552,6 @@ export class ChatServer {
         this.safeSend(ws, ["needJoinRoom", "Session expired - please join a room"]);
       }
     } else {
-       this.reconnectSessions.delete(newId);
-    
-    if (this.reconnectTimeouts.has(newId)) {
-      clearTimeout(this.reconnectTimeouts.get(newId));
-      this.reconnectTimeouts.delete(newId);
-    }
-    
       // Tidak ada reconnect session - user baru atau sudah benar-benar timeout
       // JANGAN kirim needJoinRoom di sini, biarkan client yang request join room
       console.log(`New connection for: ${newId} - no reconnect session found`);
@@ -922,5 +919,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
