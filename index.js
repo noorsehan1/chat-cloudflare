@@ -26,7 +26,9 @@ export class ChatServer {
     this.env = env;
     this.clients = new Set();
     this.userToSeat = new Map();
-    this.hasEverSetId = false;
+   this.hasEverSetId = false;
+   this.rejoinHandledMap = new Map(); // NEW: simpan status user yang sudah dihandle reconnect-nya
+
 
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
@@ -314,12 +316,18 @@ handleOnDestroy(ws, idtarget) {
       }
 
       case "onDestroy": {
-        const idtarget = ws.idtarget;
-        this.firstSetIdTarget = false;
+  const idtarget = ws.idtarget;
 
-        this.handleOnDestroy(ws, idtarget);
-        break;
-      }
+  if (idtarget) {
+    this.rejoinHandledMap.delete(idtarget); // reset, biar next connect bisa diproses lagi
+  }
+
+  ws.isDestroyed = true;
+  this.clients.delete(ws);
+  this.handleOnDestroy(ws, idtarget);
+  break;
+}
+
 
         
 
@@ -333,13 +341,22 @@ case "setIdTarget": {
   const previousSeatInfo = this.userToSeat.get(newId);
   const isInGracePeriod = this.pendingRemove.has(newId);
 
-  // Cegah dobel pengiriman join
-  if (!ws._hasHandledJoin) ws._hasHandledJoin = false;
+  // Ambil status apakah user ini sudah di-handle reconnect-nya
+  const alreadyHandled = this.rejoinHandledMap.get(newId) || false;
 
-  // 🔹 Jika masih dalam grace period → auto rejoin
-  if (previousSeatInfo && isInGracePeriod && !ws._hasHandledJoin) {
-    ws._hasHandledJoin = true; // ⛔ kunci agar tidak kirim needJoinRoom lagi
+  // Jika ini reconnect pertama kali setelah app dibuka
+  const isFirstAppOpen = !this.hasEverSetId;
+  this.hasEverSetId = true; // Setelah pertama kali, ubah jadi true
 
+  // 🚫 Cegah pengiriman dobel (autoRejoin + needJoinRoom)
+  if (alreadyHandled) {
+    // console.log(`[SKIP] ${newId} sudah ditangani reconnect`);
+    break;
+  }
+
+  // 🔹 Jika masih dalam grace period → auto rejoin (tidak kirim needJoinRoom)
+  if (previousSeatInfo && isInGracePeriod) {
+    this.rejoinHandledMap.set(newId, true); // tandai sudah auto rejoin
     clearTimeout(this.pendingRemove.get(newId));
     this.pendingRemove.delete(newId);
 
@@ -352,21 +369,18 @@ case "setIdTarget": {
     if (seatMap && seatMap.has(seat)) seatMap.get(seat).namauser = newId;
 
     this.safeSend(ws, ["autoRejoinSuccess", room]);
-  } 
-
-  // 🔹 Jika grace period sudah habis dan bukan pertama kali
-  else if (previousSeatInfo && !isInGracePeriod && !ws._hasHandledJoin) {
-    ws._hasHandledJoin = true; // ⛔ cegah kirim dobel
-    this.userToSeat.delete(newId);
-
-    if (this.hasEverSetId) {
-      this.safeSend(ws, ["needJoinRoom", previousSeatInfo.room]);
-    }
   }
 
-  // 🔹 User baru pertama kali buka app → jangan kirim apa pun
-  else if (!previousSeatInfo && !isInGracePeriod && !ws._hasHandledJoin) {
-    ws._hasHandledJoin = true;
+  // 🔹 Jika grace period habis → kirim needJoinRoom
+  else if (previousSeatInfo && !isInGracePeriod && !isFirstAppOpen) {
+    this.rejoinHandledMap.set(newId, true);
+    this.userToSeat.delete(newId);
+    this.safeSend(ws, ["needJoinRoom", previousSeatInfo.room]);
+  }
+
+  // 🔹 Jika user baru → diam saja
+  else if (!previousSeatInfo && !isInGracePeriod && isFirstAppOpen) {
+    // Tidak kirim apa pun
   }
 
   // 🔹 Kirim pesan pribadi tertunda (jika ada)
@@ -376,11 +390,12 @@ case "setIdTarget": {
     this.privateMessageBuffer.delete(newId);
   }
 
+  // 🔹 Broadcast user count kalau sudah join
   if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
 
-  this.hasEverSetId = true; // tandai sudah pernah aktif
   break;
 }
+
 
 
 
@@ -651,6 +666,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
