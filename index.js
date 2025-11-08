@@ -259,19 +259,40 @@ export class ChatServer {
     }
   }
 
-  handleOnDestroy(ws, idtarget) {
-    ws.isDestroyed = true;
-    this.removeAllSeatsById(idtarget);
-    this.clients.delete(ws);
+ handleOnDestroy(ws, idtarget) {
+  ws.isDestroyed = true;
 
-    if (this.pingTimeouts.has(idtarget)) {
-      clearTimeout(this.pingTimeouts.get(idtarget));
-      this.pingTimeouts.delete(idtarget);
-    }
+  // Hapus dari semua kursi / room
+  this.removeAllSeatsById(idtarget);
+  this.clients.delete(ws);
 
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
+  // Bersihkan semua timeout dan buffer
+  if (this.pingTimeouts.has(idtarget)) {
+    clearTimeout(this.pingTimeouts.get(idtarget));
+    this.pingTimeouts.delete(idtarget);
   }
+
+  if (this.pendingRemove.has(idtarget)) {
+    clearTimeout(this.pendingRemove.get(idtarget));
+    this.pendingRemove.delete(idtarget);
+  }
+
+  // Hapus dari userToSeat agar tidak restore otomatis
+  this.userToSeat.delete(idtarget);
+
+  // Bersihkan buffer pesan pribadi yang belum terkirim
+  if (this.privateMessageBuffer.has(idtarget)) {
+    this.privateMessageBuffer.delete(idtarget);
+  }
+
+  // Reset properti ws agar tidak tersisa
+  ws.roomname = undefined;
+  ws.idtarget = undefined;
+
+  // Debug opsional
+  // console.log(`[DESTROY] Semua data user ${idtarget} telah dibersihkan`);
+}
+
 
   handleMessage(ws, raw) {
     let data;
@@ -609,6 +630,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
