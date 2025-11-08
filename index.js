@@ -447,11 +447,7 @@ export class ChatServer {
     ws.roomname = undefined;
     ws.idtarget = undefined;
     
-    try {
-      if (ws.readyState === 1) {
-        ws.close(1000, "Cleanup on destroy");
-      }
-    } catch (e) {}
+   
     
     if (previousRoom && roomList.includes(previousRoom)) {
       this.broadcastRoomUserCount(previousRoom);
@@ -926,4 +922,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
