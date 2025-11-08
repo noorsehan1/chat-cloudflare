@@ -26,6 +26,7 @@ export class ChatServer {
     this.env = env;
     this.clients = new Set();
     this.userToSeat = new Map();
+    this.hasEverSetId = false;
 
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
@@ -258,6 +259,9 @@ export class ChatServer {
     }
   }
 
+
+  
+
 handleOnDestroy(ws, idtarget) {
   // 🔹 Tandai koneksi sudah dihancurkan
 
@@ -326,14 +330,16 @@ case "setIdTarget": {
   this.cleanupClientById(newId);
   ws.idtarget = newId;
 
-  // Ambil status apakah ini pertama kali app dibuka
-  const isFirstTime = !this.hasEverSetId; 
-  this.hasEverSetId = true; // Hanya set true setelah pertama kali
-
   const previousSeatInfo = this.userToSeat.get(newId);
   const isInGracePeriod = this.pendingRemove.has(newId);
 
-  if (previousSeatInfo && isInGracePeriod) {
+  // Cegah dobel pengiriman join
+  if (!ws._hasHandledJoin) ws._hasHandledJoin = false;
+
+  // 🔹 Jika masih dalam grace period → auto rejoin
+  if (previousSeatInfo && isInGracePeriod && !ws._hasHandledJoin) {
+    ws._hasHandledJoin = true; // ⛔ kunci agar tidak kirim needJoinRoom lagi
+
     clearTimeout(this.pendingRemove.get(newId));
     this.pendingRemove.delete(newId);
 
@@ -347,13 +353,20 @@ case "setIdTarget": {
 
     this.safeSend(ws, ["autoRejoinSuccess", room]);
   } 
-  else if (previousSeatInfo && !isInGracePeriod) {
+
+  // 🔹 Jika grace period sudah habis dan bukan pertama kali
+  else if (previousSeatInfo && !isInGracePeriod && !ws._hasHandledJoin) {
+    ws._hasHandledJoin = true; // ⛔ cegah kirim dobel
     this.userToSeat.delete(newId);
 
-    // ❗ Kirim needJoinRoom HANYA jika bukan pertama kali buka app
-    if (!isFirstTime) {
+    if (this.hasEverSetId) {
       this.safeSend(ws, ["needJoinRoom", previousSeatInfo.room]);
     }
+  }
+
+  // 🔹 User baru pertama kali buka app → jangan kirim apa pun
+  else if (!previousSeatInfo && !isInGracePeriod && !ws._hasHandledJoin) {
+    ws._hasHandledJoin = true;
   }
 
   // 🔹 Kirim pesan pribadi tertunda (jika ada)
@@ -364,8 +377,11 @@ case "setIdTarget": {
   }
 
   if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+
+  this.hasEverSetId = true; // tandai sudah pernah aktif
   break;
 }
+
 
 
 
@@ -631,6 +647,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
