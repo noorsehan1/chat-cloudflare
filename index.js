@@ -299,47 +299,54 @@ export class ChatServer {
       }
 
       case "setIdTarget": {
-        const newId = data[1];
-        
-        this.cleanupClientById(newId);
-        ws.idtarget = newId;
+  const newId = data[1];
 
-        const previousSeatInfo = this.userToSeat.get(newId);
-        const isInGracePeriod = this.pendingRemove.has(newId);
+  this.cleanupClientById(newId);
+  ws.idtarget = newId;
 
-        if (isInGracePeriod) {
-          clearTimeout(this.pendingRemove.get(newId));
-          this.pendingRemove.delete(newId);
-        }
+  const previousSeatInfo = this.userToSeat.get(newId);
+  const isInGracePeriod = this.pendingRemove.has(newId);
 
-        if (previousSeatInfo && isInGracePeriod) {
-          const { room, seat } = previousSeatInfo;
-          ws.roomname = room;
-          ws.numkursi = new Set([seat]);
-          
-          this.sendAllStateTo(ws, room);
-          
-          const seatMap = this.roomSeats.get(room);
-          if (seatMap && seatMap.has(seat)) {
-            const seatInfo = seatMap.get(seat);
-            seatInfo.namauser = newId;
-          }
-          
-        } else {
-          if (previousSeatInfo) {
-            this.userToSeat.delete(newId);
-          }
-          this.safeSend(ws, ["needJoinRoom", "Silakan join room"]);
-        }
+  // 🔧 Perbaikan utama:
+  if (previousSeatInfo && !isInGracePeriod) {
+    // Sudah punya seat tapi tidak dalam grace period (data lama) → reset saja
+    this.userToSeat.delete(newId);
+  }
 
-        if (this.privateMessageBuffer.has(newId)) {
-          for (const msg of this.privateMessageBuffer.get(newId)) this.safeSend(ws, msg);
-          this.privateMessageBuffer.delete(newId);
-        }
+  if (previousSeatInfo && isInGracePeriod) {
+    // ✅ Reconnect cepat → restore kursi & room
+    clearTimeout(this.pendingRemove.get(newId));
+    this.pendingRemove.delete(newId);
 
-        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-        break;
-      }
+    const { room, seat } = previousSeatInfo;
+    ws.roomname = room;
+    ws.numkursi = new Set([seat]);
+
+    this.sendAllStateTo(ws, room);
+
+    const seatMap = this.roomSeats.get(room);
+    if (seatMap && seatMap.has(seat)) {
+      const seatInfo = seatMap.get(seat);
+      seatInfo.namauser = newId;
+    }
+  } else if (!previousSeatInfo && !isInGracePeriod) {
+    // 🧩 Kasus pertama kali join → biarkan kosong tanpa kirim error
+    // Tidak perlu this.safeSend(ws, ["needJoinRoom", ...])
+  } else {
+    // ⚠️ Grace period habis tapi masih ada sisa data → minta join ulang
+    this.safeSend(ws, ["needJoinRoom", "Silakan join room"]);
+  }
+
+  if (this.privateMessageBuffer.has(newId)) {
+    for (const msg of this.privateMessageBuffer.get(newId))
+      this.safeSend(ws, msg);
+    this.privateMessageBuffer.delete(newId);
+  }
+
+  if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+  break;
+}
+
 
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
@@ -494,7 +501,7 @@ export class ChatServer {
       case "gameLowCardEnd": {
         // Pastikan hanya room "Lowcard" yang bisa menjalankan game
         const room = ws.roomname;
-        if (room !== "Lowcard") {
+        if (room !== "LowCard") {
           this.safeSend(ws, ["error", "Game LowCard hanya bisa dimainkan di room 'Lowcard'"]);
           break;
         }
@@ -602,6 +609,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
