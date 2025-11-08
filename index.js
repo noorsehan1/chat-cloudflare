@@ -488,21 +488,23 @@ export class ChatServer {
         break;
       }
 
-      case "gameLowCardStart":
+     case "gameLowCardStart":
       case "gameLowCardJoin":
       case "gameLowCardNumber":
       case "gameLowCardEnd": {
-  // Pastikan hanya room "Lowcard" yang bisa menjalankan game
-  const room = ws.roomname;
-  if (room !== "Lowcard") {
-    this.safeSend(ws, ["error", "Game LowCard hanya bisa dimainkan di room 'Lowcard'"]);
-    break;
-  }
+        // Pastikan hanya room "Lowcard" yang bisa menjalankan game
+        const room = ws.roomname;
+        if (room !== "Lowcard") {
+          this.safeSend(ws, ["error", "Game LowCard hanya bisa dimainkan di room 'Lowcard'"]);
+          break;
+        }
 
-  // Lanjutkan hanya jika benar di room Lowcard
-  this.lowcard.handleEvent(ws, data);
-  break;
-}
+        // Jalankan event hanya jika benar di room Lowcard
+        this.lowcard.handleEvent(ws, data);
+        break;
+      }
+
+
 
 
 
@@ -594,6 +596,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
