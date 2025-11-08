@@ -47,7 +47,8 @@ export class ChatServer {
 
     this.lowcard = new LowCardGameManager(this);
 
-    this.gracePeriod = 15000;
+    this.gracePeriod = 5 * 60 * 1000; // 5 menit
+
     this.pendingRemove = new Map();
 
     this.pingTimeouts = new Map();
@@ -587,6 +588,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
