@@ -425,38 +425,50 @@ export class ChatServer {
   }
 
   cleanupondestroy(ws) {
-    if (!ws) return;
-    
-    const id = ws.idtarget;
-    
-    if (id) {
-      console.log(`Permanent cleanup for: ${id}`);
-      
-      this.cleanupReconnectSession(id);
-      
-      this.removeAllSeatsById(id);
-    }
-    
-    if (ws.numkursi) {
-      ws.numkursi.clear();
-    }
-    
-    const previousRoom = ws.roomname;
-    this.clients.delete(ws);
-    
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-    
-    try {
-      if (ws.readyState === 1) {
-        ws.close(1000, "Cleanup on destroy");
-      }
-    } catch (e) {}
-    
-    if (previousRoom && roomList.includes(previousRoom)) {
-      this.broadcastRoomUserCount(previousRoom);
+  if (!ws) return;
+
+  const id = ws.idtarget;
+
+  if (id) {
+    console.log(`Destroy called — force removing user: ${id}`);
+
+    // Hapus semua data user dari server
+    this.removeAllSeatsById(id);
+    this.reconnectSessions.delete(id);
+    this.userToSeat.delete(id);
+    this.lastActivity.delete(id);
+    this.pingTimeouts.delete(id);
+
+    if (this.reconnectTimeouts.has(id)) {
+      clearTimeout(this.reconnectTimeouts.get(id));
+      this.reconnectTimeouts.delete(id);
     }
   }
+
+  // Hapus dari client list
+  this.clients.delete(ws);
+
+  // Tutup WebSocket dengan alasan normal
+  try {
+    if (ws.readyState === 1) {
+      ws.close(1000, "Client destroyed");
+    }
+  } catch (e) {
+    console.warn("Error closing WS on destroy:", e);
+  }
+
+  // Update tampilan jumlah user room
+  if (ws.roomname && roomList.includes(ws.roomname)) {
+    this.broadcastRoomUserCount(ws.roomname);
+  }
+
+  // Bersihkan variabel di socket
+  ws.roomname = undefined;
+  ws.idtarget = undefined;
+  ws.numkursi?.clear();
+
+  console.log("Client fully destroyed and removed.");
+}
 
   handleGetRoomUserCount(ws, roomName) {
     const count = this.getJumlahRoom()[roomName] || 0;
@@ -919,3 +931,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
