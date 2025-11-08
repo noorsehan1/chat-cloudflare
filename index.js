@@ -503,6 +503,7 @@ export class ChatServer {
         this.lowcard.handleEvent(ws, data);
         break;
       }
+    }
 
 
 
@@ -596,6 +597,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
