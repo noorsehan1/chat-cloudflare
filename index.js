@@ -488,7 +488,7 @@ export class ChatServer {
         break;
       }
 
-     case "gameLowCardStart":
+      case "gameLowCardStart":
       case "gameLowCardJoin":
       case "gameLowCardNumber":
       case "gameLowCardEnd": {
@@ -503,7 +503,12 @@ export class ChatServer {
         this.lowcard.handleEvent(ws, data);
         break;
       }
+
+      default:
+        this.safeSend(ws, ["error", "Unknown event"]);
     }
+  }
+
 
 
 
@@ -597,6 +602,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
