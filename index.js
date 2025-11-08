@@ -261,39 +261,26 @@ export class ChatServer {
 
 handleOnDestroy(ws, idtarget) {
   ws.isDestroyed = true;
-
-  // 1️⃣ Hapus user dari semua kursi & room
   this.removeAllSeatsById(idtarget);
-
-  // 2️⃣ Hapus koneksi WebSocket dari daftar aktif
   this.clients.delete(ws);
 
-  // 3️⃣ Bersihkan semua timer & data periodik
+  // 🔸 Hapus semua ping timeout
   if (this.pingTimeouts.has(idtarget)) {
     clearTimeout(this.pingTimeouts.get(idtarget));
     this.pingTimeouts.delete(idtarget);
   }
 
+  // 🔸 Hapus grace period timeout biar tidak disangka reconnect
   if (this.pendingRemove.has(idtarget)) {
     clearTimeout(this.pendingRemove.get(idtarget));
     this.pendingRemove.delete(idtarget);
   }
 
-  // 4️⃣ Hapus relasi user ke kursi/room
-  this.userToSeat.delete(idtarget);
-
-  // 5️⃣ Bersihkan pesan pribadi tertunda
-  if (this.privateMessageBuffer.has(idtarget)) {
-    this.privateMessageBuffer.delete(idtarget);
-  }
-
-  // 6️⃣ Reset properti internal WebSocket
+  // 🔸 Bersihkan data room & id
   ws.roomname = undefined;
   ws.idtarget = undefined;
-
-  // 7️⃣ (Opsional) log untuk debug
-  // console.log(`[DESTROY] Semua data user ${idtarget} sudah dihapus total.`);
 }
+
 
 
   handleMessage(ws, raw) {
@@ -632,6 +619,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
