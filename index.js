@@ -557,7 +557,18 @@ export class ChatServer {
       }
       this.cleanupClient(ws);
     });
-    ws.addEventListener("error", () => this.cleanupClient(ws));
+
+    
+  ws.addEventListener("error", () => {
+    // Bersihkan client dulu
+    this.cleanupClient(ws);
+
+    // Jika ws masih punya idtarget, kirim needReconnect
+    if (ws.idtarget) {
+        this.safeSend(ws, ["needReconnect", "Connection error, please reconnect"]);
+    }
+});
+
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -576,3 +587,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
