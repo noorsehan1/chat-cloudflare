@@ -1,10 +1,8 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi lengkap: aman untuk reconnect cepat, kursi hanya dihapus jika user benar-benar disconnect
-
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
-  "General", "Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
+  "General","Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
   "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
 ];
 
@@ -49,13 +47,11 @@ export class ChatServer {
 
     this.lowcard = new LowCardGameManager(this);
 
-    // ✅ Grace period untuk reconnect
-    this.gracePeriod = 15000; // 15 detik
-    this.pendingRemove = new Map(); // Map<idtarget, timeout>
+    this.gracePeriod = 15000;
+    this.pendingRemove = new Map();
 
-    // ✅ Ping/Pong mechanism untuk Android client
-    this.pingTimeouts = new Map(); // Map<idtarget, timeout>
-    this.PING_TIMEOUT = 30000; // 30 detik
+    this.pingTimeouts = new Map();
+    this.PING_TIMEOUT = 30000;
   }
 
   safeSend(ws, arr) {
@@ -242,16 +238,16 @@ export class ChatServer {
     if (this.pingTimeouts.has(idtarget)) {
       clearTimeout(this.pingTimeouts.get(idtarget));
     }
-
+    
     this.safeSend(ws, ["ping", idtarget]);
-
+    
     const timeout = setTimeout(() => {
       if (this.clients.has(ws)) {
         this.cleanupClient(ws);
       }
       this.pingTimeouts.delete(idtarget);
     }, this.PING_TIMEOUT);
-
+    
     this.pingTimeouts.set(idtarget, timeout);
   }
 
@@ -283,12 +279,27 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
-      case "ping": this.handlePing(ws, data[1]); break;
-      case "pong": this.handlePong(ws, data[1]); break;
-      case "onDestroy": this.handleOnDestroy(ws, ws.idtarget); break;
+      case "ping": {
+        const idtarget = data[1];
+        this.handlePing(ws, idtarget);
+        break;
+      }
+
+      case "pong": {
+        const idtarget = data[1];
+        this.handlePong(ws, idtarget);
+        break;
+      }
+
+      case "onDestroy": {
+        const idtarget = ws.idtarget;
+        this.handleOnDestroy(ws, idtarget);
+        break;
+      }
 
       case "setIdTarget": {
         const newId = data[1];
+        
         this.cleanupClientById(newId);
         ws.idtarget = newId;
 
@@ -304,14 +315,19 @@ export class ChatServer {
           const { room, seat } = previousSeatInfo;
           ws.roomname = room;
           ws.numkursi = new Set([seat]);
+          
           this.sendAllStateTo(ws, room);
-
+          
           const seatMap = this.roomSeats.get(room);
           if (seatMap && seatMap.has(seat)) {
-            seatMap.get(seat).namauser = newId;
+            const seatInfo = seatMap.get(seat);
+            seatInfo.namauser = newId;
           }
+          
         } else {
-          if (previousSeatInfo) this.userToSeat.delete(newId);
+          if (previousSeatInfo) {
+            this.userToSeat.delete(newId);
+          }
           this.safeSend(ws, ["needJoinRoom", "Silakan join room"]);
         }
 
@@ -358,8 +374,10 @@ export class ChatServer {
       case "isUserOnline": {
         const username = data[1];
         const tanda = data[2] ?? "";
+
         const activeSockets = Array.from(this.clients).filter(c => c.idtarget === username);
         const online = activeSockets.length > 0;
+
         this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
 
         if (activeSockets.length > 1) {
@@ -367,6 +385,7 @@ export class ChatServer {
           const oldSockets = activeSockets.slice(0, -1);
 
           const userSeatInfo = this.userToSeat.get(username);
+
           if (userSeatInfo) {
             const { room, seat } = userSeatInfo;
             const seatMap = this.roomSeats.get(room);
@@ -388,7 +407,6 @@ export class ChatServer {
       case "getAllRoomsUserCount": this.handleGetAllRoomsUserCount(ws); break;
       case "getCurrentNumber": this.safeSend(ws, ["currentNumber", this.currentNumber]); break;
       case "getOnlineUsers": this.safeSend(ws, ["allOnlineUsers", this.getAllOnlineUsers()]); break;
-
       case "getRoomOnlineUsers": {
         const roomName = data[1];
         if (!roomList.includes(roomName)) return this.safeSend(ws, ["error", "Unknown room"]);
@@ -461,40 +479,100 @@ export class ChatServer {
         break;
       }
 
-      case "resetPoints": {
-        const [, room, seat] = data;
-        if (!roomList.includes(room)) return;
-        const seatMap = this.roomSeats.get(room);
-        const si = seatMap.get(seat);
-        if (si) si.points.length = 0;
+      case "gift": {
+        const [, roomname, sender, receiver, giftName] = data;
+        if (!roomList.includes(roomname)) return this.safeSend(ws, ["error", "Invalid room for gift"]);
+        if (!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname, []);
+        this.chatMessageBuffer.get(roomname).push(["gift", roomname, sender, receiver, giftName, Date.now()]);
         break;
       }
 
-      default: this.safeSend(ws, ["error", `Unknown event: ${evt}`]); break;
+      case "gameLowCardStart":
+      case "gameLowCardJoin":
+      case "gameLowCardNumber":
+      case "gameLowCardEnd":
+        this.lowcard.handleEvent(ws, data);
+        break;
+
+      default:
+        this.safeSend(ws, ["error", "Unknown event"]);
     }
   }
 
-  async fetch(req) {
-    const upgradeHeader = req.headers.get("Upgrade") || "";
-    if (upgradeHeader.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 400 });
-    const [client, server] = new WebSocketPair();
+  cleanupClient(ws) {
+    const id = ws.idtarget;
+    if (id) {
+      ws.isDestroyed = false;
+      
+      if (this.pingTimeouts.has(id)) {
+        clearTimeout(this.pingTimeouts.get(id));
+        this.pingTimeouts.delete(id);
+      }
+
+      const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
+      if (stillActive) {
+        this.clients.delete(ws);
+        return;
+      }
+
+      if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
+
+      const timeout = setTimeout(() => {
+        this.removeAllSeatsById(id);
+        this.pendingRemove.delete(id);
+      }, this.gracePeriod);
+
+      this.pendingRemove.set(id, timeout);
+    }
+
+    ws.numkursi?.clear?.();
+    this.clients.delete(ws);
+    ws.roomname = undefined;
+    ws.idtarget = undefined;
+  }
+
+  async fetch(request) {
+    const upgrade = request.headers.get("Upgrade") || "";
+    if (upgrade.toLowerCase() !== "websocket")
+      return new Response("Expected WebSocket", { status: 426 });
+
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
     server.accept();
 
-    server.addEventListener("message", evt => {
-      try { this.handleMessage(server, evt.data); } catch {}
-    });
+    const ws = server;
 
-    server.addEventListener("close", () => {
-      if (server.idtarget) {
-        this.pendingRemove.set(server.idtarget, setTimeout(() => {
-          this.removeAllSeatsById(server.idtarget);
-          this.pendingRemove.delete(server.idtarget);
-        }, this.gracePeriod));
+    ws.roomname = undefined;
+    ws.idtarget = undefined;
+    ws.numkursi = new Set();
+    ws.isDestroyed = false;
+
+    this.clients.add(ws);
+
+    ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
+    ws.addEventListener("close", () => {
+      if (ws.isDestroyed) {
+        this.clients.delete(ws);
+        return;
       }
-      this.clients.delete(server);
+      this.cleanupClient(ws);
     });
+    ws.addEventListener("error", () => this.cleanupClient(ws));
 
-    this.clients.add(server);
     return new Response(null, { status: 101, webSocket: client });
   }
 }
+
+// Handler utama
+export default {
+  async fetch(req, env) {
+    if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
+      const id = env.CHAT_SERVER.idFromName("global-chat");
+      const obj = env.CHAT_SERVER.get(id);
+      return obj.fetch(req);
+    }
+    if (new URL(req.url).pathname === "/health")
+      return new Response("ok", { status: 200, headers: { "content-type": "text/plain" } });
+    return new Response("WebSocket endpoint", { status: 200 });
+  }
+};
