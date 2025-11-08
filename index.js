@@ -50,7 +50,6 @@ export class ChatServer {
     this.gracePeriod = 5 * 60 * 1000; // 5 menit
 
     this.pendingRemove = new Map();
-    this.firstSetIdTarget = true;
     this.pingTimeouts = new Map();
     this.PING_TIMEOUT = 30000;
   }
@@ -261,7 +260,6 @@ export class ChatServer {
 
 handleOnDestroy(ws, idtarget) {
   // 🔹 Tandai koneksi sudah dihancurkan
-  ws.isDestroyed = true;
 
   // 🔹 Hapus kursi dan mapping user di semua room
   this.removeAllSeatsById(idtarget);
@@ -321,63 +319,53 @@ handleOnDestroy(ws, idtarget) {
 
         
 
- case "setIdTarget": {
-        const newId = data[1];
+case "setIdTarget": {
+  const newId = data[1];
 
-        // Bersihkan koneksi lama dengan ID sama
-        this.cleanupClientById(newId);
-        ws.idtarget = newId;
+  // Bersihkan koneksi lama dengan ID sama
+  this.cleanupClientById(newId);
+  ws.idtarget = newId;
 
-        const previousSeatInfo = this.userToSeat.get(newId);
-        const isInGracePeriod = this.pendingRemove.has(newId);
+  // Ambil status apakah ini pertama kali app dibuka
+  const isFirstTime = !this.hasEverSetId; 
+  this.hasEverSetId = true; // Hanya set true setelah pertama kali
 
-        // 🔹 Jika masih dalam grace period → auto reconnect cepat
-        if (previousSeatInfo && isInGracePeriod) {
-          clearTimeout(this.pendingRemove.get(newId));
-          this.pendingRemove.delete(newId);
+  const previousSeatInfo = this.userToSeat.get(newId);
+  const isInGracePeriod = this.pendingRemove.has(newId);
 
-          const { room, seat } = previousSeatInfo;
-          ws.roomname = room;
-          ws.numkursi = new Set([seat]);
+  if (previousSeatInfo && isInGracePeriod) {
+    clearTimeout(this.pendingRemove.get(newId));
+    this.pendingRemove.delete(newId);
 
-          this.sendAllStateTo(ws, room);
+    const { room, seat } = previousSeatInfo;
+    ws.roomname = room;
+    ws.numkursi = new Set([seat]);
+    this.sendAllStateTo(ws, room);
 
-          const seatMap = this.roomSeats.get(room);
-          if (seatMap && seatMap.has(seat)) {
-            seatMap.get(seat).namauser = newId;
-          }
+    const seatMap = this.roomSeats.get(room);
+    if (seatMap && seatMap.has(seat)) seatMap.get(seat).namauser = newId;
 
-          this.safeSend(ws, ["autoRejoinSuccess", room]);
-        }
+    this.safeSend(ws, ["autoRejoinSuccess", room]);
+  } 
+  else if (previousSeatInfo && !isInGracePeriod) {
+    this.userToSeat.delete(newId);
 
-        // 🔹 Jika user pernah join tapi grace period sudah habis
-        else if (previousSeatInfo && !isInGracePeriod) {
-          this.userToSeat.delete(newId);
+    // ❗ Kirim needJoinRoom HANYA jika bukan pertama kali buka app
+    if (!isFirstTime) {
+      this.safeSend(ws, ["needJoinRoom", previousSeatInfo.room]);
+    }
+  }
 
-          // Hanya kirim needJoinRoom jika bukan setIdTarget pertama
-          if (!this.firstSetIdTarget) {
-            this.safeSend(ws, ["needJoinRoom", previousSeatInfo.room]);
-          }
-        }
+  // 🔹 Kirim pesan pribadi tertunda (jika ada)
+  if (this.privateMessageBuffer.has(newId)) {
+    for (const msg of this.privateMessageBuffer.get(newId))
+      this.safeSend(ws, msg);
+    this.privateMessageBuffer.delete(newId);
+  }
 
-        // 🔹 Jika user baru total
-        else if (!previousSeatInfo && !isInGracePeriod) {
-          // Tidak kirim apa pun
-        }
-
-        // 🔹 Setelah selesai pertama kali set ID
-        this.firstSetIdTarget = false;
-
-        // 🔹 Kirim pesan pribadi tertunda (jika ada)
-        if (this.privateMessageBuffer.has(newId)) {
-          for (const msg of this.privateMessageBuffer.get(newId))
-            this.safeSend(ws, msg);
-          this.privateMessageBuffer.delete(newId);
-        }
-
-        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-        break;
-      }
+  if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+  break;
+}
 
 
 
@@ -643,6 +631,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
