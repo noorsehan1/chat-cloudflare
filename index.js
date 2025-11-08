@@ -554,7 +554,7 @@ export class ChatServer {
     } else {
       // Tidak ada reconnect session - user baru atau sudah benar-benar timeout
       // JANGAN kirim needJoinRoom di sini, biarkan client yang request join room
-          this.cleanupReconnectSession(newId);
+      console.log(`New connection for: ${newId} - no reconnect session found`);
       // Tidak mengirim needJoinRoom - biarkan client secara manual join room
     }
   }
@@ -919,4 +919,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
