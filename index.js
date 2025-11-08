@@ -463,12 +463,15 @@ export class ChatServer {
     this.safeSend(ws, ["roomUserCount", roomName, count]);
   }
 
-  handleSetIdTarget(ws, data) {
+ handleSetIdTarget(ws, data) {
   const newId = data[1];
   
   if (!newId || typeof newId !== 'string') {
     return this.safeSend(ws, ["error", "Invalid user ID"]);
   }
+
+  // ⚠️ PENTING: SELALU HAPUS SESSION RECONNECT SAAT USER BARU BUKA APP
+  this.cleanupReconnectSession(newId);
 
   // Hanya cleanup jika benar-benar diperlukan (hindari race condition)
   const existingConnections = Array.from(this.clients).filter(c => 
@@ -503,24 +506,23 @@ export class ChatServer {
     this.privateMessageBuffer.delete(newId);
   }
 
-  // Handle reconnect session
+  // ⚠️ SETELAH CLEANUP, PASTIKAN TIDAK ADA SESSION LAGI
+  // Jadi bagian ini tidak akan pernah ter-execute untuk user baru
   const reconnectSession = this.reconnectSessions.get(newId);
   
   if (reconnectSession) {
+    // ❌ INI TIDAK AKAN TERJADI KARENA SUDAH DICLEANUP DI ATAS
     const now = Date.now();
     const sessionAge = now - reconnectSession.timestamp;
     
     if (sessionAge < this.RECONNECT_TIMEOUT_MS) {
-      // Session valid - restore tanpa perlu kirim needJoinRoom
       this.restoreReconnectSession(ws, newId, reconnectSession);
     } else {
-      // Session expired - kirim needJoinRoom
-      this.cleanupReconnectSession(newId);
       this.safeSend(ws, ["needJoinRoom", "Session expired - please join a room"]);
     }
   } else {
-    // Tidak ada reconnect session - user baru pertama kali buka aplikasi
-    this.cleanupReconnectSession(newId);
+    // ✅ INI YANG AKAN TERJADI: User baru tanpa session
+    // Biarkan client join room manual
   }
 }
 
@@ -884,5 +886,6 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
