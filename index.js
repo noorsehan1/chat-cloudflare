@@ -2,7 +2,7 @@
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
-  "General","Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
+  "Lowcard","General","Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
   "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
 ];
 
@@ -491,13 +491,19 @@ export class ChatServer {
       case "gameLowCardStart":
       case "gameLowCardJoin":
       case "gameLowCardNumber":
-      case "gameLowCardEnd":
-        this.lowcard.handleEvent(ws, data);
-        break;
+      case "gameLowCardEnd": {
+  // Pastikan hanya room "Lowcard" yang bisa menjalankan game
+  const room = ws.roomname;
+  if (room !== "Lowcard") {
+    this.safeSend(ws, ["error", "Game LowCard hanya bisa dimainkan di room 'Lowcard'"]);
+    break;
+  }
 
-      default:
-        this.safeSend(ws, ["error", "Unknown event"]);
-    }
+  // Lanjutkan hanya jika benar di room Lowcard
+  this.lowcard.handleEvent(ws, data);
+  break;
+}
+
   }
 
   cleanupClient(ws) {
@@ -588,6 +594,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
