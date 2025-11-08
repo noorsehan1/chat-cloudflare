@@ -493,51 +493,76 @@ export class ChatServer {
 
   // Method baru untuk handle setIdTarget dengan lebih baik
   handleSetIdTarget(ws, data) {
-    const newId = data[1];
+  const newId = data[1];
+  
+  if (!newId || typeof newId !== 'string') {
+    return this.safeSend(ws, ["error", "Invalid user ID"]);
+  }
+
+  console.log(`Setting ID target for new connection: ${newId}`);
+  
+  // Hanya cleanup jika benar-benar diperlukan (hindari race condition)
+  const existingConnections = Array.from(this.clients).filter(c => 
+    c.idtarget === newId && c !== ws && c.readyState === 1
+  );
+  
+  // Close duplicate connections (kecuali current ws)
+  for (const oldWs of existingConnections) {
+    try {
+      console.log(`Closing duplicate connection for: ${newId}`);
+      this.safeSend(oldWs, ["forceDisconnect", "New login detected"]);
+      oldWs.close(4000, "Duplicate login");
+      this.cleanupClient(oldWs, "Duplicate connection closed");
+    } catch (e) {
+      console.error("Error closing duplicate connection:", e);
+    }
+  }
+
+  // Set ID target untuk connection saat ini
+  ws.idtarget = newId;
+  this.lastActivity.set(newId, Date.now());
+
+  // Reset ping timeout
+  if (this.pingTimeouts.has(newId)) {
+    clearTimeout(this.pingTimeouts.get(newId));
+    this.pingTimeouts.delete(newId);
+  }
+
+  // Kirim buffered messages
+  if (this.privateMessageBuffer.has(newId)) {
+    const bufferedMessages = this.privateMessageBuffer.get(newId);
+    console.log(`Sending ${bufferedMessages.length} buffered messages to: ${newId}`);
+    for (const msg of bufferedMessages) {
+      this.safeSend(ws, msg);
+    }
+    this.privateMessageBuffer.delete(newId);
+  }
+
+  // Handle reconnect session - hanya kirim needJoinRoom jika session expired
+  const reconnectSession = this.reconnectSessions.get(newId);
+  
+  if (reconnectSession) {
+    console.log(`Processing reconnect session for: ${newId}`);
     
-    if (!newId || typeof newId !== 'string') {
-      return this.safeSend(ws, ["error", "Invalid user ID"]);
-    }
-
-    console.log(`Setting ID target for new connection: ${newId}`);
+    const now = Date.now();
+    const sessionAge = now - reconnectSession.timestamp;
     
-    // Hanya cleanup jika benar-benar diperlukan (hindari race condition)
-    const existingConnections = Array.from(this.clients).filter(c => 
-      c.idtarget === newId && c !== ws && c.readyState === 1
-    );
-    
-    // Close duplicate connections (kecuali current ws)
-    for (const oldWs of existingConnections) {
-      try {
-        console.log(`Closing duplicate connection for: ${newId}`);
-        this.safeSend(oldWs, ["forceDisconnect", "New login detected"]);
-        oldWs.close(4000, "Duplicate login");
-        this.cleanupClient(oldWs, "Duplicate connection closed");
-      } catch (e) {
-        console.error("Error closing duplicate connection:", e);
-      }
+    if (sessionAge < this.RECONNECT_TIMEOUT_MS) {
+      // Session valid - restore tanpa perlu kirim needJoinRoom
+      this.restoreReconnectSession(ws, newId, reconnectSession);
+    } else {
+      // Session expired - kirim needJoinRoom
+      console.log(`Reconnect session expired for: ${newId}`);
+      this.cleanupReconnectSession(newId);
+      this.safeSend(ws, ["needJoinRoom", "Session expired - please join a room"]);
     }
-
-    // Set ID target untuk connection saat ini
-    ws.idtarget = newId;
-    this.lastActivity.set(newId, Date.now());
-
-    // Reset ping timeout
-    if (this.pingTimeouts.has(newId)) {
-      clearTimeout(this.pingTimeouts.get(newId));
-      this.pingTimeouts.delete(newId);
-    }
-
-    // Kirim buffered messages
-    if (this.privateMessageBuffer.has(newId)) {
-      const bufferedMessages = this.privateMessageBuffer.get(newId);
-      console.log(`Sending ${bufferedMessages.length} buffered messages to: ${newId}`);
-      for (const msg of bufferedMessages) {
-        this.safeSend(ws, msg);
-      }
-      this.privateMessageBuffer.delete(newId);
-    }
-
+  } else {
+    // Tidak ada reconnect session - user baru atau sudah benar-benar timeout
+    // JANGAN kirim needJoinRoom di sini, biarkan client yang request join room
+    console.log(`New connection for: ${newId} - no reconnect session found`);
+    // Tidak mengirim needJoinRoom - biarkan client secara manual join room
+  }
+}
     // Handle reconnect session dengan lebih hati-hati
     this.handleReconnectSession(ws, newId);
   }
@@ -928,3 +953,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
