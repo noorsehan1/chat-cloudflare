@@ -50,7 +50,7 @@ export class ChatServer {
     this.lowcard = new LowCardGameManager(this);
 
     // ✅ Grace period untuk reconnect
-    this.gracePeriod = 10000; // 10 detik
+    this.gracePeriod = 15000; // 10 detik
     this.pendingRemove = new Map(); // Map<idtarget, timeout>
 
     // ✅ Ping/Pong mechanism untuk Android client
@@ -269,9 +269,25 @@ export class ChatServer {
   }
 
   handleOnDestroy(ws, idtarget) {
-    // Handle ketika client mengirim onDestroy (manual disconnect)
-    this.cleanupClient(ws);
+  // ✅ Tandai bahwa user keluar manual (bukan disconnect mendadak)
+  ws.isDestroyed = true;
+
+  // ✅ Hapus semua data user langsung (tidak pakai grace period)
+  this.removeAllSeatsById(idtarget);
+
+  // ✅ Hapus dari daftar client aktif
+  this.clients.delete(ws);
+
+  // Bersihkan timeout ping jika ada
+  if (this.pingTimeouts.has(idtarget)) {
+    clearTimeout(this.pingTimeouts.get(idtarget));
+    this.pingTimeouts.delete(idtarget);
   }
+
+  ws.roomname = undefined;
+  ws.idtarget = undefined;
+}
+
 
   handleMessage(ws, raw) {
     let data;
@@ -518,6 +534,7 @@ export class ChatServer {
   cleanupClient(ws) {
     const id = ws.idtarget;
     if (id) {
+        ws.isDestroyed = false;
       // ✅ Clear ping timeout
       if (this.pingTimeouts.has(id)) {
         clearTimeout(this.pingTimeouts.get(id));
@@ -551,27 +568,47 @@ export class ChatServer {
     ws.idtarget = undefined;
   }
 
-  async fetch(request) {
-    const upgrade = request.headers.get("Upgrade") || "";
-    if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
+async fetch(request) {
+  const upgrade = request.headers.get("Upgrade") || "";
+  if (upgrade.toLowerCase() !== "websocket")
+    return new Response("Expected WebSocket", { status: 426 });
 
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    server.accept();
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+  server.accept();
 
-    const ws = server;
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-    ws.numkursi = new Set();
-    this.clients.add(ws);
+  const ws = server;
 
-    ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-    ws.addEventListener("close", () => this.cleanupClient(ws));
-    ws.addEventListener("error", () => this.cleanupClient(ws));
+  // ✅ Set properti default untuk setiap koneksi baru
+  ws.roomname = undefined;
+  ws.idtarget = undefined;
+  ws.numkursi = new Set();
+  ws.isDestroyed = false; // 🟢 default: belum keluar manual
 
-    return new Response(null, { status: 101, webSocket: client });
-  }
+  // Tambahkan koneksi ke daftar aktif
+  this.clients.add(ws);
+
+  // ✅ Handler pesan masuk
+  ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
+
+  // ✅ Handler koneksi ditutup
+  ws.addEventListener("close", () => {
+    if (ws.isDestroyed) {
+      // 🟢 User keluar manual — sudah dibersihkan di handleOnDestroy
+      this.clients.delete(ws);
+      return;
+    }
+
+    // 🔵 User disconnect mendadak — aktifkan grace period reconnect
+    this.cleanupClient(ws);
+  });
+
+  // ✅ Handler error (anggap sama seperti disconnect)
+  ws.addEventListener("error", () => this.cleanupClient(ws));
+
+  return new Response(null, { status: 101, webSocket: client });
 }
+
 
 export default {
   async fetch(req, env) {
@@ -585,4 +622,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
