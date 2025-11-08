@@ -315,18 +315,19 @@ handleOnDestroy(ws, idtarget) {
         break;
       }
 
-      case "onDestroy": {
+     case "onDestroy": {
   const idtarget = ws.idtarget;
 
   if (idtarget) {
-    this.rejoinHandledMap.delete(idtarget); // reset, biar next connect bisa diproses lagi
+    this.rejoinHandledMap.delete(idtarget); // reset untuk koneksi berikutnya
   }
 
   ws.isDestroyed = true;
-  this.clients.delete(ws);
   this.handleOnDestroy(ws, idtarget);
   break;
 }
+
+
 
 
         
@@ -666,6 +667,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
