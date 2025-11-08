@@ -620,6 +620,10 @@ case "setIdTarget": {
 
     
   ws.addEventListener("error", () => {
+    if (ws.isDestroyed) {
+        this.clients.delete(ws);
+        return;
+      }
     // Bersihkan client dulu
     this.cleanupClient(ws);
 
@@ -647,6 +651,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
