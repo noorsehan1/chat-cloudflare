@@ -470,8 +470,6 @@ export class ChatServer {
     return this.safeSend(ws, ["error", "Invalid user ID"]);
   }
 
-  console.log(`Setting ID target for new connection: ${newId}`);
-  
   // Hanya cleanup jika benar-benar diperlukan (hindari race condition)
   const existingConnections = Array.from(this.clients).filter(c => 
     c.idtarget === newId && c !== ws && c.readyState === 1
@@ -480,13 +478,10 @@ export class ChatServer {
   // Close duplicate connections (kecuali current ws)
   for (const oldWs of existingConnections) {
     try {
-      console.log(`Closing duplicate connection for: ${newId}`);
       this.safeSend(oldWs, ["forceDisconnect", "New login detected"]);
       oldWs.close(4000, "Duplicate login");
       this.cleanupClient(oldWs, "Duplicate connection closed");
-    } catch (e) {
-      console.error("Error closing duplicate connection:", e);
-    }
+    } catch (e) {}
   }
 
   // Set ID target untuk connection saat ini
@@ -502,7 +497,6 @@ export class ChatServer {
   // Kirim buffered messages
   if (this.privateMessageBuffer.has(newId)) {
     const bufferedMessages = this.privateMessageBuffer.get(newId);
-    console.log(`Sending ${bufferedMessages.length} buffered messages to: ${newId}`);
     for (const msg of bufferedMessages) {
       this.safeSend(ws, msg);
     }
@@ -513,8 +507,6 @@ export class ChatServer {
   const reconnectSession = this.reconnectSessions.get(newId);
   
   if (reconnectSession) {
-    console.log(`Processing reconnect session for: ${newId}`);
-    
     const now = Date.now();
     const sessionAge = now - reconnectSession.timestamp;
     
@@ -522,17 +514,13 @@ export class ChatServer {
       // Session valid - restore tanpa perlu kirim needJoinRoom
       this.restoreReconnectSession(ws, newId, reconnectSession);
     } else {
-      // Session expired - HAPUS data reconnect dan TIDAK kirim needJoinRoom
-      console.log(`Reconnect session expired for: ${newId} - cleaning up`);
+      // Session expired - kirim needJoinRoom
       this.cleanupReconnectSession(newId);
-      // TIDAK kirim needJoinRoom - biarkan client secara manual join room
+      this.safeSend(ws, ["needJoinRoom", "Session expired - please join a room"]);
     }
   } else {
     // Tidak ada reconnect session - user baru pertama kali buka aplikasi
-    // TAPI cleanup untuk pastikan tidak ada data reconnect tertinggal
     this.cleanupReconnectSession(newId);
-    console.log(`New connection for: ${newId} - no reconnect session found (cleaned up)`);
-    // TIDAK kirim needJoinRoom - biarkan client secara manual join room
   }
 }
 
@@ -896,4 +884,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
