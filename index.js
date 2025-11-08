@@ -300,47 +300,60 @@ export class ChatServer {
       }
 
       case "setIdTarget": {
-        const newId = data[1];
-        let graceExpired = false;
+  const newId = data[1];
+  
+  // Cleanup duplicate connections
+  this.cleanupClientById(newId);
 
-        // 🔸 Cek apakah user reconnect sebelum gracePeriod habis
-        if (this.pendingRemove.has(newId)) {
-          clearTimeout(this.pendingRemove.get(newId)); // batalkan penghapusan kursi
-          this.pendingRemove.delete(newId);
-        } else {
-          graceExpired = true; // reconnect terlambat (> gracePeriod) atau koneksi pertama
-        }
+  // Set ID baru
+  ws.idtarget = newId;
 
-        // Bersihkan koneksi lama yang punya id sama
-        this.cleanupClientById(newId);
+  // ✅ CEK APAKAH PERLU JOIN ROOM ATAU TIDAK
+  const previousSeatInfo = this.userToSeat.get(newId);
+  const isInGracePeriod = this.pendingRemove.has(newId);
 
-        // set id pada socket yang baru
-        ws.idtarget = newId;
+  if (isInGracePeriod) {
+    // 🔹 CANCEL GRACE PERIOD - Reconnect cepat
+    clearTimeout(this.pendingRemove.get(newId));
+    this.pendingRemove.delete(newId);
+  }
 
-        // ✅ Deteksi apakah user pernah join room sebelumnya
-        const hasJoinedBefore = this.userToSeat.has(newId);
+  if (previousSeatInfo && isInGracePeriod) {
+    // 🔹 RECONNECT CEPAT: Kembalikan state sebelumnya
+    const { room, seat } = previousSeatInfo;
+    ws.roomname = room;
+    ws.numkursi = new Set([seat]);
+    
+    // ✅ HANYA kirim state room, TANPA numberKursiSaya
+    this.sendAllStateTo(ws, room);
+    
+    // Update ownership kursi
+    const seatMap = this.roomSeats.get(room);
+    if (seatMap && seatMap.has(seat)) {
+      const seatInfo = seatMap.get(seat);
+      seatInfo.namauser = newId; // Kembalikan ownership
+    }
+    
+    // ✅ Client akan tahu dia dapat kursi dari allUpdateKursiList
+    
+  } else {
+    // 🔹 PERLU JOIN ROOM: User baru ATAU reconnect terlambat
+    if (previousSeatInfo) {
+      // Reconnect terlambat - hapus mapping lama
+      this.userToSeat.delete(newId);
+    }
+    this.safeSend(ws, ["needJoinRoom", "Silakan join room"]);
+  }
 
-        if (!graceExpired && ws.roomname) {
-          // 🔹 Reconnect cepat — kursi masih aman
-          this.sendAllStateTo(ws, ws.roomname);
-          this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
-        } else if (!hasJoinedBefore) {
-          // 🔹 Pertama kali connect — jangan kirim needJoinRoom
-          this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
-        } else {
-          // 🔹 Reconnect terlambat — kursinya sudah dihapus
-          this.safeSend(ws, ["needJoinRoom", "Reconnect expired, silakan join room lagi"]);
-        }
+  // Kirim buffered messages
+  if (this.privateMessageBuffer.has(newId)) {
+    for (const msg of this.privateMessageBuffer.get(newId)) this.safeSend(ws, msg);
+    this.privateMessageBuffer.delete(newId);
+  }
 
-        // kirim private buffer jika ada
-        if (this.privateMessageBuffer.has(ws.idtarget)) {
-          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
-          this.privateMessageBuffer.delete(ws.idtarget);
-        }
-
-        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-        break;
-      }
+  if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+  break;
+}
 
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
@@ -572,3 +585,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
