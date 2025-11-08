@@ -504,7 +504,7 @@ export class ChatServer {
   break;
 }
 
-  }
+
 
   cleanupClient(ws) {
     const id = ws.idtarget;
@@ -594,6 +594,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
