@@ -46,16 +46,15 @@ export class ChatServer {
 
     this.lowcard = new LowCardGameManager(this);
 
-    // Sistem reconnect yang diperbaiki
-    this.reconnectSessions = new Map();
-    this.reconnectTimeouts = new Map();
+    // Sistem offline yang proper
+    this.offlineUsers = new Map();
+    this.offlineTimers = new Map();
     this.lastActivity = new Map();
     this.pingTimeouts = new Map();
     
-    this.RECONNECT_TIMEOUT_MS = 30 * 1000;
-    this.PING_TIMEOUT_MS = 25 * 1000;
-    this.HEARTBEAT_INTERVAL = 10 * 1000;
-    this.INACTIVE_TIMEOUT_MS = 60 * 1000;
+    this.OFFLINE_TIMEOUT_MS = 30 * 1000;
+    this.PING_TIMEOUT_MS = 30 * 1000;
+    this.HEARTBEAT_INTERVAL = 15 * 1000;
   }
 
   safeSend(ws, arr) {
@@ -68,14 +67,14 @@ export class ChatServer {
         return true;
       }
     } catch (e) {
-      console.log("SafeSend error:", e);
+      this.cleanupClient(ws);
     }
     return false;
   }
 
   sendPingToClient(ws) {
     if (ws.idtarget && ws.readyState === 1) {
-      const pingSent = this.safeSend(ws, ["ping", Date.now()]);
+      const pingSent = this.safeSend(ws, ["ping", ws.idtarget]);
       if (pingSent) {
         this.setPingTimeout(ws.idtarget);
       }
@@ -88,7 +87,6 @@ export class ChatServer {
     }
 
     const timeoutId = setTimeout(() => {
-      console.log(`Ping timeout for user: ${userId}`);
       const userWs = Array.from(this.clients).find(c => c.idtarget === userId);
       if (userWs) {
         this.handlePingTimeout(userWs);
@@ -103,8 +101,13 @@ export class ChatServer {
     const userId = ws.idtarget;
     if (!userId) return;
 
-    console.log(`Closing connection due to ping timeout: ${userId}`);
-    this.cleanupClient(ws, "Ping timeout");
+    try {
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify(["needReconnect", "Ping timeout - please reconnect"]));
+      }
+    } catch (e) {}
+
+    this.cleanupClient(ws);
   }
 
   heartbeat() {
@@ -184,13 +187,14 @@ export class ChatServer {
   }
 
   periodicFlush() {
+    // ⚠️ TIDAK cleanup WebSocket di sini - biarkan event yang handle
     this.flushKursiUpdates();
     this.flushChatBuffer();
     this.cleanExpiredLocks();
     
     this.heartbeat();
     this.checkInactiveUsers();
-    this.cleanupExpiredReconnectSessions();
+    this.checkOfflineUsers();
 
     for (const [id, msgs] of Array.from(this.privateMessageBuffer)) {
       for (const c of this.clients) {
@@ -208,73 +212,51 @@ export class ChatServer {
     const toRemove = [];
 
     for (const [id, lastActive] of this.lastActivity.entries()) {
-      if (now - lastActive >= this.INACTIVE_TIMEOUT_MS) {
+      if (now - lastActive >= this.PING_TIMEOUT_MS + 5000) {
         toRemove.push(id);
       }
     }
 
     for (const id of toRemove) {
-      console.log(`Removing inactive user: ${id}`);
-      this.forceUserOffline(id);
+      this.forceUserReconnect(id);
     }
   }
 
-  saveReconnectSession(userId, sessionData) {
-    this.reconnectSessions.set(userId, {
-      ...sessionData,
-      timestamp: Date.now()
-    });
+  forceUserReconnect(userId) {
+    const userWs = Array.from(this.clients).find(c => c.idtarget === userId);
+    if (userWs) {
+      try {
+        if (userWs.readyState === 1) {
+          userWs.send(JSON.stringify(["needReconnect", "Inactive - please reconnect"]));
+        }
+      } catch (e) {}
 
-    if (this.reconnectTimeouts.has(userId)) {
-      clearTimeout(this.reconnectTimeouts.get(userId));
+      this.cleanupClient(userWs);
     }
 
-    const timeoutId = setTimeout(() => {
-      console.log(`Reconnect session expired for: ${userId}`);
-      this.cleanupReconnectSession(userId);
-    }, this.RECONNECT_TIMEOUT_MS);
-
-    this.reconnectTimeouts.set(userId, timeoutId);
+    this.offlineUsers.delete(userId);
+    this.offlineTimers.delete(userId);
+    this.lastActivity.delete(userId);
+    this.pingTimeouts.delete(userId);
+    this.removeAllSeatsById(userId);
   }
 
-  cleanupExpiredReconnectSessions() {
+  checkOfflineUsers() {
     const now = Date.now();
     const toRemove = [];
-
-    for (const [userId, session] of this.reconnectSessions.entries()) {
-      if (now - session.timestamp >= this.RECONNECT_TIMEOUT_MS) {
-        toRemove.push(userId);
+    
+    for (const [id, saved] of this.offlineUsers.entries()) {
+      if (now - saved.timestamp >= this.OFFLINE_TIMEOUT_MS) {
+        toRemove.push(id);
       }
     }
 
-    for (const userId of toRemove) {
-      this.cleanupReconnectSession(userId);
-    }
-  }
-
-  cleanupReconnectSession(userId) {
-    console.log(`Cleaning up reconnect session for: ${userId}`);
-    
-    this.removeAllSeatsById(userId);
-    
-    this.reconnectSessions.delete(userId);
-    
-    if (this.reconnectTimeouts.has(userId)) {
-      clearTimeout(this.reconnectTimeouts.get(userId));
-      this.reconnectTimeouts.delete(userId);
-    }
-    
-    this.lastActivity.delete(userId);
-    this.pingTimeouts.delete(userId);
-    this.userToSeat.delete(userId);
-  }
-
-  forceUserOffline(userId) {
-    const userWs = Array.from(this.clients).find(c => c.idtarget === userId);
-    if (userWs) {
-      this.cleanupClient(userWs, "Inactive timeout");
-    } else {
-      this.cleanupReconnectSession(userId);
+    for (const id of toRemove) {
+      this.offlineUsers.delete(id);
+      this.offlineTimers.delete(id);
+      this.lastActivity.delete(id);
+      this.pingTimeouts.delete(id);
+      this.removeAllSeatsById(id);
     }
   }
 
@@ -335,7 +317,7 @@ export class ChatServer {
     for (const c of Array.from(this.clients)) {
       if (c.idtarget === idtarget) {
         try { c.close(4000, "Duplicate connection cleanup"); } catch {}
-        this.cleanupClient(c, "Duplicate connection");
+        this.cleanupondestroy(c);
       }
     }
   }
@@ -355,7 +337,6 @@ export class ChatServer {
       if (removedInRoom) this.broadcastRoomUserCount(room);
     }
     this.userToSeat.delete(idtarget);
-    return removedAny;
   }
 
   getAllOnlineUsers() {
@@ -370,90 +351,141 @@ export class ChatServer {
     return users;
   }
 
-  cleanupClient(ws, reason = "Connection closed") {
+  scheduleOfflineRemoval(idtarget) {
+    if (this.offlineTimers.has(idtarget)) {
+      clearTimeout(this.offlineTimers.get(idtarget));
+    }
+    
+    const timeoutId = setTimeout(() => {
+      if (this.offlineUsers.has(idtarget)) {
+        this.offlineUsers.delete(idtarget);
+        this.removeAllSeatsById(idtarget);
+        this.lastActivity.delete(idtarget);
+        this.pingTimeouts.delete(idtarget);
+      }
+      this.offlineTimers.delete(idtarget);
+    }, this.OFFLINE_TIMEOUT_MS);
+    
+    this.offlineTimers.set(idtarget, timeoutId);
+  }
+
+  cancelOfflineRemoval(idtarget) {
+    if (this.offlineTimers.has(idtarget)) {
+      clearTimeout(this.offlineTimers.get(idtarget));
+      this.offlineTimers.delete(idtarget);
+    }
+    if (this.offlineUsers.has(idtarget)) {
+      this.offlineUsers.delete(idtarget);
+    }
+    if (this.pingTimeouts.has(idtarget)) {
+      clearTimeout(this.pingTimeouts.get(idtarget));
+      this.pingTimeouts.delete(idtarget);
+    }
+  }
+
+  // ⚠️ PERBAIKAN PENTING: cleanupClient yang benar
+  cleanupClient(ws) {
     const id = ws.idtarget;
     if (!id) {
       this.clients.delete(ws);
       return;
     }
 
-    console.log(`Cleaning up client: ${id}, reason: ${reason}`);
-
-    if (ws.roomname && !this.reconnectSessions.has(id)) {
-      const sessionData = {
+    // ⚠️ SELALU simpan ke offlineUsers untuk reconnect
+    if (ws.roomname) {
+      this.offlineUsers.set(id, {
         roomname: ws.roomname,
         seats: ws.numkursi ? Array.from(ws.numkursi) : [],
-        userToSeat: this.userToSeat.get(id)
-      };
-      
-      this.saveReconnectSession(id, sessionData);
-      console.log(`Saved reconnect session for: ${id}`);
+        timestamp: Date.now()
+      });
+      this.scheduleOfflineRemoval(id);
     }
 
-    if (ws.numkursi) {
-      ws.numkursi.clear();
-    }
-    
+    // Cleanup WebSocket data
+    ws.numkursi?.clear?.();
     this.clients.delete(ws);
-    
-    this.pingTimeouts.delete(id);
-    
-    console.log(`Client cleanup completed for: ${id}`);
-  }
-
-  cleanupondestroy(ws) {
-    if (!ws) return;
-    
-    const id = ws.idtarget;
-    
-    if (id) {
-      console.log(`Permanent cleanup for: ${id}`);
-      
-      this.cleanupReconnectSession(id);
-      
-      this.removeAllSeatsById(id);
-    }
-    
-    if (ws.numkursi) {
-      ws.numkursi.clear();
-    }
-    
-    const previousRoom = ws.roomname;
-    this.clients.delete(ws);
-    
     ws.roomname = undefined;
     ws.idtarget = undefined;
     
-    try {
-      if (ws.readyState === 1) {
-        ws.close(1000, "Cleanup on destroy");
-      }
-    } catch (e) {}
-    
-    if (previousRoom && roomList.includes(previousRoom)) {
-      this.broadcastRoomUserCount(previousRoom);
-    }
+    this.pingTimeouts.delete(id);
   }
 
-  handleGetRoomUserCount(ws, roomName) {
-    const count = this.getJumlahRoom()[roomName] || 0;
-    this.safeSend(ws, ["roomUserCount", roomName, count]);
-  }
-
-  handleRemoveUserById(ws, targetId, reason = "Removed by system") {
-    this.removeAllSeatsById(targetId);
+  cleanupondestroy(ws) {
+  if (!ws) return;
+  
+  const id = ws.idtarget;
+  console.log(`[Cleanup] Starting cleanup for user: ${id}`);
+  
+  if (id) {
+    // 1. Hapus semua seat yang dimiliki user ini
+    this.removeAllSeatsById(id);
     
-    for (const client of this.clients) {
-      if (client.idtarget === targetId) {
-        this.safeSend(client, ["forceDisconnect", reason]);
-        this.cleanupondestroy(client);
-      }
+    // 2. Cancel semua timer yang terkait
+    this.cancelOfflineRemoval(id);
+    
+    // 3. Hapus dari activity tracking
+    this.lastActivity.delete(id);
+    
+    // 4. Hapus ping timeout jika ada
+    if (this.pingTimeouts.has(id)) {
+      clearTimeout(this.pingTimeouts.get(id));
+      this.pingTimeouts.delete(id);
+      console.log(`[Cleanup] Removed ping timeout for: ${id}`);
     }
     
-    this.cleanupReconnectSession(targetId);
+    // 5. Hapus dari userToSeat mapping
+    this.userToSeat.delete(id);
     
-    this.safeSend(ws, ["removeUserResult", targetId, "success", reason]);
+    // 6. Hapus dari offline users jika ada
+    if (this.offlineUsers.has(id)) {
+      this.offlineUsers.delete(id);
+      console.log(`[Cleanup] Removed from offline users: ${id}`);
+    }
+    
+    // 7. Hapus offline timer jika ada
+    if (this.offlineTimers.has(id)) {
+      clearTimeout(this.offlineTimers.get(id));
+      this.offlineTimers.delete(id);
+      console.log(`[Cleanup] Removed offline timer for: ${id}`);
+    }
   }
+  
+  // 8. Cleanup WebSocket data structures
+  if (ws.numkursi) {
+    const seatCount = ws.numkursi.size;
+    ws.numkursi.clear();
+    console.log(`[Cleanup] Cleared ${seatCount} seats from numkursi`);
+  }
+  
+  // 9. Hapus dari clients set
+  const wasInClients = this.clients.delete(ws);
+  console.log(`[Cleanup] Removed from clients set: ${wasInClients}`);
+  
+  // 10. Reset WebSocket properties
+  const previousRoom = ws.roomname;
+  ws.roomname = undefined;
+  ws.idtarget = undefined;
+  
+  // 11. Close WebSocket connection jika masih terbuka
+  try {
+    if (ws.readyState === 1) { // WebSocket.OPEN
+      ws.close(1000, "Cleanup on destroy");
+      console.log(`[Cleanup] Closed WebSocket connection for user: ${id}`);
+    } else {
+      console.log(`[Cleanup] WebSocket already in state: ${ws.readyState}`);
+    }
+  } catch (e) {
+    console.error(`[Cleanup] Error closing WebSocket:`, e);
+  }
+  
+  // 12. Broadcast room count update jika user ada di room
+  if (previousRoom && roomList.includes(previousRoom)) {
+    this.broadcastRoomUserCount(previousRoom);
+    console.log(`[Cleanup] Broadcast room count update for: ${previousRoom}`);
+  }
+  
+  console.log(`[Cleanup] Completed cleanup for user: ${id}`);
+}
 
   handleMessage(ws, raw) {
     if (ws.idtarget) {
@@ -466,306 +498,235 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
-      case "onDestroy": {
-        this.cleanupondestroy(ws);
-        break;
-      }
-
-      case "getRoomUserCount": {
-        const roomName = data[1];
-        if (!roomList.includes(roomName)) return this.safeSend(ws, ["error", "Unknown room"]);
-        this.handleGetRoomUserCount(ws, roomName);
-        break;
-      }
-
-      case "removeUserById": {
-        const targetId = data[1];
-        const reason = data[2] || "Removed by admin";
-        this.handleRemoveUserById(ws, targetId, reason);
-        break;
-      }
-
-      case "getOnlineUsers": {
-        const onlineUsers = this.getAllOnlineUsers();
-        this.safeSend(ws, ["onlineUsersList", onlineUsers]);
-        break;
-      }
-
-      case "setIdTarget": {
-  const newId = data[1];
-  
-  // Cleanup existing connections untuk user ini
-  this.cleanupClientById(newId);
-  
-  // Set ID target
-  ws.idtarget = newId;
-  this.lastActivity.set(newId, Date.now());
-
-  // Reset ping timeout untuk user ini
-  if (this.pingTimeouts.has(newId)) {
-    clearTimeout(this.pingTimeouts.get(newId));
-    this.pingTimeouts.delete(newId);
-  }
-
-  // Kirim private messages yang tertahan
-  if (this.privateMessageBuffer.has(newId)) {
-    for (const msg of this.privateMessageBuffer.get(newId)) {
-      this.safeSend(ws, msg);
+ case "onDestroy": {
+      // ⚠️ Handle onDestroy message - cleanup yang proper
+      this.cleanupondestroy(ws);
+      break;
     }
-    this.privateMessageBuffer.delete(newId);
-  }
+    case "setIdTarget": {
+      const newId = data[1];
+      this.cleanupClientById(newId);
+      ws.idtarget = newId;
 
-  // Cek apakah ada session reconnect yang tersimpan
-  const reconnectSession = this.reconnectSessions.get(newId);
-  if (reconnectSession) {
-    console.log(`Found reconnect session for: ${newId}`);
-    
-    // Hapus timeout reconnect
-    if (this.reconnectTimeouts.has(newId)) {
-      clearTimeout(this.reconnectTimeouts.get(newId));
-      this.reconnectTimeouts.delete(newId);
-    }
-    
-    // Cek apakah session masih valid (dalam waktu timeout)
-    const now = Date.now();
-    if (now - reconnectSession.timestamp < this.RECONNECT_TIMEOUT_MS) {
-      // Session masih valid - restore session
-      const { roomname, seats, userToSeat } = reconnectSession;
-      
-      // Bersihkan seat locks yang mungkin tertinggal
-      this.cleanExpiredLocks();
-      
-      ws.roomname = roomname;
-      ws.numkursi = new Set(seats);
-      
-      if (userToSeat) {
-        this.userToSeat.set(newId, userToSeat);
+      this.lastActivity.set(newId, Date.now());
+
+      if (this.privateMessageBuffer.has(ws.idtarget)) {
+        for (const msg of this.privateMessageBuffer.get(ws.idtarget)) this.safeSend(ws, msg);
+        this.privateMessageBuffer.delete(ws.idtarget);
       }
 
-      // Update seat information dan pastikan lock dibersihkan
-      const seatMap = this.roomSeats.get(roomname);
-      for (const seat of seats) {
-        const info = seatMap.get(seat);
-        if (info) {
-          // Hapus lock jika ada dan set ke user ID yang benar
-          if (info.namauser.startsWith("__LOCK__") || info.namauser === "" || info.namauser === newId) {
+      const offline = this.offlineUsers.get(newId);
+      if (offline) {
+        const { roomname, seats } = offline;
+        ws.roomname = roomname;
+        ws.numkursi = new Set(seats);
+
+        const seatMap = this.roomSeats.get(roomname);
+        for (const s of seats) {
+          const info = seatMap.get(s);
+          if (info.namauser === "" || info.namauser.startsWith("__LOCK__")) {
             info.namauser = newId;
-            info.lockTime = undefined; // Hapus lock time
           }
         }
+
+        this.sendAllStateTo(ws, roomname);
+        this.broadcastRoomUserCount(roomname);
+
+        this.offlineUsers.delete(newId);
+        this.cancelOfflineRemoval(newId);
+        
+        this.safeSend(ws, ["reconnectSuccess", roomname]);
+      } else {
+        this.safeSend(ws, ["needJoinRoom", "Session expired - please join room again"]);
       }
 
-      // Kirim semua state terbaru
-      this.sendAllStateTo(ws, roomname);
-      this.broadcastRoomUserCount(roomname);
-
-      // Hapus session reconnect
-      this.reconnectSessions.delete(newId);
-      
-      // Kirim pesan sukses reconnect
-      this.safeSend(ws, ["reconnectSuccess", roomname]);
-      
-      // Force flush buffers untuk room ini
-      this.forceFlushRoomBuffers(roomname);
-      
-      
-    } else {
-      // ❌ Session sudah expired - hapus dan kirim needJoinRoom
-
-      this.cleanupReconnectSession(newId);
-      this.safeSend(ws, ["needJoinRoom", "Session expired - please join room again"]);
+      break;
     }
-  } else {
-    // Tidak ada session reconnect - bersihkan semua data user
-    this.cleanupReconnectSession(newId);
-    this.safeSend(ws, ["needJoinRoom", "Please join a room"]);
-  }
-  break;
-}
 
-      case "pong": {
-        const pingTime = data[1];
-        if (ws.idtarget) {
-          this.lastActivity.set(ws.idtarget, Date.now());
-          if (this.pingTimeouts.has(ws.idtarget)) {
-            clearTimeout(this.pingTimeouts.get(ws.idtarget));
-            this.pingTimeouts.delete(ws.idtarget);
+    case "pong": {
+      if (ws.idtarget) {
+        this.lastActivity.set(ws.idtarget, Date.now());
+        if (this.pingTimeouts.has(ws.idtarget)) {
+          clearTimeout(this.pingTimeouts.get(ws.idtarget));
+          this.pingTimeouts.delete(ws.idtarget);
+        }
+      }
+      break;
+    }
+
+    case "ping": {
+      const idtarget = data[1];
+      if (idtarget) {
+        this.lastActivity.set(idtarget, Date.now());
+      }
+      this.safeSend(ws, ["pong"]);
+      break;
+    }
+
+    case "sendnotif": {
+      const [, idtarget, noimageUrl, username, deskripsi] = data;
+      const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
+      let delivered = false;
+      for (const c of this.clients) if (c.idtarget === idtarget) { this.safeSend(c, notif); delivered = true; }
+      if (!delivered) {
+        if (!this.privateMessageBuffer.has(idtarget)) this.privateMessageBuffer.set(idtarget, []);
+        this.privateMessageBuffer.get(idtarget).push(notif);
+      }
+      break;
+    }
+
+    case "private": {
+      const [, idt, url, msg, sender] = data;
+      const ts = Date.now();
+      const out = ["private", idt, url, msg, ts, sender];
+      this.safeSend(ws, out);
+      let delivered = false;
+      for (const c of this.clients) if (c.idtarget === idt) { this.safeSend(c, out); delivered = true; }
+      if (!delivered) {
+        if (!this.privateMessageBuffer.has(idt)) this.privateMessageBuffer.set(idt, []);
+        this.privateMessageBuffer.get(idt).push(out);
+        this.safeSend(ws, ["privateFailed", idt, "User offline"]);
+      }
+      break;
+    }
+
+    case "isUserOnline": {
+      const username = data[1];
+      const tanda = data[2] ?? "";
+
+      const activeSockets = Array.from(this.clients).filter(c => c.idtarget === username);
+      const online = activeSockets.length > 0;
+      this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
+
+      if (activeSockets.length > 1) {
+        const newest = activeSockets[activeSockets.length - 1];
+        const oldSockets = activeSockets.slice(0, -1);
+
+        const userSeatInfo = this.userToSeat.get(username);
+        if (userSeatInfo) {
+          const { room, seat } = userSeatInfo;
+          const seatMap = this.roomSeats.get(room);
+          if (seatMap && seatMap.has(seat)) {
+            Object.assign(seatMap.get(seat), createEmptySeat());
+            this.broadcastToRoom(room, ["removeKursi", room, seat]);
+            this.broadcastRoomUserCount(room);
           }
-          
-          const latency = Date.now() - pingTime;
-          this.safeSend(ws, ["pong", latency]);
+          this.userToSeat.delete(username);
         }
-        break;
-      }
 
-      case "ping": {
-        const pingTime = data[1];
-        if (ws.idtarget) {
-          this.lastActivity.set(ws.idtarget, Date.now());
+        for (const old of oldSockets) {
+          try {
+            old.close(4000, "Duplicate login — old session closed");
+            this.clients.delete(old);
+          } catch {}
         }
-        this.safeSend(ws, ["pong", pingTime]);
-        break;
       }
+      break;
+    }
 
-      case "sendnotif": {
-        const [, idtarget, noimageUrl, username, deskripsi] = data;
-        const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
-        let delivered = false;
-        for (const c of this.clients) if (c.idtarget === idtarget) { this.safeSend(c, notif); delivered = true; }
-        if (!delivered) {
-          if (!this.privateMessageBuffer.has(idtarget)) this.privateMessageBuffer.set(idtarget, []);
-          this.privateMessageBuffer.get(idtarget).push(notif);
-        }
-        break;
+    case "getAllRoomsUserCount":
+      this.handleGetAllRoomsUserCount(ws);
+      break;
+
+    case "getCurrentNumber":
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
+      break;
+
+    case "getAllOnlineUsers":
+      this.safeSend(ws, ["allOnlineUsers", this.getAllOnlineUsers()]);
+      break;
+
+    case "getRoomOnlineUsers": {
+      const roomName = data[1];
+      if (!roomList.includes(roomName)) return this.safeSend(ws, ["error", "Unknown room"]);
+      this.safeSend(ws, ["roomOnlineUsers", roomName, this.getOnlineUsersByRoom(roomName)]);
+      break;
+    }
+
+    case "joinRoom": {
+      const newRoom = data[1];
+      if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
+      if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
+      ws.roomname = newRoom;
+      const seatMap = this.roomSeats.get(newRoom);
+      const foundSeat = this.lockSeat(newRoom, ws);
+      if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
+      ws.numkursi = new Set([foundSeat]);
+      this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+      if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+      this.sendAllStateTo(ws, newRoom);
+      this.broadcastRoomUserCount(newRoom);
+      
+      if (ws.idtarget) {
+        this.lastActivity.set(ws.idtarget, Date.now());
       }
+      break;
+    }
 
-      case "private": {
-        const [, idt, url, msg, sender] = data;
-        const ts = Date.now();
-        const out = ["private", idt, url, msg, ts, sender];
-        this.safeSend(ws, out);
-        let delivered = false;
-        for (const c of this.clients) if (c.idtarget === idt) { this.safeSend(c, out); delivered = true; }
-        if (!delivered) {
-          if (!this.privateMessageBuffer.has(idt)) this.privateMessageBuffer.set(idt, []);
-          this.privateMessageBuffer.get(idt).push(out);
-          this.safeSend(ws, ["privateFailed", idt, "User offline"]);
-        }
-        break;
-      }
+    case "chat": {
+      const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
+      if (!roomList.includes(roomname)) return this.safeSend(ws, ["error", "Invalid room for chat"]);
+      if (!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname, []);
+      this.chatMessageBuffer.get(roomname).push([
+        "chat", roomname, noImageURL, username, message, usernameColor, chatTextColor
+      ]);
+      break;
+    }
 
-      case "isUserOnline": {
-        const username = data[1];
-        const tanda = data[2] ?? "";
+    case "updatePoint": {
+      const [, room, seat, x, y, fast] = data;
+      if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
+      const seatMap = this.roomSeats.get(room);
+      const si = seatMap.get(seat);
+      if (!si) return;
+      si.points.push({ x, y, fast });
+      if (si.points.length > 200) si.points.shift();
+      this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
+      break;
+    }
 
-        const activeSockets = Array.from(this.clients).filter(c => c.idtarget === username);
-        const hasReconnectSession = this.reconnectSessions.has(username);
-        const online = activeSockets.length > 0 || hasReconnectSession;
-        
-        this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
+    case "removeKursiAndPoint": {
+      const [, room, seat] = data;
+      if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
+      const seatMap = this.roomSeats.get(room);
+      Object.assign(seatMap.get(seat), createEmptySeat());
+      for (const c of this.clients) c.numkursi?.delete(seat);
+      this.broadcastToRoom(room, ["removeKursi", room, seat]);
+      this.broadcastRoomUserCount(room);
+      break;
+    }
 
-        if (activeSockets.length > 1) {
-          const newest = activeSockets[activeSockets.length - 1];
-          const oldSockets = activeSockets.slice(0, -1);
+    case "updateKursi": {
+      const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
+      if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
+      const seatMap = this.roomSeats.get(room);
+      const currentInfo = seatMap.get(seat) || createEmptySeat();
+      Object.assign(currentInfo, { noimageUrl, namauser, color, itembawah, itematas, vip, viptanda });
+      seatMap.set(seat, currentInfo);
+      if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
+      this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
+      this.broadcastRoomUserCount(room);
+      break;
+    }
 
-          for (const old of oldSockets) {
-            try {
-              old.close(4000, "Duplicate login — old session closed");
-              this.clients.delete(old);
-            } catch {}
-          }
-        }
-        break;
-      }
+    case "gift": {
+      const [, roomname, sender, receiver, giftName] = data;
+      if (!roomList.includes(roomname)) return this.safeSend(ws, ["error", "Invalid room for gift"]);
+      if (!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname, []);
+      this.chatMessageBuffer.get(roomname).push([
+        "gift", roomname, sender, receiver, giftName, Date.now()
+      ]);
+      break;
+    }
 
-      case "getAllRoomsUserCount":
-        this.handleGetAllRoomsUserCount(ws);
-        break;
+    case "gameLowCardStart":
+    case "gameLowCardJoin":
+    case "gameLowCardNumber":
+      this.lowcard.handleEvent(ws, data);
+      break;
 
-      case "getCurrentNumber":
-        this.safeSend(ws, ["currentNumber", this.currentNumber]);
-        break;
-
-      case "getAllOnlineUsers":
-        this.safeSend(ws, ["allOnlineUsers", this.getAllOnlineUsers()]);
-        break;
-
-      case "getRoomOnlineUsers": {
-        const roomName = data[1];
-        if (!roomList.includes(roomName)) return this.safeSend(ws, ["error", "Unknown room"]);
-        this.safeSend(ws, ["roomOnlineUsers", roomName, this.getOnlineUsersByRoom(roomName)]);
-        break;
-      }
-
-      case "joinRoom": {
-        const newRoom = data[1];
-        if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
-        
-        if (ws.idtarget) {
-          this.reconnectSessions.delete(ws.idtarget);
-          this.removeAllSeatsById(ws.idtarget);
-        }
-        
-        ws.roomname = newRoom;
-        const seatMap = this.roomSeats.get(newRoom);
-        const foundSeat = this.lockSeat(newRoom, ws);
-        if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
-        ws.numkursi = new Set([foundSeat]);
-        this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-        if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-        this.sendAllStateTo(ws, newRoom);
-        this.broadcastRoomUserCount(newRoom);
-        
-        if (ws.idtarget) {
-          this.lastActivity.set(ws.idtarget, Date.now());
-        }
-        break;
-      }
-
-      case "chat": {
-        const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
-        if (!roomList.includes(roomname)) return this.safeSend(ws, ["error", "Invalid room for chat"]);
-        if (!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname, []);
-        this.chatMessageBuffer.get(roomname).push([
-          "chat", roomname, noImageURL, username, message, usernameColor, chatTextColor
-        ]);
-        break;
-      }
-
-      case "updatePoint": {
-        const [, room, seat, x, y, fast] = data;
-        if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
-        const seatMap = this.roomSeats.get(room);
-        const si = seatMap.get(seat);
-        if (!si) return;
-        si.points.push({ x, y, fast });
-        if (si.points.length > 200) si.points.shift();
-        this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
-        break;
-      }
-
-      case "removeKursiAndPoint": {
-        const [, room, seat] = data;
-        if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
-        const seatMap = this.roomSeats.get(room);
-        Object.assign(seatMap.get(seat), createEmptySeat());
-        for (const c of this.clients) c.numkursi?.delete(seat);
-        this.broadcastToRoom(room, ["removeKursi", room, seat]);
-        this.broadcastRoomUserCount(room);
-        break;
-      }
-
-      case "updateKursi": {
-        const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
-        if (!roomList.includes(room)) return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
-        const seatMap = this.roomSeats.get(room);
-        const currentInfo = seatMap.get(seat) || createEmptySeat();
-        Object.assign(currentInfo, { noimageUrl, namauser, color, itembawah, itematas, vip, viptanda });
-        seatMap.set(seat, currentInfo);
-        if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
-        this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
-        this.broadcastRoomUserCount(room);
-        break;
-      }
-
-      case "gift": {
-        const [, roomname, sender, receiver, giftName] = data;
-        if (!roomList.includes(roomname)) return this.safeSend(ws, ["error", "Invalid room for gift"]);
-        if (!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname, []);
-        this.chatMessageBuffer.get(roomname).push([
-          "gift", roomname, sender, receiver, giftName, Date.now()
-        ]);
-        break;
-      }
-
-      case "gameLowCardStart":
-      case "gameLowCardJoin":
-      case "gameLowCardNumber":
-        this.lowcard.handleEvent(ws, data);
-        break;
-
-      default:
-        this.safeSend(ws, ["error", "Unknown event"]);
+    default:
+      this.safeSend(ws, ["error", "Unknown event"]);
     }
   }
 
@@ -785,12 +746,10 @@ export class ChatServer {
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
     ws.addEventListener("close", () => {
-      console.log("WebSocket closed");
-      this.cleanupClient(ws);
+      this.cleanupClient(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
     });
     ws.addEventListener("error", (e) => {
-      console.log("WebSocket error:", e);
-      this.cleanupClient(ws);
+      this.cleanupClient(ws); // ⚠️ Gunakan cleanupClient, BUKAN cleanupondestroy
     });
 
     return new Response(null, { status: 101, webSocket: client });
@@ -809,6 +768,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
 
