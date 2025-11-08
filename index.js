@@ -297,48 +297,63 @@ export class ChatServer {
         break;
       }
 
-      case "setIdTarget": {
-        const newId = data[1];
-        
-        this.cleanupClientById(newId);
-        ws.idtarget = newId;
+     case "setIdTarget": {
+    const newId = data[1];
 
-        const previousSeatInfo = this.userToSeat.get(newId);
-        const isInGracePeriod = this.pendingRemove.has(newId);
+    // Hapus client lama jika ada
+    this.cleanupClientById(newId);
+    ws.idtarget = newId;
 
-        if (isInGracePeriod) {
-          clearTimeout(this.pendingRemove.get(newId));
-          this.pendingRemove.delete(newId);
+    const previousSeatInfo = this.userToSeat.get(newId);
+    const isInGracePeriod = this.pendingRemove.has(newId);
+
+    // Jika client reconnect sebelum grace period habis
+    if (isInGracePeriod) {
+        clearTimeout(this.pendingRemove.get(newId));
+        this.pendingRemove.delete(newId);
+
+        // Kirim needReconnect langsung ke WS baru
+        this.safeSend(ws, ["needReconnect", "Reconnect detected"]);
+
+        if (previousSeatInfo) {
+            const { room, seat } = previousSeatInfo;
+            ws.roomname = room;
+            ws.numkursi = new Set([seat]);
+
+            // Restore seat di server
+            const seatMap = this.roomSeats.get(room);
+            if (seatMap && seatMap.has(seat)) {
+                seatMap.get(seat).namauser = newId;
+            }
+
+            // Kirim semua state kursi/points ke client
+            this.sendAllStateTo(ws, room);
         }
 
-        if (previousSeatInfo && isInGracePeriod) {
-          const { room, seat } = previousSeatInfo;
-          ws.roomname = room;
-          ws.numkursi = new Set([seat]);
-          
-          this.sendAllStateTo(ws, room);
-          
-          const seatMap = this.roomSeats.get(room);
-          if (seatMap && seatMap.has(seat)) {
-            const seatInfo = seatMap.get(seat);
-            seatInfo.namauser = newId;
-          }
-          
-        } else {
-          if (previousSeatInfo) {
+    } else {
+        // Jika grace period habis atau seat lama tidak ada
+        if (previousSeatInfo) {
             this.userToSeat.delete(newId);
-          }
-          this.safeSend(ws, ["needJoinRoom", "Silakan join room"]);
         }
+        // Minta client join room baru
+        this.safeSend(ws, ["needJoinRoom", "Silakan join room"]);
+    }
 
-        if (this.privateMessageBuffer.has(newId)) {
-          for (const msg of this.privateMessageBuffer.get(newId)) this.safeSend(ws, msg);
-          this.privateMessageBuffer.delete(newId);
+    // Kirim semua private message yang pending
+    if (this.privateMessageBuffer.has(newId)) {
+        for (const msg of this.privateMessageBuffer.get(newId)) {
+            this.safeSend(ws, msg);
         }
+        this.privateMessageBuffer.delete(newId);
+    }
 
-        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-        break;
-      }
+    // Update jumlah user di room
+    if (ws.roomname) {
+        this.broadcastRoomUserCount(ws.roomname);
+    }
+
+    break;
+}
 
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
@@ -587,4 +602,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
