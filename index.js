@@ -501,9 +501,17 @@ export class ChatServer {
   ws.idtarget = newId;
   this.lastActivity.set(newId, Date.now());
 
+  // Reset ping timeout untuk user ini
+  if (this.pingTimeouts.has(newId)) {
+    clearTimeout(this.pingTimeouts.get(newId));
+    this.pingTimeouts.delete(newId);
+  }
+
   // Kirim private messages yang tertahan
   if (this.privateMessageBuffer.has(newId)) {
-    for (const msg of this.privateMessageBuffer.get(newId)) this.safeSend(ws, msg);
+    for (const msg of this.privateMessageBuffer.get(newId)) {
+      this.safeSend(ws, msg);
+    }
     this.privateMessageBuffer.delete(newId);
   }
 
@@ -523,6 +531,10 @@ export class ChatServer {
     if (now - reconnectSession.timestamp < this.RECONNECT_TIMEOUT_MS) {
       // Session masih valid - restore session
       const { roomname, seats, userToSeat } = reconnectSession;
+      
+      // Bersihkan seat locks yang mungkin tertinggal
+      this.cleanExpiredLocks();
+      
       ws.roomname = roomname;
       ws.numkursi = new Set(seats);
       
@@ -530,33 +542,43 @@ export class ChatServer {
         this.userToSeat.set(newId, userToSeat);
       }
 
-      // Update seat information
+      // Update seat information dan pastikan lock dibersihkan
       const seatMap = this.roomSeats.get(roomname);
       for (const seat of seats) {
         const info = seatMap.get(seat);
-        if (info && (info.namauser === "" || info.namauser.startsWith("__LOCK__"))) {
-          info.namauser = newId;
+        if (info) {
+          // Hapus lock jika ada dan set ke user ID yang benar
+          if (info.namauser.startsWith("__LOCK__") || info.namauser === "" || info.namauser === newId) {
+            info.namauser = newId;
+            info.lockTime = undefined; // Hapus lock time
+          }
         }
       }
 
+      // Kirim semua state terbaru
       this.sendAllStateTo(ws, roomname);
       this.broadcastRoomUserCount(roomname);
 
       // Hapus session reconnect
       this.reconnectSessions.delete(newId);
       
+      // Kirim pesan sukses reconnect
       this.safeSend(ws, ["reconnectSuccess", roomname]);
-      console.log(`Reconnect successful for: ${newId}`);
+      
+      // Force flush buffers untuk room ini
+      this.forceFlushRoomBuffers(roomname);
+      
+      
     } else {
       // ❌ Session sudah expired - hapus dan kirim needJoinRoom
-      console.log(`Reconnect session expired for: ${newId}`);
+
       this.cleanupReconnectSession(newId);
       this.safeSend(ws, ["needJoinRoom", "Session expired - please join room again"]);
     }
   } else {
-      this.reconnectSessions.delete(newId);
-    this.reconnectTimeouts.delete(newId);
-    this.cleanupReconnectSession(newId); // Ini akan remove semua data terkait user
+    // Tidak ada session reconnect - bersihkan semua data user
+    this.cleanupReconnectSession(newId);
+    this.safeSend(ws, ["needJoinRoom", "Please join a room"]);
   }
   break;
 }
@@ -787,5 +809,6 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
