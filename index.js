@@ -260,27 +260,36 @@ export class ChatServer {
   }
 
 handleOnDestroy(ws, idtarget) {
+  // 🔹 Tandai koneksi sudah dihancurkan
   ws.isDestroyed = true;
+
+  // 🔹 Hapus kursi dan mapping user di semua room
   this.removeAllSeatsById(idtarget);
+
+  // 🔹 Hapus dari daftar client aktif
   this.clients.delete(ws);
 
-  // 🔸 Hapus semua ping timeout
+  // 🔹 Bersihkan timeout ping, kalau masih ada
   if (this.pingTimeouts.has(idtarget)) {
     clearTimeout(this.pingTimeouts.get(idtarget));
     this.pingTimeouts.delete(idtarget);
   }
 
-  // 🔸 Hapus grace period timeout biar tidak disangka reconnect
+  // 🔹 Bersihkan timeout grace period, kalau masih ada
   if (this.pendingRemove.has(idtarget)) {
     clearTimeout(this.pendingRemove.get(idtarget));
     this.pendingRemove.delete(idtarget);
   }
 
-  // 🔸 Bersihkan data room & id
+  // 🔹 Hapus dari userToSeat agar tidak dianggap reconnect cepat
+  if (this.userToSeat.has(idtarget)) {
+    this.userToSeat.delete(idtarget);
+  }
+
+  // 🔹 Hapus semua data terkait client
   ws.roomname = undefined;
   ws.idtarget = undefined;
 }
-
 
 
   handleMessage(ws, raw) {
@@ -308,23 +317,20 @@ handleOnDestroy(ws, idtarget) {
         break;
       }
 
-      case "setIdTarget": {
+        
+
+case "setIdTarget": {
   const newId = data[1];
 
+  // Bersihkan koneksi lama dengan ID sama
   this.cleanupClientById(newId);
   ws.idtarget = newId;
 
   const previousSeatInfo = this.userToSeat.get(newId);
   const isInGracePeriod = this.pendingRemove.has(newId);
 
-  // 🔧 Perbaikan utama:
-  if (previousSeatInfo && !isInGracePeriod) {
-    // Sudah punya seat tapi tidak dalam grace period (data lama) → reset saja
-    this.userToSeat.delete(newId);
-  }
-
+  // 🔹 Jika masih dalam grace period → anggap reconnect cepat
   if (previousSeatInfo && isInGracePeriod) {
-    // ✅ Reconnect cepat → restore kursi & room
     clearTimeout(this.pendingRemove.get(newId));
     this.pendingRemove.delete(newId);
 
@@ -332,30 +338,44 @@ handleOnDestroy(ws, idtarget) {
     ws.roomname = room;
     ws.numkursi = new Set([seat]);
 
+    // Kirim seluruh state room ke user
     this.sendAllStateTo(ws, room);
 
+    // Update nama user di kursinya
     const seatMap = this.roomSeats.get(room);
     if (seatMap && seatMap.has(seat)) {
-      const seatInfo = seatMap.get(seat);
-      seatInfo.namauser = newId;
+      seatMap.get(seat).namauser = newId;
     }
-  } else if (!previousSeatInfo && !isInGracePeriod) {
-    // 🧩 Kasus pertama kali join → biarkan kosong tanpa kirim error
-    // Tidak perlu this.safeSend(ws, ["needJoinRoom", ...])
-  } else {
-    // ⚠️ Grace period habis tapi masih ada sisa data → minta join ulang
-    this.safeSend(ws, ["needJoinRoom", "Silakan join room"]);
+
+    // 🔸 Kirim sinyal khusus bahwa user sudah auto rejoin
+    this.safeSend(ws, ["autoRejoinSuccess", room]);
+  } 
+  
+  // 🔹 Jika user baru pertama kali login (tidak punya kursi & bukan grace)
+  else if (!previousSeatInfo && !isInGracePeriod) {
+    // Tidak kirim apa pun — biarkan client join manual
+  } 
+  
+  // 🔹 Jika grace period sudah habis
+  else {
+    // Hapus data lama agar bersih
+    if (previousSeatInfo) this.userToSeat.delete(newId);
+    this.safeSend(ws, ["needJoinRoom", previousSeatInfo?.room || null]);
   }
 
+  // 🔹 Kirim pesan pribadi tertunda (jika ada)
   if (this.privateMessageBuffer.has(newId)) {
     for (const msg of this.privateMessageBuffer.get(newId))
       this.safeSend(ws, msg);
     this.privateMessageBuffer.delete(newId);
   }
 
+  // 🔹 Broadcast jumlah user jika sudah punya room
   if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+
   break;
 }
+
 
 
       case "sendnotif": {
@@ -619,6 +639,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
