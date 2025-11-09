@@ -50,7 +50,7 @@ export class ChatServer {
     this.lowcard = new LowCardGameManager(this);
 
     this.pingTimeouts = new Map();
-    this.RECONNECT_TIMEOUT = 30000; // 30 detik untuk reconnect
+    this.RECONNECT_TIMEOUT = 10000; // 30 detik untuk reconnect
   }
 
   safeSend(ws, arr) {
@@ -610,3 +610,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
