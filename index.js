@@ -27,7 +27,6 @@ export class ChatServer {
     this.clients = new Set();
     this.userToSeat = new Map();
     this.hasEverSetId = false;
-    this.rejoinHandledMap = new Map();
 
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
@@ -50,7 +49,7 @@ export class ChatServer {
     this.lowcard = new LowCardGameManager(this);
 
     this.pingTimeouts = new Map();
-    this.RECONNECT_TIMEOUT = 10000; // 30 detik untuk reconnect
+    this.RECONNECT_TIMEOUT = 30000; // 30 detik untuk reconnect
   }
 
   safeSend(ws, arr) {
@@ -265,70 +264,66 @@ export class ChatServer {
     switch (evt) {
       case "onDestroy": {
         const idtarget = ws.idtarget;
-
-        if (idtarget) {
-          this.rejoinHandledMap.delete(idtarget);
-        }
-
         ws.isDestroyed = true;
         this.handleOnDestroy(ws, idtarget);
         break;
       }
 
       case "setIdTarget": {
-  const newId = data[1];
-  ws.idtarget = newId;
+        const newId = data[1];
+        ws.idtarget = newId;
 
-  // BATALKAN TIMEOUT jika user berhasil reconnect
-  if (this.pingTimeouts.has(newId)) {
-    console.log(`User ${newId} berhasil reconnect, batalkan timeout`);
-    clearTimeout(this.pingTimeouts.get(newId));
-    this.pingTimeouts.delete(newId);
-  }
+        // BATALKAN TIMEOUT jika user berhasil reconnect
+        if (this.pingTimeouts.has(newId)) {
+          console.log(`User ${newId} berhasil reconnect, batalkan timeout`);
+          clearTimeout(this.pingTimeouts.get(newId));
+          this.pingTimeouts.delete(newId);
+        }
 
-  // Hapus WS lama dari clients
-  for (const c of Array.from(this.clients)) {
-    if (c !== ws && c.idtarget === newId) {
-      c.isDestroyed = true;
-      this.clients.delete(c);
-    }
-  }
+        // Hapus WS lama dari clients
+        for (const c of Array.from(this.clients)) {
+          if (c !== ws && c.idtarget === newId) {
+            c.isDestroyed = true;
+            this.clients.delete(c);
+          }
+        }
 
-  const prevSeat = this.userToSeat.get(newId);
+        const prevSeat = this.userToSeat.get(newId);
 
-  if (prevSeat) {
-    // User sudah punya seat sebelumnya, langsung restore
-    ws.roomname = prevSeat.room;
-    ws.numkursi = new Set([prevSeat.seat]);
+        if (prevSeat) {
+          // User sudah punya seat sebelumnya, langsung restore
+          ws.roomname = prevSeat.room;
+          ws.numkursi = new Set([prevSeat.seat]);
 
-    this.sendAllStateTo(ws, prevSeat.room);
+          this.sendAllStateTo(ws, prevSeat.room);
 
-    const seatMap = this.roomSeats.get(prevSeat.room);
-    if (seatMap) seatMap.get(prevSeat.seat).namauser = newId;
-  } else {
-    // User tidak punya seat sebelumnya
-    // TAPI: Jangan kirim needJoinRoom jika pertama kali buka APK
-    if (!this.hasEverSetId) {
-      // Ini pertama kali buka APK - biarkan client yang decide kapan join room
-      console.log(`User ${newId} pertama kali buka APK, tidak kirim needJoinRoom`);
-    } else {
-      // Ini reconnect setelah timeout - kirim needJoinRoom
-      this.safeSend(ws, ["needJoinRoom"]);
-    }
-  }
+          const seatMap = this.roomSeats.get(prevSeat.room);
+          if (seatMap) seatMap.get(prevSeat.seat).namauser = newId;
+        } else {
+          // User tidak punya seat sebelumnya
+          // TAPI: Jangan kirim needJoinRoom jika pertama kali buka APK
+          if (!this.hasEverSetId) {
+            // Ini pertama kali buka APK - biarkan client yang decide kapan join room
+            console.log(`User ${newId} pertama kali buka APK, tidak kirim needJoinRoom`);
+          } else {
+            // Ini reconnect setelah timeout - kirim needJoinRoom
+            this.safeSend(ws, ["needJoinRoom"]);
+          }
+        }
 
-  // TANDAI bahwa user sudah pernah set ID (bukan pertama kali lagi)
-  this.hasEverSetId = true;
+        // TANDAI bahwa user sudah pernah set ID (bukan pertama kali lagi)
+        this.hasEverSetId = true;
 
-  // Kirim private message tertunda
-  if (this.privateMessageBuffer.has(newId)) {
-    for (const msg of this.privateMessageBuffer.get(newId)) this.safeSend(ws, msg);
-    this.privateMessageBuffer.delete(newId);
-  }
+        // Kirim private message tertunda
+        if (this.privateMessageBuffer.has(newId)) {
+          for (const msg of this.privateMessageBuffer.get(newId)) this.safeSend(ws, msg);
+          this.privateMessageBuffer.delete(newId);
+        }
 
-  if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-  break;
-}
+        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+        break;
+      }
+
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
         const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
@@ -416,8 +411,6 @@ export class ChatServer {
         if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
         this.sendAllStateTo(ws, newRoom);
         this.broadcastRoomUserCount(newRoom);
-
-        this.firstSetIdTarget = false;
         break;
       }
 
@@ -615,5 +608,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
