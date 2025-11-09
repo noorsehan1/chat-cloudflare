@@ -293,6 +293,12 @@ handleOnDestroy(ws, idtarget) {
   // 🔹 Hapus semua data terkait client
   ws.roomname = undefined;
   ws.idtarget = undefined;
+
+   const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
+      if (stillActive) {
+        this.clients.delete(ws);
+        return;
+      }
 }
 
 
@@ -575,11 +581,7 @@ case "setIdTarget": {
         this.pingTimeouts.delete(id);
       }
 
-      const stillActive = Array.from(this.clients).some(c => c !== ws && c.idtarget === id);
-      if (stillActive) {
-        this.clients.delete(ws);
-        return;
-      }
+     
 
       if (this.pendingRemove.has(id)) clearTimeout(this.pendingRemove.get(id));
 
@@ -657,6 +659,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
