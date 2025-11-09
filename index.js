@@ -44,7 +44,7 @@ export class ChatServer {
     this.lowcard = new LowCardGameManager(this);
 
     this.pingTimeouts = new Map();
-    this.RECONNECT_TIMEOUT = 30000; // 30 detik untuk reconnect
+    this.RECONNECT_TIMEOUT = 30000;
   }
 
   safeSend(ws, arr) {
@@ -109,29 +109,6 @@ export class ChatServer {
     const allCounts = this.getJumlahRoom();
     const result = roomList.map(room => [room, allCounts[room]]);
     this.safeSend(ws, ["allRoomsUserCount", result]);
-  }
-
-  lockSeat(room, ws) {
-    const seatMap = this.roomSeats.get(room);
-    if (!ws.idtarget) return null;
-    const now = Date.now();
-
-    for (const [seat, info] of seatMap) {
-      if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 5000)
-        Object.assign(info, createEmptySeat());
-    }
-
-    for (let i = 1; i <= this.MAX_SEATS; i++) {
-      const k = seatMap.get(i);
-      if (!k) continue;
-      if (k.namauser === "") {
-        k.namauser = "__LOCK__" + ws.idtarget;
-        k.lockTime = now;
-        this.userToSeat.set(ws.idtarget, { room, seat: i });
-        return i;
-      }
-    }
-    return null;
   }
 
   sendAllStateTo(ws, room) {
@@ -228,7 +205,6 @@ export class ChatServer {
         ws.idtarget = newId;
 
         if (this.pingTimeouts.has(newId)) {
-          console.log(`User ${newId} berhasil reconnect, batalkan timeout`);
           clearTimeout(this.pingTimeouts.get(newId));
           this.pingTimeouts.delete(newId);
         }
@@ -243,7 +219,7 @@ export class ChatServer {
           if (seatMap) seatMap.get(prevSeat.seat).namauser = newId;
         } else {
           if (!this.hasEverSetId) {
-            console.log(`User ${newId} pertama kali buka APK, tidak kirim needJoinRoom`);
+            // Pertama kali buka APK - tidak kirim needJoinRoom
           } else {
             this.safeSend(ws, ["needJoinRoom"]);
           }
@@ -344,14 +320,31 @@ export class ChatServer {
       case "joinRoom": {
         const newRoom = data[1];
         if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
+        
         if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
         ws.roomname = newRoom;
+        
         const seatMap = this.roomSeats.get(newRoom);
-        const foundSeat = this.lockSeat(newRoom, ws);
+        let foundSeat = null;
+        
+        // Cari seat kosong
+        for (let i = 1; i <= this.MAX_SEATS; i++) {
+          const seatInfo = seatMap.get(i);
+          if (seatInfo && seatInfo.namauser === "") {
+            foundSeat = i;
+            break;
+          }
+        }
+        
         if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
+        
         ws.numkursi = new Set([foundSeat]);
         this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-        if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+        
+        if (ws.idtarget) {
+          this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+        }
+        
         this.sendAllStateTo(ws, newRoom);
         this.broadcastRoomUserCount(newRoom);
         break;
@@ -490,15 +483,11 @@ export class ChatServer {
       
       const id = ws.idtarget;
       if (id) {
-        console.log(`WebSocket error untuk user ${id}, menunggu reconnect dalam 30 detik...`);
-        
         if (this.pingTimeouts.has(id)) {
           clearTimeout(this.pingTimeouts.get(id));
         }
         
         const timeout = setTimeout(() => {
-          console.log(`Timeout 30 detik terpenuhi untuk user ${id}, menghapus seat dan mapping...`);
-          
           this.removeAllSeatsById(id);
           this.userToSeat.delete(id);
           
@@ -507,12 +496,10 @@ export class ChatServer {
           }
           
           this.pingTimeouts.delete(id);
-          console.log(`User ${id} dihapus permanen karena timeout 30 detik`);
         }, this.RECONNECT_TIMEOUT);
         
         this.pingTimeouts.set(id, timeout);
       } else {
-        console.log("WebSocket error tanpa idtarget, langsung hapus...");
         this.cleanupClient(ws);
       }
     });
