@@ -111,6 +111,29 @@ export class ChatServer {
     this.safeSend(ws, ["allRoomsUserCount", result]);
   }
 
+  lockSeat(room, ws) {
+    const seatMap = this.roomSeats.get(room);
+    if (!ws.idtarget) return null;
+    const now = Date.now();
+
+    for (const [seat, info] of seatMap) {
+      if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 5000)
+        Object.assign(info, createEmptySeat());
+    }
+
+    for (let i = 1; i <= this.MAX_SEATS; i++) {
+      const k = seatMap.get(i);
+      if (!k) continue;
+      if (k.namauser === "") {
+        k.namauser = "__LOCK__" + ws.idtarget;
+        k.lockTime = now;
+        this.userToSeat.set(ws.idtarget, { room, seat: i });
+        return i;
+      }
+    }
+    return null;
+  }
+
   sendAllStateTo(ws, room) {
     const seatMap = this.roomSeats.get(room);
     const allPoints = [];
@@ -322,29 +345,14 @@ export class ChatServer {
         if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
         
         if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
+        
         ws.roomname = newRoom;
-        
         const seatMap = this.roomSeats.get(newRoom);
-        let foundSeat = null;
-        
-        // Cari seat kosong
-        for (let i = 1; i <= this.MAX_SEATS; i++) {
-          const seatInfo = seatMap.get(i);
-          if (seatInfo && seatInfo.namauser === "") {
-            foundSeat = i;
-            break;
-          }
-        }
-        
+        const foundSeat = this.lockSeat(newRoom, ws);
         if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
-        
         ws.numkursi = new Set([foundSeat]);
         this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-        
-        if (ws.idtarget) {
-          this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-        }
-        
+        if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
         this.sendAllStateTo(ws, newRoom);
         this.broadcastRoomUserCount(newRoom);
         break;
