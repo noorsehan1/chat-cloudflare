@@ -335,12 +335,19 @@ case "setIdTarget": {
   const newId = data[1];
   ws.idtarget = newId;
 
-  // Cek apakah user masih dalam grace period
-  const inGrace = this.pendingRemove.has(newId);
+  // Hapus WS lama dari clients, tapi jangan hapus seat dulu
+  for (const c of Array.from(this.clients)) {
+    if (c !== ws && c.idtarget === newId) {
+      c.isDestroyed = true;
+      this.clients.delete(c); // WS lama dihapus dari clients
+    }
+  }
+
   const prevSeat = this.userToSeat.get(newId);
+  const inGrace = this.pendingRemove.has(newId);
 
   if (prevSeat && inGrace) {
-    // reconnect cepat → restore seat lama
+    // reconnect cepat → restore seat
     clearTimeout(this.pendingRemove.get(newId));
     this.pendingRemove.delete(newId);
 
@@ -354,17 +361,14 @@ case "setIdTarget": {
 
     this.safeSend(ws, ["autoRejoinSuccess", prevSeat.room]);
   } else if (prevSeat && !inGrace) {
-    // grace period habis → user harus join ulang
+    // grace habis → join ulang
     this.userToSeat.delete(newId);
-    if (!this.firstSetIdTarget) {
-      this.safeSend(ws, ["needJoinRoom", prevSeat.room]);
-    }
+    if (!this.firstSetIdTarget) this.safeSend(ws, ["needJoinRoom", prevSeat.room]);
   }
 
-  // User baru → tidak perlu apa-apa
   this.firstSetIdTarget = false;
 
-  // Kirim private message tertunda jika ada
+  // Kirim private message tertunda
   if (this.privateMessageBuffer.has(newId)) {
     for (const msg of this.privateMessageBuffer.get(newId)) this.safeSend(ws, msg);
     this.privateMessageBuffer.delete(newId);
@@ -652,6 +656,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
