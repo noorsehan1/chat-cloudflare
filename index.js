@@ -333,70 +333,79 @@ handleOnDestroy(ws, idtarget) {
         
 
 case "setIdTarget": {
-  const newId = data[1];
+    const newId = data[1];
 
-  // Bersihkan koneksi lama dengan ID sama
-  this.cleanupClientById(newId);
-  ws.idtarget = newId;
+    // 🔹 Bersihkan koneksi lama dengan ID sama
+    this.cleanupClientById(newId);
+    ws.idtarget = newId;
 
-  const previousSeatInfo = this.userToSeat.get(newId);
-  const isInGracePeriod = this.pendingRemove.has(newId);
+    const previousSeatInfo = this.userToSeat.get(newId);
+    const isInGracePeriod = this.pendingRemove.has(newId);
 
-  // Ambil status apakah user ini sudah di-handle reconnect-nya
-  const alreadyHandled = this.rejoinHandledMap.get(newId) || false;
+    // 🔹 Jika masih dalam grace period → auto reconnect cepat
+    if (previousSeatInfo && isInGracePeriod) {
+        clearTimeout(this.pendingRemove.get(newId));
+        this.pendingRemove.delete(newId);
 
-  // Jika ini reconnect pertama kali setelah app dibuka
-  const isFirstAppOpen = !this.hasEverSetId;
-  this.hasEverSetId = true; // Setelah pertama kali, ubah jadi true
+        const { room, seat } = previousSeatInfo;
 
-  // 🚫 Cegah pengiriman dobel (autoRejoin + needJoinRoom)
-  if (alreadyHandled) {
-    // console.log(`[SKIP] ${newId} sudah ditangani reconnect`);
+        // 🔹 Assign ws ke room dan kursi
+        ws.roomname = room;
+        ws.numkursi = new Set([seat]);
+
+        // 🔹 Assign kembali mapping seat
+        this.userToSeat.set(newId, { room, seat });
+
+        // 🔹 Update seat info di roomSeats
+        const seatMap = this.roomSeats.get(room);
+        if (seatMap && seatMap.has(seat)) {
+            seatMap.get(seat).namauser = newId;
+        }
+
+        // 🔹 Kirim semua state room ke client
+        this.sendAllStateTo(ws, room);
+
+        // 🔹 Kirim pesan pribadi pending
+        if (this.privateMessageBuffer.has(newId)) {
+            for (const msg of this.privateMessageBuffer.get(newId)) {
+                this.safeSend(ws, msg);
+            }
+            this.privateMessageBuffer.delete(newId);
+        }
+
+        this.safeSend(ws, ["autoRejoinSuccess", room]);
+    }
+
+    // 🔹 Jika user pernah join tapi grace period sudah habis
+    else if (previousSeatInfo && !isInGracePeriod) {
+        this.userToSeat.delete(newId);
+
+        // Hanya kirim needJoinRoom jika bukan setIdTarget pertama
+        if (!this.firstSetIdTarget) {
+            this.safeSend(ws, ["needJoinRoom", previousSeatInfo.room]);
+        }
+    }
+
+    // 🔹 Jika user baru total
+    else if (!previousSeatInfo && !isInGracePeriod) {
+        // Tidak kirim apa pun, tunggu joinRoom
+    }
+
+    // 🔹 Setelah selesai pertama kali set ID
+    this.firstSetIdTarget = false;
+
+    // 🔹 Kirim private messages tertunda (jika ada)
+    if (this.privateMessageBuffer.has(newId)) {
+        for (const msg of this.privateMessageBuffer.get(newId)) {
+            this.safeSend(ws, msg);
+        }
+        this.privateMessageBuffer.delete(newId);
+    }
+
+    // 🔹 Update jumlah user room
+    if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
     break;
-  }
-
-  // 🔹 Jika masih dalam grace period → auto rejoin (tidak kirim needJoinRoom)
-  if (previousSeatInfo && isInGracePeriod) {
-    this.rejoinHandledMap.set(newId, true); // tandai sudah auto rejoin
-    clearTimeout(this.pendingRemove.get(newId));
-    this.pendingRemove.delete(newId);
-
-    const { room, seat } = previousSeatInfo;
-    ws.roomname = room;
-    ws.numkursi = new Set([seat]);
-    this.sendAllStateTo(ws, room);
-
-    const seatMap = this.roomSeats.get(room);
-    if (seatMap && seatMap.has(seat)) seatMap.get(seat).namauser = newId;
-
-    this.safeSend(ws, ["autoRejoinSuccess", room]);
-  }
-
-  // 🔹 Jika grace period habis → kirim needJoinRoom
-  else if (previousSeatInfo && !isInGracePeriod && !isFirstAppOpen) {
-    this.rejoinHandledMap.set(newId, true);
-    this.userToSeat.delete(newId);
-    this.safeSend(ws, ["needJoinRoom", previousSeatInfo.room]);
-  }
-
-  // 🔹 Jika user baru → diam saja
-  else if (!previousSeatInfo && !isInGracePeriod && isFirstAppOpen) {
-    // Tidak kirim apa pun
-  }
-
-  // 🔹 Kirim pesan pribadi tertunda (jika ada)
-  if (this.privateMessageBuffer.has(newId)) {
-    for (const msg of this.privateMessageBuffer.get(newId))
-      this.safeSend(ws, msg);
-    this.privateMessageBuffer.delete(newId);
-  }
-
-  // 🔹 Broadcast user count kalau sudah join
-  if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-
-  break;
 }
-
 
 
 
@@ -667,6 +676,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
