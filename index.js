@@ -335,79 +335,60 @@ handleOnDestroy(ws, idtarget) {
 case "setIdTarget": {
     const newId = data[1];
 
-    // 🔹 Bersihkan koneksi lama dengan ID sama
-    this.cleanupClientById(newId);
+    // 🔹 Ambil koneksi lama dengan ID sama
+    const oldSockets = Array.from(this.clients).filter(c => c.idtarget === newId);
+    for (const old of oldSockets) {
+        old.isDestroyed = true;
+        this.cleanupClient(old); // hapus dari clients & pendingRemove
+    }
+
     ws.idtarget = newId;
 
     const previousSeatInfo = this.userToSeat.get(newId);
     const isInGracePeriod = this.pendingRemove.has(newId);
 
-    // 🔹 Jika masih dalam grace period → auto reconnect cepat
     if (previousSeatInfo && isInGracePeriod) {
+        // 🔹 reconnect cepat, restore seat
         clearTimeout(this.pendingRemove.get(newId));
         this.pendingRemove.delete(newId);
 
         const { room, seat } = previousSeatInfo;
-
-        // 🔹 Assign ws ke room dan kursi
         ws.roomname = room;
         ws.numkursi = new Set([seat]);
 
-        // 🔹 Assign kembali mapping seat
         this.userToSeat.set(newId, { room, seat });
 
-        // 🔹 Update seat info di roomSeats
         const seatMap = this.roomSeats.get(room);
         if (seatMap && seatMap.has(seat)) {
             seatMap.get(seat).namauser = newId;
         }
 
-        // 🔹 Kirim semua state room ke client
         this.sendAllStateTo(ws, room);
 
-        // 🔹 Kirim pesan pribadi pending
         if (this.privateMessageBuffer.has(newId)) {
-            for (const msg of this.privateMessageBuffer.get(newId)) {
+            for (const msg of this.privateMessageBuffer.get(newId))
                 this.safeSend(ws, msg);
-            }
             this.privateMessageBuffer.delete(newId);
         }
 
         this.safeSend(ws, ["autoRejoinSuccess", room]);
-    }
-
-    // 🔹 Jika user pernah join tapi grace period sudah habis
-    else if (previousSeatInfo && !isInGracePeriod) {
+    } else if (previousSeatInfo && !isInGracePeriod) {
+        // grace period habis → perlu joinRoom manual
         this.userToSeat.delete(newId);
-
-        // Hanya kirim needJoinRoom jika bukan setIdTarget pertama
-        if (!this.firstSetIdTarget) {
-            this.safeSend(ws, ["needJoinRoom", previousSeatInfo.room]);
-        }
+        if (!this.firstSetIdTarget) this.safeSend(ws, ["needJoinRoom", previousSeatInfo.room]);
     }
 
-    // 🔹 Jika user baru total
-    else if (!previousSeatInfo && !isInGracePeriod) {
-        // Tidak kirim apa pun, tunggu joinRoom
-    }
-
-    // 🔹 Setelah selesai pertama kali set ID
     this.firstSetIdTarget = false;
 
-    // 🔹 Kirim private messages tertunda (jika ada)
     if (this.privateMessageBuffer.has(newId)) {
-        for (const msg of this.privateMessageBuffer.get(newId)) {
+        for (const msg of this.privateMessageBuffer.get(newId))
             this.safeSend(ws, msg);
-        }
         this.privateMessageBuffer.delete(newId);
     }
 
-    // 🔹 Update jumlah user room
     if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
     break;
 }
-
-
 
 
       case "sendnotif": {
@@ -676,6 +657,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
