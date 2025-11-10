@@ -434,60 +434,62 @@ export class ChatServer {
     return users;
   }
 
-handleOnDestroy(ws, idtarget) {
-  if (ws.isDestroyed) return;
-  
-  ws.isDestroyed = true;
-  
-  // Tandai untuk cleanup manual (hindari race condition)
-  this.cleanupInProgress.add(idtarget);
-  
-  if (idtarget) {
-    // ⚡ HAPUS SEMUA KURSI dengan idtarget yang sama di SEMUA ROOM
-    const roomsToUpdate = new Set();
+  handleOnDestroy(ws, idtarget) {
+    if (ws.isDestroyed) return;
     
-    for (const [room, seatMap] of this.roomSeats) {
-      for (const [seat, info] of seatMap) {
-        if (info.namauser === idtarget) {
-          Object.assign(info, createEmptySeat());
-          this.broadcastToRoom(room, ["removeKursi", room, seat]);
-          roomsToUpdate.add(room);
+    ws.isDestroyed = true;
+    
+    if (idtarget) {
+      // Tandai untuk cleanup manual (hindari race condition)
+      this.cleanupInProgress.add(idtarget);
+      
+      // ⚡ HAPUS SEMUA KURSI dengan idtarget yang sama di SEMUA ROOM
+      const roomsToUpdate = new Set();
+      
+      for (const [room, seatMap] of this.roomSeats) {
+        for (const [seat, info] of seatMap) {
+          if (info.namauser === idtarget) {
+            Object.assign(info, createEmptySeat());
+            this.broadcastToRoom(room, ["removeKursi", room, seat]);
+            roomsToUpdate.add(room);
+          }
         }
       }
-    }
-    
-    // ⚡ HAPUS SEMUA CLIENT dengan idtarget yang sama
-    const clientsToRemove = [];
-    for (const client of this.clients) {
-      if (client.idtarget === idtarget) {
-        clientsToRemove.push(client);
-        client.isDestroyed = true;
+      
+      // ⚡ HAPUS SEMUA CLIENT dengan idtarget yang sama (TERMASUK WEBSOCKET INI)
+      const clientsToRemove = [];
+      for (const client of this.clients) {
+        if (client.idtarget === idtarget) {
+          clientsToRemove.push(client);
+          client.isDestroyed = true;
+        }
       }
-    }
-    
-    for (const client of clientsToRemove) {
-      this.clients.delete(client);
-    }
-    
-    // Hapus dari userToSeat
-    this.userToSeat.delete(idtarget);
-    
-    // Hapus ping timeout
-    if (this.pingTimeouts.has(idtarget)) {
-      clearTimeout(this.pingTimeouts.get(idtarget));
-      this.pingTimeouts.delete(idtarget);
-    }
-    
-    // Update count hanya untuk room yang affected
-    for (const room of roomsToUpdate) {
-      this.broadcastRoomUserCount(room);
+      
+      for (const client of clientsToRemove) {
+        this.clients.delete(client);
+      }
+      
+      // Hapus dari userToSeat
+      this.userToSeat.delete(idtarget);
+      
+      // Hapus ping timeout
+      if (this.pingTimeouts.has(idtarget)) {
+        clearTimeout(this.pingTimeouts.get(idtarget));
+        this.pingTimeouts.delete(idtarget);
+      }
+      
+      // Update count hanya untuk room yang affected
+      for (const room of roomsToUpdate) {
+        this.broadcastRoomUserCount(room);
+      }
+      
+      this.cleanupInProgress.delete(idtarget);
+    } else {
+      // Jika tidak ada idtarget, hapus hanya WebSocket ini
+      this.clients.delete(ws);
     }
   }
-  
-  this.cleanupInProgress.delete(idtarget);
-}
 
-  
   handleMessage(ws, raw) {
     if (ws.readyState !== 1) return;
     
