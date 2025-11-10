@@ -1,4 +1,4 @@
-// ChatServer Durable Object (Bahasa Indonesia) - FULL FIXED VERSION
+// ChatServer Durable Object (Bahasa Indonesia) - FINAL VERSION
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
@@ -44,21 +44,16 @@ export class ChatServer {
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
     
-    // Protected intervals dengan error handling
     this._tickTimer = setInterval(() => {
       try {
         this.tick();
-      } catch (error) {
-        console.error('Error in tick timer:', error);
-      }
+      } catch (error) {}
     }, this.intervalMillis);
     
     this._flushTimer = setInterval(() => {
       try {
         this.periodicFlush();
-      } catch (error) {
-        console.error('Error in flush timer:', error);
-      }
+      } catch (error) {}
     }, 100);
 
     this.lowcard = new LowCardGameManager(this);
@@ -78,15 +73,11 @@ export class ChatServer {
           if (ws.readyState === 1) {
             try { 
               ws.send(JSON.stringify(arr)); 
-            } catch (e) {
-              console.log("safeSend timeout error:", e);
-            }
+            } catch (e) {}
           }
         }, 300);
       }
-    } catch (e) {
-      console.log("safeSend general error:", e);
-    }
+    } catch (e) {}
     return false;
   }
 
@@ -107,7 +98,6 @@ export class ChatServer {
               errorCount++;
             }
           } catch (error) {
-            console.log(`Broadcast error to client:`, error);
             errorCount++;
           }
         }
@@ -136,9 +126,7 @@ export class ChatServer {
     try {
       const count = this.getJumlahRoom()[room] || 0;
       this.broadcastToRoom(room, ["roomUserCount", room, count]);
-    } catch (error) {
-      console.error(`Error broadcasting room count for ${room}:`, error);
-    }
+    } catch (error) {}
   }
 
   flushChatBuffer() {
@@ -149,9 +137,7 @@ export class ChatServer {
             this.broadcastToRoom(room, msg);
           }
           messages.length = 0;
-        } catch (error) {
-          console.error(`Error flushing chat buffer for ${room}:`, error);
-        }
+        } catch (error) {}
       }
     }
   }
@@ -170,9 +156,7 @@ export class ChatServer {
           this.broadcastToRoom(room, ["kursiBatchUpdate", room, updates]);
         }
         seatMapUpdates.clear();
-      } catch (error) {
-        console.error(`Error flushing kursi updates for ${room}:`, error);
-      }
+      } catch (error) {}
     }
   }
 
@@ -187,18 +171,14 @@ export class ChatServer {
         } else {
           try {
             this.safeSend(c, ["currentNumber", this.currentNumber]);
-          } catch (error) {
-            console.log(`Tick send error to client:`, error);
-          }
+          } catch (error) {}
         }
       }
       
       for (const closedClient of clientsToRemove) {
         this.cleanupClientSafely(closedClient);
       }
-    } catch (error) {
-      console.error('Error in tick:', error);
-    }
+    } catch (error) {}
   }
 
   cleanExpiredLocks() {
@@ -214,9 +194,7 @@ export class ChatServer {
           }
         }
       }
-    } catch (error) {
-      console.error('Error cleaning expired locks:', error);
-    }
+    } catch (error) {}
   }
 
   periodicFlush() {
@@ -232,9 +210,7 @@ export class ChatServer {
             try {
               for (const m of msgs) this.safeSend(c, m);
               delivered = true;
-            } catch (error) {
-              console.log(`Private message delivery error for ${id}:`, error);
-            }
+            } catch (error) {}
             break;
           }
         }
@@ -248,9 +224,7 @@ export class ChatServer {
           }
         }
       }
-    } catch (error) {
-      console.error('Error in periodicFlush:', error);
-    }
+    } catch (error) {}
   }
 
   handleGetAllRoomsUserCount(ws) {
@@ -259,9 +233,7 @@ export class ChatServer {
       const allCounts = this.getJumlahRoom();
       const result = roomList.map(room => [room, allCounts[room]]);
       this.safeSend(ws, ["allRoomsUserCount", result]);
-    } catch (error) {
-      console.error('Error handling getAllRoomsUserCount:', error);
-    }
+    } catch (error) {}
   }
 
   lockSeat(room, ws) {
@@ -271,7 +243,7 @@ export class ChatServer {
       const now = Date.now();
 
       for (const [seat, info] of seatMap) {
-        if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 5000) {
+        if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
           Object.assign(info, createEmptySeat());
         }
       }
@@ -288,9 +260,68 @@ export class ChatServer {
       }
       return null;
     } catch (error) {
-      console.error(`Error locking seat in ${room}:`, error);
       return null;
     }
+  }
+
+  senderrorstate(ws, room) {
+    try {
+      if (ws.readyState !== 1) return;
+      
+      const seatMap = this.roomSeats.get(room);
+      const allPoints = [];
+      const kursiBatch = [];
+      
+      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        const info = seatMap.get(seat);
+        if (!info) continue;
+        
+        for (const p of info.points) {
+          allPoints.push([room, seat, p.x, p.y, p.fast]);
+        }
+        
+        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+          kursiBatch.push([
+            seat,
+            {
+              noimageUrl: info.noimageUrl,
+              namauser: info.namauser,
+              color: info.color,
+              itembawah: info.itembawah,
+              itematas: info.itematas,
+              vip: info.vip,
+              viptanda: info.viptanda
+            }
+          ]);
+        }
+      }
+      
+      if (kursiBatch.length > 0) {
+        this.safeSend(ws, ["kursiBatchUpdate", room, kursiBatch]);
+      }
+      
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
+      
+      const count = this.getJumlahRoom()[room] || 0;
+      this.safeSend(ws, ["roomUserCount", room, count]);
+      
+      if (allPoints.length > 0) {
+        const CHUNK_SIZE = 5;
+        const DELAY_MS = 100;
+        
+        for (let i = 0; i < allPoints.length; i += CHUNK_SIZE) {
+          const chunk = allPoints.slice(i, i + CHUNK_SIZE);
+          
+          setTimeout(() => {
+            if (ws.readyState === 1) {
+              for (const pointData of chunk) {
+                this.safeSend(ws, ["pointUpdated", ...pointData]);
+              }
+            }
+          }, (i / CHUNK_SIZE) * DELAY_MS);
+        }
+      }
+    } catch (error) {}
   }
 
   sendAllStateTo(ws, room) {
@@ -318,9 +349,7 @@ export class ChatServer {
       }
       this.safeSend(ws, ["allPointsList", room, allPoints]);
       this.safeSend(ws, ["allUpdateKursiList", room, meta]);
-    } catch (error) {
-      console.error(`Error sending all state to client in ${room}:`, error);
-    }
+    } catch (error) {}
   }
 
   cleanupClientSafely(ws) {
@@ -353,7 +382,6 @@ export class ChatServer {
       this.clients.delete(ws);
       
     } catch (error) {
-      console.error(`Error cleaning up client ${id}:`, error);
     } finally {
       this.cleanupInProgress.delete(id);
     }
@@ -376,9 +404,7 @@ export class ChatServer {
       }
 
       this.userToSeat.delete(idtarget);
-    } catch (error) {
-      console.error(`Error removing seats for ${idtarget}:`, error);
-    }
+    } catch (error) {}
   }
 
   getAllOnlineUsers() {
@@ -402,7 +428,47 @@ export class ChatServer {
     if (ws.isDestroyed) return;
     
     ws.isDestroyed = true;
-    this.cleanupClientSafely(ws);
+    
+    if (idtarget) {
+      // Hapus SEMUA kursi dengan idtarget yang sama di SEMUA room
+      for (const [room, seatMap] of this.roomSeats) {
+        for (const [seat, info] of seatMap) {
+          if (info.namauser === idtarget) {
+            Object.assign(info, createEmptySeat());
+            this.broadcastToRoom(room, ["removeKursi", room, seat]);
+          }
+        }
+      }
+      
+      // Hapus dari userToSeat
+      this.userToSeat.delete(idtarget);
+      
+      // Hapus SEMUA client dengan idtarget yang sama
+      const clientsToRemove = [];
+      for (const client of this.clients) {
+        if (client.idtarget === idtarget) {
+          clientsToRemove.push(client);
+          client.isDestroyed = true;
+        }
+      }
+      
+      for (const client of clientsToRemove) {
+        this.clients.delete(client);
+      }
+      
+      // Hapus ping timeout
+      if (this.pingTimeouts.has(idtarget)) {
+        clearTimeout(this.pingTimeouts.get(idtarget));
+        this.pingTimeouts.delete(idtarget);
+      }
+      
+      // Update count untuk semua room
+      for (const room of roomList) {
+        this.broadcastRoomUserCount(room);
+      }
+    }
+    
+    this.clients.delete(ws);
   }
 
   handleMessage(ws, raw) {
@@ -412,7 +478,6 @@ export class ChatServer {
     try { 
       data = JSON.parse(raw); 
     } catch (e) { 
-      console.log("JSON parse error:", e);
       return this.safeSend(ws, ["error", "Invalid JSON"]); 
     }
     
@@ -434,7 +499,6 @@ export class ChatServer {
           ws.idtarget = newId;
 
           if (this.pingTimeouts.has(newId)) {
-            console.log(`User ${newId} reconnected, cancel timeout`);
             clearTimeout(this.pingTimeouts.get(newId));
             this.pingTimeouts.delete(newId);
           }
@@ -445,7 +509,7 @@ export class ChatServer {
             ws.roomname = prevSeat.room;
             ws.numkursi = new Set([prevSeat.seat]);
 
-            this.sendAllStateTo(ws, prevSeat.room);
+            this.senderrorstate(ws, prevSeat.room);
 
             const seatMap = this.roomSeats.get(prevSeat.room);
             if (seatMap) {
@@ -456,7 +520,6 @@ export class ChatServer {
             }
           } else {
             if (!this.hasEverSetId) {
-              console.log(`User ${newId} first time, no needJoinRoom`);
             } else {
               this.safeSend(ws, ["needJoinRoom"]);
             }
@@ -545,9 +608,7 @@ export class ChatServer {
                   old.close(4000, "Duplicate login"); 
                 }
                 this.clients.delete(old); 
-              } catch (e) {
-                console.log("Error closing duplicate socket:", e);
-              }
+              } catch (e) {}
             }
           }
           break;
@@ -676,12 +737,9 @@ export class ChatServer {
           this.safeSend(ws, ["error", "Unknown event"]);
       }
     } catch (error) {
-      console.error(`Error handling message ${evt}:`, error);
       try {
         this.safeSend(ws, ["error", "Internal server error"]);
-      } catch (sendError) {
-        console.error("Even error sending failed:", sendError);
-      }
+      } catch (sendError) {}
     }
   }
 
@@ -704,38 +762,29 @@ export class ChatServer {
 
       this.clients.add(ws);
 
-      // Message handler dengan error isolation
       ws.addEventListener("message", (ev) => {
         try {
           this.handleMessage(ws, ev.data);
         } catch (error) {
-          console.error("Fatal error in message handler:", error);
           try {
             ws.close(1011, "Internal server error");
           } catch (closeError) {
-            console.error("Even close failed:", closeError);
           } finally {
             this.cleanupClientSafely(ws);
           }
         }
       });
       
-      // Close handler
       ws.addEventListener("close", () => {
         if (!ws.isDestroyed) {
           this.cleanupClientSafely(ws);
         }
       });
 
-      // Error handler - isolated
       ws.addEventListener("error", (error) => {
-        console.log("WebSocket connection error:", error);
         const id = ws.idtarget;
         if (id && !this.pingTimeouts.has(id)) {
-          console.log(`Setting reconnect timeout for ${id}`);
-          
           const timeout = setTimeout(() => {
-            console.log(`Reconnect timeout reached for ${id}`);
             if (this.clients.has(ws) && ws.readyState !== 1) {
               this.cleanupClientSafely(ws);
             }
@@ -748,7 +797,6 @@ export class ChatServer {
 
       return new Response(null, { status: 101, webSocket: client });
     } catch (error) {
-      console.error("Fatal error in fetch:", error);
       return new Response("Internal Server Error", { status: 500 });
     }
   }
@@ -766,7 +814,6 @@ export default {
         return new Response("ok", { status: 200, headers: { "content-type": "text/plain" } });
       return new Response("WebSocket endpoint", { status: 200 });
     } catch (error) {
-      console.error("Fatal error in default handler:", error);
       return new Response("Internal Server Error", { status: 500 });
     }
   }
