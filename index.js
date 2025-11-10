@@ -1,4 +1,4 @@
-// ChatServer Durable Object (Bahasa Indonesia) - FINAL VERSION
+// ChatServer Durable Object (Bahasa Indonesia) - FINAL STABLE VERSION
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
@@ -59,7 +59,7 @@ export class ChatServer {
     this.lowcard = new LowCardGameManager(this);
 
     this.pingTimeouts = new Map();
-    this.RECONNECT_TIMEOUT = 45000;
+    this.RECONNECT_TIMEOUT = 30000; // 30 detik
     this.cleanupInProgress = new Set();
   }
 
@@ -376,7 +376,17 @@ export class ChatServer {
       );
 
       if (activeConnections.length === 0) {
-        this.removeAllSeatsById(id);
+        const seatInfo = this.userToSeat.get(id);
+        if (seatInfo) {
+          const { room, seat } = seatInfo;
+          const seatMap = this.roomSeats.get(room);
+          if (seatMap && seatMap.has(seat)) {
+            Object.assign(seatMap.get(seat), createEmptySeat());
+            this.broadcastToRoom(room, ["removeKursi", room, seat]);
+            this.broadcastRoomUserCount(room);
+          }
+          this.userToSeat.delete(id);
+        }
       }
 
       this.clients.delete(ws);
@@ -424,53 +434,60 @@ export class ChatServer {
     return users;
   }
 
-  handleOnDestroy(ws, idtarget) {
-    if (ws.isDestroyed) return;
+handleOnDestroy(ws, idtarget) {
+  if (ws.isDestroyed) return;
+  
+  ws.isDestroyed = true;
+  
+  // Tandai untuk cleanup manual (hindari race condition)
+  this.cleanupInProgress.add(idtarget);
+  
+  if (idtarget) {
+    // ⚡ HAPUS SEMUA KURSI dengan idtarget yang sama di SEMUA ROOM
+    const roomsToUpdate = new Set();
     
-    ws.isDestroyed = true;
-    
-    if (idtarget) {
-      // Hapus SEMUA kursi dengan idtarget yang sama di SEMUA room
-      for (const [room, seatMap] of this.roomSeats) {
-        for (const [seat, info] of seatMap) {
-          if (info.namauser === idtarget) {
-            Object.assign(info, createEmptySeat());
-            this.broadcastToRoom(room, ["removeKursi", room, seat]);
-          }
+    for (const [room, seatMap] of this.roomSeats) {
+      for (const [seat, info] of seatMap) {
+        if (info.namauser === idtarget) {
+          Object.assign(info, createEmptySeat());
+          this.broadcastToRoom(room, ["removeKursi", room, seat]);
+          roomsToUpdate.add(room);
         }
-      }
-      
-      // Hapus dari userToSeat
-      this.userToSeat.delete(idtarget);
-      
-      // Hapus SEMUA client dengan idtarget yang sama
-      const clientsToRemove = [];
-      for (const client of this.clients) {
-        if (client.idtarget === idtarget) {
-          clientsToRemove.push(client);
-          client.isDestroyed = true;
-        }
-      }
-      
-      for (const client of clientsToRemove) {
-        this.clients.delete(client);
-      }
-      
-      // Hapus ping timeout
-      if (this.pingTimeouts.has(idtarget)) {
-        clearTimeout(this.pingTimeouts.get(idtarget));
-        this.pingTimeouts.delete(idtarget);
-      }
-      
-      // Update count untuk semua room
-      for (const room of roomList) {
-        this.broadcastRoomUserCount(room);
       }
     }
     
-    this.clients.delete(ws);
+    // ⚡ HAPUS SEMUA CLIENT dengan idtarget yang sama
+    const clientsToRemove = [];
+    for (const client of this.clients) {
+      if (client.idtarget === idtarget) {
+        clientsToRemove.push(client);
+        client.isDestroyed = true;
+      }
+    }
+    
+    for (const client of clientsToRemove) {
+      this.clients.delete(client);
+    }
+    
+    // Hapus dari userToSeat
+    this.userToSeat.delete(idtarget);
+    
+    // Hapus ping timeout
+    if (this.pingTimeouts.has(idtarget)) {
+      clearTimeout(this.pingTimeouts.get(idtarget));
+      this.pingTimeouts.delete(idtarget);
+    }
+    
+    // Update count hanya untuk room yang affected
+    for (const room of roomsToUpdate) {
+      this.broadcastRoomUserCount(room);
+    }
   }
+  
+  this.cleanupInProgress.delete(idtarget);
+}
 
+  
   handleMessage(ws, raw) {
     if (ws.readyState !== 1) return;
     
