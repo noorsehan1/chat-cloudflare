@@ -1,4 +1,4 @@
-// ChatServer Durable Object - FULL OVERWRITE VERSION
+// ChatServer Durable Object - FIXED TIMEOUT VERSION
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
@@ -63,7 +63,7 @@ export class ChatServer {
     this.lowcard = new LowCardGameManager(this);
 
     this.pingTimeouts = new Map();
-    this.RECONNECT_TIMEOUT = 30000;
+    this.RECONNECT_TIMEOUT = 30000; // 30 detik
     this.cleanupInProgress = new Set();
   }
 
@@ -498,21 +498,36 @@ export class ChatServer {
     }
   }
 
+  // ⚡ FIXED: Method ini sekarang langsung dijalankan saat WebSocket close/error
   scheduleCleanupTimeout(idtarget) {
+    console.log(`⏰ Scheduling cleanup timeout for ${idtarget} in ${this.RECONNECT_TIMEOUT}ms`);
+    
+    // Clear existing timeout jika ada
     if (this.pingTimeouts.has(idtarget)) {
       clearTimeout(this.pingTimeouts.get(idtarget));
+      this.pingTimeouts.delete(idtarget);
     }
     
     const timeout = setTimeout(() => {
-      if (this.cleanupInProgress.has(idtarget)) return;
+      console.log(`⏰ Timeout triggered for ${idtarget}, checking if still disconnected...`);
+      
+      if (this.cleanupInProgress.has(idtarget)) {
+        console.log(`⏰ Cleanup already in progress for ${idtarget}, skipping`);
+        return;
+      }
+      
       this.cleanupInProgress.add(idtarget);
       
       try {
+        // Cek apakah masih ada koneksi aktif untuk user ini
         const stillActive = Array.from(this.clients).some(
           c => c.idtarget === idtarget && c.readyState === 1
         );
         
         if (!stillActive) {
+          console.log(`⏰ No active connections found for ${idtarget}, removing from seat`);
+          
+          // Hapus kursi dan data terkait
           const seatInfo = this.userToSeat.get(idtarget);
           if (seatInfo) {
             const { room, seat } = seatInfo;
@@ -523,12 +538,16 @@ export class ChatServer {
                 Object.assign(currentSeat, createEmptySeat());
                 this.broadcastToRoom(room, ["removeKursi", room, seat]);
                 this.broadcastRoomUserCount(room);
+                console.log(`⏰ Removed ${idtarget} from seat ${seat} in room ${room}`);
               }
             }
             this.userToSeat.delete(idtarget);
           }
+        } else {
+          console.log(`⏰ ${idtarget} has reconnected, skipping cleanup`);
         }
         
+        // Cleanup WebSocket yang stuck
         const stuckClients = [];
         for (const client of this.clients) {
           if (client.idtarget === idtarget && (client.readyState === 2 || client.readyState === 3)) {
@@ -538,16 +557,20 @@ export class ChatServer {
         
         for (const client of stuckClients) {
           this.clients.delete(client);
+          console.log(`⏰ Removed stuck WebSocket for ${idtarget}`);
         }
         
       } catch (error) {
+        console.error(`⏰ Error during cleanup for ${idtarget}:`, error);
       } finally {
         this.pingTimeouts.delete(idtarget);
         this.cleanupInProgress.delete(idtarget);
+        console.log(`⏰ Cleanup completed for ${idtarget}`);
       }
     }, this.RECONNECT_TIMEOUT);
     
     this.pingTimeouts.set(idtarget, timeout);
+    console.log(`⏰ Timeout scheduled for ${idtarget}`);
   }
 
   handleMessage(ws, raw) {
@@ -577,9 +600,11 @@ export class ChatServer {
           const newId = data[1];
           ws.idtarget = newId;
 
+          // ⚡ FIXED: Clear timeout saat user reconnect
           if (this.pingTimeouts.has(newId)) {
             clearTimeout(this.pingTimeouts.get(newId));
             this.pingTimeouts.delete(newId);
+            console.log(`✅ Cleared timeout for reconnected user: ${newId}`);
           }
 
           const prevSeat = this.userToSeat.get(newId);
@@ -838,7 +863,6 @@ export class ChatServer {
       server.accept();
 
       const ws = server;
-      const serverInstance = this; // ✅ Simpan reference ke ChatServer instance
 
       ws.roomname = undefined;
       ws.idtarget = undefined;
@@ -847,9 +871,10 @@ export class ChatServer {
 
       this.clients.add(ws);
 
+      // ⚡ FIXED: Gunakan arrow function untuk mempertahankan 'this' context
       ws.addEventListener("message", (ev) => {
         try {
-          serverInstance.handleMessage(ws, ev.data); // ✅ Gunakan serverInstance
+          this.handleMessage(ws, ev.data);
         } catch (error) {
           try {
             if (ws.readyState === 1) {
@@ -857,24 +882,26 @@ export class ChatServer {
             }
           } catch (closeError) {
           } finally {
-            serverInstance.cleanupClientSafely(ws); // ✅ Gunakan serverInstance
+            this.cleanupClientSafely(ws);
           }
         }
       });
       
+      // ⚡ FIXED: Langsung jalankan timeout saat WebSocket close
       ws.addEventListener("close", (event) => {
-        if (!ws.isDestroyed) {
-          const id = ws.idtarget;
-          if (id) {
-            serverInstance.scheduleCleanupTimeout(id); // ✅ SEKARAN WORK!
-          }
+        console.log(`🔌 WebSocket closed for: ${ws.idtarget}, code: ${event.code}`);
+        if (!ws.isDestroyed && ws.idtarget) {
+          console.log(`⏰ Immediately scheduling cleanup timeout for: ${ws.idtarget}`);
+          this.scheduleCleanupTimeout(ws.idtarget);
         }
       });
 
+      // ⚡ FIXED: Langsung jalankan timeout saat WebSocket error
       ws.addEventListener("error", (error) => {
-        const id = ws.idtarget;
-        if (id) {
-          serverInstance.scheduleCleanupTimeout(id); // ✅ SEKARAN WORK!
+        console.log(`❌ WebSocket error for: ${ws.idtarget}`, error);
+        if (!ws.isDestroyed && ws.idtarget) {
+          console.log(`⏰ Immediately scheduling cleanup timeout for: ${ws.idtarget}`);
+          this.scheduleCleanupTimeout(ws.idtarget);
         }
       });
 
@@ -885,7 +912,6 @@ export class ChatServer {
   }
 }
 
-// HAPUS SEMUA BARIS SETELAH INI DAN GANTI DENGAN:
 export default {
   async fetch(req, env) {
     try {
