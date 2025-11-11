@@ -861,26 +861,42 @@ export class ChatServer {
         }
       });
       
-      ws.addEventListener("close", (event) => {
-        if (!ws.isDestroyed) {
-          const id = ws.idtarget;
-          if (id) {
-            this.scheduleCleanupTimeout(id);
-          }
-          this.cleanupClientSafely(ws);
-        }
-      });
+     // Dalam method fetch()
+ws.addEventListener("message", (ev) => {
+  try {
+    this.handleMessage(ws, ev.data);
+  } catch (error) {
+    try {
+      if (ws.readyState === 1) {
+        ws.close(1011, "Internal server error");
+      }
+    } catch (closeError) {
+    } finally {
+      this.cleanupClientSafely(ws);
+    }
+  }
+});
 
-      ws.addEventListener("error", (error) => {
-        const id = ws.idtarget;
-        if (id) {
-          this.scheduleCleanupTimeout(id);
-        }
-        
-        if (!ws.isDestroyed) {
-          this.cleanupClientSafely(ws);
-        }
-      });
+ws.addEventListener("close", (event) => {
+  if (!ws.isDestroyed) {
+    const id = ws.idtarget;
+    if (id) {
+      this.scheduleCleanupTimeout(id);
+    }
+    this.cleanupClientSafely(ws);
+  }
+});
+
+ws.addEventListener("error", (error) => {
+  const id = ws.idtarget;
+  if (id) {
+    this.scheduleCleanupTimeout(id);
+  }
+  
+  if (!ws.isDestroyed) {
+    this.cleanupClientSafely(ws);
+  }
+});
 
       return new Response(null, { status: 101, webSocket: client });
     } catch (error) {
@@ -905,3 +921,4 @@ export default {
     }
   }
 };
+
