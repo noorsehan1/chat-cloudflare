@@ -1,4 +1,4 @@
-// ChatServer Durable Object - COMPLETE FIXED VERSION
+// ChatServer Durable Object - CLEAN FIXED VERSION
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
@@ -63,8 +63,7 @@ export class ChatServer {
     this.lowcard = new LowCardGameManager(this);
 
     this.pingTimeouts = new Map();
-    this.RECONNECT_TIMEOUT = 40000; // 40 detik
-    this.cleanupInProgress = new Set();
+    this.RECONNECT_TIMEOUT = 40000;
   }
 
   async destroy() {
@@ -105,7 +104,7 @@ export class ChatServer {
     }
     
     for (const closedClient of clientsToRemove) {
-      this.cleanupClientSafely(closedClient);
+      this.clients.delete(closedClient);
     }
   }
 
@@ -180,7 +179,7 @@ export class ChatServer {
       }
       
       for (const closedClient of clientsToRemove) {
-        this.cleanupClientSafely(closedClient);
+        this.clients.delete(closedClient);
       }
     } catch (error) {}
   }
@@ -372,25 +371,6 @@ export class ChatServer {
     } catch (error) {}
   }
 
-  cleanupClientSafely(ws) {
-    const id = ws.idtarget;
-    if (!id) {
-      this.clients.delete(ws);
-      return;
-    }
-
-    if (this.cleanupInProgress.has(id)) {
-      return;
-    }
-    
-    console.log(`🔌 cleanupClientSafely called for: ${id}`);
-    
-    // ⚡ LANGSUNG SCHEDULE TIMEOUT
-    this.scheduleCleanupTimeout(id);
-    
-    this.clients.delete(ws);
-  }
-
   removeAllSeatsById(idtarget) {
     try {
       const seatInfo = this.userToSeat.get(idtarget);
@@ -430,13 +410,7 @@ export class ChatServer {
   }
 
   handleOnDestroy(ws, idtarget) {
-    if (ws.isDestroyed) return;
-    
-    ws.isDestroyed = true;
-    
     if (idtarget) {
-      this.cleanupInProgress.add(idtarget);
-      
       const seatInfo = this.userToSeat.get(idtarget);
       if (seatInfo) {
         const { room, seat } = seatInfo;
@@ -452,108 +426,67 @@ export class ChatServer {
         this.userToSeat.delete(idtarget);
       }
       
-      this.clients.delete(ws);
-      
       if (this.pingTimeouts.has(idtarget)) {
         clearTimeout(this.pingTimeouts.get(idtarget));
         this.pingTimeouts.delete(idtarget);
       }
-      
-      this.cleanupInProgress.delete(idtarget);
-    } else {
-      this.clients.delete(ws);
     }
+    
+    this.clients.delete(ws);
   }
 
-  // ⚡ FIXED: Cleanup timeout yang BENAR-BENAR bekerja
   scheduleCleanupTimeout(idtarget) {
-    console.log(`⏰ Scheduling 40s cleanup timeout for: ${idtarget}`);
-    
-    // Clear existing timeout jika ada
     if (this.pingTimeouts.has(idtarget)) {
       clearTimeout(this.pingTimeouts.get(idtarget));
       this.pingTimeouts.delete(idtarget);
     }
     
     const timeout = setTimeout(() => {
-      console.log(`⏰⏰⏰ TIMEOUT 40s TRIGGERED for: ${idtarget}`);
+      const stillActive = Array.from(this.clients).some(
+        c => c.idtarget === idtarget && c.readyState === 1
+      );
       
-      if (this.cleanupInProgress.has(idtarget)) {
-        console.log(`⏰ Cleanup already in progress for ${idtarget}, skipping`);
-        return;
-      }
-      
-      this.cleanupInProgress.add(idtarget);
-      
-      try {
-        // ⚡ FIXED: Cek yang LEBIH AKURAT - apakah masih ada koneksi aktif
-        const stillActive = Array.from(this.clients).some(
-          c => c.idtarget === idtarget && c.readyState === 1
-        );
-        
-        console.log(`⏰ User ${idtarget} still active after 40s?: ${stillActive}`);
-        
-        if (!stillActive) {
-          console.log(`⏰🚨 REMOVING USER: ${idtarget} - No active connections after 40s`);
-          
-          // ⚡ FIXED: HAPUS SEMUA DATA USER
-          const seatInfo = this.userToSeat.get(idtarget);
-          if (seatInfo) {
-            const { room, seat } = seatInfo;
-            const seatMap = this.roomSeats.get(room);
-            if (seatMap && seatMap.has(seat)) {
-              const currentSeat = seatMap.get(seat);
-              if (currentSeat.namauser === idtarget) {
-                Object.assign(currentSeat, createEmptySeat());
-                this.broadcastToRoom(room, ["removeKursi", room, seat]);
-                this.broadcastRoomUserCount(room);
-                console.log(`⏰✅ Removed ${idtarget} from seat ${seat} in room ${room}`);
-              }
+      if (!stillActive) {
+        const seatInfo = this.userToSeat.get(idtarget);
+        if (seatInfo) {
+          const { room, seat } = seatInfo;
+          const seatMap = this.roomSeats.get(room);
+          if (seatMap && seatMap.has(seat)) {
+            const currentSeat = seatMap.get(seat);
+            if (currentSeat.namauser === idtarget) {
+              Object.assign(currentSeat, createEmptySeat());
+              this.broadcastToRoom(room, ["removeKursi", room, seat]);
+              this.broadcastRoomUserCount(room);
             }
-            this.userToSeat.delete(idtarget);
-            console.log(`⏰✅ Removed ${idtarget} from userToSeat mapping`);
           }
-          
-          // ⚡ HAPUS BUFFER MESSAGE
-          if (this.privateMessageBuffer.has(idtarget)) {
-            this.privateMessageBuffer.delete(idtarget);
-            console.log(`⏰✅ Cleared private message buffer for ${idtarget}`);
-          }
-        } else {
-          console.log(`⏰✅ ${idtarget} reconnected within 40s, skipping cleanup`);
+          this.userToSeat.delete(idtarget);
         }
         
-        // ⚡ CLEANUP WEBSOCKET YANG STUCK
+        if (this.privateMessageBuffer.has(idtarget)) {
+          this.privateMessageBuffer.delete(idtarget);
+        }
+        
         const stuckClients = Array.from(this.clients).filter(
           client => client.idtarget === idtarget && client.readyState !== 1
         );
         
         for (const client of stuckClients) {
           this.clients.delete(client);
-          console.log(`⏰✅ Removed stuck WebSocket for ${idtarget}`);
         }
-        
-      } catch (error) {
-        console.error(`⏰❌ Error during cleanup for ${idtarget}:`, error);
-      } finally {
-        this.pingTimeouts.delete(idtarget);
-        this.cleanupInProgress.delete(idtarget);
-        console.log(`⏰🏁 Cleanup completed for ${idtarget}`);
       }
+      
+      this.pingTimeouts.delete(idtarget);
     }, this.RECONNECT_TIMEOUT);
     
     this.pingTimeouts.set(idtarget, timeout);
   }
 
-  // ⚡ FIXED: Handler setIdTarget yang CLEAR timeout
   handleSetIdTarget(ws, newId) {
     ws.idtarget = newId;
 
-    // ⚡ CLEAR TIMEOUT JIKA USER RECONNECT
     if (this.pingTimeouts.has(newId)) {
       clearTimeout(this.pingTimeouts.get(newId));
       this.pingTimeouts.delete(newId);
-      console.log(`✅✅✅ CLEARED TIMEOUT - User reconnected: ${newId}`);
     }
 
     const prevSeat = this.userToSeat.get(newId);
@@ -843,7 +776,6 @@ export class ChatServer {
       ws.roomname = undefined;
       ws.idtarget = undefined;
       ws.numkursi = new Set();
-      ws.isDestroyed = false;
 
       this.clients.add(ws);
 
@@ -857,27 +789,18 @@ export class ChatServer {
             }
           } catch (closeError) {
           } finally {
-            this.cleanupClientSafely(ws);
+            this.clients.delete(ws);
           }
         }
       });
       
-      // ⚡ FIXED: Langsung jalankan timeout tanpa cek isDestroyed
-      ws.addEventListener("close", (event) => {
-        console.log(`🔌 WebSocket closed for: ${ws.idtarget}, code: ${event.code}`);
-        if (ws.idtarget) {
-          console.log(`⏰ Immediately scheduling cleanup timeout for: ${ws.idtarget}`);
-          this.scheduleCleanupTimeout(ws.idtarget);
-        }
-      });
+ 
 
-      // ⚡ FIXED: Langsung jalankan timeout tanpa cek isDestroyed
       ws.addEventListener("error", (error) => {
-        console.log(`❌ WebSocket error for: ${ws.idtarget}`);
         if (ws.idtarget) {
-          console.log(`⏰ Immediately scheduling cleanup timeout for: ${ws.idtarget}`);
           this.scheduleCleanupTimeout(ws.idtarget);
         }
+        this.clients.delete(ws);
       });
 
       return new Response(null, { status: 101, webSocket: client });
