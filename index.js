@@ -50,32 +50,29 @@ export class ChatServer {
     this.intervalMillis = 15 * 60 * 1000;
     
     // BATCH AUTO REMOVE CONFIG
-    this.AUTO_REMOVE_DISCONNECTED_TIMEOUT = 20 * 1000; // 20 detik
+    this.AUTO_REMOVE_DISCONNECTED_TIMEOUT = 20 * 1000;
+    this.BATCH_CHECK_INTERVAL = 20 * 1000;
     this.disconnectedUsers = new Map();
     
     this._tickTimer = setInterval(() => {
       try {
         this.tick();
-      } catch (error) {
-      }
+      } catch (error) {}
     }, this.intervalMillis);
     
     this._flushTimer = setInterval(() => {
       try {
         this.periodicFlush();
-      } catch (error) {
-      }
+      } catch (error) {}
     }, 100);
 
-    // BATCH PROCESSING: Check setiap 30 detik
     this._autoRemoveTimer = setInterval(() => {
       try {
         if (this.disconnectedUsers.size > 0) {
           this.cleanupDisconnectedUsersBatch();
         }
-      } catch (error) {
-      }
-    }, 30000);
+      } catch (error) {}
+    }, this.BATCH_CHECK_INTERVAL);
 
     this.lowcard = new LowCardGameManager(this);
 
@@ -95,7 +92,6 @@ export class ChatServer {
     this.pingTimeouts.clear();
   }
 
-  // BATCH CLEANUP: Proses semua yang eligible sekaligus
   cleanupDisconnectedUsersBatch() {
     const now = Date.now();
     const usersToRemove = [];
@@ -106,7 +102,7 @@ export class ChatServer {
       
       processedCount++;
 
-      if (now - disconnectedInfo.disconnectTime > this.AUTO_REMOVE_DISCONNECTED_TIMEOUT) {
+      if (now - disconnectedInfo.disconnectTime >= this.AUTO_REMOVE_DISCONNECTED_TIMEOUT) {
         const userConnections = this.userConnections.get(userId);
         const hasActiveConnection = userConnections && 
           Array.from(userConnections).some(ws => ws.readyState === 1);
@@ -124,7 +120,6 @@ export class ChatServer {
     }
   }
 
-  // Remove user dari SEMUA kursi di SEMUA room
   removeDisconnectedUserFromAllSeats(userId) {
     try {
       const disconnectedInfo = this.disconnectedUsers.get(userId);
@@ -148,11 +143,9 @@ export class ChatServer {
         this.broadcastRoomUserCount(room);
       }
 
-    } catch (error) {
-    }
+    } catch (error) {}
   }
 
-  // Track ketika user disconnect
   handleUserDisconnected(userId) {
     if (!userId) return;
 
@@ -179,8 +172,7 @@ export class ChatServer {
         ws.send(JSON.stringify(arr));
         return true;
       }
-    } catch (e) {
-    }
+    } catch (e) {}
     return false;
   }
 
@@ -225,8 +217,7 @@ export class ChatServer {
     try {
       const count = this.getJumlahRoom()[room] || 0;
       this.broadcastToRoom(room, ["roomUserCount", room, count]);
-    } catch (error) {
-    }
+    } catch (error) {}
   }
 
   flushChatBuffer() {
@@ -280,8 +271,7 @@ export class ChatServer {
       for (const closedClient of clientsToRemove) {
         this.cleanupClient(closedClient);
       }
-    } catch (error) {
-    }
+    } catch (error) {}
   }
 
   cleanExpiredLocks() {
@@ -299,8 +289,7 @@ export class ChatServer {
           }
         }
       }
-    } catch (error) {
-    }
+    } catch (error) {}
   }
 
   periodicFlush() {
@@ -320,8 +309,7 @@ export class ChatServer {
               }
               delivered = true;
               break;
-            } catch (error) {
-            }
+            } catch (error) {}
           }
         }
         if (delivered) {
@@ -332,8 +320,7 @@ export class ChatServer {
       for (const id of deliveredIds) {
         this.privateMessageBuffer.delete(id);
       }
-    } catch (error) {
-    }
+    } catch (error) {}
   }
 
   handleGetAllRoomsUserCount(ws) {
@@ -342,8 +329,7 @@ export class ChatServer {
       const allCounts = this.getJumlahRoom();
       const result = roomList.map(room => [room, allCounts[room]]);
       this.safeSend(ws, ["allRoomsUserCount", result]);
-    } catch (error) {
-    }
+    } catch (error) {}
   }
 
   lockSeat(room, ws) {
@@ -436,8 +422,7 @@ export class ChatServer {
         }
       });
       
-    } catch (error) {
-    }
+    } catch (error) {}
   }
 
   sendAllStateTo(ws, room) {
@@ -473,8 +458,7 @@ export class ChatServer {
       
       this.safeSend(ws, ["allPointsList", room, allPoints]);
       this.safeSend(ws, ["allUpdateKursiList", room, meta]);
-    } catch (error) {
-    }
+    } catch (error) {}
   }
 
   cleanupClient(ws) {
@@ -536,8 +520,7 @@ export class ChatServer {
       }
 
       this.userToSeat.delete(idtarget);
-    } catch (error) {
-    }
+    } catch (error) {}
   }
 
   getAllOnlineUsers() {
@@ -575,8 +558,7 @@ export class ChatServer {
           }
           this.clients.delete(oldWs);
           userConnections.delete(oldWs);
-        } catch (e) {
-        }
+        } catch (e) {}
       }
 
       this.userConnections.set(userId, new Set([newest]));
@@ -645,6 +627,10 @@ export class ChatServer {
           if (this.pingTimeouts.has(newId)) {
             clearTimeout(this.pingTimeouts.get(newId));
             this.pingTimeouts.delete(newId);
+          }
+
+          if (this.disconnectedUsers.has(newId)) {
+            this.disconnectedUsers.delete(newId);
           }
 
           if (!this.userConnections.has(newId)) {
@@ -880,8 +866,7 @@ export class ChatServer {
     } catch (error) {
       try {
         this.safeSend(ws, ["error", "Internal server error"]);
-      } catch (sendError) {
-      }
+      } catch (sendError) {}
     }
   }
 
