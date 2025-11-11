@@ -827,63 +827,65 @@ export class ChatServer {
     }
   }
 
-async fetch(request) {
-  try {
-    const upgrade = request.headers.get("Upgrade") || "";
-    if (upgrade.toLowerCase() !== "websocket")
-      return new Response("Expected WebSocket", { status: 426 });
+  async fetch(request) {
+    try {
+      const upgrade = request.headers.get("Upgrade") || "";
+      if (upgrade.toLowerCase() !== "websocket")
+        return new Response("Expected WebSocket", { status: 426 });
 
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    server.accept();
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      server.accept();
 
-    const ws = server;
-    const serverInstance = this; // ✅ Simpan reference ke ChatServer instance
+      const ws = server;
+      const serverInstance = this; // ✅ Simpan reference ke ChatServer instance
 
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-    ws.numkursi = new Set();
-    ws.isDestroyed = false;
+      ws.roomname = undefined;
+      ws.idtarget = undefined;
+      ws.numkursi = new Set();
+      ws.isDestroyed = false;
 
-    this.clients.add(ws);
+      this.clients.add(ws);
 
-    ws.addEventListener("message", (ev) => {
-      try {
-        serverInstance.handleMessage(ws, ev.data); // ✅ Gunakan serverInstance
-      } catch (error) {
+      ws.addEventListener("message", (ev) => {
         try {
-          if (ws.readyState === 1) {
-            ws.close(1011, "Internal server error");
+          serverInstance.handleMessage(ws, ev.data); // ✅ Gunakan serverInstance
+        } catch (error) {
+          try {
+            if (ws.readyState === 1) {
+              ws.close(1011, "Internal server error");
+            }
+          } catch (closeError) {
+          } finally {
+            serverInstance.cleanupClientSafely(ws); // ✅ Gunakan serverInstance
           }
-        } catch (closeError) {
-        } finally {
-          serverInstance.cleanupClientSafely(ws); // ✅ Gunakan serverInstance
         }
-      }
-    });
-    
-    ws.addEventListener("close", (event) => {
-      if (!ws.isDestroyed) {
+      });
+      
+      ws.addEventListener("close", (event) => {
+        if (!ws.isDestroyed) {
+          const id = ws.idtarget;
+          if (id) {
+            serverInstance.scheduleCleanupTimeout(id); // ✅ SEKARAN WORK!
+          }
+        }
+      });
+
+      ws.addEventListener("error", (error) => {
         const id = ws.idtarget;
         if (id) {
           serverInstance.scheduleCleanupTimeout(id); // ✅ SEKARAN WORK!
         }
-      }
-    });
+      });
 
-    ws.addEventListener("error", (error) => {
-      const id = ws.idtarget;
-      if (id) {
-        serverInstance.scheduleCleanupTimeout(id); // ✅ SEKARAN WORK!
-      }
-    });
-
-    return new Response(null, { status: 101, webSocket: client });
-  } catch (error) {
-    return new Response("Internal Server Error", { status: 500 });
+      return new Response(null, { status: 101, webSocket: client });
+    } catch (error) {
+      return new Response("Internal Server Error", { status: 500 });
+    }
   }
 }
 
+// HAPUS SEMUA BARIS SETELAH INI DAN GANTI DENGAN:
 export default {
   async fetch(req, env) {
     try {
@@ -900,5 +902,3 @@ export default {
     }
   }
 };
-
-
