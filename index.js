@@ -120,32 +120,41 @@ export class ChatServer {
     }
   }
 
-  removeDisconnectedUserFromAllSeats(userId) {
-    try {
-      const disconnectedInfo = this.disconnectedUsers.get(userId);
-      if (!disconnectedInfo) return;
+ removeDisconnectedUserFromAllSeats(userId) {
+  try {
+    const disconnectedInfo = this.disconnectedUsers.get(userId);
+    if (!disconnectedInfo) return;
 
-      for (const { room, seat } of disconnectedInfo.rooms) {
-        const seatMap = this.roomSeats.get(room);
-        if (seatMap && seatMap.has(seat)) {
-          const currentSeat = seatMap.get(seat);
-          if (currentSeat.namauser === userId) {
-            Object.assign(currentSeat, createEmptySeat());
-            this.broadcastToRoom(room, ["removeKursi", room, seat]);
-          }
+    for (const { room, seat } of disconnectedInfo.rooms) {
+      const seatMap = this.roomSeats.get(room);
+      if (seatMap && seatMap.has(seat)) {
+        const currentSeat = seatMap.get(seat);
+        if (currentSeat.namauser === userId) {
+          Object.assign(currentSeat, createEmptySeat());
+          this.broadcastToRoom(room, ["removeKursi", room, seat]);
         }
       }
+    }
 
-      this.userToSeat.delete(userId);
-      this.disconnectedUsers.delete(userId);
+    this.userToSeat.delete(userId);
+    this.disconnectedUsers.delete(userId);
 
-      for (const room of roomList) {
-        this.broadcastRoomUserCount(room);
+    // ⭐ KIRIM needJoinRoom KE SEMUA CONNECTION USER INI
+    const userConnections = this.userConnections.get(userId);
+    if (userConnections) {
+      for (const ws of userConnections) {
+        if (ws.readyState === 1) {
+          this.safeSend(ws, ["needJoinRoom"]);
+        }
       }
+    }
 
-    } catch (error) {}
-  }
+    for (const room of roomList) {
+      this.broadcastRoomUserCount(room);
+    }
 
+  } catch (error) {}
+}
   handleUserDisconnected(userId) {
     if (!userId) return;
 
@@ -950,3 +959,4 @@ export default {
     }
   }
 };
+
