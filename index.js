@@ -1,4 +1,4 @@
-// ChatServer Durable Object (Bahasa Indonesia) - FINAL STABLE VERSION
+// ChatServer Durable Object - FULL OVERWRITE VERSION
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
@@ -24,16 +24,20 @@ export class ChatServer {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    
     this.clients = new Set();
     this.userToSeat = new Map();
     this.hasEverSetId = false;
 
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
+    
     for (const room of roomList) {
-      const m = new Map();
-      for (let i = 1; i <= this.MAX_SEATS; i++) m.set(i, createEmptySeat());
-      this.roomSeats.set(room, m);
+      const seatMap = new Map();
+      for (let i = 1; i <= this.MAX_SEATS; i++) {
+        seatMap.set(i, createEmptySeat());
+      }
+      this.roomSeats.set(room, seatMap);
     }
 
     this.updateKursiBuffer = new Map();
@@ -64,14 +68,8 @@ export class ChatServer {
   }
 
   async destroy() {
-    if (this._tickTimer) {
-      clearInterval(this._tickTimer);
-      this._tickTimer = null;
-    }
-    if (this._flushTimer) {
-      clearInterval(this._flushTimer);
-      this._flushTimer = null;
-    }
+    if (this._tickTimer) clearInterval(this._tickTimer);
+    if (this._flushTimer) clearInterval(this._flushTimer);
     
     for (const timeout of this.pingTimeouts.values()) {
       clearTimeout(timeout);
@@ -99,7 +97,9 @@ export class ChatServer {
         } else if (c.readyState === 1) {
           try {
             this.safeSend(c, msg);
-          } catch (error) {}
+          } catch (error) {
+            clientsToRemove.push(c);
+          }
         }
       }
     }
@@ -113,8 +113,12 @@ export class ChatServer {
     const cnt = Object.fromEntries(roomList.map(r => [r, 0]));
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
-      for (const info of seatMap.values()) {
-        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) cnt[room]++;
+      if (seatMap) {
+        for (const info of seatMap.values()) {
+          if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+            cnt[room]++;
+          }
+        }
       }
     }
     return cnt;
@@ -134,8 +138,10 @@ export class ChatServer {
           for (const msg of messages) {
             this.broadcastToRoom(room, msg);
           }
-          messages.length = 0;
-        } catch (error) {}
+          this.chatMessageBuffer.set(room, []);
+        } catch (error) {
+          this.chatMessageBuffer.set(room, []);
+        }
       }
     }
   }
@@ -153,8 +159,10 @@ export class ChatServer {
         if (updates.length > 0) {
           this.broadcastToRoom(room, ["kursiBatchUpdate", room, updates]);
         }
-        seatMapUpdates.clear();
-      } catch (error) {}
+        this.updateKursiBuffer.set(room, new Map());
+      } catch (error) {
+        this.updateKursiBuffer.set(room, new Map());
+      }
     }
   }
 
@@ -182,11 +190,13 @@ export class ChatServer {
       const now = Date.now();
       for (const room of roomList) {
         const seatMap = this.roomSeats.get(room);
-        for (const [seat, info] of seatMap) {
-          if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
-            Object.assign(info, createEmptySeat());
-            this.broadcastToRoom(room, ["removeKursi", room, seat]);
-            this.broadcastRoomUserCount(room);
+        if (seatMap) {
+          for (const [seat, info] of seatMap) {
+            if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
+              Object.assign(info, createEmptySeat());
+              this.broadcastToRoom(room, ["removeKursi", room, seat]);
+              this.broadcastRoomUserCount(room);
+            }
           }
         }
       }
@@ -199,20 +209,27 @@ export class ChatServer {
       this.flushChatBuffer();
       this.cleanExpiredLocks();
 
+      const deliveredIds = [];
       for (const [id, msgs] of this.privateMessageBuffer) {
         let delivered = false;
         for (const c of this.clients) {
           if (c.idtarget === id && c.readyState === 1) {
             try {
-              for (const m of msgs) this.safeSend(c, m);
+              for (const m of msgs) {
+                this.safeSend(c, m);
+              }
               delivered = true;
               break;
             } catch (error) {}
           }
         }
         if (delivered) {
-          this.privateMessageBuffer.delete(id);
+          deliveredIds.push(id);
         }
+      }
+      
+      for (const id of deliveredIds) {
+        this.privateMessageBuffer.delete(id);
       }
     } catch (error) {}
   }
@@ -231,6 +248,8 @@ export class ChatServer {
     
     try {
       const seatMap = this.roomSeats.get(room);
+      if (!seatMap) return null;
+      
       const now = Date.now();
 
       for (const [seat, info] of seatMap) {
@@ -259,6 +278,7 @@ export class ChatServer {
     
     try {
       const seatMap = this.roomSeats.get(room);
+      if (!seatMap) return;
       
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
       
@@ -321,6 +341,8 @@ export class ChatServer {
     
     try {
       const seatMap = this.roomSeats.get(room);
+      if (!seatMap) return;
+      
       const allPoints = [];
       const meta = {};
       
@@ -392,6 +414,10 @@ export class ChatServer {
 
       this.clients.delete(ws);
       
+      if (this.privateMessageBuffer.has(id)) {
+        this.privateMessageBuffer.delete(id);
+      }
+      
     } catch (error) {
     } finally {
       this.cleanupInProgress.delete(id);
@@ -429,8 +455,9 @@ export class ChatServer {
   getOnlineUsersByRoom(roomName) {
     const users = [];
     for (const ws of this.clients) {
-      if (ws.roomname === roomName && ws.idtarget && ws.readyState === 1) 
+      if (ws.roomname === roomName && ws.idtarget && ws.readyState === 1) {
         users.push(ws.idtarget);
+      }
     }
     return users;
   }
@@ -728,8 +755,10 @@ export class ChatServer {
           const seatMap = this.roomSeats.get(room);
           const si = seatMap.get(seat);
           if (!si) return;
-          si.points.push({ x, y, fast });
-          if (si.points.length > 200) si.points.shift();
+          
+          // ⚡ OVERWRITE: Ganti semua points dengan yang baru
+          si.points = [{ x, y, fast }];
+          
           this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
           break;
         }
@@ -752,7 +781,10 @@ export class ChatServer {
             return this.safeSend(ws, ["error", `Unknown room: ${room}`]);
           const seatMap = this.roomSeats.get(room);
           const currentInfo = seatMap.get(seat) || createEmptySeat();
+          
+          // ⚡ OVERWRITE: Ganti semua data kursi
           Object.assign(currentInfo, { noimageUrl, namauser, color, itembawah, itematas, vip, viptanda });
+          
           seatMap.set(seat, currentInfo);
           if (!this.updateKursiBuffer.has(room)) 
             this.updateKursiBuffer.set(room, new Map());
