@@ -48,7 +48,7 @@ export class ChatServer {
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
 
-    this.lowcard = new LowCardGameManager(this); // PERBAIKAN: konsisten dengan lowercase
+    this.lowcard = new LowCardGameManager(this);
 
     // Grace period 20 detik untuk reconnect
     this.gracePeriod = 20000;
@@ -131,10 +131,12 @@ export class ChatServer {
     this.flushChatBuffer();
     this.cleanExpiredLocks();
 
-    // Cleanup WebSocket yang sudah closed
-    for (const client of Array.from(this.clients)) {
-      if (client.readyState === 2 || client.readyState === 3) {
-        this.cleanupClient(client);
+    // Cleanup WebSocket yang sudah closed dan sudah melewati grace period
+    const now = Date.now();
+    for (const [id, timeoutData] of Array.from(this.pendingRemove)) {
+      if (now - timeoutData.timestamp > this.gracePeriod) {
+        this.removeAllSeatsById(id);
+        this.pendingRemove.delete(id);
       }
     }
 
@@ -205,7 +207,7 @@ export class ChatServer {
   cleanupClientById(idtarget) {
     for (const c of Array.from(this.clients)) {
       if (c.idtarget === idtarget) {
-        this.cleanupClient(c);
+        this.delayedCleanupClient(c);
       }
     }
   }
@@ -238,25 +240,46 @@ export class ChatServer {
     return users;
   }
 
-  cleanupClient(ws) {
+  // PERBAIKAN: Delayed cleanup dengan grace period
+  delayedCleanupClient(ws) {
     const id = ws.idtarget;
     
+    // Hapus dari clients set segera
     this.clients.delete(ws);
     
     if (id) {
       // Batalkan pending removal lama jika ada
       if (this.pendingRemove.has(id)) {
-        clearTimeout(this.pendingRemove.get(id));
-        this.pendingRemove.delete(id);
+        return; // Sudah ada pending removal, tidak perlu buat baru
       }
 
-      // Set timeout 20 detik untuk hapus kursi
-      const timeout = setTimeout(() => {
-        this.removeAllSeatsById(id);
-        this.pendingRemove.delete(id);
-      }, this.gracePeriod);
+      // Simpan timestamp untuk periodic cleanup
+      this.pendingRemove.set(id, {
+        timestamp: Date.now(),
+        room: ws.roomname
+      });
+    }
 
-      this.pendingRemove.set(id, timeout);
+    // Clear data websocket segera
+    if (ws.numkursi) ws.numkursi.clear();
+    ws.roomname = undefined;
+    ws.idtarget = undefined;
+  }
+
+  // Cleanup langsung (tanpa delay) - untuk cases tertentu
+  immediateCleanupClient(ws) {
+    const id = ws.idtarget;
+    
+    this.clients.delete(ws);
+    
+    if (id) {
+      // Hapus pending removal jika ada
+      if (this.pendingRemove.has(id)) {
+        this.pendingRemove.delete(id);
+      }
+      
+      // Hapus kursi segera
+      this.removeAllSeatsById(id);
     }
 
     if (ws.numkursi) ws.numkursi.clear();
@@ -264,9 +287,9 @@ export class ChatServer {
     ws.idtarget = undefined;
   }
 
-  // PERBAIKAN: Fungsi untuk memeriksa apakah user berada di room LowCard (sesuai dengan roomList)
+  // Fungsi untuk memeriksa apakah user berada di room LowCard
   isInLowcardRoom(ws) {
-    return ws.roomname === "LowCard"; // PERBAIKAN: "LowCard" bukan "Lowcard"
+    return ws.roomname === "LowCard";
   }
 
   handleMessage(ws, raw) {
@@ -280,9 +303,6 @@ export class ChatServer {
     if (!Array.isArray(data) || data.length === 0) return this.safeSend(ws, ["error", "Invalid message format"]);
     const evt = data[0];
 
-    // PERBAIKAN: Debug log untuk memeriksa room user
-    console.log(`Event: ${evt}, User: ${ws.idtarget}, Room: ${ws.roomname}, In LowCard Room: ${this.isInLowcardRoom(ws)}`);
-
     switch (evt) {
       case "setIdTarget": {
         const newId = data[1];
@@ -291,7 +311,6 @@ export class ChatServer {
 
         // Jika ada pending removal, batalkan (reconnect dalam 20 detik)
         if (this.pendingRemove.has(newId)) {
-          clearTimeout(this.pendingRemove.get(newId));
           this.pendingRemove.delete(newId);
           this.safeSend(ws, ["info", "Reconnect cepat, kursi tetap aman"]);
         }
@@ -384,7 +403,7 @@ export class ChatServer {
               if (old.readyState === 1) {
                 old.close(4000, "Duplicate login");
               }
-              this.clients.delete(old);
+              this.immediateCleanupClient(old);
             } catch (e) {}
           }
         }
@@ -431,7 +450,6 @@ export class ChatServer {
         this.broadcastRoomUserCount(newRoom);
 
         if (ws.idtarget && this.pendingRemove.has(ws.idtarget)) {
-          clearTimeout(this.pendingRemove.get(ws.idtarget));
           this.pendingRemove.delete(ws.idtarget);
         }
         break;
@@ -501,17 +519,15 @@ export class ChatServer {
         break;
       }
 
-      // PERBAIKAN: Game Lowcard events - hanya boleh di room "LowCard" (sesuai roomList)
+      // Game Lowcard events - hanya boleh di room "LowCard"
       case "gameLowCardStart":
       case "gameLowCardJoin":
       case "gameLowCardNumber":
       case "gameLowCardEnd":
         if (!this.isInLowcardRoom(ws)) {
-          console.log(`Blocked game event ${evt} for user ${ws.idtarget} in room ${ws.roomname}`);
           return this.safeSend(ws, ["error", "Game Lowcard hanya tersedia di room LowCard"]);
         }
-        console.log(`Allowed game event ${evt} for user ${ws.idtarget} in room LowCard`);
-        this.lowcard.handleEvent(ws, data); // PERBAIKAN: konsisten dengan lowercase
+        this.lowcard.handleEvent(ws, data);
         break;
 
       default:
@@ -539,12 +555,13 @@ export class ChatServer {
       this.handleMessage(ws, ev.data);
     });
 
+    // PERBAIKAN: Delay cleanup dengan grace period 20 detik
     ws.addEventListener("close", (event) => {
-      this.cleanupClient(ws);
+      this.delayedCleanupClient(ws);
     });
 
     ws.addEventListener("error", (error) => {
-      this.cleanupClient(ws);
+      this.delayedCleanupClient(ws);
     });
 
     return new Response(null, { status: 101, webSocket: client });
