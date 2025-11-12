@@ -1,5 +1,5 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi lengkap dengan grace period 20 detik untuk banyak user
+// Versi lengkap dengan grace period 30 detik untuk banyak user
 // Game Lowcard hanya boleh di room "LowCard"
 
 import { LowCardGameManager } from "./lowcard.js";
@@ -50,8 +50,7 @@ export class ChatServer {
 
     this.lowcard = new LowCardGameManager(this);
 
-    // Grace period 20 detik untuk reconnect
-    this.gracePeriod = 20000;
+    // Grace period 30 detik untuk reconnect
     this.pendingRemove = new Map();
   }
 
@@ -131,15 +130,6 @@ export class ChatServer {
     this.flushChatBuffer();
     this.cleanExpiredLocks();
 
-    // Cleanup WebSocket yang sudah closed dan sudah melewati grace period
-    const now = Date.now();
-    for (const [id, timeoutData] of Array.from(this.pendingRemove)) {
-      if (now - timeoutData.timestamp > this.gracePeriod) {
-        this.removeAllSeatsById(id);
-        this.pendingRemove.delete(id);
-      }
-    }
-
     for (const [id, msgs] of Array.from(this.privateMessageBuffer)) {
       for (const c of this.clients) {
         if (c.idtarget === id) {
@@ -204,14 +194,6 @@ export class ChatServer {
     this.safeSend(ws, ["allUpdateKursiList", room, meta]);
   }
 
-  cleanupClientById(idtarget) {
-    for (const c of Array.from(this.clients)) {
-      if (c.idtarget === idtarget) {
-        this.delayedCleanupClient(c);
-      }
-    }
-  }
-
   removeAllSeatsById(idtarget) {
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
@@ -240,53 +222,6 @@ export class ChatServer {
     return users;
   }
 
-  // PERBAIKAN: Delayed cleanup dengan grace period
-  delayedCleanupClient(ws) {
-    const id = ws.idtarget;
-    
-    // Hapus dari clients set segera
-    this.clients.delete(ws);
-    
-    if (id) {
-      // Batalkan pending removal lama jika ada
-      if (this.pendingRemove.has(id)) {
-        return; // Sudah ada pending removal, tidak perlu buat baru
-      }
-
-      // Simpan timestamp untuk periodic cleanup
-      this.pendingRemove.set(id, {
-        timestamp: Date.now(),
-        room: ws.roomname
-      });
-    }
-
-    // Clear data websocket segera
-    if (ws.numkursi) ws.numkursi.clear();
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-  }
-
-  // Cleanup langsung (tanpa delay) - untuk cases tertentu
-  immediateCleanupClient(ws) {
-    const id = ws.idtarget;
-    
-    this.clients.delete(ws);
-    
-    if (id) {
-      // Hapus pending removal jika ada
-      if (this.pendingRemove.has(id)) {
-        this.pendingRemove.delete(id);
-      }
-      
-      // Hapus kursi segera
-      this.removeAllSeatsById(id);
-    }
-
-    if (ws.numkursi) ws.numkursi.clear();
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-  }
-
   // Fungsi untuk memeriksa apakah user berada di room LowCard
   isInLowcardRoom(ws) {
     return ws.roomname === "LowCard";
@@ -307,12 +242,23 @@ export class ChatServer {
       case "setIdTarget": {
         const newId = data[1];
 
-        this.cleanupClientById(newId);
+        // Cleanup client lama dengan ID yang sama
+        for (const c of Array.from(this.clients)) {
+          if (c.idtarget === newId && c !== ws) {
+            this.clients.delete(c);
+            if (c.numkursi) c.numkursi.clear();
+            c.roomname = undefined;
+            c.idtarget = undefined;
+          }
+        }
 
-        // Jika ada pending removal, batalkan (reconnect dalam 20 detik)
+        // Batalkan timer disconnect jika ada untuk user ID ini
         if (this.pendingRemove.has(newId)) {
+          const pendingData = this.pendingRemove.get(newId);
+          console.log(`User ${newId} reconnected, canceling timer`);
+          clearTimeout(pendingData.timeout);
           this.pendingRemove.delete(newId);
-          this.safeSend(ws, ["info", "Reconnect cepat, kursi tetap aman"]);
+          this.safeSend(ws, ["info", "Reconnect berhasil, kursi tetap aman"]);
         }
 
         ws.idtarget = newId;
@@ -403,7 +349,10 @@ export class ChatServer {
               if (old.readyState === 1) {
                 old.close(4000, "Duplicate login");
               }
-              this.immediateCleanupClient(old);
+              this.clients.delete(old);
+              if (old.numkursi) old.numkursi.clear();
+              old.roomname = undefined;
+              old.idtarget = undefined;
             } catch (e) {}
           }
         }
@@ -450,6 +399,7 @@ export class ChatServer {
         this.broadcastRoomUserCount(newRoom);
 
         if (ws.idtarget && this.pendingRemove.has(ws.idtarget)) {
+          clearTimeout(this.pendingRemove.get(ws.idtarget).timeout);
           this.pendingRemove.delete(ws.idtarget);
         }
         break;
@@ -555,13 +505,79 @@ export class ChatServer {
       this.handleMessage(ws, ev.data);
     });
 
-    // PERBAIKAN: Delay cleanup dengan grace period 20 detik
+    // Timer delay 30 detik langsung diaktifkan saat close/error
     ws.addEventListener("close", (event) => {
-      this.delayedCleanupClient(ws);
+      const id = ws.idtarget;
+      
+      // Hapus dari clients set segera
+      this.clients.delete(ws);
+      
+      if (id) {
+        console.log(`User ${id} disconnected, starting 30s timer`);
+
+        // Batalkan timer lama jika ada untuk user ID ini
+        if (this.pendingRemove.has(id)) {
+          console.log(`Canceling existing timer for user: ${id}`);
+          clearTimeout(this.pendingRemove.get(id).timeout);
+        }
+
+        // Set timeout 30 detik untuk hapus kursi
+        const timeout = setTimeout(() => {
+          console.log(`Timer expired - removing seats for user: ${id}`);
+          this.removeAllSeatsById(id);
+          this.pendingRemove.delete(id);
+        }, 30000); // 30 detik
+
+        // Simpan timer berdasarkan user ID
+        this.pendingRemove.set(id, {
+          timeout: timeout,
+          room: ws.roomname,
+          disconnectedAt: Date.now(),
+          wsId: ws.idtarget
+        });
+      }
+
+      // Clear data websocket segera
+      if (ws.numkursi) ws.numkursi.clear();
+      ws.roomname = undefined;
+      ws.idtarget = undefined;
     });
 
     ws.addEventListener("error", (error) => {
-      this.delayedCleanupClient(ws);
+      const id = ws.idtarget;
+      
+      // Hapus dari clients set segera
+      this.clients.delete(ws);
+      
+      if (id) {
+        console.log(`User ${id} error, starting 30s timer`);
+
+        // Batalkan timer lama jika ada untuk user ID ini
+        if (this.pendingRemove.has(id)) {
+          console.log(`Canceling existing timer for user: ${id}`);
+          clearTimeout(this.pendingRemove.get(id).timeout);
+        }
+
+        // Set timeout 30 detik untuk hapus kursi
+        const timeout = setTimeout(() => {
+          console.log(`Timer expired - removing seats for user: ${id}`);
+          this.removeAllSeatsById(id);
+          this.pendingRemove.delete(id);
+        }, 30000); // 30 detik
+
+        // Simpan timer berdasarkan user ID
+        this.pendingRemove.set(id, {
+          timeout: timeout,
+          room: ws.roomname,
+          disconnectedAt: Date.now(),
+          wsId: ws.idtarget
+        });
+      }
+
+      // Clear data websocket segera
+      if (ws.numkursi) ws.numkursi.clear();
+      ws.roomname = undefined;
+      ws.idtarget = undefined;
     });
 
     return new Response(null, { status: 101, webSocket: client });
