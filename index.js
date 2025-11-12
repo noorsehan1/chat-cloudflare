@@ -202,6 +202,27 @@ export class ChatServer {
     this.safeSend(ws, ["allUpdateKursiList", room, meta]);
   }
 
+ cleanupClientDestroy(ws) {
+    const id = ws.idtarget;
+    
+    this.clients.delete(ws);
+    
+    if (id) {
+        // Batalkan pending removal lama jika ada
+        if (this.pendingRemove.has(id)) {
+            clearTimeout(this.pendingRemove.get(id));
+            this.pendingRemove.delete(id);
+        }
+
+        // Hapus kursi langsung TANPA timeout 20 detik
+        this.removeAllSeatsById(id);
+    }
+
+    if (ws.numkursi) ws.numkursi.clear();
+    ws.roomname = undefined;
+    ws.idtarget = undefined;
+}
+
   cleanupClientById(idtarget) {
     for (const c of Array.from(this.clients)) {
       if (c.idtarget === idtarget) {
@@ -281,6 +302,19 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
+
+
+case "onDestroy": {
+    
+    if (ws.idtarget) {
+        // Pakai fungsi destroy yang langsung hapus
+        this.cleanupClientDestroy(ws);
+       
+    }
+    
+    break;
+}
+      
       case "setIdTarget": {
         const newId = data[1];
 
@@ -290,7 +324,6 @@ export class ChatServer {
         if (this.pendingRemove.has(newId)) {
           clearTimeout(this.pendingRemove.get(newId));
           this.pendingRemove.delete(newId);
-          this.safeSend(ws, ["info", "Reconnect cepat, kursi tetap aman"]);
         }
 
         ws.idtarget = newId;
@@ -302,7 +335,6 @@ export class ChatServer {
           lastRoom = seatInfo.room;
           ws.roomname = lastRoom;
           this.sendAllStateTo(ws, lastRoom);
-          this.safeSend(ws, ["numberKursiSaya", seatInfo.seat]);
         } else {
           ws.roomname = undefined;
         }
@@ -559,3 +591,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
