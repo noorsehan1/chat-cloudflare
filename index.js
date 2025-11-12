@@ -1,6 +1,5 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi lengkap dengan grace period 20 detik untuk banyak user
-// Game Lowcard hanya boleh di room "LowCard"
+// Versi lengkap dengan semua perbaikan optimasi
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -48,7 +47,7 @@ export class ChatServer {
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
 
-    this.lowcard = new LowCardGameManager(this); // Tetap menggunakan lowercase untuk konsistensi
+    this.lowcard = new LowCardGameManager(this);
 
     // Grace period 20 detik untuk reconnect
     this.gracePeriod = 20000;
@@ -66,6 +65,13 @@ export class ChatServer {
   broadcastToRoom(room, msg) {
     for (const c of Array.from(this.clients)) {
       if (c.roomname === room) this.safeSend(c, msg);
+    }
+  }
+
+  // BROADCAST KE SEMUA CLIENT TERLEPAS ROOM
+  broadcastToAll(msg) {
+    for (const c of Array.from(this.clients)) {
+      this.safeSend(c, msg);
     }
   }
 
@@ -202,27 +208,6 @@ export class ChatServer {
     this.safeSend(ws, ["allUpdateKursiList", room, meta]);
   }
 
- cleanupClientDestroy(ws) {
-    const id = ws.idtarget;
-    
-    this.clients.delete(ws);
-    
-    if (id) {
-        // Batalkan pending removal lama jika ada
-        if (this.pendingRemove.has(id)) {
-            clearTimeout(this.pendingRemove.get(id));
-            this.pendingRemove.delete(id);
-        }
-
-        // Hapus kursi langsung TANPA timeout 20 detik
-        this.removeAllSeatsById(id);
-    }
-
-    if (ws.numkursi) ws.numkursi.clear();
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
-}
-
   cleanupClientById(idtarget) {
     for (const c of Array.from(this.clients)) {
       if (c.idtarget === idtarget) {
@@ -231,20 +216,69 @@ export class ChatServer {
     }
   }
 
+  // FUNGSI YANG DIPERBAIKI: Hanya hapus kursi dengan ID yang sesuai
   removeAllSeatsById(idtarget) {
+    console.log(`🔍 Mencari kursi untuk user: ${idtarget}`);
+    let removedCount = 0;
+    
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
       
       for (const [seat, info] of seatMap) {
+        // PROTEKSI: Hanya hapus jika namauser sama persis dengan idtarget
         if (info.namauser === idtarget) {
+          console.log(`🗑️ Menghapus kursi ${seat} di room ${room} untuk user ${idtarget}`);
           Object.assign(info, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.broadcastRoomUserCount(room);
+          removedCount++;
+        }
+        // PROTEKSI: Juga hapus lock yang expired untuk user ini
+        else if (String(info.namauser).startsWith("__LOCK__" + idtarget)) {
+          console.log(`🗑️ Menghapus lock kursi ${seat} di room ${room} untuk user ${idtarget}`);
+          Object.assign(info, createEmptySeat());
+          this.broadcastToRoom(room, ["removeKursi", room, seat]);
+          this.broadcastRoomUserCount(room);
+          removedCount++;
         }
       }
     }
 
     this.userToSeat.delete(idtarget);
+    console.log(`✅ Berhasil menghapus ${removedCount} kursi untuk user ${idtarget}`);
+  }
+
+  // FUNGSI BARU: Cleanup tanpa grace period (instant removal)
+  cleanupClientDestroy(ws) {
+    const id = ws.idtarget;
+    
+    this.clients.delete(ws);
+    
+    if (id) {
+      // Batalkan pending removal lama jika ada
+      if (this.pendingRemove.has(id)) {
+        clearTimeout(this.pendingRemove.get(id));
+        this.pendingRemove.delete(id);
+      }
+
+      // Hapus kursi langsung TANPA timeout 20 detik
+      this.removeAllSeatsById(id);
+    }
+
+    if (ws.numkursi) ws.numkursi.clear();
+    ws.roomname = undefined;
+    ws.idtarget = undefined;
+    
+    console.log(`🚨 User ${id} di-destroy secara paksa`);
+  }
+
+  // FUNGSI BANTU: Batalkan pending removal untuk user
+  batalkanPendingRemoval(userId) {
+    if (userId && this.pendingRemove.has(userId)) {
+      clearTimeout(this.pendingRemove.get(userId));
+      this.pendingRemove.delete(userId);
+      console.log(`✅ Pending removal dibatalkan untuk user: ${userId}`);
+    }
   }
 
   getAllOnlineUsers() {
@@ -259,6 +293,7 @@ export class ChatServer {
     return users;
   }
 
+  // FUNGSI ORIGINAL: Cleanup dengan grace period 20 detik
   cleanupClient(ws) {
     const id = ws.idtarget;
     
@@ -268,16 +303,17 @@ export class ChatServer {
       // Batalkan pending removal lama jika ada
       if (this.pendingRemove.has(id)) {
         clearTimeout(this.pendingRemove.get(id));
-        this.pendingRemove.delete(id);
       }
 
       // Set timeout 20 detik untuk hapus kursi
       const timeout = setTimeout(() => {
         this.removeAllSeatsById(id);
         this.pendingRemove.delete(id);
+        console.log(`⏰ Pending removal terpicu, kursi user ${id} dihapus`);
       }, this.gracePeriod);
 
       this.pendingRemove.set(id, timeout);
+      console.log(`⏰ Pending removal 20 detik untuk user: ${id}`);
     }
 
     if (ws.numkursi) ws.numkursi.clear();
@@ -285,7 +321,7 @@ export class ChatServer {
     ws.idtarget = undefined;
   }
 
-  // FUNGSI YANG DIPERBAIKI: Mengecek room "LowCard" (sesuai dengan roomList)
+  // Fungsi untuk memeriksa apakah user berada di room Lowcard
   isInLowcardRoom(ws) {
     return ws.roomname === "LowCard";
   }
@@ -302,29 +338,14 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
-
-
-case "onDestroy": {
-    
-    if (ws.idtarget) {
-        // Pakai fungsi destroy yang langsung hapus
-        this.cleanupClientDestroy(ws);
-       
-    }
-    
-    break;
-}
-      
       case "setIdTarget": {
         const newId = data[1];
 
         this.cleanupClientById(newId);
 
-        // Jika ada pending removal, batalkan (reconnect dalam 20 detik)
-        if (this.pendingRemove.has(newId)) {
-          clearTimeout(this.pendingRemove.get(newId));
-          this.pendingRemove.delete(newId);
-        }
+        // ✅ Batalkan pending removal jika ada (reconnect dalam 20 detik)
+        this.batalkanPendingRemoval(newId);
+        this.safeSend(ws, ["info", "Reconnect cepat, kursi tetap aman"]);
 
         ws.idtarget = newId;
 
@@ -335,6 +356,7 @@ case "onDestroy": {
           lastRoom = seatInfo.room;
           ws.roomname = lastRoom;
           this.sendAllStateTo(ws, lastRoom);
+          this.safeSend(ws, ["numberKursiSaya", seatInfo.seat]);
         } else {
           ws.roomname = undefined;
         }
@@ -443,7 +465,11 @@ case "onDestroy": {
         const newRoom = data[1];
         if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
         
-        if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
+        // ✅ Batalkan pending removal sebelum pindah room
+        if (ws.idtarget) {
+          this.batalkanPendingRemoval(ws.idtarget);
+          this.removeAllSeatsById(ws.idtarget);
+        }
         
         ws.roomname = newRoom;
         const seatMap = this.roomSeats.get(newRoom);
@@ -459,10 +485,6 @@ case "onDestroy": {
         this.sendAllStateTo(ws, newRoom);
         this.broadcastRoomUserCount(newRoom);
 
-        if (ws.idtarget && this.pendingRemove.has(ws.idtarget)) {
-          clearTimeout(this.pendingRemove.get(ws.idtarget));
-          this.pendingRemove.delete(ws.idtarget);
-        }
         break;
       }
 
@@ -530,7 +552,20 @@ case "onDestroy": {
         break;
       }
 
-      // Game Lowcard events - hanya boleh di room "LowCard" (sesuai roomList)
+      // CASE BARU: onDestroy - reset hanya kursi user ini saja
+      case "onDestroy": {
+        
+        if (ws.idtarget) {
+          // ✅ Batalkan pending removal dan hapus langsung
+          this.batalkanPendingRemoval(ws.idtarget);
+          this.cleanupClientDestroy(ws);
+         
+        } 
+        
+        break;
+      }
+
+      // Game Lowcard events - hanya boleh di room "LowCard"
       case "gameLowCardStart":
       case "gameLowCardJoin":
       case "gameLowCardNumber":
@@ -538,7 +573,7 @@ case "onDestroy": {
         if (!this.isInLowcardRoom(ws)) {
           return this.safeSend(ws, ["error", "Game Lowcard hanya tersedia di room LowCard"]);
         }
-        this.lowcard.handleEvent(ws, data); // Menggunakan lowercase yang konsisten
+        this.lowcard.handleEvent(ws, data);
         break;
 
       default:
@@ -591,4 +626,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
