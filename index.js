@@ -1,6 +1,6 @@
 // ChatServer Durable Object (Bahasa Indonesia)
 // Versi lengkap dengan grace period 20 detik untuk banyak user
-// Game Lowcard hanya boleh di room "Lowcard"
+// Game Lowcard hanya boleh di room "LowCard"
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -48,7 +48,7 @@ export class ChatServer {
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
 
-    this.lowCard = new LowCardGameManager(this);
+    this.lowcard = new LowCardGameManager(this); // PERBAIKAN: konsisten dengan lowercase
 
     // Grace period 20 detik untuk reconnect
     this.gracePeriod = 20000;
@@ -264,9 +264,9 @@ export class ChatServer {
     ws.idtarget = undefined;
   }
 
-  // Fungsi untuk memeriksa apakah user berada di room Lowcard
+  // PERBAIKAN: Fungsi untuk memeriksa apakah user berada di room LowCard (sesuai dengan roomList)
   isInLowcardRoom(ws) {
-    return ws.roomname === "Lowcard";
+    return ws.roomname === "LowCard"; // PERBAIKAN: "LowCard" bukan "Lowcard"
   }
 
   handleMessage(ws, raw) {
@@ -279,6 +279,9 @@ export class ChatServer {
     
     if (!Array.isArray(data) || data.length === 0) return this.safeSend(ws, ["error", "Invalid message format"]);
     const evt = data[0];
+
+    // PERBAIKAN: Debug log untuk memeriksa room user
+    console.log(`Event: ${evt}, User: ${ws.idtarget}, Room: ${ws.roomname}, In LowCard Room: ${this.isInLowcardRoom(ws)}`);
 
     switch (evt) {
       case "setIdTarget": {
@@ -498,15 +501,17 @@ export class ChatServer {
         break;
       }
 
-      // Game Lowcard events - hanya boleh di room "Lowcard"
+      // PERBAIKAN: Game Lowcard events - hanya boleh di room "LowCard" (sesuai roomList)
       case "gameLowCardStart":
       case "gameLowCardJoin":
       case "gameLowCardNumber":
       case "gameLowCardEnd":
         if (!this.isInLowcardRoom(ws)) {
-          return this.safeSend(ws, ["error", "Game Lowcard hanya tersedia di room Lowcard"]);
+          console.log(`Blocked game event ${evt} for user ${ws.idtarget} in room ${ws.roomname}`);
+          return this.safeSend(ws, ["error", "Game Lowcard hanya tersedia di room LowCard"]);
         }
-        this.lowcard.handleEvent(ws, data);
+        console.log(`Allowed game event ${evt} for user ${ws.idtarget} in room LowCard`);
+        this.lowcard.handleEvent(ws, data); // PERBAIKAN: konsisten dengan lowercase
         break;
 
       default:
