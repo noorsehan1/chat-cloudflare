@@ -415,7 +415,7 @@ export class ChatServer {
             clearTimeout(pendingData.timeout);
             this.pendingRemove.delete(newId);
             this._savePendingRemovals();
-            this.safeSend(ws, ["info", "Reconnect berhasil, kursi tetap aman"]);
+          
           }
 
           ws.idtarget = newId;
@@ -427,7 +427,6 @@ export class ChatServer {
             lastRoom = seatInfo.room;
             ws.roomname = lastRoom;
             this.sendAllStateTo(ws, lastRoom);
-            this.safeSend(ws, ["numberKursiSaya", seatInfo.seat]);
           } else {
             ws.roomname = undefined;
           }
@@ -608,3 +607,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
