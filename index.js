@@ -4,7 +4,7 @@
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
- "LowCard", "General", "Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
+  "LowCard", "General", "Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
   "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
 ];
 
@@ -59,19 +59,24 @@ export class ChatServer {
       if (ws.readyState === 1) {
         ws.send(JSON.stringify(arr));
       }
-    } catch (e) {}
+    } catch (e) {
+      // Tetap diam jika error pengiriman
+    }
   }
 
   broadcastToRoom(room, msg) {
     for (const c of Array.from(this.clients)) {
-      if (c.roomname === room) this.safeSend(c, msg);
+      if (c.roomname === room && c.readyState === 1) {
+        this.safeSend(c, msg);
+      }
     }
   }
 
-  // BROADCAST KE SEMUA CLIENT TERLEPAS ROOM
   broadcastToAll(msg) {
     for (const c of Array.from(this.clients)) {
-      this.safeSend(c, msg);
+      if (c.readyState === 1) {
+        this.safeSend(c, msg);
+      }
     }
   }
 
@@ -80,7 +85,9 @@ export class ChatServer {
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
       for (const info of seatMap.values()) {
-        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) cnt[room]++;
+        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+          cnt[room]++;
+        }
       }
     }
     return cnt;
@@ -93,8 +100,12 @@ export class ChatServer {
 
   flushChatBuffer() {
     for (const [room, messages] of this.chatMessageBuffer) {
-      for (const msg of messages) this.broadcastToRoom(room, msg);
-      messages.length = 0;
+      if (messages.length > 0) {
+        for (const msg of messages) {
+          this.broadcastToRoom(room, msg);
+        }
+        messages.length = 0;
+      }
     }
   }
 
@@ -102,20 +113,26 @@ export class ChatServer {
     for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
       const updates = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        if (!seatMapUpdates.has(seat)) continue;
-        const info = seatMapUpdates.get(seat);
-        const { points, ...rest } = info;
-        updates.push([seat, rest]);
+        if (seatMapUpdates.has(seat)) {
+          const info = seatMapUpdates.get(seat);
+          const { points, ...rest } = info;
+          updates.push([seat, rest]);
+        }
       }
-      if (updates.length > 0)
+      if (updates.length > 0) {
         this.broadcastToRoom(room, ["kursiBatchUpdate", room, updates]);
+      }
       seatMapUpdates.clear();
     }
   }
 
   tick() {
     this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
-    for (const c of Array.from(this.clients)) this.safeSend(c, ["currentNumber", this.currentNumber]);
+    for (const c of Array.from(this.clients)) {
+      if (c.readyState === 1) {
+        this.safeSend(c, ["currentNumber", this.currentNumber]);
+      }
+    }
   }
 
   cleanExpiredLocks() {
@@ -144,13 +161,17 @@ export class ChatServer {
       }
     }
 
+    // Kirim pesan private yang tertunda
     for (const [id, msgs] of Array.from(this.privateMessageBuffer)) {
+      let delivered = false;
       for (const c of this.clients) {
-        if (c.idtarget === id) {
+        if (c.idtarget === id && c.readyState === 1) {
           for (const m of msgs) this.safeSend(c, m);
-          this.privateMessageBuffer.delete(id);
-          if (c.roomname) this.broadcastRoomUserCount(c.roomname);
+          delivered = true;
         }
+      }
+      if (delivered) {
+        this.privateMessageBuffer.delete(id);
       }
     }
   }
@@ -166,15 +187,17 @@ export class ChatServer {
     if (!ws.idtarget) return null;
     const now = Date.now();
 
+    // Bersihkan lock yang expired
     for (const [seat, info] of seatMap) {
-      if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 5000)
+      if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 5000) {
         Object.assign(info, createEmptySeat());
+      }
     }
 
+    // Cari kursi kosong
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const k = seatMap.get(i);
-      if (!k) continue;
-      if (k.namauser === "") {
+      if (k && k.namauser === "") {
         k.namauser = "__LOCK__" + ws.idtarget;
         k.lockTime = now;
         this.userToSeat.set(ws.idtarget, { room, seat: i });
@@ -188,10 +211,15 @@ export class ChatServer {
     const seatMap = this.roomSeats.get(room);
     const allPoints = [];
     const meta = {};
+    
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
       const info = seatMap.get(seat);
       if (!info) continue;
-      for (const p of info.points) allPoints.push({ seat, ...p });
+      
+      for (const p of info.points) {
+        allPoints.push({ seat, ...p });
+      }
+      
       if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
         meta[seat] = {
           noimageUrl: info.noimageUrl,
@@ -204,6 +232,7 @@ export class ChatServer {
         };
       }
     }
+    
     this.safeSend(ws, ["allPointsList", room, allPoints]);
     this.safeSend(ws, ["allUpdateKursiList", room, meta]);
   }
@@ -216,26 +245,19 @@ export class ChatServer {
     }
   }
 
-  // FUNGSI YANG DIPERBAIKI: Hanya hapus kursi dengan ID yang sesuai
   removeAllSeatsById(idtarget) {
-    console.log(`🔍 Mencari kursi untuk user: ${idtarget}`);
     let removedCount = 0;
     
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
       
       for (const [seat, info] of seatMap) {
-        // PROTEKSI: Hanya hapus jika namauser sama persis dengan idtarget
         if (info.namauser === idtarget) {
-          console.log(`🗑️ Menghapus kursi ${seat} di room ${room} untuk user ${idtarget}`);
           Object.assign(info, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.broadcastRoomUserCount(room);
           removedCount++;
-        }
-        // PROTEKSI: Juga hapus lock yang expired untuk user ini
-        else if (String(info.namauser).startsWith("__LOCK__" + idtarget)) {
-          console.log(`🗑️ Menghapus lock kursi ${seat} di room ${room} untuk user ${idtarget}`);
+        } else if (String(info.namauser).startsWith("__LOCK__" + idtarget)) {
           Object.assign(info, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.broadcastRoomUserCount(room);
@@ -245,10 +267,9 @@ export class ChatServer {
     }
 
     this.userToSeat.delete(idtarget);
-    console.log(`✅ Berhasil menghapus ${removedCount} kursi untuk user ${idtarget}`);
+    return removedCount;
   }
 
-  // FUNGSI BARU: Cleanup tanpa grace period (instant removal)
   cleanupClientDestroy(ws) {
     const id = ws.idtarget;
     
@@ -268,32 +289,35 @@ export class ChatServer {
     if (ws.numkursi) ws.numkursi.clear();
     ws.roomname = undefined;
     ws.idtarget = undefined;
-    
-    console.log(`🚨 User ${id} di-destroy secara paksa`);
   }
 
-  // FUNGSI BANTU: Batalkan pending removal untuk user
   batalkanPendingRemoval(userId) {
     if (userId && this.pendingRemove.has(userId)) {
       clearTimeout(this.pendingRemove.get(userId));
       this.pendingRemove.delete(userId);
-      console.log(`✅ Pending removal dibatalkan untuk user: ${userId}`);
     }
   }
 
   getAllOnlineUsers() {
     const users = [];
-    for (const ws of this.clients) if (ws.idtarget) users.push(ws.idtarget);
+    for (const ws of this.clients) {
+      if (ws.idtarget && ws.readyState === 1) {
+        users.push(ws.idtarget);
+      }
+    }
     return users;
   }
 
   getOnlineUsersByRoom(roomName) {
     const users = [];
-    for (const ws of this.clients) if (ws.roomname === roomName && ws.idtarget) users.push(ws.idtarget);
+    for (const ws of this.clients) {
+      if (ws.roomname === roomName && ws.idtarget && ws.readyState === 1) {
+        users.push(ws.idtarget);
+      }
+    }
     return users;
   }
 
-  // FUNGSI ORIGINAL: Cleanup dengan grace period 20 detik
   cleanupClient(ws) {
     const id = ws.idtarget;
     
@@ -309,11 +333,9 @@ export class ChatServer {
       const timeout = setTimeout(() => {
         this.removeAllSeatsById(id);
         this.pendingRemove.delete(id);
-        console.log(`⏰ Pending removal terpicu, kursi user ${id} dihapus`);
       }, this.gracePeriod);
 
       this.pendingRemove.set(id, timeout);
-      console.log(`⏰ Pending removal 20 detik untuk user: ${id}`);
     }
 
     if (ws.numkursi) ws.numkursi.clear();
@@ -321,7 +343,6 @@ export class ChatServer {
     ws.idtarget = undefined;
   }
 
-  // Fungsi untuk memeriksa apakah user berada di room Lowcard
   isInLowcardRoom(ws) {
     return ws.roomname === "LowCard";
   }
@@ -341,11 +362,23 @@ export class ChatServer {
       case "setIdTarget": {
         const newId = data[1];
 
-        this.cleanupClientById(newId);
+        // ✅ PERBAIKAN: Hapus cleanupClientById karena itu menghapus kursi
+        // this.cleanupClientById(newId); // ❌ DIHAPUS
 
         // ✅ Batalkan pending removal jika ada (reconnect dalam 20 detik)
         this.batalkanPendingRemoval(newId);
-        this.safeSend(ws, ["info", "Reconnect cepat, kursi tetap aman"]);
+
+        // ✅ Tutup koneksi duplikat tanpa menghapus kursi
+        for (const client of Array.from(this.clients)) {
+          if (client.idtarget === newId && client !== ws && client.readyState === 1) {
+            try {
+              client.close(4000, "Duplicate connection");
+              this.clients.delete(client);
+            } catch (e) {
+              // Silent catch
+            }
+          }
+        }
 
         ws.idtarget = newId;
 
@@ -356,7 +389,7 @@ export class ChatServer {
           lastRoom = seatInfo.room;
           ws.roomname = lastRoom;
           this.sendAllStateTo(ws, lastRoom);
-          this.safeSend(ws, ["numberKursiSaya", seatInfo.seat]);
+          this.safeSend(ws, ["needJoinRoom", seatInfo.seat]);
         } else {
           ws.roomname = undefined;
         }
@@ -377,7 +410,10 @@ export class ChatServer {
         const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
         let delivered = false;
         for (const c of this.clients) {
-          if (c.idtarget === idtarget) { this.safeSend(c, notif); delivered = true; }
+          if (c.idtarget === idtarget && c.readyState === 1) { 
+            this.safeSend(c, notif); 
+            delivered = true; 
+          }
         }
         if (!delivered) {
           if (!this.privateMessageBuffer.has(idtarget)) this.privateMessageBuffer.set(idtarget, []);
@@ -393,7 +429,10 @@ export class ChatServer {
         this.safeSend(ws, out);
         let delivered = false;
         for (const c of this.clients) {
-          if (c.idtarget === idt) { this.safeSend(c, out); delivered = true; }
+          if (c.idtarget === idt && c.readyState === 1) { 
+            this.safeSend(c, out); 
+            delivered = true; 
+          }
         }
         if (!delivered) {
           if (!this.privateMessageBuffer.has(idt)) this.privateMessageBuffer.set(idt, []);
@@ -465,7 +504,7 @@ export class ChatServer {
         const newRoom = data[1];
         if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
         
-        // ✅ Batalkan pending removal sebelum pindah room
+        // Batalkan pending removal sebelum pindah room
         if (ws.idtarget) {
           this.batalkanPendingRemoval(ws.idtarget);
           this.removeAllSeatsById(ws.idtarget);
@@ -552,16 +591,12 @@ export class ChatServer {
         break;
       }
 
-      // CASE BARU: onDestroy - reset hanya kursi user ini saja
       case "onDestroy": {
-        
         if (ws.idtarget) {
-          // ✅ Batalkan pending removal dan hapus langsung
+          // Batalkan pending removal dan hapus langsung
           this.batalkanPendingRemoval(ws.idtarget);
           this.cleanupClientDestroy(ws);
-         
-        } 
-        
+        }
         break;
       }
 
