@@ -1,5 +1,5 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi tanpa periodic flush timer
+// Versi tanpa buffer sama sekali
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -36,16 +36,11 @@ export class ChatServer {
       for (let i = 1; i <= this.MAX_SEATS; i++) m.set(i, createEmptySeat());
       this.roomSeats.set(room, m);
     }
-    
-    this.updateKursiBuffer = new Map();
-    this.chatMessageBuffer = new Map();
-    this.privateMessageBuffer = new Map();
 
     this.currentNumber = 1;
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
-    // Periodic flush timer dihapus
 
     this.lowcard = new LowCardGameManager(this);
 
@@ -98,68 +93,6 @@ export class ChatServer {
     this.broadcastToRoom(room, ["roomUserCount", room, count]);
   }
 
-  // Flush chat buffer langsung saat dipanggil
-  flushChatBuffer(room = null) {
-    if (room) {
-      // Flush untuk room tertentu
-      const messages = this.chatMessageBuffer.get(room);
-      if (messages && messages.length > 0) {
-        for (const msg of messages) {
-          this.broadcastToRoom(room, msg);
-        }
-        messages.length = 0;
-      }
-    } else {
-      // Flush semua room
-      for (const [roomName, messages] of this.chatMessageBuffer) {
-        if (messages.length > 0) {
-          for (const msg of messages) {
-            this.broadcastToRoom(roomName, msg);
-          }
-          messages.length = 0;
-        }
-      }
-    }
-  }
-
-  // Flush kursi updates langsung saat dipanggil
-  flushKursiUpdates(room = null) {
-    if (room) {
-      // Flush untuk room tertentu
-      const seatMapUpdates = this.updateKursiBuffer.get(room);
-      if (seatMapUpdates) {
-        const updates = [];
-        for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-          if (seatMapUpdates.has(seat)) {
-            const info = seatMapUpdates.get(seat);
-            const { points, ...rest } = info;
-            updates.push([seat, rest]);
-          }
-        }
-        if (updates.length > 0) {
-          this.broadcastToRoom(room, ["kursiBatchUpdate", room, updates]);
-        }
-        seatMapUpdates.clear();
-      }
-    } else {
-      // Flush semua room
-      for (const [roomName, seatMapUpdates] of this.updateKursiBuffer) {
-        const updates = [];
-        for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-          if (seatMapUpdates.has(seat)) {
-            const info = seatMapUpdates.get(seat);
-            const { points, ...rest } = info;
-            updates.push([seat, rest]);
-          }
-        }
-        if (updates.length > 0) {
-          this.broadcastToRoom(roomName, ["kursiBatchUpdate", roomName, updates]);
-        }
-        seatMapUpdates.clear();
-      }
-    }
-  }
-
   tick() {
     this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
     for (const c of Array.from(this.clients)) {
@@ -192,29 +125,10 @@ export class ChatServer {
     }
   }
 
-  // Kirim pesan private yang tertunda (dipanggil manual)
-  flushPrivateMessages() {
-    for (const [id, msgs] of Array.from(this.privateMessageBuffer)) {
-      let delivered = false;
-      for (const c of this.clients) {
-        if (c.idtarget === id && c.readyState === 1) {
-          for (const m of msgs) this.safeSend(c, m);
-          delivered = true;
-        }
-      }
-      if (delivered) {
-        this.privateMessageBuffer.delete(id);
-      }
-    }
-  }
-
   // Fungsi periodic flush yang bisa dipanggil manual
   manualPeriodicFlush() {
-    this.flushKursiUpdates();
-    this.flushChatBuffer();
     this.cleanExpiredLocks();
     this.cleanupClosedWebSockets();
-    this.flushPrivateMessages();
   }
 
   handleGetAllRoomsUserCount(ws) {
@@ -509,14 +423,6 @@ export class ChatServer {
           ws.roomname = undefined;
         }
 
-        // Kirim pesan private yang tertunda
-        if (this.privateMessageBuffer.has(ws.idtarget)) {
-          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) {
-            this.safeSend(ws, msg);
-          }
-          this.privateMessageBuffer.delete(ws.idtarget);
-        }
-
         if (ws.roomname) {
           this.broadcastRoomUserCount(ws.roomname);
         }
@@ -527,6 +433,8 @@ export class ChatServer {
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
         const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
+        
+        // LANGSUNG KIRIM ke target user jika online
         let delivered = false;
         for (const c of this.clients) {
           if (c.idtarget === idtarget && c.readyState === 1) { 
@@ -534,9 +442,10 @@ export class ChatServer {
             delivered = true; 
           }
         }
+        
+        // ❌ TIDAK SIMPAN JIKA OFFLINE - langsung return failed
         if (!delivered) {
-          if (!this.privateMessageBuffer.has(idtarget)) this.privateMessageBuffer.set(idtarget, []);
-          this.privateMessageBuffer.get(idtarget).push(notif);
+          this.safeSend(ws, ["notifFailed", idtarget, "User offline"]);
         }
         break;
       }
@@ -546,6 +455,8 @@ export class ChatServer {
         const ts = Date.now();
         const out = ["private", idt, url, msg, ts, sender];
         this.safeSend(ws, out);
+        
+        // LANGSUNG KIRIM ke target user jika online
         let delivered = false;
         for (const c of this.clients) {
           if (c.idtarget === idt && c.readyState === 1) { 
@@ -553,9 +464,9 @@ export class ChatServer {
             delivered = true; 
           }
         }
+        
+        // ❌ TIDAK SIMPAN JIKA OFFLINE - langsung return failed
         if (!delivered) {
-          if (!this.privateMessageBuffer.has(idt)) this.privateMessageBuffer.set(idt, []);
-          this.privateMessageBuffer.get(idt).push(out);
           this.safeSend(ws, ["privateFailed", idt, "User offline"]);
         }
         break;
@@ -640,9 +551,10 @@ export class ChatServer {
         
         if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
         
-        this.safeSend(ws, ["currentNumber", this.currentNumber]); 
         this.sendAllStateTo(ws, newRoom);
         this.broadcastRoomUserCount(newRoom);
+        this.safeSend(ws, ["currentNumber", this.currentNumber]); 
+
 
         break;
       }
@@ -650,10 +562,9 @@ export class ChatServer {
       case "chat": {
         const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
         if (!roomList.includes(roomname)) return this.safeSend(ws, ["error", "Invalid room for chat"]);
-        if (!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname, []);
-        this.chatMessageBuffer.get(roomname).push(["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
-        // Flush chat buffer untuk room ini
-        this.flushChatBuffer(roomname);
+        
+        // LANGSUNG BROADCAST tanpa buffer
+        this.broadcastToRoom(roomname, ["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
         break;
       }
 
@@ -699,10 +610,18 @@ export class ChatServer {
         });
         
         seatMap.set(seat, currentInfo);
-        if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
-        this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
-        // Flush kursi updates untuk room ini
-        this.flushKursiUpdates(room);
+        
+        // LANGSUNG BROADCAST tanpa buffer
+        this.broadcastToRoom(room, ["kursiBatchUpdate", room, [[seat, {
+          noimageUrl, 
+          namauser, 
+          color, 
+          itembawah, 
+          itematas, 
+          vip, 
+          viptanda
+        }]]]);
+        
         this.broadcastRoomUserCount(room);
         break;
       }
@@ -710,10 +629,9 @@ export class ChatServer {
       case "gift": {
         const [, roomname, sender, receiver, giftName] = data;
         if (!roomList.includes(roomname)) return this.safeSend(ws, ["error", "Invalid room for gift"]);
-        if (!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname, []);
-        this.chatMessageBuffer.get(roomname).push(["gift", roomname, sender, receiver, giftName, Date.now()]);
-        // Flush chat buffer untuk room ini
-        this.flushChatBuffer(roomname);
+        
+        // LANGSUNG BROADCAST tanpa buffer
+        this.broadcastToRoom(roomname, ["gift", roomname, sender, receiver, giftName, Date.now()]);
         break;
       }
 
