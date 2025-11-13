@@ -406,55 +406,65 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
+
+        
       case "setIdTarget": {
-        const newId = data[1];
+    const newId = data[1];
 
-        this.batalkanPendingRemoval(newId);
+    this.batalkanPendingRemoval(newId);
 
-        // Tutup koneksi duplikat
-        for (const client of Array.from(this.clients)) {
-          if (client.idtarget === newId && client !== ws && client.readyState === 1) {
+    // Tutup koneksi duplikat
+    for (const client of Array.from(this.clients)) {
+        if (client.idtarget === newId && client !== ws && client.readyState === 1) {
             try {
-              client.close(4000, "Duplicate connection");
-              this.clients.delete(client);
+                client.close(4000, "Duplicate connection");
+                this.clients.delete(client);
             } catch (e) {
-              // Silent catch
+                // Silent catch
             }
-          }
         }
+    }
 
-        ws.idtarget = newId;
+    ws.idtarget = newId;
 
-        const seatInfo = this.userToSeat.get(newId);
+    // ✅ TAMBAHKAN: Flag untuk menandai pertama kali koneksi
+    const isFirstConnection = !ws.hasConnectedBefore;
+    ws.hasConnectedBefore = true;
 
-        if (seatInfo) {
-          // Reconnect dalam 20 detik, kembalikan ke kursi
-          const lastRoom = seatInfo.room;
-          const lastSeat = seatInfo.seat;
-          ws.roomname = lastRoom;
-          
-          // Kirim state lengkap dengan optimasi 50ms
-          this.sendPointKursi(ws, lastRoom);
-        } else {
-          // Reconnect lewat 20 detik, kursi sudah dihapus
-          ws.roomname = undefined;
-          this.safeSend(ws, ["needJoinRoom", -1]);
+    const seatInfo = this.userToSeat.get(newId);
+
+    if (seatInfo) {
+        // Reconnect dalam 20 detik, kembalikan ke kursi
+        const lastRoom = seatInfo.room;
+        const lastSeat = seatInfo.seat;
+        ws.roomname = lastRoom;
+        
+        // Kirim state lengkap dengan optimasi 50ms
+        this.sendPointKursi(ws, lastRoom);
+    } else {
+        // Reconnect lewat 20 detik, kursi sudah dihapus
+        ws.roomname = undefined;
+        
+        // ✅ MODIFIKASI: Jangan kirim needJoinRoom jika pertama kali buka aplikasi
+        if (!isFirstConnection) {
+            this.safeSend(ws, ["needJoinRoom", -1]);
         }
+    }
 
-        // Kirim pesan private yang tertunda
-        if (this.privateMessageBuffer.has(ws.idtarget)) {
-          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) {
+    // Kirim pesan private yang tertunda
+    if (this.privateMessageBuffer.has(ws.idtarget)) {
+        for (const msg of this.privateMessageBuffer.get(ws.idtarget)) {
             this.safeSend(ws, msg);
-          }
-          this.privateMessageBuffer.delete(ws.idtarget);
         }
+        this.privateMessageBuffer.delete(ws.idtarget);
+    }
 
-        if (ws.roomname) {
-          this.broadcastRoomUserCount(ws.roomname);
-        }
+    if (ws.roomname) {
+        this.broadcastRoomUserCount(ws.roomname);
+    }
 
-        break;
-      }
+    break;
+}
 
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
@@ -712,4 +722,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
