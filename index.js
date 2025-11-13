@@ -1,5 +1,5 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi dengan timeout manual di cleanupClient
+// Versi final dengan timer hapus kursi + chat pending
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -46,7 +46,6 @@ export class ChatServer {
     this.intervalMillis = 15 * 60 * 1000;
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
 
-    // ✅ TIDAK PAKAI INTERVAL CLEANUP
     this.lowcard = new LowCardGameManager(this);
 
     this.gracePeriod = 20000;
@@ -405,7 +404,7 @@ export class ChatServer {
     return users;
   }
 
-  // ✅ PERBAIKAN BESAR: cleanupClient dengan timeout yang WORK
+  // ✅ CLEANUP CLIENT DENGAN DUA TIMER
   cleanupClient(ws) {
     const id = ws.idtarget;
     
@@ -421,24 +420,23 @@ export class ChatServer {
       }
       
       if (!hasActiveConnection) {
+        // ✅ TIMER 1: AKTIFKAN CHAT PENDING (langsung)
         this.disconnectTime.set(id, Date.now());
         
-        // ✅ BATALKAN TIMEOUT LAMA JIKA ADA
+        // ✅ TIMER 2: HAPUS KURSI (setelah 20 detik)
         if (this.pendingRemove.has(id)) {
           clearTimeout(this.pendingRemove.get(id));
           this.pendingRemove.delete(id);
         }
 
-        // ✅ BUAT TIMEOUT BARU YANG PASTI JALAN
         const timeout = setTimeout(() => {
-          // ✅ INI YANG AKAN HAPUS KURSI SETELAH 20 DETIK
           this.removeAllSeatsById(id);
           this.pendingRemove.delete(id);
         }, this.gracePeriod);
 
         this.pendingRemove.set(id, timeout);
+        
       } else {
-        // User masih ada koneksi aktif, batalkan timeout
         if (this.pendingRemove.has(id)) {
           clearTimeout(this.pendingRemove.get(id));
           this.pendingRemove.delete(id);
