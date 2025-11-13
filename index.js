@@ -274,15 +274,16 @@ export class ChatServer {
     this.safeSend(ws, ["allUpdateKursiList", room, meta]);
   }
 
-sendPointKursi(ws, room) {
+  sendPointKursi(ws, room) {
     const seatMap = this.roomSeats.get(room);
     const seatData = [];
 
-    // Kirim kursi dengan delay sendiri
+    // Kumpulkan data kursi yang ADA USER dan POINT
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         if (!info) continue;
 
+        // ✅ Hanya kursi yang ADA USER (bukan kosong atau lock)
         if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
             seatData.push({
                 seat,
@@ -298,9 +299,10 @@ sendPointKursi(ws, room) {
         }
     }
 
-    // ✅ Kirim kursi dengan delay sendiri (50ms per kursi)
+    // ✅ Kirim kursiBatchUpdate dan pointUpdated dengan delay bertahap 50ms * index
     seatData.forEach((data, index) => {
         setTimeout(() => {
+            // Kirim update kursi
             this.safeSend(ws, ["kursiBatchUpdate", room, [[data.seat, {
                 noimageUrl: data.noimageUrl,
                 namauser: data.namauser,
@@ -311,46 +313,40 @@ sendPointKursi(ws, room) {
                 viptanda: data.viptanda
             }]]]);
 
+            // Kirim point jika ada
             if (data.points) {
                 this.safeSend(ws, ["pointUpdated", room, data.seat, data.points.x, data.points.y, data.points.fast]);
             }
-        }, 50 * index);
+        }, 50 * index); // Delay bertahap
     });
     
-    // ✅ Kirim chat pending dengan delay mulai TERPISAH
+    // ✅ KIRIM PENDING CHATS SETELAH KURSI SELESAI (TANPA DOUBLE)
     setTimeout(() => {
-        this.sendPendingChats(ws, room);
-    }, 500);
-}
-
-sendPendingChats(ws, room) {
-    if (ws.idtarget && this.missedChatsBuffer.has(ws.idtarget)) {
-        const missedChats = this.missedChatsBuffer.get(ws.idtarget);
-        const roomMissedChats = missedChats.filter(chat => chat[1] === room);
-        
-        if (roomMissedChats.length > 0) {
-            console.log(`Mengirim ${roomMissedChats.length} chat pending ke Java client`);
+        if (ws.idtarget && this.missedChatsBuffer.has(ws.idtarget)) {
+            const missedChats = this.missedChatsBuffer.get(ws.idtarget);
+            const roomMissedChats = missedChats.filter(chat => chat[1] === room);
             
-            // ✅ Kirim chat satu per satu dengan delay sendiri LANGSUNG ke case "chat"
-            roomMissedChats.forEach((chatMsg, index) => {
-                setTimeout(() => {
-                    // ✅ LANGSUNG KIRIM sebagai message "chat" biasa
-                    // Format: ["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]
-                    this.safeSend(ws, chatMsg);
-                    
-                    if (index === roomMissedChats.length - 1) {
-                        setTimeout(() => {
+            if (roomMissedChats.length > 0) {
+                console.log(`Mengirim ${roomMissedChats.length} chat pending ke user ${ws.idtarget}`);
+                
+                // ✅ Kirim chat satu per satu dengan case KHUSUS "pendingChat"
+                roomMissedChats.forEach((chatMsg, index) => {
+                    setTimeout(() => {
+                        // Format: ["pendingChat", roomname, noImageURL, username, message, usernameColor, chatTextColor]
+                        const pendingChatMessage = ["pendingChat", ...chatMsg.slice(1)];
+                        this.safeSend(ws, pendingChatMessage);
+                        
+                        if (index === roomMissedChats.length - 1) {
                             this.missedChatsBuffer.delete(ws.idtarget);
-                            console.log(`Selesai mengirim ${roomMissedChats.length} chat pending`);
-                        }, 100);
-                    }
-                }, 100 * index); // Delay 100ms per chat
-            });
-        } else {
-            this.missedChatsBuffer.delete(ws.idtarget);
+                        }
+                    }, 100 * index); // Delay 100ms per chat
+                });
+            } else {
+                this.missedChatsBuffer.delete(ws.idtarget);
+            }
         }
-    }
-}
+    }, 500); // Delay 500ms setelah kursi selesai
+  }
 
   cleanupClientById(idtarget) {
     for (const c of Array.from(this.clients)) {
@@ -391,7 +387,7 @@ sendPendingChats(ws, room) {
     return removedCount;
   }
 
-cleanupClientDestroy(ws) {
+  cleanupClientDestroy(ws) {
     const id = ws.idtarget;
     
     this.clients.delete(ws);
@@ -445,7 +441,7 @@ cleanupClientDestroy(ws) {
     return users;
   }
 
- cleanupClient(ws) {
+  cleanupClient(ws) {
     const id = ws.idtarget;
     
     this.clients.delete(ws);
@@ -473,7 +469,7 @@ cleanupClientDestroy(ws) {
     ws.roomname = undefined;
     ws.idtarget = undefined;
     ws.hasJoinedRoom = undefined;
-}
+  }
 
   isInLowcardRoom(ws) {
     return ws.roomname === "LowCard";
@@ -491,87 +487,79 @@ cleanupClientDestroy(ws) {
     const evt = data[0];
 
     switch (evt) {
+      case "setIdTarget": {
+        const newId = data[1];
 
-        
-     case "setIdTarget": {
-    const newId = data[1];
+        this.batalkanPendingRemoval(newId);
 
-    this.batalkanPendingRemoval(newId);
-
-    // Tutup koneksi duplikat
-    for (const client of Array.from(this.clients)) {
-        if (client.idtarget === newId && client !== ws && client.readyState === 1) {
+        // Tutup koneksi duplikat
+        for (const client of Array.from(this.clients)) {
+          if (client.idtarget === newId && client !== ws && client.readyState === 1) {
             try {
-                client.close(4000, "Duplicate connection");
-                this.clients.delete(client);
+              client.close(4000, "Duplicate connection");
+              this.clients.delete(client);
             } catch (e) {
-                // Silent catch
+              // Silent catch
             }
+          }
         }
-    }
 
-    ws.idtarget = newId;
+        ws.idtarget = newId;
 
-    // ✅ INISIALISASI: Default false (belum pernah join room)
-    if (ws.hasJoinedRoom === undefined) {
-        ws.hasJoinedRoom = false;
-        
-        // ✅ HAPUS BUFFER CHAT: Saat pertama kali buka aplikasi
-        if (this.missedChatsBuffer.has(newId)) {
+        // ✅ INISIALISASI: Default false (belum pernah join room)
+        if (ws.hasJoinedRoom === undefined) {
+          ws.hasJoinedRoom = false;
+          
+          // ✅ HAPUS BUFFER CHAT: Saat pertama kali buka aplikasi
+          if (this.missedChatsBuffer.has(newId)) {
             this.missedChatsBuffer.delete(newId);
+          }
         }
-    }
 
-    const seatInfo = this.userToSeat.get(newId);
+        const seatInfo = this.userToSeat.get(newId);
 
-    if (seatInfo) {
-        // User memiliki kursi aktif (dalam grace period 20 detik)
-        const lastRoom = seatInfo.room;
-        const lastSeat = seatInfo.seat;
-        ws.roomname = lastRoom;
-        
-        // Kirim state lengkap dengan optimasi 50ms
-        this.sendPointKursi(ws, lastRoom);
-        
-        // ✅ KIRIM SEMUA CHAT YANG TERLEWAT selama disconnect
-        if (this.missedChatsBuffer.has(newId)) {
-            const missedChats = this.missedChatsBuffer.get(newId);
-            // Kirim semua chat yang terlewat dengan delay
-            missedChats.forEach((chatMsg, index) => {
-                setTimeout(() => {
-                    this.safeSend(ws, chatMsg);
-                }, 100 * index); // Delay 100ms per chat
-            });
-            // Hapus buffer setelah dikirim
-            this.missedChatsBuffer.delete(newId);
-        }
-        
-        // ✅ SET: User sudah pernah join room
-        ws.hasJoinedRoom = true;
-    } else {
-        // Tidak ada kursi aktif
-        ws.roomname = undefined;
-        
-        // ✅ MODIFIKASI: Hanya kirim needJoinRoom jika pernah join room
-        if (ws.hasJoinedRoom === true) {
+        if (seatInfo) {
+          // Reconnect dalam 20 detik, kembalikan ke kursi
+          const lastRoom = seatInfo.room;
+          const lastSeat = seatInfo.seat;
+          ws.roomname = lastRoom;
+          
+          // ✅ HANYA kirim state kursi, chat pending akan dikirim oleh sendPointKursi
+          this.sendPointKursi(ws, lastRoom);
+          
+          // ✅ SET: User sudah pernah join room
+          ws.hasJoinedRoom = true;
+        } else {
+          // Reconnect lewat 20 detik, kursi sudah dihapus
+          ws.roomname = undefined;
+          
+          // ✅ MODIFIKASI: Hanya kirim needJoinRoom jika pernah join room
+          if (ws.hasJoinedRoom === true) {
             this.safeSend(ws, ["needJoinRoom", -1]);
+          }
         }
-    }
 
-    // Kirim pesan private yang tertunda
-    if (this.privateMessageBuffer.has(ws.idtarget)) {
-        for (const msg of this.privateMessageBuffer.get(ws.idtarget)) {
+        // Kirim pesan private yang tertunda
+        if (this.privateMessageBuffer.has(ws.idtarget)) {
+          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) {
             this.safeSend(ws, msg);
+          }
+          this.privateMessageBuffer.delete(ws.idtarget);
         }
-        this.privateMessageBuffer.delete(ws.idtarget);
-    }
 
-    if (ws.roomname) {
-        this.broadcastRoomUserCount(ws.roomname);
-    }
+        if (ws.roomname) {
+          this.broadcastRoomUserCount(ws.roomname);
+        }
 
-    break;
-}
+        break;
+      }
+
+      case "pendingChat": {
+        // ✅ Handle pending chat dari client (jika diperlukan)
+        const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
+        // Process pending chat seperti chat biasa
+        break;
+      }
 
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
@@ -669,39 +657,39 @@ cleanupClientDestroy(ws) {
       }
 
       case "joinRoom": {
-    const newRoom = data[1];
-    if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
-    
-    // Batalkan pending removal sebelum pindah room
-    if (ws.idtarget) {
-        this.batalkanPendingRemoval(ws.idtarget);
-        this.removeAllSeatsById(ws.idtarget);
+        const newRoom = data[1];
+        if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
         
-        // ✅ HAPUS BUFFER CHAT: Saat pindah/join room baru
-        if (this.missedChatsBuffer.has(ws.idtarget)) {
+        // Batalkan pending removal sebelum pindah room
+        if (ws.idtarget) {
+          this.batalkanPendingRemoval(ws.idtarget);
+          this.removeAllSeatsById(ws.idtarget);
+          
+          // ✅ HAPUS BUFFER CHAT: Saat pindah/join room baru
+          if (this.missedChatsBuffer.has(ws.idtarget)) {
             this.missedChatsBuffer.delete(ws.idtarget);
+          }
         }
-    }
-    
-    ws.roomname = newRoom;
-    const seatMap = this.roomSeats.get(newRoom);
-    const foundSeat = this.lockSeat(newRoom, ws);
-    
-    if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
-    
-    ws.numkursi = new Set([foundSeat]);
-    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-    
-    if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-    
-    // ✅ SET: User sudah pernah join room = TRUE
-    ws.hasJoinedRoom = true;
-    this.safeSend(ws, ["currentNumber", this.currentNumber]); 
-    this.sendAllStateTo(ws, newRoom);
-    this.broadcastRoomUserCount(newRoom);
+        
+        ws.roomname = newRoom;
+        const seatMap = this.roomSeats.get(newRoom);
+        const foundSeat = this.lockSeat(newRoom, ws);
+        
+        if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
+        
+        ws.numkursi = new Set([foundSeat]);
+        this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+        
+        if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+        
+        // ✅ SET: User sudah pernah join room = TRUE
+        ws.hasJoinedRoom = true;
+        this.safeSend(ws, ["currentNumber", this.currentNumber]); 
+        this.sendAllStateTo(ws, newRoom);
+        this.broadcastRoomUserCount(newRoom);
 
-    break;
-}
+        break;
+      }
 
       case "chat": {
         const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
@@ -837,4 +825,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
