@@ -404,7 +404,7 @@ export class ChatServer {
       }
 
       // ✅ KIRIM needJoinRoom KE CLIENT sebelum menghapus
-      this.safeSend(ws, ["needJoinRoom", -1]);
+  
       
       // Hapus kursi langsung TANPA timeout 20 detik
       this.removeAllSeatsById(id);
@@ -479,6 +479,7 @@ export class ChatServer {
 
         this.pendingRemove.set(id, timeout);
       } else {
+         this.safeSend(ws, ["needJoinRoom", -1]);
         // ✅ User masih ada koneksi aktif, batalkan timeout
         if (this.pendingRemove.has(id)) {
           clearTimeout(this.pendingRemove.get(id));
@@ -826,3 +827,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
