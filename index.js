@@ -488,72 +488,74 @@ export class ChatServer {
     const evt = data[0];
 
     switch (evt) {
-      case "setIdTarget": {
-        const newId = data[1];
+case "setIdTarget": {
+    const newId = data[1];
 
-        this.batalkanPendingRemoval(newId);
+    // ✅ BATALKAN TIMEOUT: Pastikan batalkan dulu sebelum lanjut
+    this.batalkanPendingRemoval(newId);
 
-        // Tutup koneksi duplikat
-        for (const client of Array.from(this.clients)) {
-          if (client.idtarget === newId && client !== ws && client.readyState === 1) {
+    // ✅ SET ID TARGET DULU sebelum menutup koneksi duplikat
+    ws.idtarget = newId;
+
+    // Tutup koneksi duplikat
+    for (const client of Array.from(this.clients)) {
+        if (client.idtarget === newId && client !== ws && client.readyState === 1) {
             try {
-              client.close(4000, "Duplicate connection");
-              this.clients.delete(client);
+                client.close(4000, "Duplicate connection");
+                this.clients.delete(client);
             } catch (e) {
-              // Silent catch
+                // Silent catch
             }
-          }
         }
+    }
 
-        ws.idtarget = newId;
-
-        // ✅ INISIALISASI: Default false (belum pernah join room)
-        if (ws.hasJoinedRoom === undefined) {
-          ws.hasJoinedRoom = false;
-          
-          // ✅ HAPUS BUFFER CHAT: Saat pertama kali buka aplikasi
-          if (this.missedChatsBuffer.has(newId)) {
+    // ✅ INISIALISASI: Default false (belum pernah join room)
+    if (ws.hasJoinedRoom === undefined) {
+        ws.hasJoinedRoom = false;
+        
+        // ✅ HAPUS BUFFER CHAT: Saat pertama kali buka aplikasi
+        if (this.missedChatsBuffer.has(newId)) {
             this.missedChatsBuffer.delete(newId);
-          }
         }
+    }
 
-        const seatInfo = this.userToSeat.get(newId);
+    const seatInfo = this.userToSeat.get(newId);
 
-        if (seatInfo) {
-          // Reconnect dalam 20 detik, kembalikan ke kursi
-          const lastRoom = seatInfo.room;
-          const lastSeat = seatInfo.seat;
-          ws.roomname = lastRoom;
-          
-          // ✅ HANYA kirim state kursi, chat pending akan dikirim oleh sendPointKursi
-          this.sendPointKursi(ws, lastRoom);
-          
-          // ✅ SET: User sudah pernah join room
-          ws.hasJoinedRoom = true;
-        } else {
-          // Reconnect lewat 20 detik, kursi sudah dihapus
-          ws.roomname = undefined;
-          
-          // ✅ MODIFIKASI: Hanya kirim needJoinRoom jika pernah join room
-          if (ws.hasJoinedRoom === true) {
+    if (seatInfo) {
+        // User memiliki kursi aktif (dalam grace period 20 detik)
+        const lastRoom = seatInfo.room;
+        const lastSeat = seatInfo.seat;
+        ws.roomname = lastRoom;
+        
+        // Kirim state lengkap dengan optimasi 50ms
+        this.sendPointKursi(ws, lastRoom);
+        
+        // ✅ SET: User sudah pernah join room
+        ws.hasJoinedRoom = true;
+    } else {
+        // Tidak ada kursi aktif
+        ws.roomname = undefined;
+        
+        // ✅ MODIFIKASI: Hanya kirim needJoinRoom jika pernah join room
+        if (ws.hasJoinedRoom === true) {
             this.safeSend(ws, ["needJoinRoom", -1]);
-          }
         }
+    }
 
-        // Kirim pesan private yang tertunda
-        if (this.privateMessageBuffer.has(ws.idtarget)) {
-          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) {
+    // Kirim pesan private yang tertunda
+    if (this.privateMessageBuffer.has(ws.idtarget)) {
+        for (const msg of this.privateMessageBuffer.get(ws.idtarget)) {
             this.safeSend(ws, msg);
-          }
-          this.privateMessageBuffer.delete(ws.idtarget);
         }
+        this.privateMessageBuffer.delete(ws.idtarget);
+    }
 
-        if (ws.roomname) {
-          this.broadcastRoomUserCount(ws.roomname);
-        }
+    if (ws.roomname) {
+        this.broadcastRoomUserCount(ws.roomname);
+    }
 
-        break;
-      }
+    break;
+}
 
       case "pendingChat": {
         // ✅ Handle pending chat dari client (jika diperlukan)
@@ -826,4 +828,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
