@@ -354,7 +354,6 @@ export class ChatServer {
 
         this.pendingRemove.set(id, timeout);
       } else {
-        this.safeSend(ws, ["needJoinRoom", -1]);
         // ✅ User masih ada koneksi aktif, batalkan timeout
         if (this.pendingRemove.has(id)) {
           clearTimeout(this.pendingRemove.get(id));
@@ -554,7 +553,6 @@ export class ChatServer {
         this.sendAllStateTo(ws, newRoom);
         this.broadcastRoomUserCount(newRoom);
         this.safeSend(ws, ["currentNumber", this.currentNumber]); 
-
 
         break;
       }
