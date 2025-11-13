@@ -277,6 +277,7 @@ export class ChatServer {
   sendPointKursi(ws, room) {
     const seatMap = this.roomSeats.get(room);
     const seatData = [];
+    this.safeSend(ws, ["currentNumber", this.currentNumber]); 
 
     // Kumpulkan data kursi yang ADA USER dan POINT
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
@@ -825,3 +826,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
