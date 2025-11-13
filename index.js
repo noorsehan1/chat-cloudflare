@@ -237,6 +237,53 @@ export class ChatServer {
     this.safeSend(ws, ["allUpdateKursiList", room, meta]);
   }
 
+ sendPointKursi(ws, room) {
+    const seatMap = this.roomSeats.get(room);
+    const seatData = [];
+
+    // Kumpulkan data kursi yang ADA USER dan POINT
+    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        const info = seatMap.get(seat);
+        if (!info) continue;
+
+        // ✅ Hanya kursi yang ADA USER (bukan kosong atau lock)
+        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+            seatData.push({
+                seat,
+                noimageUrl: info.noimageUrl,
+                namauser: info.namauser,
+                color: info.color,
+                itembawah: info.itembawah,
+                itematas: info.itematas,
+                vip: info.vip,
+                viptanda: info.viptanda,
+                points: info.points.length > 0 ? info.points[0] : null
+            });
+        }
+    }
+
+    // ✅ Kirim kursiBatchUpdate dan pointUpdated dengan delay bertahap 50ms * index
+    seatData.forEach((data, index) => {
+        setTimeout(() => {
+            // Kirim update kursi
+            this.safeSend(ws, ["kursiBatchUpdate", room, [[data.seat, {
+                noimageUrl: data.noimageUrl,
+                namauser: data.namauser,
+                color: data.color,
+                itembawah: data.itembawah,
+                itematas: data.itematas,
+                vip: data.vip,
+                viptanda: data.viptanda
+            }]]]);
+
+            // Kirim point jika ada
+            if (data.points) {
+                this.safeSend(ws, ["pointUpdated", room, data.seat, data.points.x, data.points.y, data.points.fast]);
+            }
+        }, 50 * index); // Delay bertahap
+    });
+}
+
   cleanupClientById(idtarget) {
     for (const c of Array.from(this.clients)) {
       if (c.idtarget === idtarget) {
@@ -318,50 +365,6 @@ export class ChatServer {
     return users;
   }
 
-
-sendpoitkursi(ws, room) {
-    const seatMap = this.roomSeats.get(room);
-    const updates = [];
-    const points = [];
-
-    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const info = seatMap.get(seat);
-        if (!info) continue;
-
-        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-            updates.push([seat, {
-                noimageUrl: info.noimageUrl,
-                namauser: info.namauser,
-                color: info.color,
-                itembawah: info.itembawah,
-                itematas: info.itematas,
-                vip: info.vip,
-                viptanda: info.viptanda
-            }]);
-        }
-
-        if (info.points.length > 0) {
-            // Asumsikan kita hanya mengambil point pertama, sesuai kode sebelumnya
-            const point = info.points[0];
-            points.push({ seat, point });
-        }
-    }
-
-    // Kirim kursiBatchUpdate segera
-    if (updates.length > 0) {
-        this.safeSend(ws, ["kursiBatchUpdate", room, updates]);
-    }
-
-    // Kirim semua pointUpdated setelah 50ms
-    if (points.length > 0) {
-        setTimeout(() => {
-            for (const { seat, point } of points) {
-                this.safeSend(ws, ["pointUpdated", room, seat, point.x, point.y, point.fast]);
-            }
-        }, 50);
-    }
-}
-  
   cleanupClient(ws) {
     const id = ws.idtarget;
     
@@ -403,42 +406,56 @@ sendpoitkursi(ws, room) {
     const evt = data[0];
 
     switch (evt) {
+      case "setIdTarget": {
+        const newId = data[1];
 
-        
-    case "setIdTarget": {
-  const newId = data[1];
+        this.batalkanPendingRemoval(newId);
 
-  this.batalkanPendingRemoval(newId);
+        // Tutup koneksi duplikat
+        for (const client of Array.from(this.clients)) {
+          if (client.idtarget === newId && client !== ws && client.readyState === 1) {
+            try {
+              client.close(4000, "Duplicate connection");
+              this.clients.delete(client);
+            } catch (e) {
+              // Silent catch
+            }
+          }
+        }
 
-  // Tutup koneksi duplikat
-  for (const client of Array.from(this.clients)) {
-    if (client.idtarget === newId && client !== ws && client.readyState === 1) {
-      try {
-        client.close(4000, "Duplicate connection");
-        this.clients.delete(client);
-      } catch (e) {
-        // Silent catch
+        ws.idtarget = newId;
+
+        const seatInfo = this.userToSeat.get(newId);
+
+        if (seatInfo) {
+          // Reconnect dalam 20 detik, kembalikan ke kursi
+          const lastRoom = seatInfo.room;
+          const lastSeat = seatInfo.seat;
+          ws.roomname = lastRoom;
+          
+          // Kirim state lengkap dengan optimasi 50ms
+          this.sendPointKursi(ws, lastRoom);
+          this.safeSend(ws, ["needJoinRoom", lastSeat]);
+        } else {
+          // Reconnect lewat 20 detik, kursi sudah dihapus
+          ws.roomname = undefined;
+          this.safeSend(ws, ["needJoinRoom", -1]);
+        }
+
+        // Kirim pesan private yang tertunda
+        if (this.privateMessageBuffer.has(ws.idtarget)) {
+          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) {
+            this.safeSend(ws, msg);
+          }
+          this.privateMessageBuffer.delete(ws.idtarget);
+        }
+
+        if (ws.roomname) {
+          this.broadcastRoomUserCount(ws.roomname);
+        }
+
+        break;
       }
-    }
-  }
-
-  ws.idtarget = newId;
-
-  const seatInfo = this.userToSeat.get(newId);
-
-  if (seatInfo) {
-    // Reconnect dalam 20 detik, kembalikan ke kursi
-    const lastRoom = seatInfo.room;
-    ws.roomname = lastRoom;
-    this.sendpoitkursi(ws, lastRoom);
-  } else {
-    // Reconnect lewat 20 detik, kursi sudah dihapus
-    ws.roomname = undefined;
-    this.safeSend(ws, ["needJoinRoom"); // Beri sinyal ke client untuk join room
-  }
-
-  break;
-}
 
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
@@ -696,4 +713,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
