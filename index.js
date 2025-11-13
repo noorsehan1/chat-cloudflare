@@ -40,7 +40,14 @@ export class ChatServer {
     this.currentNumber = 1;
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
-    this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
+    
+    // ✅ PERBAIKAN: Timer dengan error handling
+    try {
+      this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
+    } catch (e) {
+      // Fallback jika timer gagal
+      this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
+    }
 
     this.lowcard = new LowCardGameManager(this);
 
@@ -48,28 +55,48 @@ export class ChatServer {
     this.pendingRemove = new Map();
   }
 
+  // ✅ PERBAIKAN: Function khusus kirim currentNumber
+  sendCurrentNumber(ws) {
+    if (!ws || ws.readyState !== 1) {
+      return false;
+    }
+    
+    try {
+      ws.send(JSON.stringify(["currentNumber", this.currentNumber]));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   safeSend(ws, arr) {
     try {
       if (ws.readyState === 1) {
         ws.send(JSON.stringify(arr));
+        return true;
       }
     } catch (e) {}
+    return false;
   }
 
   broadcastToRoom(room, msg) {
+    let sentCount = 0;
     for (const c of Array.from(this.clients)) {
       if (c.roomname === room && c.readyState === 1) {
-        this.safeSend(c, msg);
+        if (this.safeSend(c, msg)) sentCount++;
       }
     }
+    return sentCount;
   }
 
   broadcastToAll(msg) {
+    let sentCount = 0;
     for (const c of Array.from(this.clients)) {
       if (c.readyState === 1) {
-        this.safeSend(c, msg);
+        if (this.safeSend(c, msg)) sentCount++;
       }
     }
+    return sentCount;
   }
 
   getJumlahRoom() {
@@ -90,12 +117,19 @@ export class ChatServer {
     this.broadcastToRoom(room, ["roomUserCount", room, count]);
   }
 
+  // ✅ PERBAIKAN: Tick dengan error handling
   tick() {
-    this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
-    for (const c of Array.from(this.clients)) {
-      if (c.readyState === 1) {
-        this.safeSend(c, ["currentNumber", this.currentNumber]);
+    try {
+      this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
+      
+      // ✅ Hanya kirim ke client yang ready
+      const readyClients = Array.from(this.clients).filter(c => c.readyState === 1);
+      
+      for (const c of readyClients) {
+        this.sendCurrentNumber(c);
       }
+    } catch (e) {
+      // Jangan crash jika ada error
     }
   }
 
@@ -185,10 +219,15 @@ export class ChatServer {
     this.safeSend(ws, ["allUpdateKursiList", room, meta]);
   }
 
+  // ✅ PERBAIKAN: Pastikan WebSocket ready sebelum kirim
   sendPointKursi(ws, room) {
+    if (!ws || ws.readyState !== 1) return;
+    
     const seatMap = this.roomSeats.get(room);
     const seatData = [];
-    this.safeSend(ws, ["currentNumber", this.currentNumber]); 
+    
+    // ✅ KIRIM currentNumber di awal
+    this.sendCurrentNumber(ws);
 
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
@@ -211,18 +250,20 @@ export class ChatServer {
 
     seatData.forEach((data, index) => {
         setTimeout(() => {
-            this.safeSend(ws, ["kursiBatchUpdate", room, [[data.seat, {
-                noimageUrl: data.noimageUrl,
-                namauser: data.namauser,
-                color: data.color,
-                itembawah: data.itembawah,
-                itematas: data.itematas,
-                vip: data.vip,
-                viptanda: data.viptanda
-            }]]]);
+            if (ws.readyState === 1) {
+                this.safeSend(ws, ["kursiBatchUpdate", room, [[data.seat, {
+                    noimageUrl: data.noimageUrl,
+                    namauser: data.namauser,
+                    color: data.color,
+                    itembawah: data.itembawah,
+                    itematas: data.itematas,
+                    vip: data.vip,
+                    viptanda: data.viptanda
+                }]]]);
 
-            if (data.points) {
-                this.safeSend(ws, ["pointUpdated", room, data.seat, data.points.x, data.points.y, data.points.fast]);
+                if (data.points) {
+                    this.safeSend(ws, ["pointUpdated", room, data.seat, data.points.x, data.points.y, data.points.fast]);
+                }
             }
         }, 50 * index);
     });
@@ -468,7 +509,7 @@ export class ChatServer {
         break;
         
       case "getCurrentNumber": 
-        this.safeSend(ws, ["currentNumber", this.currentNumber]); 
+        this.sendCurrentNumber(ws); // ✅ GUNAKAN function baru
         break;
         
       case "getAllOnlineUsers": 
@@ -502,9 +543,12 @@ export class ChatServer {
         
         if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
         
-        this.sendAllStateTo(ws, newRoom);
-        this.broadcastRoomUserCount(newRoom);
-        this.safeSend(ws, ["currentNumber", this.currentNumber]); 
+        // ✅ PERBAIKAN: Hanya kirim jika WebSocket ready
+        if (ws.readyState === 1) {
+          this.sendAllStateTo(ws, newRoom);
+          this.broadcastRoomUserCount(newRoom);
+          this.sendCurrentNumber(ws); // ✅ GUNAKAN function baru
+        }
 
         break;
       }
