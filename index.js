@@ -408,7 +408,7 @@ export class ChatServer {
     switch (evt) {
 
         
-      case "setIdTarget": {
+     case "setIdTarget": {
     const newId = data[1];
 
     this.batalkanPendingRemoval(newId);
@@ -427,28 +427,33 @@ export class ChatServer {
 
     ws.idtarget = newId;
 
-    // ✅ TAMBAHKAN: Flag untuk menandai pertama kali koneksi
-    const isFirstConnection = !ws.hasConnectedBefore;
-    ws.hasConnectedBefore = true;
+    // ✅ INISIALISASI: Default false (belum pernah join room)
+    if (ws.hasJoinedRoom === undefined) {
+        ws.hasJoinedRoom = false;
+    }
 
     const seatInfo = this.userToSeat.get(newId);
 
     if (seatInfo) {
-        // Reconnect dalam 20 detik, kembalikan ke kursi
+        // User memiliki kursi aktif (dalam grace period 20 detik)
         const lastRoom = seatInfo.room;
         const lastSeat = seatInfo.seat;
         ws.roomname = lastRoom;
         
         // Kirim state lengkap dengan optimasi 50ms
         this.sendPointKursi(ws, lastRoom);
+        
+        // ✅ SET: User sudah pernah join room
+        ws.hasJoinedRoom = true;
     } else {
-        // Reconnect lewat 20 detik, kursi sudah dihapus
+        // Tidak ada kursi aktif
         ws.roomname = undefined;
         
-        // ✅ MODIFIKASI: Jangan kirim needJoinRoom jika pertama kali buka aplikasi
-        if (!isFirstConnection) {
+        // ✅ MODIFIKASI: Hanya kirim needJoinRoom jika pernah join room
+        if (ws.hasJoinedRoom === true) {
             this.safeSend(ws, ["needJoinRoom", -1]);
         }
+        // Jika hasJoinedRoom = false, DIAM SAJA - tidak kirim needJoinRoom
     }
 
     // Kirim pesan private yang tertunda
@@ -562,31 +567,34 @@ export class ChatServer {
       }
 
       case "joinRoom": {
-        const newRoom = data[1];
-        if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
-        
-        // Batalkan pending removal sebelum pindah room
-        if (ws.idtarget) {
-          this.batalkanPendingRemoval(ws.idtarget);
-          this.removeAllSeatsById(ws.idtarget);
-        }
-        
-        ws.roomname = newRoom;
-        const seatMap = this.roomSeats.get(newRoom);
-        const foundSeat = this.lockSeat(newRoom, ws);
-        
-        if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
-        
-        ws.numkursi = new Set([foundSeat]);
-        this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-        
-        if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-        
-        this.sendAllStateTo(ws, newRoom);
-        this.broadcastRoomUserCount(newRoom);
+    const newRoom = data[1];
+    if (!roomList.includes(newRoom)) return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
+    
+    // Batalkan pending removal sebelum pindah room
+    if (ws.idtarget) {
+        this.batalkanPendingRemoval(ws.idtarget);
+        this.removeAllSeatsById(ws.idtarget);
+    }
+    
+    ws.roomname = newRoom;
+    const seatMap = this.roomSeats.get(newRoom);
+    const foundSeat = this.lockSeat(newRoom, ws);
+    
+    if (foundSeat === null) return this.safeSend(ws, ["roomFull", newRoom]);
+    
+    ws.numkursi = new Set([foundSeat]);
+    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+    
+    if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+    
+    // ✅ SET: User sudah pernah join room = TRUE
+    ws.hasJoinedRoom = true;
+    
+    this.sendAllStateTo(ws, newRoom);
+    this.broadcastRoomUserCount(newRoom);
 
-        break;
-      }
+    break;
+}
 
       case "chat": {
         const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
@@ -722,5 +730,6 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
