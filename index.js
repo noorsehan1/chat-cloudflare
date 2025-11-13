@@ -1,5 +1,5 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi lengkap dengan semua perbaikan optimasi
+// Versi lengkap dengan perbaikan missed chats per user
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -68,40 +68,42 @@ export class ChatServer {
   }
 
   broadcastToRoom(room, msg) {
-    // ✅ SIMPAN CHAT KE BUFFER: Jika ini message chat/gift, simpan ke buffer user yang offline
+    // ✅ SIMPAN KE BUFFER hanya untuk user yang SEDANG OFFLINE di room ini
     if (msg[0] === "chat" || msg[0] === "gift") {
-        const roomName = msg[1];
-        
-        // Cari semua user yang ada di room ini tapi sedang offline (dalam grace period)
-        for (const [userId, seatInfo] of this.userToSeat) {
-            if (seatInfo.room === roomName) {
-                // Cek apakah user ini sedang offline (tidak ada koneksi aktif)
-                let isUserOnline = false;
-                for (const client of this.clients) {
-                    if (client.idtarget === userId && client.readyState === 1) {
-                        isUserOnline = true;
-                        break;
-                    }
-                }
-                
-                // Jika user OFFLINE, simpan chat ke buffer-nya
-                if (!isUserOnline) {
-                    if (!this.missedChatsBuffer.has(userId)) {
-                        this.missedChatsBuffer.set(userId, []);
-                    }
-                    const buffer = this.missedChatsBuffer.get(userId);
-                    buffer.push(msg);
-                    
-                    // ✅ BATASI buffer maksimal 100 pesan per user
-                    if (buffer.length > 100) {
-                        buffer.shift(); // Hapus pesan paling lama
-                    }
-                }
+      const roomName = msg[1];
+      
+      // Cari user yang ADA DI ROOM INI tapi SEDANG OFFLINE
+      for (const [userId, seatInfo] of this.userToSeat) {
+        if (seatInfo.room === roomName) {
+          // ✅ CEK: User ini SEDANG OFFLINE?
+          let isUserCurrentlyOnline = false;
+          for (const client of this.clients) {
+            if (client.idtarget === userId && client.readyState === 1) {
+              isUserCurrentlyOnline = true;
+              break;
             }
+          }
+          
+          // ✅ JIKA SEDANG OFFLINE: simpan chat untuk user ini saja
+          if (!isUserCurrentlyOnline) {
+            if (!this.missedChatsBuffer.has(userId)) {
+              this.missedChatsBuffer.set(userId, []);
+            }
+            const buffer = this.missedChatsBuffer.get(userId);
+            buffer.push(msg);
+            
+            // Batasi buffer
+            if (buffer.length > 100) {
+              buffer.shift();
+            }
+            
+            console.log(`💾 Simpan missed chat untuk ${userId}: ${msg[3]?.substring(0, 20)}...`);
+          }
         }
+      }
     }
     
-    // Broadcast ke user yang online
+    // ✅ BROADCAST ke user yang SEDANG ONLINE
     for (const c of Array.from(this.clients)) {
       if (c.roomname === room && c.readyState === 1) {
         this.safeSend(c, msg);
@@ -321,30 +323,38 @@ export class ChatServer {
         }, 50 * index); // Delay bertahap
     });
     
-    // ✅ KIRIM PENDING CHATS SETELAH KURSI SELESAI (TANPA DOUBLE)
+    // ✅ PERBAIKAN: Kirim missed chats HANYA untuk user ini saja
     setTimeout(() => {
         if (ws.idtarget && this.missedChatsBuffer.has(ws.idtarget)) {
             const missedChats = this.missedChatsBuffer.get(ws.idtarget);
+            
+            // ✅ FILTER: Hanya chat dari room yang sama
             const roomMissedChats = missedChats.filter(chat => chat[1] === room);
             
+            console.log(`📨 Kirim ${roomMissedChats.length} missed chats ke ${ws.idtarget} (HANYA user ini)`);
+            
             if (roomMissedChats.length > 0) {
-                // ✅ Kirim chat satu per satu dengan case KHUSUS "pendingChat"
+                // ✅ KIRIM ke user ini SAJA
                 roomMissedChats.forEach((chatMsg, index) => {
                     setTimeout(() => {
-                        // Format: ["pendingChat", roomname, noImageURL, username, message, usernameColor, chatTextColor]
-                        const pendingChatMessage = ["pendingChat", ...chatMsg.slice(1)];
-                        this.safeSend(ws, pendingChatMessage);
-                        
-                        if (index === roomMissedChats.length - 1) {
-                            this.missedChatsBuffer.delete(ws.idtarget);
-                        }
-                    }, 100 * index); // Delay 100ms per chat
+                        this.safeSend(ws, chatMsg); // ✅ Hanya kirim ke ws (user yang reconnect)
+                    }, 100 * index);
                 });
+                
+                // ✅ HAPUS buffer untuk room ini saja
+                const remainingChats = missedChats.filter(chat => chat[1] !== room);
+                if (remainingChats.length > 0) {
+                    this.missedChatsBuffer.set(ws.idtarget, remainingChats);
+                } else {
+                    this.missedChatsBuffer.delete(ws.idtarget);
+                }
+                
+                console.log(`✅ Selesai kirim missed chats ke ${ws.idtarget}`);
             } else {
                 this.missedChatsBuffer.delete(ws.idtarget);
             }
         }
-    }, 500); // Delay 500ms setelah kursi selesai
+    }, 1000); // Delay 1 detik setelah kursi selesai
   }
 
   cleanupClientById(idtarget) {
@@ -403,9 +413,6 @@ export class ChatServer {
         this.missedChatsBuffer.delete(id);
       }
 
-      // ✅ KIRIM needJoinRoom KE CLIENT sebelum menghapus
-  
-      
       // Hapus kursi langsung TANPA timeout 20 detik
       this.removeAllSeatsById(id);
     }
@@ -442,7 +449,7 @@ export class ChatServer {
     return users;
   }
 
-  // ✅ PERBAIKAN: cleanupClient yang benar - cek koneksi aktif sebelum set timeout
+  // ✅ PERBAIKAN: cleanupClient yang benar
   cleanupClient(ws) {
     const id = ws.idtarget;
     
@@ -458,28 +465,27 @@ export class ChatServer {
         }
       }
       
-      // ❌ JANGAN set timeout jika masih ada koneksi aktif
       if (!hasActiveConnection) {
         // Batalkan pending removal lama jika ada
         if (this.pendingRemove.has(id)) {
           clearTimeout(this.pendingRemove.get(id));
         }
 
-        // ✅ SET TIMEOUT hanya jika benar-benar tidak ada koneksi aktif
+        // ✅ SET TIMEOUT grace period
         const timeout = setTimeout(() => {
           // Hapus buffer chat
           if (this.missedChatsBuffer.has(id)) {
+            console.log(`🧹 Hapus missed chats buffer untuk ${id} (timeout)`);
             this.missedChatsBuffer.delete(id);
           }
           
-          // Hapus kursi
+          // Hapus kursi setelah grace period
           this.removeAllSeatsById(id);
           this.pendingRemove.delete(id);
         }, this.gracePeriod);
 
         this.pendingRemove.set(id, timeout);
       } else {
-         this.safeSend(ws, ["needJoinRoom", -1]);
         // ✅ User masih ada koneksi aktif, batalkan timeout
         if (this.pendingRemove.has(id)) {
           clearTimeout(this.pendingRemove.get(id));
@@ -530,11 +536,6 @@ export class ChatServer {
           }
         }
 
-        // ✅ HAPUS BUFFER CHAT: Saat pertama kali buka aplikasi
-        if (this.missedChatsBuffer.has(newId)) {
-          this.missedChatsBuffer.delete(newId);
-        }
-
         const seatInfo = this.userToSeat.get(newId);
 
         if (seatInfo) {
@@ -543,11 +544,17 @@ export class ChatServer {
           const lastSeat = seatInfo.seat;
           ws.roomname = lastRoom;
           
+          
           // Kirim state lengkap dengan optimasi 50ms
           this.sendPointKursi(ws, lastRoom);
         } else {
           // Tidak ada kursi aktif
           ws.roomname = undefined;
+          
+          // ✅ User baru, hapus buffer missed chats jika ada
+          if (this.missedChatsBuffer.has(newId)) {
+            this.missedChatsBuffer.delete(newId);
+          }
         }
 
         // Kirim pesan private yang tertunda
@@ -686,9 +693,11 @@ export class ChatServer {
         
         if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
         
-        this.safeSend(ws, ["currentNumber", this.currentNumber]); 
+       
         this.sendAllStateTo(ws, newRoom);
         this.broadcastRoomUserCount(newRoom);
+        this.safeSend(ws, ["currentNumber", this.currentNumber]); 
+
 
         break;
       }
@@ -827,4 +836,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
