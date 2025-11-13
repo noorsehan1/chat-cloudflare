@@ -317,7 +317,7 @@ export class ChatServer {
     return removedCount;
   }
 
-  cleanupClientDestroy(ws) {
+cleanupClientDestroy(ws) {
     const id = ws.idtarget;
     
     this.clients.delete(ws);
@@ -336,6 +336,8 @@ export class ChatServer {
     if (ws.numkursi) ws.numkursi.clear();
     ws.roomname = undefined;
     ws.idtarget = undefined;
+    // ✅ RESET: Hapus status hasJoinedRoom saat destroy
+    ws.hasJoinedRoom = undefined;
   }
 
   batalkanPendingRemoval(userId) {
@@ -365,7 +367,7 @@ export class ChatServer {
     return users;
   }
 
-  cleanupClient(ws) {
+ cleanupClient(ws) {
     const id = ws.idtarget;
     
     this.clients.delete(ws);
@@ -388,6 +390,8 @@ export class ChatServer {
     if (ws.numkursi) ws.numkursi.clear();
     ws.roomname = undefined;
     ws.idtarget = undefined;
+    // ✅ RESET: Hapus status hasJoinedRoom saat cleanup
+    ws.hasJoinedRoom = undefined;
   }
 
   isInLowcardRoom(ws) {
@@ -730,6 +734,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
