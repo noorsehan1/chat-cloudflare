@@ -435,7 +435,6 @@ export class ChatServer {
           
           // Kirim state lengkap dengan optimasi 50ms
           this.sendPointKursi(ws, lastRoom);
-          this.safeSend(ws, ["needJoinRoom", lastSeat]);
         } else {
           // Reconnect lewat 20 detik, kursi sudah dihapus
           ws.roomname = undefined;
@@ -713,3 +712,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
