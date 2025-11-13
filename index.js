@@ -55,6 +55,9 @@ export class ChatServer {
     
     // ✅ BUFFER BARU: Simpan chat yang terlewat per USER
     this.missedChatsBuffer = new Map(); // key: userid, value: array of missed messages
+    
+    // ✅ TRACK INITIAL CONNECTIONS
+    this.initialConnections = new Set();
   }
 
   safeSend(ws, arr) {
@@ -409,15 +412,16 @@ export class ChatServer {
       this.removeAllSeatsById(id);
     }
 
+    // ✅ RESET STATE: Tapi jangan reset hasJoinedRoom
     if (ws.numkursi) ws.numkursi.clear();
     ws.roomname = undefined;
     ws.idtarget = undefined;
-    ws.hasJoinedRoom = undefined;
+    // JANGAN reset: ws.hasJoinedRoom
+    ws.isFreshConnection = undefined;
   }
 
   batalkanPendingRemoval(userId) {
     if (userId && this.pendingRemove.has(userId)) {
-      console.log(`❌ Batalkan timeout hapus kursi untuk user: ${userId}`);
       clearTimeout(this.pendingRemove.get(userId));
       this.pendingRemove.delete(userId);
     }
@@ -493,10 +497,13 @@ export class ChatServer {
       }
     }
 
+    // ✅ RESET STATE: Tapi jangan reset hasJoinedRoom agar tahu history user
+    // Hanya reset state koneksi, tapi pertahankan history
     if (ws.numkursi) ws.numkursi.clear();
     ws.roomname = undefined;
     ws.idtarget = undefined;
-    ws.hasJoinedRoom = undefined;
+    // JANGAN reset: ws.hasJoinedRoom - biarkan tetap untuk tahu history
+    ws.isFreshConnection = undefined;
   }
 
   isInLowcardRoom(ws) {
@@ -536,13 +543,16 @@ export class ChatServer {
           }
         }
 
-        // ✅ INISIALISASI: Default false (belum pernah join room)
-        if (ws.hasJoinedRoom === undefined) {
+        // ✅ RESET STATE: Pastikan hasJoinedRoom = false untuk koneksi baru
+        // Jika ini koneksi baru (fresh connection), reset ke false
+        if (ws.isFreshConnection) {
           ws.hasJoinedRoom = false;
+          ws.isFreshConnection = false; // Reset flag setelah digunakan
           
           // ✅ HAPUS BUFFER CHAT: Saat pertama kali buka aplikasi
           if (this.missedChatsBuffer.has(newId)) {
             this.missedChatsBuffer.delete(newId);
+            console.log(`🧹 Buffer chat dibersihkan untuk user baru: ${newId}`);
           }
         }
 
@@ -557,20 +567,22 @@ export class ChatServer {
           // Kirim state lengkap dengan optimasi 50ms
           this.sendPointKursi(ws, lastRoom);
           
-          // ✅ SET: User sudah pernah join room
-          ws.hasJoinedRoom = true;
-          
+          // ✅ SET: User reconnect, pertahankan state sebelumnya
+          // Jangan ubah hasJoinedRoom karena ini reconnect, bukan buka aplikasi baru
           console.log(`✅ User ${newId} reconnect berhasil, kursi tetap dipertahankan`);
         } else {
           // Tidak ada kursi aktif
           ws.roomname = undefined;
           
-          // ✅ MODIFIKASI: Hanya kirim needJoinRoom jika pernah join room
-          if (ws.hasJoinedRoom === true) {
+          // ✅ KIRIM needJoinRoom HANYA jika pernah join room sebelumnya
+          // Cek apakah user ini punya history join room
+          const wasInRoomBefore = ws.hasJoinedRoom === true;
+          
+          if (wasInRoomBefore) {
             this.safeSend(ws, ["needJoinRoom", -1]);
             console.log(`⏰ User ${newId} reconnect terlambat, kursi sudah dihapus`);
           } else {
-            console.log(`🆕 User ${newId} pertama kali buka aplikasi`);
+            console.log(`🆕 User ${newId} pertama kali buka aplikasi atau belum pernah join room`);
           }
         }
 
@@ -718,7 +730,7 @@ export class ChatServer {
         if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
         
         // ✅ SET: User sudah pernah join room = TRUE
-        ws.hasJoinedRoom = true;
+        ws.hasJoinedRoom = true; // INI YANG PENTING!
         this.safeSend(ws, ["currentNumber", this.currentNumber]); 
         this.sendAllStateTo(ws, newRoom);
         this.broadcastRoomUserCount(newRoom);
@@ -826,9 +838,14 @@ export class ChatServer {
     server.accept();
 
     const ws = server;
+    
+    // ✅ INISIALISASI STATE YANG JELAS
     ws.roomname = undefined;
     ws.idtarget = undefined;
     ws.numkursi = new Set();
+    ws.hasJoinedRoom = false; // ✅ SELALU false saat pertama kali koneksi
+    ws.isFreshConnection = true; // ✅ Flag baru untuk identifikasi koneksi baru
+
     this.clients.add(ws);
 
     ws.addEventListener("message", (ev) => {
