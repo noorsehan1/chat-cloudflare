@@ -274,16 +274,15 @@ export class ChatServer {
     this.safeSend(ws, ["allUpdateKursiList", room, meta]);
   }
 
- sendPointKursi(ws, room) {
+sendPointKursi(ws, room) {
     const seatMap = this.roomSeats.get(room);
     const seatData = [];
 
-    // Kumpulkan data kursi yang ADA USER dan POINT
+    // Kirim kursi dengan delay sendiri
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         if (!info) continue;
 
-        // ✅ Hanya kursi yang ADA USER (bukan kosong atau lock)
         if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
             seatData.push({
                 seat,
@@ -299,10 +298,9 @@ export class ChatServer {
         }
     }
 
-    // ✅ Kirim kursiBatchUpdate dan pointUpdated dengan delay bertahap 50ms * index
+    // ✅ Kirim kursi dengan delay sendiri (50ms per kursi)
     seatData.forEach((data, index) => {
         setTimeout(() => {
-            // Kirim update kursi
             this.safeSend(ws, ["kursiBatchUpdate", room, [[data.seat, {
                 noimageUrl: data.noimageUrl,
                 namauser: data.namauser,
@@ -313,12 +311,45 @@ export class ChatServer {
                 viptanda: data.viptanda
             }]]]);
 
-            // Kirim point jika ada
             if (data.points) {
                 this.safeSend(ws, ["pointUpdated", room, data.seat, data.points.x, data.points.y, data.points.fast]);
             }
-        }, 50 * index); // Delay bertahap
+        }, 50 * index);
     });
+    
+    // ✅ Kirim chat pending dengan delay mulai TERPISAH
+    setTimeout(() => {
+        this.sendPendingChats(ws, room);
+    }, 500);
+}
+
+sendPendingChats(ws, room) {
+    if (ws.idtarget && this.missedChatsBuffer.has(ws.idtarget)) {
+        const missedChats = this.missedChatsBuffer.get(ws.idtarget);
+        const roomMissedChats = missedChats.filter(chat => chat[1] === room);
+        
+        if (roomMissedChats.length > 0) {
+            console.log(`Mengirim ${roomMissedChats.length} chat pending ke Java client`);
+            
+            // ✅ Kirim chat satu per satu dengan delay sendiri LANGSUNG ke case "chat"
+            roomMissedChats.forEach((chatMsg, index) => {
+                setTimeout(() => {
+                    // ✅ LANGSUNG KIRIM sebagai message "chat" biasa
+                    // Format: ["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]
+                    this.safeSend(ws, chatMsg);
+                    
+                    if (index === roomMissedChats.length - 1) {
+                        setTimeout(() => {
+                            this.missedChatsBuffer.delete(ws.idtarget);
+                            console.log(`Selesai mengirim ${roomMissedChats.length} chat pending`);
+                        }, 100);
+                    }
+                }, 100 * index); // Delay 100ms per chat
+            });
+        } else {
+            this.missedChatsBuffer.delete(ws.idtarget);
+        }
+    }
 }
 
   cleanupClientById(idtarget) {
@@ -806,3 +837,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
