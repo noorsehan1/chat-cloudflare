@@ -1,5 +1,5 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi final dengan missed chats yang work
+// Versi final dengan pendingChat untuk missed chats
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -59,9 +59,7 @@ export class ChatServer {
       if (ws.readyState === 1) {
         ws.send(JSON.stringify(arr));
       }
-    } catch (e) {
-      // Tetap diam jika error pengiriman
-    }
+    } catch (e) {}
   }
 
   broadcastToRoom(room, msg) {
@@ -157,7 +155,6 @@ export class ChatServer {
     const now = Date.now();
     for (const [userId, disconnectTimestamp] of Array.from(this.disconnectTime)) {
       const timeSinceDisconnect = now - disconnectTimestamp;
-      
       if (timeSinceDisconnect > this.gracePeriod) {
         if (this.missedChatsBuffer.has(userId)) {
           this.missedChatsBuffer.delete(userId);
@@ -282,7 +279,7 @@ export class ChatServer {
             }]]]);
 
             if (data.points) {
-                this.safeSend(ws, ["pointUpdated", room, data.seat, data.points.x, data.points.y, data.points.fast]);
+                 this.safeSend(ws, ["pointUpdated", room, data.seat, data.points.x, data.points.y, 0]);
             }
         }, 50 * index);
     });
@@ -295,7 +292,8 @@ export class ChatServer {
             if (roomMissedChats.length > 0) {
                 roomMissedChats.forEach((chatMsg, index) => {
                     setTimeout(() => {
-                        this.safeSend(ws, chatMsg);
+                        const pendingChatMessage = ["pendingChat", ...chatMsg.slice(1)];
+                        this.safeSend(ws, pendingChatMessage);
                     }, 100 * index);
                 });
                 
