@@ -589,7 +589,7 @@ export class ChatServer {
     
     // ✅ SET: User sudah pernah join room = TRUE
     ws.hasJoinedRoom = true;
-    
+    this.safeSend(ws, ["currentNumber", this.currentNumber]); 
     this.sendAllStateTo(ws, newRoom);
     this.broadcastRoomUserCount(newRoom);
 
@@ -730,6 +730,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
