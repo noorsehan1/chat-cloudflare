@@ -1,5 +1,5 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi final dengan timer hapus kursi + chat pending
+// Versi final dengan pending chat yang work
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -45,6 +45,9 @@ export class ChatServer {
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
+
+    // ✅ INTERVAL untuk periodicFlush
+    this._flushTimer = setInterval(() => this.periodicFlush(), 5000);
 
     this.lowcard = new LowCardGameManager(this);
 
@@ -152,13 +155,13 @@ export class ChatServer {
     this.flushChatBuffer();
     this.cleanExpiredLocks();
 
+    // ✅ PERBAIKAN: Hanya hapus disconnectTime, JANGAN hapus missedChatsBuffer
     const now = Date.now();
     for (const [userId, disconnectTimestamp] of Array.from(this.disconnectTime)) {
       const timeSinceDisconnect = now - disconnectTimestamp;
       if (timeSinceDisconnect > this.gracePeriod) {
-        if (this.missedChatsBuffer.has(userId)) {
-          this.missedChatsBuffer.delete(userId);
-        }
+        // ❌ JANGAN hapus missedChatsBuffer di sini!
+        // ✅ Hanya hapus disconnectTime (stop menerima chat pending baru)
         this.disconnectTime.delete(userId);
       }
     }
@@ -341,13 +344,13 @@ export class ChatServer {
 
     this.userToSeat.delete(idtarget);
     
+    // ✅ Hapus disconnectTime (stop chat pending baru)
     if (this.disconnectTime.has(idtarget)) {
       this.disconnectTime.delete(idtarget);
     }
     
-    if (this.missedChatsBuffer.has(idtarget)) {
-      this.missedChatsBuffer.delete(idtarget);
-    }
+    // ❌ JANGAN hapus missedChatsBuffer di sini!
+    // Biarkan missed chats tetap tersimpan
     
     return removedCount;
   }
@@ -365,9 +368,8 @@ export class ChatServer {
 
       this.disconnectTime.delete(id);
 
-      if (this.missedChatsBuffer.has(id)) {
-        this.missedChatsBuffer.delete(id);
-      }
+      // ❌ JANGAN hapus missedChatsBuffer di sini!
+      // Biarkan untuk reconnect nanti
 
       this.removeAllSeatsById(id);
     }
@@ -404,7 +406,6 @@ export class ChatServer {
     return users;
   }
 
-  // ✅ CLEANUP CLIENT DENGAN DUA TIMER
   cleanupClient(ws) {
     const id = ws.idtarget;
     
@@ -470,6 +471,7 @@ export class ChatServer {
 
         this.batalkanPendingRemoval(newId);
 
+        // ✅ Hentikan timer chat pending saat reconnect
         if (this.disconnectTime.has(newId)) {
           this.disconnectTime.delete(newId);
         }
@@ -494,9 +496,8 @@ export class ChatServer {
           this.sendPointKursi(ws, lastRoom);
         } else {
           ws.roomname = undefined;
-          if (this.missedChatsBuffer.has(newId)) {
-            this.missedChatsBuffer.delete(newId);
-          }
+          // ❌ JANGAN hapus missedChatsBuffer di sini!
+          // Biarkan untuk dikirim saat join room nanti
         }
 
         if (this.privateMessageBuffer.has(ws.idtarget)) {
@@ -616,9 +617,8 @@ export class ChatServer {
           this.batalkanPendingRemoval(ws.idtarget);
           this.removeAllSeatsById(ws.idtarget);
           
-          if (this.missedChatsBuffer.has(ws.idtarget)) {
-            this.missedChatsBuffer.delete(ws.idtarget);
-          }
+          // ❌ JANGAN hapus missedChatsBuffer saat pindah room!
+          // Biarkan untuk dikirim di room baru
         }
         
         ws.roomname = newRoom;
@@ -645,6 +645,7 @@ export class ChatServer {
         
         const chatMessage = ["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor];
         
+        // ✅ SIMPAN KE MISSED CHATS BUFFER untuk user yang offline
         for (const [userId, seatInfo] of this.userToSeat) {
           if (seatInfo.room === roomname) {
             let isUserCurrentlyOnline = false;
@@ -655,6 +656,7 @@ export class ChatServer {
               }
             }
             
+            // ✅ JIKA USER OFFLINE & MASIH DALAM GRACE PERIOD
             if (!isUserCurrentlyOnline && this.disconnectTime.has(userId)) {
               if (!this.missedChatsBuffer.has(userId)) {
                 this.missedChatsBuffer.set(userId, []);
