@@ -1,5 +1,5 @@
 // ChatServer Durable Object (Bahasa Indonesia)
-// Versi tanpa buffer sama sekali
+// Versi lengkap dengan semua perbaikan optimasi
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -36,17 +36,25 @@ export class ChatServer {
       for (let i = 1; i <= this.MAX_SEATS; i++) m.set(i, createEmptySeat());
       this.roomSeats.set(room, m);
     }
+    
+    this.updateKursiBuffer = new Map();
+    this.chatMessageBuffer = new Map();
+    this.privateMessageBuffer = new Map();
 
     this.currentNumber = 1;
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
+    this._flushTimer = setInterval(() => this.periodicFlush(), 100);
 
     this.lowcard = new LowCardGameManager(this);
 
     // Grace period 20 detik untuk reconnect
     this.gracePeriod = 20000; // 20 detik
     this.pendingRemove = new Map();
+    
+    // ✅ BUFFER BARU: Simpan chat yang terlewat per USER
+    this.missedChatsBuffer = new Map(); // key: userid, value: array of missed messages
   }
 
   safeSend(ws, arr) {
@@ -60,6 +68,40 @@ export class ChatServer {
   }
 
   broadcastToRoom(room, msg) {
+    // ✅ SIMPAN CHAT KE BUFFER: Jika ini message chat/gift, simpan ke buffer user yang offline
+    if (msg[0] === "chat" || msg[0] === "gift") {
+        const roomName = msg[1];
+        
+        // Cari semua user yang ada di room ini tapi sedang offline (dalam grace period)
+        for (const [userId, seatInfo] of this.userToSeat) {
+            if (seatInfo.room === roomName) {
+                // Cek apakah user ini sedang offline (tidak ada koneksi aktif)
+                let isUserOnline = false;
+                for (const client of this.clients) {
+                    if (client.idtarget === userId && client.readyState === 1) {
+                        isUserOnline = true;
+                        break;
+                    }
+                }
+                
+                // Jika user OFFLINE, simpan chat ke buffer-nya
+                if (!isUserOnline) {
+                    if (!this.missedChatsBuffer.has(userId)) {
+                        this.missedChatsBuffer.set(userId, []);
+                    }
+                    const buffer = this.missedChatsBuffer.get(userId);
+                    buffer.push(msg);
+                    
+                    // ✅ BATASI buffer maksimal 100 pesan per user
+                    if (buffer.length > 100) {
+                        buffer.shift(); // Hapus pesan paling lama
+                    }
+                }
+            }
+        }
+    }
+    
+    // Broadcast ke user yang online
     for (const c of Array.from(this.clients)) {
       if (c.roomname === room && c.readyState === 1) {
         this.safeSend(c, msg);
@@ -93,6 +135,34 @@ export class ChatServer {
     this.broadcastToRoom(room, ["roomUserCount", room, count]);
   }
 
+  flushChatBuffer() {
+    for (const [room, messages] of this.chatMessageBuffer) {
+      if (messages.length > 0) {
+        for (const msg of messages) {
+          this.broadcastToRoom(room, msg);
+        }
+        messages.length = 0;
+      }
+    }
+  }
+
+  flushKursiUpdates() {
+    for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
+      const updates = [];
+      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        if (seatMapUpdates.has(seat)) {
+          const info = seatMapUpdates.get(seat);
+          const { points, ...rest } = info;
+          updates.push([seat, rest]);
+        }
+      }
+      if (updates.length > 0) {
+        this.broadcastToRoom(room, ["kursiBatchUpdate", room, updates]);
+      }
+      seatMapUpdates.clear();
+    }
+  }
+
   tick() {
     this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
     for (const c of Array.from(this.clients)) {
@@ -116,19 +186,31 @@ export class ChatServer {
     }
   }
 
-  // Cleanup WebSocket yang sudah closed (dipanggil manual)
-  cleanupClosedWebSockets() {
+  periodicFlush() {
+    this.flushKursiUpdates();
+    this.flushChatBuffer();
+    this.cleanExpiredLocks();
+
+    // Cleanup WebSocket yang sudah closed
     for (const client of Array.from(this.clients)) {
       if (client.readyState === 2 || client.readyState === 3) {
         this.cleanupClient(client);
       }
     }
-  }
 
-  // Fungsi periodic flush yang bisa dipanggil manual
-  manualPeriodicFlush() {
-    this.cleanExpiredLocks();
-    this.cleanupClosedWebSockets();
+    // Kirim pesan private yang tertunda
+    for (const [id, msgs] of Array.from(this.privateMessageBuffer)) {
+      let delivered = false;
+      for (const c of this.clients) {
+        if (c.idtarget === id && c.readyState === 1) {
+          for (const m of msgs) this.safeSend(c, m);
+          delivered = true;
+        }
+      }
+      if (delivered) {
+        this.privateMessageBuffer.delete(id);
+      }
+    }
   }
 
   handleGetAllRoomsUserCount(ws) {
@@ -238,6 +320,31 @@ export class ChatServer {
             }
         }, 50 * index); // Delay bertahap
     });
+    
+    // ✅ KIRIM PENDING CHATS SETELAH KURSI SELESAI (TANPA DOUBLE)
+    setTimeout(() => {
+        if (ws.idtarget && this.missedChatsBuffer.has(ws.idtarget)) {
+            const missedChats = this.missedChatsBuffer.get(ws.idtarget);
+            const roomMissedChats = missedChats.filter(chat => chat[1] === room);
+            
+            if (roomMissedChats.length > 0) {
+                // ✅ Kirim chat satu per satu dengan case KHUSUS "pendingChat"
+                roomMissedChats.forEach((chatMsg, index) => {
+                    setTimeout(() => {
+                        // Format: ["pendingChat", roomname, noImageURL, username, message, usernameColor, chatTextColor]
+                        const pendingChatMessage = ["pendingChat", ...chatMsg.slice(1)];
+                        this.safeSend(ws, pendingChatMessage);
+                        
+                        if (index === roomMissedChats.length - 1) {
+                            this.missedChatsBuffer.delete(ws.idtarget);
+                        }
+                    }, 100 * index); // Delay 100ms per chat
+                });
+            } else {
+                this.missedChatsBuffer.delete(ws.idtarget);
+            }
+        }
+    }, 500); // Delay 500ms setelah kursi selesai
   }
 
   cleanupClientById(idtarget) {
@@ -271,6 +378,11 @@ export class ChatServer {
 
     this.userToSeat.delete(idtarget);
     
+    // ✅ HAPUS BUFFER CHAT: Saat hapus semua kursi user
+    if (this.missedChatsBuffer.has(idtarget)) {
+      this.missedChatsBuffer.delete(idtarget);
+    }
+    
     return removedCount;
   }
 
@@ -286,6 +398,14 @@ export class ChatServer {
         this.pendingRemove.delete(id);
       }
 
+      // ✅ HAPUS BUFFER CHAT: Saat onDestroy()
+      if (this.missedChatsBuffer.has(id)) {
+        this.missedChatsBuffer.delete(id);
+      }
+
+      // ✅ KIRIM needJoinRoom KE CLIENT sebelum menghapus
+  
+      
       // Hapus kursi langsung TANPA timeout 20 detik
       this.removeAllSeatsById(id);
     }
@@ -347,6 +467,11 @@ export class ChatServer {
 
         // ✅ SET TIMEOUT hanya jika benar-benar tidak ada koneksi aktif
         const timeout = setTimeout(() => {
+          // Hapus buffer chat
+          if (this.missedChatsBuffer.has(id)) {
+            this.missedChatsBuffer.delete(id);
+          }
+          
           // Hapus kursi
           this.removeAllSeatsById(id);
           this.pendingRemove.delete(id);
@@ -354,7 +479,7 @@ export class ChatServer {
 
         this.pendingRemove.set(id, timeout);
       } else {
-        this.safeSend(ws, ["needJoinRoom", -1]);
+         this.safeSend(ws, ["needJoinRoom", -1]);
         // ✅ User masih ada koneksi aktif, batalkan timeout
         if (this.pendingRemove.has(id)) {
           clearTimeout(this.pendingRemove.get(id));
@@ -383,9 +508,6 @@ export class ChatServer {
     if (!Array.isArray(data) || data.length === 0) return this.safeSend(ws, ["error", "Invalid message format"]);
     const evt = data[0];
 
-    // Panggil manual flush sebelum memproses pesan
-    this.manualPeriodicFlush();
-
     switch (evt) {
       case "setIdTarget": {
         const newId = data[1];
@@ -408,6 +530,11 @@ export class ChatServer {
           }
         }
 
+        // ✅ HAPUS BUFFER CHAT: Saat pertama kali buka aplikasi
+        if (this.missedChatsBuffer.has(newId)) {
+          this.missedChatsBuffer.delete(newId);
+        }
+
         const seatInfo = this.userToSeat.get(newId);
 
         if (seatInfo) {
@@ -423,6 +550,14 @@ export class ChatServer {
           ws.roomname = undefined;
         }
 
+        // Kirim pesan private yang tertunda
+        if (this.privateMessageBuffer.has(ws.idtarget)) {
+          for (const msg of this.privateMessageBuffer.get(ws.idtarget)) {
+            this.safeSend(ws, msg);
+          }
+          this.privateMessageBuffer.delete(ws.idtarget);
+        }
+
         if (ws.roomname) {
           this.broadcastRoomUserCount(ws.roomname);
         }
@@ -433,8 +568,6 @@ export class ChatServer {
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
         const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
-        
-        // LANGSUNG KIRIM ke target user jika online
         let delivered = false;
         for (const c of this.clients) {
           if (c.idtarget === idtarget && c.readyState === 1) { 
@@ -442,10 +575,9 @@ export class ChatServer {
             delivered = true; 
           }
         }
-        
-        // ❌ TIDAK SIMPAN JIKA OFFLINE - langsung return failed
         if (!delivered) {
-          this.safeSend(ws, ["notifFailed", idtarget, "User offline"]);
+          if (!this.privateMessageBuffer.has(idtarget)) this.privateMessageBuffer.set(idtarget, []);
+          this.privateMessageBuffer.get(idtarget).push(notif);
         }
         break;
       }
@@ -455,8 +587,6 @@ export class ChatServer {
         const ts = Date.now();
         const out = ["private", idt, url, msg, ts, sender];
         this.safeSend(ws, out);
-        
-        // LANGSUNG KIRIM ke target user jika online
         let delivered = false;
         for (const c of this.clients) {
           if (c.idtarget === idt && c.readyState === 1) { 
@@ -464,9 +594,9 @@ export class ChatServer {
             delivered = true; 
           }
         }
-        
-        // ❌ TIDAK SIMPAN JIKA OFFLINE - langsung return failed
         if (!delivered) {
+          if (!this.privateMessageBuffer.has(idt)) this.privateMessageBuffer.set(idt, []);
+          this.privateMessageBuffer.get(idt).push(out);
           this.safeSend(ws, ["privateFailed", idt, "User offline"]);
         }
         break;
@@ -538,6 +668,11 @@ export class ChatServer {
         if (ws.idtarget) {
           this.batalkanPendingRemoval(ws.idtarget);
           this.removeAllSeatsById(ws.idtarget);
+          
+          // ✅ HAPUS BUFFER CHAT: Saat pindah/join room baru
+          if (this.missedChatsBuffer.has(ws.idtarget)) {
+            this.missedChatsBuffer.delete(ws.idtarget);
+          }
         }
         
         ws.roomname = newRoom;
@@ -551,10 +686,9 @@ export class ChatServer {
         
         if (ws.idtarget) this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
         
+        this.safeSend(ws, ["currentNumber", this.currentNumber]); 
         this.sendAllStateTo(ws, newRoom);
         this.broadcastRoomUserCount(newRoom);
-        this.safeSend(ws, ["currentNumber", this.currentNumber]); 
-
 
         break;
       }
@@ -562,9 +696,8 @@ export class ChatServer {
       case "chat": {
         const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
         if (!roomList.includes(roomname)) return this.safeSend(ws, ["error", "Invalid room for chat"]);
-        
-        // LANGSUNG BROADCAST tanpa buffer
-        this.broadcastToRoom(roomname, ["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
+        if (!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname, []);
+        this.chatMessageBuffer.get(roomname).push(["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
         break;
       }
 
@@ -610,18 +743,8 @@ export class ChatServer {
         });
         
         seatMap.set(seat, currentInfo);
-        
-        // LANGSUNG BROADCAST tanpa buffer
-        this.broadcastToRoom(room, ["kursiBatchUpdate", room, [[seat, {
-          noimageUrl, 
-          namauser, 
-          color, 
-          itembawah, 
-          itematas, 
-          vip, 
-          viptanda
-        }]]]);
-        
+        if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
+        this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
         this.broadcastRoomUserCount(room);
         break;
       }
@@ -629,9 +752,8 @@ export class ChatServer {
       case "gift": {
         const [, roomname, sender, receiver, giftName] = data;
         if (!roomList.includes(roomname)) return this.safeSend(ws, ["error", "Invalid room for gift"]);
-        
-        // LANGSUNG BROADCAST tanpa buffer
-        this.broadcastToRoom(roomname, ["gift", roomname, sender, receiver, giftName, Date.now()]);
+        if (!this.chatMessageBuffer.has(roomname)) this.chatMessageBuffer.set(roomname, []);
+        this.chatMessageBuffer.get(roomname).push(["gift", roomname, sender, receiver, giftName, Date.now()]);
         break;
       }
 
