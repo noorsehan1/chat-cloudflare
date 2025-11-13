@@ -50,7 +50,8 @@ export class ChatServer {
     this.lowcard = new LowCardGameManager(this);
 
     // Grace period 20 detik untuk reconnect
-    this.gracePeriod = 20000;
+   // ✅ PERBAIKAN: Grace period 20 detik untuk reconnect
+    this.gracePeriod = 20000; // 20 detik
     this.pendingRemove = new Map();
   }
 
@@ -378,11 +379,11 @@ cleanupClientDestroy(ws) {
         clearTimeout(this.pendingRemove.get(id));
       }
 
-      // Set timeout 20 detik untuk hapus kursi
+      // ✅ PERBAIKAN: Gunakan this.gracePeriod (20 detik), bukan this.intervalMillis (15 menit)
       const timeout = setTimeout(() => {
         this.removeAllSeatsById(id);
         this.pendingRemove.delete(id);
-      }, this.gracePeriod);
+      }, this.gracePeriod); // ← 20 detik
 
       this.pendingRemove.set(id, timeout);
     }
@@ -390,10 +391,8 @@ cleanupClientDestroy(ws) {
     if (ws.numkursi) ws.numkursi.clear();
     ws.roomname = undefined;
     ws.idtarget = undefined;
-    // ✅ RESET: Hapus status hasJoinedRoom saat cleanup
     ws.hasJoinedRoom = undefined;
-  }
-
+}
   isInLowcardRoom(ws) {
     return ws.roomname === "LowCard";
   }
@@ -734,6 +733,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
