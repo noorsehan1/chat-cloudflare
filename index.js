@@ -9,9 +9,9 @@ const ROOM_LIST = [
 ];
 
 const MAX_SEATS = 35;
-const NUMBER_INTERVAL = 15 * 60 * 1000; // 15 menit
-const GRACE_PERIOD = 5000; // 5 detik
-const LOCK_TIMEOUT = 10000; // 10 detik
+const NUMBER_INTERVAL = 15 * 60 * 1000;
+const GRACE_PERIOD = 10000; // ✅ DIPERPANJANG: 10 detik
+const LOCK_TIMEOUT = 10000;
 
 function createEmptySeat() {
   return {
@@ -31,11 +31,10 @@ export class ChatServer {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.clients = new Set();
+    this.clients = new Map(); // ✅ PERBAIKAN: Gunakan Map bukan Set
     this.userToSeat = new Map();
     this.pendingRemove = new Map();
 
-    // Inisialisasi kursi untuk semua room
     this.roomSeats = new Map();
     for (const room of ROOM_LIST) {
       const seats = new Map();
@@ -43,11 +42,9 @@ export class ChatServer {
       this.roomSeats.set(room, seats);
     }
 
-    // Sistem angka berganti
     this.currentNumber = 1;
     this.maxNumber = 6;
     
-    // Timer untuk ganti angka
     try {
       this._tickTimer = setInterval(() => this.tick(), NUMBER_INTERVAL);
     } catch (e) {
@@ -57,7 +54,30 @@ export class ChatServer {
     this.lowcard = new LowCardGameManager(this);
   }
 
-  // ✅ PERBAIKAN: Function khusus kirim currentNumber
+  // ✅ PERBAIKAN: Function khusus untuk handle connection baru
+  registerClient(ws, clientId) {
+    // Hapus client lama dengan ID yang sama
+    if (this.clients.has(clientId)) {
+      const oldClient = this.clients.get(clientId);
+      if (oldClient && oldClient.readyState === 1) {
+        try {
+          oldClient.close(4001, "Replaced by new connection");
+        } catch (e) {}
+      }
+      this.clients.delete(clientId);
+    }
+
+    // Batalkan pending removal untuk ID ini
+    this.batalkanPendingRemoval(clientId);
+
+    // Register client baru
+    this.clients.set(clientId, ws);
+    ws.idtarget = clientId;
+    ws.connectionTime = Date.now();
+
+    console.log(`Client registered: ${clientId}, Total: ${this.clients.size}`);
+  }
+
   sendCurrentNumber(ws) {
     if (!this.isWebSocketReady(ws)) return false;
     
@@ -86,18 +106,8 @@ export class ChatServer {
 
   broadcastToRoom(room, msg) {
     let sentCount = 0;
-    for (const client of this.clients) {
+    for (const [clientId, client] of this.clients) {
       if (client.roomname === room && this.isWebSocketReady(client)) {
-        if (this.safeSend(client, msg)) sentCount++;
-      }
-    }
-    return sentCount;
-  }
-
-  broadcastToAll(msg) {
-    let sentCount = 0;
-    for (const client of this.clients) {
-      if (this.isWebSocketReady(client)) {
         if (this.safeSend(client, msg)) sentCount++;
       }
     }
@@ -126,13 +136,11 @@ export class ChatServer {
     this.broadcastToRoom(room, ["roomUserCount", room, counts[room]]);
   }
 
-  // ✅ PERBAIKAN: Tick dengan error handling
   tick() {
     try {
       this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
       
-      // Kirim ke semua client yang ready
-      for (const client of this.clients) {
+      for (const [clientId, client] of this.clients) {
         if (this.isWebSocketReady(client)) {
           this.sendCurrentNumber(client);
         }
@@ -162,17 +170,24 @@ export class ChatServer {
     }
   }
 
-  cleanupClosedWebSockets() {
-    for (const client of this.clients) {
-      if (client.readyState === 2 || client.readyState === 3) {
-        this.cleanupClient(client);
-      }
-    }
-  }
-
   periodicMaintenance() {
     this.cleanExpiredLocks();
-    this.cleanupClosedWebSockets();
+    this.cleanupDeadConnections();
+  }
+
+  // ✅ PERBAIKAN: Cleanup koneksi yang mati
+  cleanupDeadConnections() {
+    const deadClients = [];
+    
+    for (const [clientId, client] of this.clients) {
+      if (client.readyState === 2 || client.readyState === 3) {
+        deadClients.push(clientId);
+      }
+    }
+
+    for (const clientId of deadClients) {
+      this.cleanupClient(clientId);
+    }
   }
 
   lockSeat(room, ws) {
@@ -214,17 +229,14 @@ export class ChatServer {
     const allPoints = [];
     const seatMetadata = {};
 
-    // Kumpulkan data points dan metadata
     for (let seat = 1; seat <= MAX_SEATS; seat++) {
       const info = seatMap.get(seat);
       if (!info) continue;
 
-      // Points
       for (const point of info.points) {
         allPoints.push({ seat, ...point });
       }
 
-      // Metadata kursi
       if (info.namauser && !info.namauser.startsWith("__LOCK__")) {
         seatMetadata[seat] = {
           noimageUrl: info.noimageUrl,
@@ -238,7 +250,6 @@ export class ChatServer {
       }
     }
 
-    // Kirim data
     this.safeSend(ws, ["allPointsList", room, allPoints]);
     this.safeSend(ws, ["allUpdateKursiList", room, seatMetadata]);
     this.sendCurrentNumber(ws);
@@ -271,14 +282,15 @@ export class ChatServer {
     if (userId && this.pendingRemove.has(userId)) {
       clearTimeout(this.pendingRemove.get(userId));
       this.pendingRemove.delete(userId);
+      console.log(`Pending removal dibatalkan untuk: ${userId}`);
     }
   }
 
   getAllOnlineUsers() {
     const users = [];
-    for (const client of this.clients) {
-      if (client.idtarget && this.isWebSocketReady(client)) {
-        users.push(client.idtarget);
+    for (const [clientId, client] of this.clients) {
+      if (clientId && this.isWebSocketReady(client)) {
+        users.push(clientId);
       }
     }
     return users;
@@ -286,48 +298,45 @@ export class ChatServer {
 
   getOnlineUsersByRoom(roomName) {
     const users = [];
-    for (const client of this.clients) {
-      if (client.roomname === roomName && client.idtarget && this.isWebSocketReady(client)) {
-        users.push(client.idtarget);
+    for (const [clientId, client] of this.clients) {
+      if (client.roomname === roomName && clientId && this.isWebSocketReady(client)) {
+        users.push(clientId);
       }
     }
     return users;
   }
 
-  cleanupClient(ws) {
-    const userId = ws.idtarget;
+  // ✅ PERBAIKAN: Cleanup by client ID
+  cleanupClient(clientId) {
+    const ws = this.clients.get(clientId);
     
-    this.clients.delete(ws);
-    
-    if (userId) {
-      // Cek apakah ada koneksi aktif lain untuk user ini
-      const hasActiveConnection = Array.from(this.clients).some(
-        client => client.idtarget === userId && this.isWebSocketReady(client)
+    if (ws) {
+      this.clients.delete(clientId);
+      
+      console.log(`Client cleanup: ${clientId}, Sisa: ${this.clients.size}`);
+
+      // Reset WebSocket properties
+      ws.numkursi?.clear();
+      ws.roomname = undefined;
+      ws.idtarget = undefined;
+    }
+
+    // Jadwalkan penghapusan kursi setelah grace period
+    if (clientId && !this.pendingRemove.has(clientId)) {
+      const hasActiveConnection = Array.from(this.clients.entries()).some(
+        ([id, client]) => id === clientId && this.isWebSocketReady(client)
       );
       
       if (!hasActiveConnection) {
-        // Hapus timeout yang ada
-        if (this.pendingRemove.has(userId)) {
-          clearTimeout(this.pendingRemove.get(userId));
-        }
-
-        // Jadwalkan penghapusan kursi
         const timeout = setTimeout(() => {
-          this.removeUserSeats(userId);
-          this.pendingRemove.delete(userId);
+          console.log(`Removing seats for: ${clientId}`);
+          this.removeUserSeats(clientId);
+          this.pendingRemove.delete(clientId);
         }, GRACE_PERIOD);
 
-        this.pendingRemove.set(userId, timeout);
-      } else {
-        // Batalkan penghapusan jika ada koneksi aktif
-        this.batalkanPendingRemoval(userId);
+        this.pendingRemove.set(clientId, timeout);
       }
     }
-
-    // Reset WebSocket properties
-    ws.numkursi?.clear();
-    ws.roomname = undefined;
-    ws.idtarget = undefined;
   }
 
   isInLowcardRoom(ws) {
@@ -348,6 +357,11 @@ export class ChatServer {
     
     const [eventType, ...args] = data;
     this.periodicMaintenance();
+
+    // ✅ PERBAIKAN: Pastikan client sudah terdaftar untuk semua event kecuali setIdTarget
+    if (eventType !== "setIdTarget" && !ws.idtarget) {
+      return this.safeSend(ws, ["error", "Set ID target terlebih dahulu"]);
+    }
 
     switch (eventType) {
       case "setIdTarget":
@@ -410,7 +424,6 @@ export class ChatServer {
         this.handleDestroy(ws);
         break;
 
-      // Game LowCard events
       case "gameLowCardStart":
       case "gameLowCardJoin":
       case "gameLowCardNumber":
@@ -426,18 +439,16 @@ export class ChatServer {
     }
   }
 
-  // Handler methods untuk memecah logika
+  // ✅ PERBAIKAN: Handler setIdTarget yang lebih robust
   handleSetIdTarget(ws, newId) {
-    this.batalkanPendingRemoval(newId);
-    ws.idtarget = newId;
-
-    // Tutup koneksi duplikat
-    for (const client of this.clients) {
-      if (client.idtarget === newId && client !== ws && this.isWebSocketReady(client)) {
-        client.close(4000, "Duplicate connection");
-        this.clients.delete(client);
-      }
+    if (!newId || typeof newId !== 'string') {
+      return this.safeSend(ws, ["error", "ID target tidak valid"]);
     }
+
+    console.log(`Setting ID target: ${newId} untuk WebSocket`);
+
+    // Register client dengan sistem baru
+    this.registerClient(ws, newId);
 
     // Pulihkan state sebelumnya jika ada
     const seatInfo = this.userToSeat.get(newId);
@@ -445,15 +456,20 @@ export class ChatServer {
       ws.roomname = seatInfo.room;
       this.sendRoomState(ws, seatInfo.room);
       this.broadcastRoomUserCount(seatInfo.room);
+      this.safeSend(ws, ["stateRestored", seatInfo.room, seatInfo.seat]);
+    } else {
+      this.safeSend(ws, ["idSet", newId]);
     }
+
+    console.log(`ID target berhasil diset: ${newId}`);
   }
 
   handleSendNotification(ws, [targetId, imageUrl, username, description]) {
     const notification = ["notif", imageUrl, username, description, Date.now()];
     let delivered = false;
     
-    for (const client of this.clients) {
-      if (client.idtarget === targetId && this.isWebSocketReady(client)) {
+    for (const [clientId, client] of this.clients) {
+      if (clientId === targetId && this.isWebSocketReady(client)) {
         this.safeSend(client, notification);
         delivered = true;
       }
@@ -469,8 +485,8 @@ export class ChatServer {
     this.safeSend(ws, privateMsg);
     
     let delivered = false;
-    for (const client of this.clients) {
-      if (client.idtarget === targetId && this.isWebSocketReady(client)) {
+    for (const [clientId, client] of this.clients) {
+      if (clientId === targetId && this.isWebSocketReady(client)) {
         this.safeSend(client, privateMsg);
         delivered = true;
       }
@@ -482,44 +498,10 @@ export class ChatServer {
   }
 
   handleUserOnlineCheck(ws, username, marker = "") {
-    const activeConnections = Array.from(this.clients)
-      .filter(client => client.idtarget === username && this.isWebSocketReady(client));
+    const isOnline = this.clients.has(username) && 
+                    this.isWebSocketReady(this.clients.get(username));
     
-    const isOnline = activeConnections.length > 0;
     this.safeSend(ws, ["userOnlineStatus", username, isOnline, marker]);
-
-    // Handle duplicate connections
-    if (activeConnections.length > 1) {
-      this.handleDuplicateConnections(username, activeConnections);
-    }
-  }
-
-  handleDuplicateConnections(username, connections) {
-    const newest = connections[connections.length - 1];
-    const oldConnections = connections.slice(0, -1);
-
-    // Hapus state kursi user
-    const seatInfo = this.userToSeat.get(username);
-    if (seatInfo) {
-      const { room, seat } = seatInfo;
-      const seatMap = this.roomSeats.get(room);
-      
-      if (seatMap && seatMap.has(seat)) {
-        Object.assign(seatMap.get(seat), createEmptySeat());
-        this.broadcastToRoom(room, ["removeKursi", room, seat]);
-        this.broadcastRoomUserCount(room);
-      }
-      
-      this.userToSeat.delete(username);
-    }
-
-    // Tutup koneksi lama
-    for (const oldConnection of oldConnections) {
-      if (this.isWebSocketReady(oldConnection)) {
-        oldConnection.close(4000, "Duplicate login");
-      }
-      this.clients.delete(oldConnection);
-    }
   }
 
   handleGetAllRoomsUserCount(ws) {
@@ -541,11 +523,12 @@ export class ChatServer {
       return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
     }
     
-    // Bersihkan state sebelumnya
-    if (ws.idtarget) {
-      this.batalkanPendingRemoval(ws.idtarget);
-      this.removeUserSeats(ws.idtarget);
+    if (!ws.idtarget) {
+      return this.safeSend(ws, ["error", "Set ID target terlebih dahulu"]);
     }
+    
+    // Bersihkan state sebelumnya
+    this.removeUserSeats(ws.idtarget);
     
     ws.roomname = newRoom;
     const assignedSeat = this.lockSeat(newRoom, ws);
@@ -557,15 +540,14 @@ export class ChatServer {
     ws.numkursi = new Set([assignedSeat]);
     this.safeSend(ws, ["numberKursiSaya", assignedSeat]);
     
-    if (ws.idtarget) {
-      this.userToSeat.set(ws.idtarget, { room: newRoom, seat: assignedSeat });
-    }
+    this.userToSeat.set(ws.idtarget, { room: newRoom, seat: assignedSeat });
     
     // Kirim state room
     if (this.isWebSocketReady(ws)) {
       this.sendRoomState(ws, newRoom);
       this.broadcastRoomUserCount(newRoom);
       this.sendCurrentNumber(ws);
+      this.safeSend(ws, ["joinSuccess", newRoom, assignedSeat]);
     }
   }
 
@@ -595,8 +577,7 @@ export class ChatServer {
     const seatMap = this.roomSeats.get(room);
     Object.assign(seatMap.get(seat), createEmptySeat());
     
-    // Hapus dari semua client
-    for (const client of this.clients) {
+    for (const [clientId, client] of this.clients) {
       client.numkursi?.delete(seat);
     }
     
@@ -642,8 +623,7 @@ export class ChatServer {
 
   handleDestroy(ws) {
     if (ws.idtarget) {
-      this.batalkanPendingRemoval(ws.idtarget);
-      this.cleanupClient(ws);
+      this.cleanupClient(ws.idtarget);
     }
   }
 
@@ -657,25 +637,28 @@ export class ChatServer {
     const [client, server] = Object.values(new WebSocketPair());
     server.accept();
 
-    // Setup WebSocket
     const ws = server;
     ws.roomname = undefined;
     ws.idtarget = undefined;
     ws.numkursi = new Set();
-    
-    this.clients.add(ws);
 
-    // Event listeners
+    // ✅ PERBAIKAN: Event listeners yang lebih sederhana
     ws.addEventListener("message", (event) => {
       this.handleMessage(ws, event.data);
     });
 
     ws.addEventListener("close", () => {
-      this.cleanupClient(ws);
+      if (ws.idtarget) {
+        console.log(`WebSocket closed for: ${ws.idtarget}`);
+        this.cleanupClient(ws.idtarget);
+      }
     });
 
-    ws.addEventListener("error", () => {
-      this.cleanupClient(ws);
+    ws.addEventListener("error", (error) => {
+      console.log(`WebSocket error for: ${ws.idtarget}`, error);
+      if (ws.idtarget) {
+        this.cleanupClient(ws.idtarget);
+      }
     });
 
     return new Response(null, { status: 101, webSocket: client });
