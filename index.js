@@ -593,64 +593,90 @@ export class ChatServer {
   }
 
 
-  handleSetIdTarget2(ws, id, baru) {
-
+ handleSetIdTarget2(ws, id, baru) {
   ws.idtarget = id;
 
   // USER BARU
   if (baru === true) {
-    if (this.pendingRemove.has(id)) {
-      clearTimeout(this.pendingRemove.get(id));
-      this.pendingRemove.delete(id);
+    // Cancel any pending removal when new user connects
+    if (this.usersToRemove.has(id)) {
+      this.usersToRemove.delete(id);
+    }
+
+    // Clear any existing ping timeout
+    if (this.pingTimeouts.has(id)) {
+      clearTimeout(this.pingTimeouts.get(id));
+      this.pingTimeouts.delete(id);
     }
 
     ws.isNewUser = true;
+    
+    // For new users, send needJoinRoom to prompt room selection
+    this.safeSend(ws, ["needJoinRoom"]);
     return;
   }
 
-  // RECONNECT
+  // RECONNECT - Existing user
   ws.isNewUser = false;
 
-  if (this.pendingRemove.has(id)) {
-    clearTimeout(this.pendingRemove.get(id));
-    this.pendingRemove.delete(id);
+  // Cancel any pending removal when user reconnects
+  if (this.usersToRemove.has(id)) {
+    this.usersToRemove.delete(id);
+  }
+
+  // Clear any existing ping timeout
+  if (this.pingTimeouts.has(id)) {
+    clearTimeout(this.pingTimeouts.get(id));
+    this.pingTimeouts.delete(id);
   }
 
   const seatInfo = this.userToSeat.get(id);
 
-  if (seatInfo && this.isWebSocketReady(ws)) {
-    ws.roomname = seatInfo.room;
-    this.sendRoomState(ws, seatInfo.room);
-    this.broadcastRoomUserCount(seatInfo.room);
-  }
+  if (seatInfo) {
+    const { room, seat } = seatInfo;
+    ws.roomname = room;
+    ws.numkursi = new Set([seat]);
 
-  console.log("SET ID 2:", id, "baru:", baru);
-}
-
-
-  handleOnDestroy(ws, idtarget) {
-    if (ws.isDestroyed) return;
-    
-    ws.isDestroyed = true;
-    
-    if (idtarget) {
-      this.cleanupInProgress.add(idtarget);
+    // Update seat activity and ensure user is properly seated
+    const seatMap = this.roomSeats.get(room);
+    if (seatMap && seatMap.has(seat)) {
+      const seatData = seatMap.get(seat);
       
-      // Schedule for batch removal instead of immediate removal
-      this.usersToRemove.set(idtarget, Date.now());
-      
-      this.clients.delete(ws);
-      
-      if (this.pingTimeouts.has(idtarget)) {
-        clearTimeout(this.pingTimeouts.get(idtarget));
-        this.pingTimeouts.delete(idtarget);
+      // If seat is locked or empty, reclaim it
+      if (String(seatData.namauser).startsWith("__LOCK__") || !seatData.namauser) {
+        seatData.namauser = id;
+        seatData.lastActivity = Date.now();
       }
       
-      this.cleanupInProgress.delete(idtarget);
+      // If seat belongs to someone else, remove user from seat mapping
+      if (seatData.namauser !== id) {
+        this.userToSeat.delete(id);
+        this.safeSend(ws, ["needJoinRoom"]);
+      } else {
+        // Send current room state to reconnected user
+        this.senderrorstate(ws, room);
+        this.broadcastRoomUserCount(room);
+      }
     } else {
-      this.clients.delete(ws);
+      // Seat doesn't exist, remove mapping
+      this.userToSeat.delete(id);
+      this.safeSend(ws, ["needJoinRoom"]);
     }
+  } else {
+    // No seat info found, prompt for room join
+    this.safeSend(ws, ["needJoinRoom"]);
   }
+
+  // Deliver any pending private messages
+  if (this.privateMessageBuffer.has(id)) {
+    for (const msg of this.privateMessageBuffer.get(id)) {
+      this.safeSend(ws, msg);
+    }
+    this.privateMessageBuffer.delete(id);
+  }
+
+  console.log("SET ID 2:", id, "baru:", baru, "room:", ws.roomname);
+}
 
   scheduleCleanupTimeout(idtarget) {
     if (this.pingTimeouts.has(idtarget)) {
@@ -716,9 +742,12 @@ export class ChatServer {
         }
 
           
-     case "setIdTarget2":
-  this.handleSetIdTarget2(ws, args[0], args[1]); // <-- BOOLEAN MASUK
+     case "setIdTarget2": {
+  const id = data[1];
+  const baru = data[2]; // This should be the boolean parameter
+  this.handleSetIdTarget2(ws, id, baru);
   break;
+}
 
         case "setIdTarget": {
           const newId = data[1];
@@ -1079,3 +1108,4 @@ export default {
     }
   }
 };
+
