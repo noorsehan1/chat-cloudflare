@@ -670,7 +670,7 @@ export class ChatServer {
     });
 
     ws.addEventListener("close", (event) => {
-      this.cleanupClient(ws);
+    this.cleanupClientDestroy(ws);
     });
 
     ws.addEventListener("error", (error) => {
@@ -694,4 +694,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
