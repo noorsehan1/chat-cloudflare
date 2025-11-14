@@ -204,10 +204,17 @@ export class ChatServer {
   }
 
   handleGetAllRoomsUserCount(ws) {
+    console.log('🟢 handleGetAllRoomsUserCount DIPANGGIL'); // ✅ DEBUG
+    
     const allCounts = this.getJumlahRoom();
-    const result = Object.entries(allCounts).map(([room, count]) => ({ roomName: room, userCount: count }));
+    const result = Object.entries(allCounts).map(([room, count]) => ({ 
+        roomName: room, 
+        userCount: count 
+    }));
+    
+    console.log('📊 Data yang dikirim:', result); // ✅ DEBUG
     this.safeSend(ws, ["allRoomsUserCount", result]);
-  }
+}
 
   handleGetAllOnlineUsers(ws) {
     const users = [];
@@ -659,4 +666,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
