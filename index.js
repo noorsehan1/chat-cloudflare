@@ -219,17 +219,18 @@ export class ChatServer {
     this.safeSend(ws, ["allOnlineUsers", [...new Set(users)]]);
   }
 
-  handleGetRoomOnlineUsers(ws, roomName) {
-    if (!roomList.includes(roomName)) return;
+  handleGetAllRoomsUserCount(ws) {
+    const allCounts = this.getJumlahRoom();
+    console.log('All counts:', allCounts); // ✅ DEBUG LOG
     
-    const users = [];
-    for (const client of this.clients) {
-      if (client.roomname === roomName && client.idtarget && client.readyState === 1) {
-        users.push(client.idtarget);
-      }
-    }
-    this.safeSend(ws, ["roomOnlineUsers", roomName, [...new Set(users)]]);
-  }
+    const result = Object.entries(allCounts).map(([room, count]) => ({
+        roomName: room, 
+        userCount: count 
+    }));
+    
+    console.log('Sending to client:', result); // ✅ DEBUG LOG
+    this.safeSend(ws, ["allRoomsUserCount", result]);
+}
 
   lockSeat(room, ws) {
     const seatMap = this.roomSeats.get(room);
@@ -658,3 +659,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
