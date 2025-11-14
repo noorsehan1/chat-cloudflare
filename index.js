@@ -653,13 +653,14 @@ export class ChatServer {
         this.userToSeat.delete(id);
         this.safeSend(ws, ["needJoinRoom"]);
       } else {
-        // Send current room state to reconnected user
+        this.safeSend(ws, ["currentNumber", this.currentNumber]); // Send current room state to reconnected user
         this.senderrorstate(ws, room);
         this.broadcastRoomUserCount(room);
       }
     } else {
       // Seat doesn't exist, remove mapping
       this.userToSeat.delete(id);
+
       this.safeSend(ws, ["needJoinRoom"]);
     }
   } else {
@@ -917,7 +918,7 @@ export class ChatServer {
           
           if (ws.idtarget) 
             this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-          
+          this.safeSend(ws, ["currentNumber", this.currentNumber]); 
           this.sendAllStateTo(ws, newRoom);
           this.broadcastRoomUserCount(newRoom);
           break;
@@ -1108,4 +1109,5 @@ export default {
     }
   }
 };
+
 
