@@ -522,35 +522,54 @@ cleanupforce(ws) {
     }
   }
 
+
+  
+
 handleSetIdTarget2(ws, id, baru) {
 
   ws.idtarget = id;
 
-  // Jika user BARU → bersihkan kursi & pending
+  // =======================
+  // USER BARU
+  // =======================
   if (baru === true) {
 
+    // bersihkan pending remove kalau ada
     if (this.pendingRemove.has(id)) {
       clearTimeout(this.pendingRemove.get(id));
       this.pendingRemove.delete(id);
     }
 
-    this.removeUserSeats(id);
-    this.userToSeat.delete(id);
-
     ws.isNewUser = true;
+    return;
   }
 
-  // Jika reconnect → restore
-  else {
-    ws.isNewUser = false;
+  // =======================
+  // RECONNECT (baru = false)
+  // =======================
+  ws.isNewUser = false;
 
-    const seatInfo = this.userToSeat.get(id);
-    if (seatInfo && this.isWebSocketReady(ws)) {
-      ws.roomname = seatInfo.room;
-      this.sendRoomState(ws, seatInfo.room);
-      this.broadcastRoomUserCount(seatInfo.room);
-    }
+  // hapus pending remove + timeout
+  if (this.pendingRemove.has(id)) {
+    clearTimeout(this.pendingRemove.get(id));
+    this.pendingRemove.delete(id);
   }
+
+  const seatInfo = this.userToSeat.get(id);
+
+  if (seatInfo && this.isWebSocketReady(ws)) {
+    ws.roomname = seatInfo.room;
+
+    // restore room state
+    this.sendRoomState(ws, seatInfo.room);
+
+    // broadcast update user count
+    this.broadcastRoomUserCount(seatInfo.room);
+  }
+
+  console.log("SET ID 2:", id, "baru:", baru);
+}
+
 
   console.log("SET ID 2:", id, "baru:", baru);
 }
@@ -867,4 +886,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 }
+
 
