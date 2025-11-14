@@ -181,7 +181,7 @@ export class ChatServer {
       const seatMap = this.roomSeats.get(room);
       
       for (const [seat, info] of seatMap) {
-        if (info.namauser && info.namauser.startsWith("__LOCK__") && 
+        if (info.namauser.startsWith("__LOCK__") && 
             info.lockTime && 
             (now - info.lockTime) > LOCK_TIMEOUT) {
           expiredLocks.push({ room, seat });
@@ -226,7 +226,7 @@ export class ChatServer {
     for (let seat = 1; seat <= MAX_SEATS; seat++) {
       const seatInfo = seatMap.get(seat);
       
-      const isExpiredLock = seatInfo.namauser && seatInfo.namauser.startsWith("__LOCK__") && 
+      const isExpiredLock = seatInfo.namauser.startsWith("__LOCK__") && 
                            seatInfo.lockTime && 
                            (now - seatInfo.lockTime) > LOCK_TIMEOUT;
       
@@ -234,7 +234,7 @@ export class ChatServer {
         Object.assign(seatInfo, emptySeat);
       }
       
-      if (!seatInfo.namauser || seatInfo.namauser === "") {
+      if (seatInfo.namauser === "") {
         seatInfo.namauser = `__LOCK__${ws.idtarget}`;
         seatInfo.lockTime = now;
         this.userToSeat.set(ws.idtarget, { room, seat });
@@ -256,7 +256,7 @@ export class ChatServer {
       const info = seatMap.get(seat);
       if (!info) continue;
 
-      if (info.points && info.points.length > 0) {
+      if (info.points.length > 0) {
         for (const point of info.points) {
           allPoints.push({ seat, ...point });
         }
@@ -296,7 +296,7 @@ export class ChatServer {
       
       for (const [seat, info] of seatMap) {
         const isUserSeat = info.namauser === userId || 
-                          (info.namauser && info.namauser.startsWith(`__LOCK__${userId}`));
+                          info.namauser.startsWith(`__LOCK__${userId}`);
         
         if (isUserSeat) {
           seatsToRemove.push({ room, seat });
@@ -345,37 +345,37 @@ export class ChatServer {
   }
 
 
-  cleanupforce(ws) {
-    const userId = ws.idtarget;
+cleanupforce(ws) {
+  const userId = ws.idtarget;
 
-    this.clients.delete(ws);
+  this.clients.delete(ws);
 
-    if (userId) {
-      if (this.connectionAttempts.has(userId)) {
-        clearTimeout(this.connectionAttempts.get(userId));
-        this.connectionAttempts.delete(userId);
-      }
+  if (userId) {
+    if (this.connectionAttempts.has(userId)) {
+      clearTimeout(this.connectionAttempts.get(userId));
+      this.connectionAttempts.delete(userId);
+    }
 
-      let hasActiveConnection = false;
-      for (const client of this.clients) {
-        if (client.idtarget === userId && client.readyState === 1) {
-          hasActiveConnection = true;
-          break;
-        }
-      }
-
-      if (!hasActiveConnection) {
-        this.batalkanPendingRemoval(userId);
-
-        // TANPA GRACE PERIOD → langsung hapus
-        this.removeUserSeats(userId);
-        this.pendingRemove.delete(userId);
-
-      } else {
-        this.batalkanPendingRemoval(userId);
+    let hasActiveConnection = false;
+    for (const client of this.clients) {
+      if (client.idtarget === userId && client.readyState === 1) {
+        hasActiveConnection = true;
+        break;
       }
     }
+
+    if (!hasActiveConnection) {
+      this.batalkanPendingRemoval(userId);
+
+      // TANPA GRACE PERIOD → langsung hapus
+      this.removeUserSeats(userId);
+      this.pendingRemove.delete(userId);
+
+    } else {
+      this.batalkanPendingRemoval(userId);
+    }
   }
+}
 
 
   
@@ -445,6 +445,11 @@ export class ChatServer {
       case "setIdTarget":
         this.handleSetIdTarget(ws, args[0]);
         break;
+        
+        case "setIdTarget2":
+     this.handleSetIdTarget2(ws, args[0], args[1]);
+     break;
+
 
       case "sendnotif":
         this.handleSendNotification(ws, args);
@@ -517,20 +522,53 @@ export class ChatServer {
     }
   }
 
+handleSetIdTarget2(ws, id, baru) {
+
+  ws.idtarget = id;
+
+  // Jika user BARU → bersihkan kursi & pending
+  if (baru === true) {
+
+    if (this.pendingRemove.has(id)) {
+      clearTimeout(this.pendingRemove.get(id));
+      this.pendingRemove.delete(id);
+    }
+
+    this.removeUserSeats(id);
+    this.userToSeat.delete(id);
+
+    ws.isNewUser = true;
+  }
+
+  // Jika reconnect → restore
+  else {
+    ws.isNewUser = false;
+
+    const seatInfo = this.userToSeat.get(id);
+    if (seatInfo && this.isWebSocketReady(ws)) {
+      ws.roomname = seatInfo.room;
+      this.sendRoomState(ws, seatInfo.room);
+      this.broadcastRoomUserCount(seatInfo.room);
+    }
+  }
+
+  console.log("SET ID 2:", id, "baru:", baru);
+}
+
+  
+
   handleSetIdTarget(ws, newId) {
     if (!newId) return;
-
-    // batalkan pendingRemove (jika ada) sejak awal
+    
     this.batalkanPendingRemoval(newId);
-
+    
     if (this.connectionAttempts.has(newId)) {
       clearTimeout(this.connectionAttempts.get(newId));
       this.connectionAttempts.delete(newId);
     }
-
+    
     ws.idtarget = newId;
 
-    // close duplicate older connections (sama seperti sebelumnya)
     const duplicates = [];
     for (const client of this.clients) {
       if (client.idtarget === newId && client !== ws) {
@@ -547,67 +585,18 @@ export class ChatServer {
             }
             this.clients.delete(dup);
           } catch (e) {
-            // silent
+            // Error closing duplicate handled silently
           }
         }
       }, 100);
     }
 
-    // Jika user sebelumnya sudah memiliki seat tersimpan -> coba restore safe
+    // ✅ PERBAIKAN: Langsung restore state tanpa timeout
     const seatInfo = this.userToSeat.get(newId);
     if (seatInfo && this.isWebSocketReady(ws)) {
-      const seatMap = this.roomSeats.get(seatInfo.room);
-      const stored = seatMap && seatMap.get(seatInfo.seat);
-
-      // Validasi: kursi harus tersedia untuk direstore (milik user atau kosong/lock milik user)
-      let canRestore = false;
-      if (stored) {
-        if (stored.namauser === newId) {
-          // sudah benar pemiliknya
-          canRestore = true;
-        } else if (!stored.namauser || stored.namauser === "" || stored.namauser.startsWith(`__LOCK__${newId}`)) {
-          // kosong atau sebelumnya di-lock oleh user yang sama
-          canRestore = true;
-        } else {
-          // kursi diambil user lain -> tidak bisa restore
-          canRestore = false;
-        }
-      }
-
-      if (canRestore) {
-        // set roomname pada socket (agar getOnlineUsersByRoom dll konsisten)
-        ws.roomname = seatInfo.room;
-
-        // pastikan numkursi pada ws
-        if (!ws.numkursi) ws.numkursi = new Set();
-        ws.numkursi.add(seatInfo.seat);
-
-        // minimal assign namauser jika kosong atau lock milik user
-        if (stored && (!stored.namauser || stored.namauser === "" || stored.namauser.startsWith(`__LOCK__${newId}`))) {
-          // jangan hapus metadata lain (avatar, items), hanya set namauser
-          Object.assign(stored, { namauser: newId, lockTime: 0 });
-        }
-
-        // beri tahu client bahwa ini restore (bukan join baru)
-        this.safeSend(ws, ["restoreState", seatInfo.room, seatInfo.seat]);
-
-        // kirim state room (kursi + point) — client sudah tahu ini restore, jadi harus menangani tanpa efek join
-        this.sendRoomState(ws, seatInfo.room);
-
-        // update jumlah user di room (broadcast ke room)
-        this.broadcastRoomUserCount(seatInfo.room);
-
-        // kirim currentNumber juga
-        this.sendCurrentNumber(ws);
-
-        // ensure userToSeat is set (in case it was lost)
-        this.userToSeat.set(newId, { room: seatInfo.room, seat: seatInfo.seat });
-      } else {
-        // kursi sudah diambil orang lain -> hapus mapping lama agar tidak mengacaukan
-        this.userToSeat.delete(newId);
-        // do NOT auto-join. Client should request join again if wanted.
-        this.safeSend(ws, ["restoreFailed", "seat_taken"]);
-      }
+      ws.roomname = seatInfo.room;
+      this.sendRoomState(ws, seatInfo.room);
+      this.broadcastRoomUserCount(seatInfo.room);
     }
   }
 
@@ -715,81 +704,28 @@ export class ChatServer {
     if (!ROOM_SET.has(newRoom)) {
       return this.safeSend(ws, ["error", `Unknown room: ${newRoom}`]);
     }
-
-    // Pastikan batalkan pending removal sesegera mungkin jika ada
+    
     if (ws.idtarget) {
       this.batalkanPendingRemoval(ws.idtarget);
+      this.removeUserSeats(ws.idtarget);
     }
-
-    // Jika user sudah punya seat yang tercatat di userToSeat
-    if (ws.idtarget) {
-      const existing = this.userToSeat.get(ws.idtarget);
-
-      // Jika seat yang tercatat ada dan di room yang sama -> treat as RESTORE
-      if (existing && existing.room === newRoom) {
-        const seatMap = this.roomSeats.get(newRoom);
-        const info = seatMap.get(existing.seat);
-
-        // Pastikan ws membawa seat (numkursi) sehingga tidak dianggap belum punya seat
-        if (!ws.numkursi) ws.numkursi = new Set();
-        ws.numkursi.add(existing.seat);
-
-        // Validate: jika seat dimiliki orang lain, jangan override
-        if (info && info.namauser && info.namauser !== ws.idtarget && !info.namauser.startsWith(`__LOCK__${ws.idtarget}`)) {
-          // kursi sudah diambil orang lain -> hapus mapping lama dan lanjut ke normal join
-          this.userToSeat.delete(ws.idtarget);
-        } else {
-          // pastikan seat di seatMap menunjuk ke userId (jika sempat __LOCK__ atau kosong)
-          if (info && (!info.namauser || info.namauser === "" || info.namauser.startsWith("__LOCK__"))) {
-            Object.assign(info, { namauser: ws.idtarget, lockTime: 0 });
-          }
-
-          // tandai room pada socket
-          ws.roomname = newRoom;
-
-          // Kirim restoreState supaya client tidak memproses sebagai join ulang
-          this.safeSend(ws, ["restoreState", newRoom, existing.seat]);
-
-          // Kirim state room (kursi + point)
-          this.sendRoomState(ws, newRoom);
-
-          // Update room user count
-          this.broadcastRoomUserCount(newRoom);
-
-          // Kirim currentNumber
-          this.sendCurrentNumber(ws);
-
-          // Pastikan userToSeat tetap tersimpan (tidak dihapus)
-          this.userToSeat.set(ws.idtarget, { room: newRoom, seat: existing.seat });
-
-          return;
-        }
-      }
-
-      // Jika existing seat ada tapi di room berbeda -> hapus kursi lama (pindah room)
-      if (existing && existing.room !== newRoom) {
-        this.removeUserSeats(ws.idtarget);
-      }
-    }
-
-    // normal join flow: ambil kursi baru
+    
     ws.roomname = newRoom;
     const assignedSeat = this.lockSeat(newRoom, ws);
-
+    
     if (assignedSeat === null) {
       return this.safeSend(ws, ["roomFull", newRoom]);
     }
-
+    
     if (!ws.numkursi) ws.numkursi = new Set();
     ws.numkursi.add(assignedSeat);
-
-    // hanya kirim numberKursiSaya saat memang assigned seat baru (bukan restore)
+    
     this.safeSend(ws, ["numberKursiSaya", assignedSeat]);
-
+    
     if (ws.idtarget) {
       this.userToSeat.set(ws.idtarget, { room: newRoom, seat: assignedSeat });
     }
-
+    
     if (this.isWebSocketReady(ws)) {
       this.sendRoomState(ws, newRoom);
       this.broadcastRoomUserCount(newRoom);
@@ -930,4 +866,5 @@ export default {
     
     return new Response("WebSocket endpoint", { status: 200 });
   }
-};
+}
+
