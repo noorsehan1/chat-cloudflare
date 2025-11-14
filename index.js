@@ -529,12 +529,8 @@ handleSetIdTarget2(ws, id, baru) {
 
   ws.idtarget = id;
 
-  // =======================
   // USER BARU
-  // =======================
   if (baru === true) {
-
-    // bersihkan pending remove kalau ada
     if (this.pendingRemove.has(id)) {
       clearTimeout(this.pendingRemove.get(id));
       this.pendingRemove.delete(id);
@@ -544,12 +540,9 @@ handleSetIdTarget2(ws, id, baru) {
     return;
   }
 
-  // =======================
-  // RECONNECT (baru = false)
-  // =======================
+  // RECONNECT
   ws.isNewUser = false;
 
-  // hapus pending remove + timeout
   if (this.pendingRemove.has(id)) {
     clearTimeout(this.pendingRemove.get(id));
     this.pendingRemove.delete(id);
@@ -559,19 +552,10 @@ handleSetIdTarget2(ws, id, baru) {
 
   if (seatInfo && this.isWebSocketReady(ws)) {
     ws.roomname = seatInfo.room;
-
-    // restore room state
     this.sendRoomState(ws, seatInfo.room);
-
-    // broadcast update user count
     this.broadcastRoomUserCount(seatInfo.room);
   }
 
-  console.log("SET ID 2:", id, "baru:", baru);
-}
-
-
-  console.log("SET ID 2:", id, "baru:", baru);
 }
 
   
@@ -886,5 +870,6 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 }
+
 
 
