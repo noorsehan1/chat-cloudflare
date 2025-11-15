@@ -1,4 +1,4 @@
-// ChatServer Durable Object - OPTIMIZED VERSION
+// ChatServer Durable Object - OPTIMIZED & CLEAN VERSION
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
@@ -64,13 +64,13 @@ export class ChatServer {
       if (this.clients.size > 0) {
         this.periodicFlush().catch(() => {});
       }
-    }, 500); // Reduced from 100ms to 500ms
+    }, 500);
 
     this._autoRemoveTimer = setInterval(() => {
       if (this.usersToRemove.size > 0 || this.userToSeat.size > 0) {
         this.batchAutoRemove().catch(() => {});
       }
-    }, 30000); // Reduced from 20s to 30s
+    }, 30000);
 
     this.lowcard = new LowCardGameManager(this);
 
@@ -123,7 +123,7 @@ export class ChatServer {
   async batchAutoRemove() {
     try {
       const now = Date.now();
-      const removalThreshold = 25000; // Increased from 20s to 25s
+      const removalThreshold = 25000;
       
       this.cleanExpiredLocks();
       
@@ -667,9 +667,9 @@ export class ChatServer {
     if (!idtarget) return;
     
     try {
-      ws.isDestroyed = true;
+      // 🎯 CLEANUP TANPA ws.isDestroyed - LANGSUNG ACTION!
       
-      // Immediate cleanup without waiting
+      // Immediate cleanup tanpa waiting
       this.usersToRemove.delete(idtarget);
       
       if (this.pingTimeouts.has(idtarget)) {
@@ -698,7 +698,7 @@ export class ChatServer {
   }
 
   handleMessage(ws, raw) {
-    if (ws.readyState !== 1 || ws.isDestroyed) return;
+    if (ws.readyState !== 1) return; // 🎯 CUMA CHECK readyState SAJA
     
     // Rate limiting check
     if (!this.checkRateLimit(ws)) return;
@@ -986,7 +986,7 @@ export class ChatServer {
       ws.roomname = undefined;
       ws.idtarget = undefined;
       ws.numkursi = new Set();
-      ws.isDestroyed = false;
+      // 🎯 TIDAK PERLU ws.isDestroyed = false;
 
       this.clients.add(ws);
 
