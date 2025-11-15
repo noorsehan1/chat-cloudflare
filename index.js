@@ -525,7 +525,7 @@ export class ChatServer {
           if (seatData.namauser === id) {
             ws.roomname = room;
             ws.numkursi = new Set([seat]);
-            
+           this.safeSend(ws, ["currentNumber", this.currentNumber]); 
             this.sendAllStateTo(ws, room);
             this.broadcastRoomUserCount(room);
           }
@@ -929,3 +929,4 @@ export default {
     }
   }
 };
+
