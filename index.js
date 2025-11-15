@@ -1,4 +1,4 @@
-// ChatServer Durable Object - OPTIMIZED & CLEAN VERSION
+// ChatServer Durable Object - FINAL VERSION WITHOUT lastActivity
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
@@ -562,12 +562,13 @@ export class ChatServer {
         Object.assign(currentSeat, createEmptySeat());
         this.broadcastToRoom(room, ["removeKursi", room, seat]);
         this.broadcastRoomUserCount(room);
+        console.log(`✅ Removed seats for ${idtarget} from ${room} seat ${seat}`);
       }
 
       this.userToSeat.delete(idtarget);
       this.usersToRemove.delete(idtarget);
     } catch (error) {
-      // Ignore errors
+      console.error('Error in removeAllSeatsById:', error);
     }
   }
 
@@ -667,7 +668,7 @@ export class ChatServer {
     if (!idtarget) return;
     
     try {
-      // 🎯 CLEANUP TANPA ws.isDestroyed - LANGSUNG ACTION!
+      console.log(`🔄 handleOnDestroy called for: ${idtarget}`);
       
       // Immediate cleanup tanpa waiting
       this.usersToRemove.delete(idtarget);
@@ -679,8 +680,19 @@ export class ChatServer {
       
       this.cleanupInProgress.delete(idtarget);
       
-      // Immediate seat removal
-      this.removeAllSeatsById(idtarget);
+      // Immediate seat removal - FORCE BROADCAST
+      const seatInfo = this.userToSeat.get(idtarget);
+      if (seatInfo) {
+        const { room, seat } = seatInfo;
+        console.log(`🗑️ Force removing ${idtarget} from ${room} seat ${seat}`);
+        
+        const seatMap = this.roomSeats.get(room);
+        if (seatMap && seatMap.has(seat)) {
+          Object.assign(seatMap.get(seat), createEmptySeat());
+          this.broadcastToRoom(room, ["removeKursi", room, seat]);
+          this.broadcastRoomUserCount(room);
+        }
+      }
       
       // Immediate client removal
       this.clients.delete(ws);
@@ -692,13 +704,15 @@ export class ChatServer {
       // Remove from userToSeat mapping
       this.userToSeat.delete(idtarget);
       
+      console.log(`✅ Cleanup completed for: ${idtarget}`);
+      
     } catch (error) {
-      // Ignore errors during cleanup
+      console.error('Error in handleOnDestroy:', error);
     }
   }
 
   handleMessage(ws, raw) {
-    if (ws.readyState !== 1) return; // 🎯 CUMA CHECK readyState SAJA
+    if (ws.readyState !== 1) return;
     
     // Rate limiting check
     if (!this.checkRateLimit(ws)) return;
@@ -718,6 +732,7 @@ export class ChatServer {
       switch (evt) {
         case "onDestroy": {
           const idtarget = ws.idtarget;
+          console.log(`📥 onDestroy received from client: ${idtarget}`);
           this.handleOnDestroy(ws, idtarget);
           break;
         }
@@ -967,7 +982,7 @@ export class ChatServer {
         }
       }
     } catch (error) {
-      // Silent catch - already handled by rate limiting and validation
+      console.error('Error in handleMessage:', error);
     }
   }
 
@@ -986,7 +1001,6 @@ export class ChatServer {
       ws.roomname = undefined;
       ws.idtarget = undefined;
       ws.numkursi = new Set();
-      // 🎯 TIDAK PERLU ws.isDestroyed = false;
 
       this.clients.add(ws);
 
@@ -1000,6 +1014,7 @@ export class ChatServer {
       
       ws.addEventListener("close", (event) => {
         const id = ws.idtarget;
+        console.log(`🔌 WebSocket close event for: ${id}, code: ${event.code}`);
         if (id) {
           this.scheduleCleanupTimeout(id);
         }
@@ -1008,6 +1023,7 @@ export class ChatServer {
 
       ws.addEventListener("error", (error) => {
         const id = ws.idtarget;
+        console.log(`❌ WebSocket error for: ${id}`, error);
         if (id) {
           this.scheduleCleanupTimeout(id);
         }
