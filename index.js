@@ -737,49 +737,64 @@ export class ChatServer {
     return users;
   }
 
-  handleSetIdTarget2(ws, id, baru) {
-    ws.idtarget = id;
+ handleSetIdTarget2(ws, id, baru) {
+  ws.idtarget = id;
 
-    this.usersToRemove.delete(id);
-    if (this.pingTimeouts.has(id)) {
-      clearTimeout(this.pingTimeouts.get(id));
-      this.pingTimeouts.delete(id);
-    }
+  this.usersToRemove.delete(id);
+  if (this.pingTimeouts.has(id)) {
+    clearTimeout(this.pingTimeouts.get(id));
+    this.pingTimeouts.delete(id);
+  }
 
-    let isInRoom = false;
+  let isInRoom = false;
 
-    if (baru === false) {
-      const seatInfo = this.userToSeat.get(id);
-      if (seatInfo) {
-        const { room, seat } = seatInfo;
-        const seatMap = this.roomSeats.get(room);
+  if (baru === false) {
+    const seatInfo = this.userToSeat.get(id);
 
-        if (seatMap?.has(seat)) {
-          const seatData = seatMap.get(seat);
+    if (seatInfo) {
+      const { room, seat } = seatInfo;
+      const seatMap = this.roomSeats.get(room);
 
-          if (seatData.namauser === id) {
-            isInRoom = true;
-            ws.roomname = room;
-            ws.numkursi = new Set([seat]);
-            this.safeSend(ws, ["currentNumber", this.currentNumber]);
-            this.sendAllStateTo(ws, room);
-            this.broadcastRoomUserCount(room);
-          }
+      if (seatMap?.has(seat)) {
+        const seatData = seatMap.get(seat);
+
+        if (seatData.namauser === id) {
+          // ===== USER MATCH KURSI =====
+          isInRoom = true;
+          ws.roomname = room;
+          ws.numkursi = new Set([seat]);
+
+          this.safeSend(ws, ["currentNumber", this.currentNumber]);
+          this.sendAllStateTo(ws, room);
+          this.broadcastRoomUserCount(room);
+
+        } else {
+          // ===== USER ADA DI ROOM TAPI BEDA NAMA =====
+          this.safeSend(ws, ["needJoinRoom"]);
         }
-      }
-    }
 
-    if (!isInRoom) {
+      } else {
+        // ===== SEAT TIDAK ADA =====
+        this.safeSend(ws, ["needJoinRoom"]);
+      }
+
+    } else {
+      // ===== USER TIDAK PUNYA SEATINFO =====
       this.safeSend(ws, ["needJoinRoom"]);
     }
-
-    if (this.privateMessageBuffer.has(id)) {
-      for (const msg of this.privateMessageBuffer.get(id)) {
-        this.safeSend(ws, msg);
-      }
-      this.privateMessageBuffer.delete(id);
-    }
   }
+
+
+
+  // ===== KIRIM BUFFER PRIVATE MESSAGE =====
+  if (this.privateMessageBuffer.has(id)) {
+    for (const msg of this.privateMessageBuffer.get(id)) {
+      this.safeSend(ws, msg);
+    }
+    this.privateMessageBuffer.delete(id);
+  }
+}
+
 
   scheduleCleanupTimeout(idtarget) {
     if (this.pingTimeouts.has(idtarget)) {
@@ -1207,3 +1222,4 @@ export default {
     }
   }
 };
+
