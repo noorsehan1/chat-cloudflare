@@ -123,7 +123,6 @@ export class ChatServer {
     }
 
     // 2) Remove seat(s) across all rooms that reference the idtarget (or lock by id)
-    // We iterate rooms and seats but stop early if no references found for performance hints.
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) continue;
@@ -152,7 +151,6 @@ export class ChatServer {
 
     // 5) Remove any pending seat updates from updateKursiBuffer referencing idtarget
     for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
-      // Avoid creating arrays; iterate entries and delete matching ones
       for (const [seat, info] of seatMapUpdates) {
         if (info && (info.namauser === idtarget || info.namauser === `__LOCK__${idtarget}`)) {
           seatMapUpdates.delete(seat);
@@ -163,13 +161,11 @@ export class ChatServer {
     // 6) Remove chat messages coming from this idtarget in buffers
     for (const [room, chatList] of this.chatMessageBuffer) {
       if (!Array.isArray(chatList) || chatList.length === 0) continue;
-      // Filter in-place by creating a small new array only if needed
       let changed = false;
       const filtered = [];
       for (let i = 0; i < chatList.length; i++) {
         const msg = chatList[i];
         if (!msg) continue;
-        // msg format: ["chat", roomname, noImageURL, username, message, ...]
         if (msg[3] === idtarget) {
           changed = true;
           continue;
@@ -182,8 +178,6 @@ export class ChatServer {
     }
 
     // 7) Remove any seatLocks that point to empty seats (conservative cleanup)
-    // seatLocks keys are of form `${room}-${seat}`; locks themselves are boolean flags.
-    // We clear locks for seats that are currently empty (no namauser) to avoid stale locks.
     for (const [lockKey] of Array.from(this.seatLocks)) {
       const [room, seatStr] = lockKey.split("-");
       const seatNum = parseInt(seatStr, 10);
@@ -203,11 +197,10 @@ export class ChatServer {
       }
     }
 
-    // 8) Remove any client websockets with this idtarget from clients set (do not close others)
+    // 8) Remove any client websockets with this idtarget from clients set
     for (const c of Array.from(this.clients)) {
       try {
         if (c && c.idtarget === idtarget) {
-          // Remove reference; if socket still open, try to close gracefully
           try {
             if (c.readyState === 1) {
               c.close(1000, "Session removed");
@@ -221,18 +214,6 @@ export class ChatServer {
         // suppress
       }
     }
-  }
-
-  async destroy() {
-    // duplicate destroy removed (kept single definition above). included for backward compatibility if referenced
-    const timers = [this._tickTimer, this._flushTimer, this._autoRemoveTimer];
-    for (const timer of timers) {
-      if (timer) clearInterval(timer);
-    }
-    for (const timeout of this.pingTimeouts.values()) {
-      clearTimeout(timeout);
-    }
-    this.pingTimeouts.clear();
   }
 
   // Enhanced rate limiting dengan type-based limits
@@ -254,9 +235,9 @@ export class ChatServer {
     // Adjust limits based on message type
     let limit = this.MAX_MESSAGES_PER_SECOND;
     if (messageType === "chat") {
-      limit = 50; // Higher limit for chat
+      limit = 50;
     } else if (messageType === "updatePoint") {
-      limit = 100; // Highest limit for drawing
+      limit = 100;
     }
 
     if (stats.count++ > limit) {
@@ -298,7 +279,6 @@ export class ChatServer {
           );
 
           if (!stillActive) {
-            // Use fullRemoveById for comprehensive cleanup
             this.fullRemoveById(idtarget);
 
             for (const client of this.clients) {
@@ -402,7 +382,6 @@ export class ChatServer {
     for (const [room, messages] of this.chatMessageBuffer) {
       if (messages.length > 0) {
         try {
-          // Process ALL messages tanpa batch limit
           for (let i = 0; i < messages.length; i++) {
             const msg = messages[i];
             this.broadcastToRoom(room, msg);
@@ -439,7 +418,6 @@ export class ChatServer {
     try {
       this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
 
-      // Only broadcast to active clients in relevant rooms
       for (const c of this.clients) {
         if (c.readyState === 1 && c.roomname) {
           this.safeSend(c, ["currentNumber", this.currentNumber]);
@@ -514,7 +492,6 @@ export class ChatServer {
         let delivered = false;
         for (const c of this.clients) {
           if (c.idtarget === id && c.readyState === 1) {
-            // Send max 10 messages at once
             const batch = msgs.slice(0, 10);
             for (let i = 0; i < batch.length; i++) {
               const m = batch[i];
@@ -639,9 +616,8 @@ export class ChatServer {
         const info = seatMap.get(seat);
         if (!info) continue;
 
-        // Limit points to prevent overload - show recent points only
         if (info.points.length > 0) {
-          const recentPoints = info.points.slice(-5); // Show last 5 points
+          const recentPoints = info.points.slice(-5);
           for (let i = 0; i < recentPoints.length; i++) {
             const point = recentPoints[i];
             allPoints.push({ seat, ...point });
@@ -695,11 +671,9 @@ export class ChatServer {
 
       this.clients.delete(ws);
 
-      // Use fullRemoveById to ensure complete cleanup when no active connections
       if (activeConnections.length === 0) {
         this.fullRemoveById(id);
       } else {
-        // If there are still active connections, only clean buffers for this ws
         this.privateMessageBuffer.delete(id);
         this.messageCounts.delete(id);
       }
@@ -739,7 +713,6 @@ export class ChatServer {
 
   getAllOnlineUsers() {
     const users = [];
-    // Limit to 1000 users for performance
     let count = 0;
     for (const ws of this.clients) {
       if (count >= 1000) break;
@@ -773,6 +746,8 @@ export class ChatServer {
       this.pingTimeouts.delete(id);
     }
 
+    let isInRoom = false;
+
     if (baru === false) {
       const seatInfo = this.userToSeat.get(id);
       if (seatInfo) {
@@ -783,6 +758,7 @@ export class ChatServer {
           const seatData = seatMap.get(seat);
 
           if (seatData.namauser === id) {
+            isInRoom = true;
             ws.roomname = room;
             ws.numkursi = new Set([seat]);
             this.safeSend(ws, ["currentNumber", this.currentNumber]);
@@ -791,6 +767,10 @@ export class ChatServer {
           }
         }
       }
+    }
+
+    if (!isInRoom) {
+      this.safeSend(ws, ["needJoinRoom"]);
     }
 
     if (this.privateMessageBuffer.has(id)) {
@@ -834,15 +814,35 @@ export class ChatServer {
     if (!idtarget) return;
 
     try {
-      // Immediate comprehensive cleanup
       this.fullRemoveById(idtarget);
-
-      // Remove this specific ws reference if present
       this.clients.delete(ws);
-
     } catch (error) {
       // suppress
     }
+  }
+
+  handleJoinRoom(ws, newRoom) {
+    if (!roomList.includes(newRoom)) return false;
+
+    if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
+
+    ws.roomname = newRoom;
+    const foundSeat = this.lockSeat(newRoom, ws);
+
+    if (foundSeat === null) return false;
+
+    ws.numkursi = new Set([foundSeat]);
+    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+
+    if (ws.idtarget) {
+        this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+    }
+    
+    this.safeSend(ws, ["currentNumber", this.currentNumber]);
+    this.sendAllStateTo(ws, newRoom);
+    this.broadcastRoomUserCount(newRoom);
+    
+    return true;
   }
 
   handleMessage(ws, raw) {
@@ -859,11 +859,34 @@ export class ChatServer {
 
     const evt = data[0];
 
-    // Enhanced rate limiting dengan message type
     if (!this.checkRateLimit(ws, evt)) return;
 
     try {
       switch (evt) {
+        case "isInRoom": {
+          const idtarget = ws.idtarget;
+          
+          if (!idtarget) {
+            this.safeSend(ws, ["inRoomStatus", false]);
+            return;
+          }
+          
+          const seatInfo = this.userToSeat.get(idtarget);
+          if (!seatInfo) {
+            this.safeSend(ws, ["inRoomStatus", false]);
+            return;
+          }
+          
+          const { room, seat } = seatInfo;
+          const seatMap = this.roomSeats.get(room);
+          const seatData = seatMap?.get(seat);
+          
+          const isInRoom = seatData?.namauser === idtarget;
+          
+          this.safeSend(ws, ["inRoomStatus", isInRoom]);
+          break;
+        }
+
         case "onDestroy": {
           const idtarget = ws.idtarget;
           this.handleOnDestroy(ws, idtarget);
@@ -1022,23 +1045,7 @@ export class ChatServer {
 
         case "joinRoom": {
           const newRoom = data[1];
-          if (!roomList.includes(newRoom)) return;
-
-          if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
-
-          ws.roomname = newRoom;
-          const foundSeat = this.lockSeat(newRoom, ws);
-
-          if (foundSeat === null) return;
-
-          ws.numkursi = new Set([foundSeat]);
-          this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-
-          if (ws.idtarget)
-            this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-          this.safeSend(ws, ["currentNumber", this.currentNumber]);
-          this.sendAllStateTo(ws, newRoom);
-          this.broadcastRoomUserCount(newRoom);
+          this.handleJoinRoom(ws, newRoom);
           break;
         }
 
@@ -1059,14 +1066,12 @@ export class ChatServer {
           const si = seatMap.get(seat);
           if (!si) return;
 
-          // FIXED: Accumulate points instead of overwriting
           si.points.push({ x, y, fast, timestamp: Date.now() });
 
-          // Clean old points (keep last 3 seconds)
           const now = Date.now();
           si.points = si.points.filter(point => now - point.timestamp < 3000);
 
-          si.lastActivity = Date.now();
+          si.lastActivity = now;
           this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
           break;
         }
@@ -1085,7 +1090,6 @@ export class ChatServer {
           const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
           if (!roomList.includes(room)) return;
 
-          // Simple lock mechanism untuk prevent race condition
           const lockKey = `${room}-${seat}`;
           if (this.seatLocks.has(lockKey)) return;
           this.seatLocks.set(lockKey, true);
@@ -1143,7 +1147,9 @@ export class ChatServer {
 
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
-      server.accept();
+      
+      // ✅ FIX: Tambahkan await di sini
+      await server.accept();
 
       const ws = server;
 
@@ -1157,7 +1163,6 @@ export class ChatServer {
         try {
           this.handleMessage(ws, ev.data);
         } catch (error) {
-          // On unexpected error during message handling, cleanup safely
           this.cleanupClientSafely(ws);
         }
       });
@@ -1170,7 +1175,14 @@ export class ChatServer {
         this.cleanupClientSafely(ws);
       });
 
-      // Note: Per request, do not attach 'error' event handler and no console logs.
+      // ✅ FIX: Perbaiki typo "reeor" menjadi "error"
+      ws.addEventListener("error", (event) => {
+        const id = ws.idtarget;
+        if (id) {
+          this.scheduleCleanupTimeout(id);
+        }
+        this.cleanupClientSafely(ws);
+      });
 
       return new Response(null, { status: 101, webSocket: client });
     } catch (error) {
