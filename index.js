@@ -767,17 +767,18 @@ export class ChatServer {
     return users;
   }
 
-  handleSetIdTarget2(ws, id, baru) {
-    ws.idtarget = id;
+ handleSetIdTarget2(ws, id, baru) {
+  ws.idtarget = id;
 
-    // === CLEANUP DULU: HAPUS SEMUA KURSI DARI SEMUA ROOM YANG PAKAI ID INI ===
+  // ✅ USER BARU (baru === true) - BUTUH CLEANUP
+  if (baru === true) {
+    // === CLEANUP DULU UNTUK USER BARU ===
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) continue;
 
       for (const [seatNumber, seatInfo] of seatMap) {
         if (seatInfo.namauser === id) {
-          // Hapus kursi yang pakai ID ini
           Object.assign(seatInfo, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
         }
@@ -785,7 +786,6 @@ export class ChatServer {
       this.broadcastRoomUserCount(room);
     }
 
-    // Juga hapus dari mapping dan buffers
     this.userToSeat.delete(id);
     this.usersToRemove.delete(id);
     this.privateMessageBuffer.delete(id);
@@ -796,12 +796,9 @@ export class ChatServer {
       this.pingTimeouts.delete(id);
     }
 
-    let isInRoom = false;
-
-    // === CEK APAKAH USER SUDAH ADA DI ROOM (dari join manual sebelumnya) ===
+    // PROSES USER BARU
     if (ws.roomname && ws.numkursi && ws.numkursi.size > 0) {
-      // User sudah ada di room dari join manual sebelumnya
-      isInRoom = true;
+      // User sudah join room manual sebelumnya
       const room = ws.roomname;
       const seat = Array.from(ws.numkursi)[0];
       
@@ -809,11 +806,10 @@ export class ChatServer {
       if (seatMap?.has(seat)) {
         const seatData = seatMap.get(seat);
         
-        // Assign seat ke user baru (setelah cleanup)
+        // Assign seat ke user baru
         seatData.namauser = id;
         seatData.lastActivity = Date.now();
         
-        // Simpan mapping user -> seat
         this.userToSeat.set(id, { room, seat });
         
         // Broadcast update kursi
@@ -833,50 +829,61 @@ export class ChatServer {
         
         this.broadcastRoomUserCount(room);
       }
-      
-    } else if (baru === false) {
-      // USER LAMA - coba restore dari seat info
-      const seatInfo = this.userToSeat.get(id);
+    } else {
+      // User baru tapi belum join room manual
+      this.safeSend(ws, ["needJoinRoom"]);
+    }
+  }
+  // ✅ USER LAMA (baru === false) - HANYA RESTORE, TANPA CLEANUP
+  else if (baru === false) {
+    // Hanya hapus ping timeout (selalu perlu)
+    if (this.pingTimeouts.has(id)) {
+      clearTimeout(this.pingTimeouts.get(id));
+      this.pingTimeouts.delete(id);
+    }
 
-      if (seatInfo) {
-        const { room, seat } = seatInfo;
-        const seatMap = this.roomSeats.get(room);
+    this.usersToRemove.delete(id);
 
-        if (seatMap?.has(seat)) {
-          const seatData = seatMap.get(seat);
+    // LANGSUNG RESTORE DARI SEAT INFO YANG ADA
+    const seatInfo = this.userToSeat.get(id);
 
-          if (seatData.namauser === id) {
-            // User masih di seat yang sama
-            isInRoom = true;
-            ws.roomname = room;
-            ws.numkursi = new Set([seat]);
-            this.broadcastRoomUserCount(room);
-          } else {
-            // Seat sudah diduduki orang lain
-            this.safeSend(ws, ["needJoinRoom"]);
-          }
+    if (seatInfo) {
+      const { room, seat } = seatInfo;
+      const seatMap = this.roomSeats.get(room);
+
+      if (seatMap?.has(seat)) {
+        const seatData = seatMap.get(seat);
+
+        if (seatData.namauser === id) {
+          // ✅ User masih di seat yang sama - RESTORE BERHASIL
+          ws.roomname = room;
+          ws.numkursi = new Set([seat]);
+          this.broadcastRoomUserCount(room);
         } else {
-          // Seat tidak ada
+          // ❌ Seat sudah diduduki orang lain
           this.safeSend(ws, ["needJoinRoom"]);
         }
       } else {
-        // Tidak ada seat info
+        // ❌ Seat tidak ada
         this.safeSend(ws, ["needJoinRoom"]);
       }
     } else {
-      // USER BARU TAPI BELUM JOIN ROOM
+      // ❌ Tidak ada seat info
       this.safeSend(ws, ["needJoinRoom"]);
-    }
-
-    // Kirim private messages
-    if (this.privateMessageBuffer.has(id)) {
-      for (const msg of this.privateMessageBuffer.get(id)) {
-        this.safeSend(ws, msg);
-      }
-      this.privateMessageBuffer.delete(id);
     }
   }
 
+  // Kirim private messages buffer (untuk kedua case)
+  if (this.privateMessageBuffer.has(id)) {
+    for (const msg of this.privateMessageBuffer.get(id)) {
+      this.safeSend(ws, msg);
+    }
+    this.privateMessageBuffer.delete(id);
+  }
+}
+
+
+  
   scheduleCleanupTimeout(idtarget) {
     if (this.pingTimeouts.has(idtarget)) {
       clearTimeout(this.pingTimeouts.get(idtarget));
@@ -1280,3 +1287,4 @@ export default {
     }
   }
 };
+
