@@ -829,9 +829,6 @@ export class ChatServer {
         
         this.broadcastRoomUserCount(room);
       }
-    } else {
-      // User baru tapi belum join room manual
-      this.safeSend(ws, ["needJoinRoom"]);
     }
   }
   // ✅ USER LAMA (baru === false) - HANYA RESTORE, TANPA CLEANUP
@@ -1287,4 +1284,5 @@ export default {
     }
   }
 };
+
 
