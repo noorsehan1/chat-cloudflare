@@ -1,4 +1,4 @@
-// ChatServer Durable Object - FINAL FIX with fullRemoveById + memory optimizations
+// ChatServer Durable Object - FINAL FIX dengan semua perbaikan
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
@@ -88,27 +88,57 @@ export class ChatServer {
   }
 
   async destroy() {
+    console.log('ChatServer Durable Object destroying...');
+    
+    // 1. Clear semua timers
     const timers = [this._tickTimer, this._flushTimer, this._autoRemoveTimer];
     for (const timer of timers) {
       if (timer) clearInterval(timer);
     }
 
+    // 2. Clear semua timeouts
     for (const timeout of this.pingTimeouts.values()) {
       clearTimeout(timeout);
     }
     this.pingTimeouts.clear();
 
-    // Clear large buffers to help GC
-    this.chatMessageBuffer.clear();
-    this.updateKursiBuffer.clear();
-    this.privateMessageBuffer.clear();
-    this.roomSeats.clear();
-    this.userToSeat.clear();
+    // 3. Clear semua buffers dan collections
+    const buffersToClear = [
+      this.chatMessageBuffer,
+      this.updateKursiBuffer, 
+      this.privateMessageBuffer, // ✅ PRIVATE MESSAGE BUFFER
+      this.roomSeats,
+      this.userToSeat,
+      this.seatLocks,
+      this.messageCounts,
+      this.usersToRemove,
+      this.cleanupInProgress
+    ];
+    
+    for (const buffer of buffersToClear) {
+      if (buffer && typeof buffer.clear === 'function') {
+        buffer.clear();
+      }
+    }
+
+    // 4. Close semua websocket connections
+    for (const client of this.clients) {
+      try {
+        if (client.readyState === 1) {
+          client.close(1000, "Server shutdown");
+        }
+      } catch (e) {
+        // suppress
+      }
+    }
     this.clients.clear();
-    this.seatLocks.clear();
-    this.messageCounts.clear();
-    this.usersToRemove.clear();
-    this.cleanupInProgress.clear();
+
+    // 5. Cleanup game manager
+    if (this.lowcard && typeof this.lowcard.destroy === 'function') {
+      this.lowcard.destroy();
+    }
+    
+    console.log('ChatServer Durable Object destroyed successfully');
   }
 
   // Comprehensive remover that clears all references for an idtarget
@@ -737,64 +767,115 @@ export class ChatServer {
     return users;
   }
 
- handleSetIdTarget2(ws, id, baru) {
-  ws.idtarget = id;
+  handleSetIdTarget2(ws, id, baru) {
+    ws.idtarget = id;
 
-  this.usersToRemove.delete(id);
-  if (this.pingTimeouts.has(id)) {
-    clearTimeout(this.pingTimeouts.get(id));
-    this.pingTimeouts.delete(id);
-  }
-
-  let isInRoom = false;
-
-  if (baru === false) {
-    const seatInfo = this.userToSeat.get(id);
-
-    if (seatInfo) {
-      const { room, seat } = seatInfo;
+    // === CLEANUP DULU: HAPUS SEMUA KURSI DARI SEMUA ROOM YANG PAKAI ID INI ===
+    for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
+      if (!seatMap) continue;
 
+      for (const [seatNumber, seatInfo] of seatMap) {
+        if (seatInfo.namauser === id) {
+          // Hapus kursi yang pakai ID ini
+          Object.assign(seatInfo, createEmptySeat());
+          this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
+        }
+      }
+      this.broadcastRoomUserCount(room);
+    }
+
+    // Juga hapus dari mapping dan buffers
+    this.userToSeat.delete(id);
+    this.usersToRemove.delete(id);
+    this.privateMessageBuffer.delete(id);
+    this.messageCounts.delete(id);
+    
+    if (this.pingTimeouts.has(id)) {
+      clearTimeout(this.pingTimeouts.get(id));
+      this.pingTimeouts.delete(id);
+    }
+
+    let isInRoom = false;
+
+    // === CEK APAKAH USER SUDAH ADA DI ROOM (dari join manual sebelumnya) ===
+    if (ws.roomname && ws.numkursi && ws.numkursi.size > 0) {
+      // User sudah ada di room dari join manual sebelumnya
+      isInRoom = true;
+      const room = ws.roomname;
+      const seat = Array.from(ws.numkursi)[0];
+      
+      const seatMap = this.roomSeats.get(room);
       if (seatMap?.has(seat)) {
         const seatData = seatMap.get(seat);
+        
+        // Assign seat ke user baru (setelah cleanup)
+        seatData.namauser = id;
+        seatData.lastActivity = Date.now();
+        
+        // Simpan mapping user -> seat
+        this.userToSeat.set(id, { room, seat });
+        
+        // Broadcast update kursi
+        const updateData = {
+          noimageUrl: seatData.noimageUrl,
+          namauser: seatData.namauser,
+          color: seatData.color,
+          itembawah: seatData.itembawah,
+          itematas: seatData.itematas,
+          vip: seatData.vip,
+          viptanda: seatData.viptanda
+        };
+        
+        if (!this.updateKursiBuffer.has(room))
+          this.updateKursiBuffer.set(room, new Map());
+        this.updateKursiBuffer.get(room).set(seat, updateData);
+        
+        this.broadcastRoomUserCount(room);
+      }
+      
+    } else if (baru === false) {
+      // USER LAMA - coba restore dari seat info
+      const seatInfo = this.userToSeat.get(id);
 
-        if (seatData.namauser === id) {
-          // ===== USER MATCH KURSI =====
-          isInRoom = true;
-          ws.roomname = room;
-          ws.numkursi = new Set([seat]);
+      if (seatInfo) {
+        const { room, seat } = seatInfo;
+        const seatMap = this.roomSeats.get(room);
 
-          this.safeSend(ws, ["currentNumber", this.currentNumber]);
-          this.sendAllStateTo(ws, room);
-          this.broadcastRoomUserCount(room);
+        if (seatMap?.has(seat)) {
+          const seatData = seatMap.get(seat);
 
+          if (seatData.namauser === id) {
+            // User masih di seat yang sama
+            isInRoom = true;
+            ws.roomname = room;
+            ws.numkursi = new Set([seat]);
+            this.broadcastRoomUserCount(room);
+          } else {
+            // Seat sudah diduduki orang lain
+            this.safeSend(ws, ["needJoinRoom"]);
+          }
         } else {
-          // ===== USER ADA DI ROOM TAPI BEDA NAMA =====
+          // Seat tidak ada
           this.safeSend(ws, ["needJoinRoom"]);
         }
-
       } else {
-        // ===== SEAT TIDAK ADA =====
+        // Tidak ada seat info
         this.safeSend(ws, ["needJoinRoom"]);
       }
-
     } else {
-      // ===== USER TIDAK PUNYA SEATINFO =====
+      // USER BARU TAPI BELUM JOIN ROOM
       this.safeSend(ws, ["needJoinRoom"]);
     }
-  }
 
-
-
-  // ===== KIRIM BUFFER PRIVATE MESSAGE =====
-  if (this.privateMessageBuffer.has(id)) {
-    for (const msg of this.privateMessageBuffer.get(id)) {
-      this.safeSend(ws, msg);
+    // Kirim private messages
+    if (this.privateMessageBuffer.has(id)) {
+      for (const msg of this.privateMessageBuffer.get(id)) {
+        this.safeSend(ws, msg);
+      }
+      this.privateMessageBuffer.delete(id);
     }
-    this.privateMessageBuffer.delete(id);
   }
-}
-
 
   scheduleCleanupTimeout(idtarget) {
     if (this.pingTimeouts.has(idtarget)) {
@@ -1003,39 +1084,16 @@ export class ChatServer {
           const username = data[1];
           const tanda = data[2] ?? "";
 
-          const activeSockets = Array.from(this.clients)
-            .filter(c => c.idtarget === username && c.readyState === 1);
-          const online = activeSockets.length > 0;
-
-          this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
-
-          if (activeSockets.length > 1) {
-            const newest = activeSockets[activeSockets.length - 1];
-            const oldSockets = activeSockets.slice(0, -1);
-
-            const userSeatInfo = this.userToSeat.get(username);
-            if (userSeatInfo) {
-              const { room, seat } = userSeatInfo;
-              const seatMap = this.roomSeats.get(room);
-              if (seatMap && seatMap.has(seat)) {
-                Object.assign(seatMap.get(seat), createEmptySeat());
-                this.broadcastToRoom(room, ["removeKursi", room, seat]);
-                this.broadcastRoomUserCount(room);
-              }
-              this.userToSeat.delete(username);
-            }
-
-            for (const old of oldSockets) {
-              try {
-                if (old.readyState === 1) {
-                  old.close(4000, "Duplicate login");
-                }
-                this.clients.delete(old);
-              } catch (e) {
-                // suppress
-              }
+          // ✅ SEDERHANA: Cek apakah user ada yang online
+          let online = false;
+          for (const c of this.clients) {
+            if (c.idtarget === username && c.readyState === 1) {
+              online = true;
+              break;
             }
           }
+
+          this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
           break;
         }
 
@@ -1222,4 +1280,3 @@ export default {
     }
   }
 };
-
