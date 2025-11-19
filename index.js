@@ -781,10 +781,9 @@ export class ChatServer {
         if (seatInfo.namauser === id) {
           Object.assign(seatInfo, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
-           this.broadcastRoomUserCount(room);
-
         }
       }
+      this.broadcastRoomUserCount(room);
     }
 
     this.userToSeat.delete(id);
@@ -858,10 +857,17 @@ export class ChatServer {
           ws.numkursi = new Set([seat]);
           this.broadcastRoomUserCount(room);
         } else {
-         
+          // ❌ Seat sudah diduduki orang lain
           this.safeSend(ws, ["needJoinRoom"]);
         }
-    
+      } else {
+        // ❌ Seat tidak ada
+        this.safeSend(ws, ["needJoinRoom"]);
+      }
+    } else {
+      // ❌ Tidak ada seat info
+      this.safeSend(ws, ["needJoinRoom"]);
+    }
   }
 
   // Kirim private messages buffer (untuk kedua case)
@@ -1278,6 +1284,4 @@ export default {
     }
   }
 };
-
-
 
