@@ -938,7 +938,6 @@ export class ChatServer {
         this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
     }
     
-    this.safeSend(ws, ["currentNumber", this.currentNumber]);
     this.sendAllStateTo(ws, newRoom);
     this.broadcastRoomUserCount(newRoom);
     
@@ -1284,4 +1283,5 @@ export default {
     }
   }
 };
+
 
