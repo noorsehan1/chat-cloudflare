@@ -960,6 +960,36 @@ export class ChatServer {
     return true;
   }
 
+
+  // Function untuk VIP badge - realtime overwrite
+handleVipBadge(room, seat, numvip, colorvip) {
+  if (!roomList.includes(room)) return false;
+  
+  const seatMap = this.roomSeats.get(room);
+  if (!seatMap) return false;
+
+  const seatInfo = seatMap.get(seat);
+  if (!seatInfo) return false;
+
+  // Update data VIP - overwrite realtime
+  seatInfo.vip = numvip;
+  seatInfo.viptanda = 1;
+  if (colorvip) seatInfo.color = colorvip;
+  
+  // Broadcast vipbadge event
+  this.broadcastToRoom(room, [
+    "vipbadge", 
+    room,
+    seat,
+    numvip, 
+    colorvip
+  ]);
+  
+  return true;
+}
+
+
+
   handleMessage(ws, raw) {
     if (ws.readyState !== 1) return;
 
@@ -978,6 +1008,13 @@ export class ChatServer {
 
     try {
       switch (evt) {
+
+          // Hanya tambahkan case vipbadge di handleMessage
+case "vipbadge": {
+  const [, room, seat, numbadge, colortext] = data;
+  this.handleVipBadge(room, seat, numbadge, colortext);
+  break;
+}
         case "isInRoom": {
           const idtarget = ws.idtarget;
           
@@ -1299,3 +1336,4 @@ export default {
     }
   }
 };
+
