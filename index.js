@@ -633,22 +633,18 @@ export class ChatServer {
       const count = this.getJumlahRoom()[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
 
+      // ✅ PERBAIKAN: Kirim VIP badges TANPA setTimeout (langsung real-time)
       const vipBadges = this.getAllVipBadges(room);
       if (vipBadges.length > 0) {
         for (let i = 0; i < vipBadges.length; i++) {
           const vipData = vipBadges[i];
-          
-          setTimeout(() => {
-            if (ws.readyState === 1) {
-              this.safeSend(ws, [
-                "vipbadge", 
-                room,
-                vipData[0],
-                vipData[1],
-                vipData[2]
-              ]);
-            }
-          }, 50 * i);
+          this.safeSend(ws, [
+            "vipbadge", 
+            room,
+            vipData[0],
+            vipData[1],
+            vipData[2]
+          ]);
         }
       }
 
@@ -718,24 +714,18 @@ export class ChatServer {
       this.safeSend(ws, ["allPointsList", room, allPoints]);
       this.safeSend(ws, ["allUpdateKursiList", room, meta]);
 
+      // ✅ PERBAIKAN: Kirim VIP badges TANPA setTimeout (langsung real-time)
       const vipBadges = this.getAllVipBadges(room);
       if (vipBadges.length > 0) {
         for (let i = 0; i < vipBadges.length; i++) {
           const vipData = vipBadges[i];
-          
-          setTimeout(() => {
-            try {
-              if (ws.readyState === 1) {
-                this.safeSend(ws, [
-                  "vipbadge", 
-                  room,
-                  vipData[0],
-                  vipData[1],
-                  vipData[2]
-                ]);
-              }
-            } catch (error) {}
-          }, 50 * i);
+          this.safeSend(ws, [
+            "vipbadge", 
+            room,
+            vipData[0],
+            vipData[1],
+            vipData[2]
+          ]);
         }
       }
     } catch (error) {}
@@ -861,6 +851,7 @@ export class ChatServer {
         this.userToSeat.delete(id);
         ws.roomname = undefined;
         ws.numkursi = new Set();
+        this.safeSend(ws, ["needJoinRoom"]);
     }
     else if (baru === false) {
         const seatInfo = this.userToSeat.get(id);
@@ -1283,4 +1274,3 @@ export default {
     }
   }
 };
-
