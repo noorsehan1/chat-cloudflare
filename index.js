@@ -111,7 +111,7 @@ export class ChatServer {
       roomVipMap.delete(seat);
     }
     
-    // ✅ BROADCAST REAL-TIME ke semua client di room
+    // ✅ HANYA INI YANG KIRIM VIP BADGE - REAL-TIME
     if (numbadge > 0) {
       this.broadcastToRoom(room, [
         "vipbadge", 
@@ -645,21 +645,7 @@ export class ChatServer {
       const count = this.getJumlahRoom()[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
 
-      // ✅ PERBAIKAN: Kirim VIP badges LANGSUNG tanpa setTimeout
-      const vipBadges = this.getAllVipBadges(room);
-      if (vipBadges.length > 0) {
-        for (let i = 0; i < vipBadges.length; i++) {
-          const vipData = vipBadges[i];
-          this.safeSend(ws, [
-            "vipbadge", 
-            room,
-            vipData[0],
-            vipData[1],
-            vipData[2]
-          ]);
-        }
-      }
-
+      // ❌ HAPUS VIP BADGES DARI SINI - TIDAK DIKIRIM LAGI
       const kursiUpdates = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
@@ -726,20 +712,8 @@ export class ChatServer {
       this.safeSend(ws, ["allPointsList", room, allPoints]);
       this.safeSend(ws, ["allUpdateKursiList", room, meta]);
 
-      // ✅ PERBAIKAN: Kirim VIP badges LANGSUNG tanpa setTimeout
-      const vipBadges = this.getAllVipBadges(room);
-      if (vipBadges.length > 0) {
-        for (let i = 0; i < vipBadges.length; i++) {
-          const vipData = vipBadges[i];
-          this.safeSend(ws, [
-            "vipbadge", 
-            room,
-            vipData[0],
-            vipData[1],
-            vipData[2]
-          ]);
-        }
-      }
+      // ❌ HAPUS VIP BADGES DARI SINI - TIDAK DIKIRIM LAGI
+
     } catch (error) {}
   }
 
