@@ -91,6 +91,7 @@ export class ChatServer {
 
   handleVipBadge(room, seat, numbadge, colorvip) {
     if (!roomList.includes(room)) return false;
+    if (seat < 1 || seat > this.MAX_SEATS) return false;
     
     if (!this.vipBadgeMap.has(room)) {
       this.vipBadgeMap.set(room, new Map());
@@ -99,22 +100,33 @@ export class ChatServer {
     const roomVipMap = this.vipBadgeMap.get(room);
     
     if (numbadge > 0) {
+      // ✅ SELALU OVERWRITE data existing
       roomVipMap.set(seat, {
         numbadge: numbadge,
         colorvip: colorvip,
         timestamp: Date.now()
       });
     } else {
+      // Remove VIP badge
       roomVipMap.delete(seat);
     }
     
-    this.broadcastToRoom(room, [
-      "vipbadge", 
-      room,
-      seat,
-      numbadge, 
-      colorvip
-    ]);
+    // ✅ BROADCAST REAL-TIME ke semua client di room
+    if (numbadge > 0) {
+      this.broadcastToRoom(room, [
+        "vipbadge", 
+        room,
+        seat,
+        numbadge, 
+        colorvip
+      ]);
+    } else {
+      this.broadcastToRoom(room, [
+        "vipbadgeremove", 
+        room,
+        seat
+      ]);
+    }
     
     return true;
   }
@@ -633,7 +645,7 @@ export class ChatServer {
       const count = this.getJumlahRoom()[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
 
-      // ✅ PERBAIKAN: Kirim VIP badges TANPA setTimeout (langsung real-time)
+      // ✅ PERBAIKAN: Kirim VIP badges TANPA setTimeout (REAL-TIME)
       const vipBadges = this.getAllVipBadges(room);
       if (vipBadges.length > 0) {
         for (let i = 0; i < vipBadges.length; i++) {
@@ -714,7 +726,7 @@ export class ChatServer {
       this.safeSend(ws, ["allPointsList", room, allPoints]);
       this.safeSend(ws, ["allUpdateKursiList", room, meta]);
 
-      // ✅ PERBAIKAN: Kirim VIP badges TANPA setTimeout (langsung real-time)
+      // ✅ PERBAIKAN: Kirim VIP badges TANPA setTimeout (REAL-TIME)
       const vipBadges = this.getAllVipBadges(room);
       if (vipBadges.length > 0) {
         for (let i = 0; i < vipBadges.length; i++) {
