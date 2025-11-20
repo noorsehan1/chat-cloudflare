@@ -765,23 +765,24 @@ export class ChatServer {
       this.safeSend(ws, ["allPointsList", room, allPoints]);
       this.safeSend(ws, ["allUpdateKursiList", room, meta]);
 
-      // Kirim semua VIP badges untuk room ini
-      const vipBadges = this.getAllVipBadges(room);
-      if (vipBadges.length > 0) {
-        for (const vipData of vipBadges) {
-          this.safeSend(ws, [
-            "vipbadge", 
-            room,
-            vipData[0], // seat
-            vipData[1], // numbadge
-            vipData[2]  // colorvip
-          ]);
-        }
-      }
-    } catch (error) {
-      // suppress
-    }
+     // Kirim semua VIP badges untuk room ini
+const vipBadges = this.getAllVipBadges(room);
+if (vipBadges.length > 0) {
+  for (let i = 0; i < vipBadges.length; i++) {
+    const vipData = vipBadges[i];
+    
+    // Delay 50ms untuk setiap badge
+    setTimeout(() => {
+      this.safeSend(ws, [
+        "vipbadge", 
+        room,
+        vipData[0], // seat
+        vipData[1], // numbadge
+        vipData[2]  // colorvip
+      ]);
+    }, 50 * i); // Delay bertambah 50ms untuk setiap iterasi
   }
+}
 
   cleanupClientSafely(ws) {
     const id = ws.idtarget;
@@ -1422,3 +1423,4 @@ export default {
     }
   }
 };
+
