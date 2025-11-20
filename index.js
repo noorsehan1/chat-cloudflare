@@ -1,7 +1,10 @@
 // ChatServer Durable Object - FULL VERSION
 import { LowCardGameManager } from "./lowcard.js";
+const roomList = [
+  "LowCard", "General", "Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
+  "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
+];
 
-const roomList = ["LowCard", "General", "Indonesia", "Chill Zone"];
 
 function createEmptySeat() {
   return {
@@ -705,3 +708,4 @@ export default {
     }
   }
 };
+
