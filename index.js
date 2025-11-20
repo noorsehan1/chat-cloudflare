@@ -861,7 +861,6 @@ export class ChatServer {
         this.userToSeat.delete(id);
         ws.roomname = undefined;
         ws.numkursi = new Set();
-        this.safeSend(ws, ["needJoinRoom"]);
     }
     else if (baru === false) {
         const seatInfo = this.userToSeat.get(id);
@@ -1284,3 +1283,4 @@ export default {
     }
   }
 };
+
