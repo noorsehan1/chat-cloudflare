@@ -933,6 +933,7 @@ export class ChatServer {
 
     ws.numkursi = new Set([foundSeat]);
     this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]); // Ditambahkan parameter room
 
     if (ws.idtarget) {
         this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
@@ -1283,5 +1284,6 @@ export default {
     }
   }
 };
+
 
 
