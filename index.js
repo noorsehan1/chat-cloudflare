@@ -671,7 +671,7 @@ export class ChatServer {
     }
   }
 
- senderrorstate(ws, room) {
+  senderrorstate(ws, room) {
     if (ws.readyState !== 1) return;
 
     try {
@@ -703,10 +703,7 @@ export class ChatServer {
           }, 50 * i);
         }
       }
-    } catch (error) {
-      // suppress
-    }
-}
+
       const kursiUpdates = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
@@ -737,7 +734,7 @@ export class ChatServer {
     }
   }
 
- sendAllStateTo(ws, room) {
+  sendAllStateTo(ws, room) {
     if (ws.readyState !== 1) return;
 
     try {
@@ -801,7 +798,7 @@ export class ChatServer {
     } catch (error) {
       // suppress
     }
-}
+  }
 
   cleanupClientSafely(ws) {
     const id = ws.idtarget;
@@ -899,152 +896,97 @@ export class ChatServer {
     }
     return users;
   }
+handleSetIdTarget2(ws, id, baru) {
+    ws.idtarget = id;
 
- handleSetIdTarget2(ws, id, baru) {
-  ws.idtarget = id;
-
-  // ✅ USER BARU (baru === true) - BUTUH CLEANUP
-  if (baru === true) {
-    // === CLEANUP DULU UNTUK USER BARU ===
-    for (const room of roomList) {
-      const seatMap = this.roomSeats.get(room);
-      if (!seatMap) continue;
-
-      for (const [seatNumber, seatInfo] of seatMap) {
-        if (seatInfo.namauser === id) {
-          Object.assign(seatInfo, createEmptySeat());
-          
-          // Hapus VIP badge dari kursi ini
-          this.removeVipBadgeFromSeat(room, seatNumber);
-          
-          this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
-        }
-      }
-      this.broadcastRoomUserCount(room);
+    // ✅ CLEANUP DATA PENDING UNTUK KEDUA CASE (BARU & LAMA)
+    // Hapus data pending removal, timeout, dan buffers
+    if (this.pingTimeouts.has(id)) {
+        clearTimeout(this.pingTimeouts.get(id));
+        this.pingTimeouts.delete(id);
     }
-
-    this.userToSeat.delete(id);
     this.usersToRemove.delete(id);
     this.privateMessageBuffer.delete(id);
     this.messageCounts.delete(id);
-    
-    if (this.pingTimeouts.has(id)) {
-      clearTimeout(this.pingTimeouts.get(id));
-      this.pingTimeouts.delete(id);
-    }
 
-    // PROSES USER BARU
-    if (ws.roomname && ws.numkursi && ws.numkursi.size > 0) {
-      // User sudah join room manual sebelumnya
-      const room = ws.roomname;
-      const seat = Array.from(ws.numkursi)[0];
-      
-      const seatMap = this.roomSeats.get(room);
-      if (seatMap?.has(seat)) {
-        const seatData = seatMap.get(seat);
-        
-        // Assign seat ke user baru
-        seatData.namauser = id;
-        seatData.lastActivity = Date.now();
-        
-        this.userToSeat.set(id, { room, seat });
-        
-        // Broadcast update kursi
-        const updateData = {
-          noimageUrl: seatData.noimageUrl,
-          namauser: seatData.namauser,
-          color: seatData.color,
-          itembawah: seatData.itembawah,
-          itematas: seatData.itematas,
-          vip: seatData.vip,
-          viptanda: seatData.viptanda
-        };
-        
-        if (!this.updateKursiBuffer.has(room))
-          this.updateKursiBuffer.set(room, new Map());
-        this.updateKursiBuffer.get(room).set(seat, updateData);
-        
-        this.broadcastRoomUserCount(room);
-      }
-    }
-  }
-  // ✅ USER LAMA (baru === false) - HANYA RESTORE, TANPA CLEANUP
-  else if (baru === false) {
-    // Hanya hapus ping timeout (selalu perlu)
-    if (this.pingTimeouts.has(id)) {
-      clearTimeout(this.pingTimeouts.get(id));
-      this.pingTimeouts.delete(id);
-    }
+    // ✅ USER BARU (baru === true) - HANYA CLEANUP, TIDAK BUAT KURSI BARU
+    if (baru === true) {
+        // === CLEANUP DULU UNTUK USER BARU ===
+        for (const room of roomList) {
+            const seatMap = this.roomSeats.get(room);
+            if (!seatMap) continue;
 
-    this.usersToRemove.delete(id);
-
-    // LANGSUNG RESTORE DARI SEAT INFO YANG ADA
-    const seatInfo = this.userToSeat.get(id);
-
-    if (seatInfo) {
-      const { room, seat } = seatInfo;
-      const seatMap = this.roomSeats.get(room);
-
-      if (seatMap?.has(seat)) {
-        const seatData = seatMap.get(seat);
-
-        if (seatData.namauser === id) {
-          // ✅ User masih di seat yang sama - RESTORE BERHASIL
-          ws.roomname = room;
-          ws.numkursi = new Set([seat]);
-          this.broadcastRoomUserCount(room);
-        } else {
-          // ❌ Seat sudah diduduki orang lain
-          this.safeSend(ws, ["needJoinRoom"]);
+            for (const [seatNumber, seatInfo] of seatMap) {
+                if (seatInfo.namauser === id) {
+                    Object.assign(seatInfo, createEmptySeat());
+                    
+                    // Hapus VIP badge dari kursi ini
+                    this.removeVipBadgeFromSeat(room, seatNumber);
+                    
+                    this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
+                }
+            }
+            this.broadcastRoomUserCount(room);
         }
-      } else {
-        // ❌ Seat tidak ada
+
+        // Cleanup data user
+        this.userToSeat.delete(id);
+
+        // ✅ USER BARU TIDAK OTOMATIS DAPAT KURSI
+        // Hanya reset state websocket
+        ws.roomname = undefined;
+        ws.numkursi = new Set();
+        
+        // Kirim needJoinRoom agar user manual join room
         this.safeSend(ws, ["needJoinRoom"]);
-      }
-    } else {
-      // ❌ Tidak ada seat info
-      this.safeSend(ws, ["needJoinRoom"]);
     }
-  }
+    // ✅ USER LAMA (baru === false) - RESTORE SEAT YANG ADA
+    else if (baru === false) {
+        // LANGSUNG RESTORE DARI SEAT INFO YANG ADA
+        const seatInfo = this.userToSeat.get(id);
 
-  // Kirim private messages buffer (untuk kedua case)
-  if (this.privateMessageBuffer.has(id)) {
-    for (const msg of this.privateMessageBuffer.get(id)) {
-      this.safeSend(ws, msg);
-    }
-    this.privateMessageBuffer.delete(id);
-  }
-}
+        if (seatInfo) {
+            const { room, seat } = seatInfo;
+            const seatMap = this.roomSeats.get(room);
 
-  
-  scheduleCleanupTimeout(idtarget) {
-    if (this.pingTimeouts.has(idtarget)) {
-      clearTimeout(this.pingTimeouts.get(idtarget));
-    }
+            if (seatMap?.has(seat)) {
+                const seatData = seatMap.get(seat);
 
-    const timeout = setTimeout(() => {
-      if (this.cleanupInProgress.has(idtarget)) return;
-      this.cleanupInProgress.add(idtarget);
-
-      try {
-        const stillActive = Array.from(this.clients).some(
-          c => c.idtarget === idtarget && c.readyState === 1
-        );
-
-        if (!stillActive) {
-          this.usersToRemove.set(idtarget, Date.now());
+                if (seatData.namauser === id) {
+                    // ✅ User masih di seat yang sama - RESTORE BERHASIL
+                    ws.roomname = room;
+                    ws.numkursi = new Set([seat]);
+                    
+                    // Update last activity
+                    seatData.lastActivity = Date.now();
+                    
+                    // Kirim state room ke user
+                    this.sendAllStateTo(ws, room);
+                    this.broadcastRoomUserCount(room);
+                } else {
+                    // ❌ Seat sudah diduduki orang lain
+                    this.userToSeat.delete(id); // Hapus mapping yang sudah tidak valid
+                    this.safeSend(ws, ["needJoinRoom"]);
+                }
+            } else {
+                // ❌ Seat tidak ada
+                this.userToSeat.delete(id); // Hapus mapping yang sudah tidak valid
+                this.safeSend(ws, ["needJoinRoom"]);
+            }
+        } else {
+            // ❌ Tidak ada seat info
+            this.safeSend(ws, ["needJoinRoom"]);
         }
+    }
 
-      } catch (error) {
-        // suppress
-      } finally {
-        this.pingTimeouts.delete(idtarget);
-        this.cleanupInProgress.delete(idtarget);
-      }
-    }, this.RECONNECT_TIMEOUT);
-
-    this.pingTimeouts.set(idtarget, timeout);
-  }
+    // Kirim private messages buffer (untuk kedua case)
+    if (this.privateMessageBuffer.has(id)) {
+        for (const msg of this.privateMessageBuffer.get(id)) {
+            this.safeSend(ws, msg);
+        }
+        this.privateMessageBuffer.delete(id);
+    }
+}
 
   handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
@@ -1057,7 +999,7 @@ export class ChatServer {
     }
   }
 
-handleJoinRoom(ws, newRoom) {
+  handleJoinRoom(ws, newRoom) {
     if (!roomList.includes(newRoom)) return false;
 
     if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
@@ -1083,9 +1025,8 @@ handleJoinRoom(ws, newRoom) {
     this.broadcastRoomUserCount(newRoom);
     
     return true;
-}
+  }
 
-  
   handleMessage(ws, raw) {
     if (ws.readyState !== 1) return;
 
@@ -1442,5 +1383,3 @@ export default {
     }
   }
 };
-
-
