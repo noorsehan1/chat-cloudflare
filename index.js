@@ -299,7 +299,6 @@ export class ChatServer {
 
             for (const client of this.clients) {
               if (client.idtarget === idtarget && client.readyState === 1) {
-                this.safeSend(client, ["needJoinRoom"]);
               }
             }
           }
@@ -753,7 +752,6 @@ export class ChatServer {
         this.userToSeat.delete(id);
         ws.roomname = undefined;
         ws.numkursi = new Set();
-        this.safeSend(ws, ["needJoinRoom"]);
     }
     else if (baru === false) {
         const seatInfo = this.userToSeat.get(id);
