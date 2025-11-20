@@ -921,47 +921,35 @@ export class ChatServer {
     }
   }
 
- handleJoinRoom(ws, newRoom) {
-    try {
-        // Validasi room exists
-        if (!roomList.includes(newRoom)) {
-            return false;
-        }
+handleJoinRoom(ws, newRoom) {
+    if (!roomList.includes(newRoom)) return false;
 
-        // Jika sudah ada di room sebelumnya, hapus dari kursi lama
-        if (ws.idtarget) {
-            this.removeAllSeatsById(ws.idtarget);
-        }
+    if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
 
-        ws.roomname = newRoom;
-        const foundSeat = this.lockSeat(newRoom, ws);
+    ws.roomname = newRoom;
+    const foundSeat = this.lockSeat(newRoom, ws);
 
-        // ✅ KIRIM roomFull JIKA KURSI TIDAK DITEMUKAN
-        if (foundSeat === null) {
-            this.safeSend(ws, ["roomFull", newRoom]);
-            return false;
-        }
-
-        
-        ws.numkursi = new Set([foundSeat]);
-        this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-
-        if (ws.idtarget) {
-            this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-        }
-        
-        this.sendAllStateTo(ws, newRoom);
-        this.broadcastRoomUserCount(newRoom);
-        this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-
-        
-        return true;
-
-    } catch (error) {
+    if (foundSeat === null) {
+        // ✅ KIRIM EVENT ROOM FULL KE CLIENT
+        this.safeSend(ws, ["roomFull", newRoom]);
         return false;
     }
+
+    ws.numkursi = new Set([foundSeat]);
+    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+
+    if (ws.idtarget) {
+        this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+    }
+    
+    this.sendAllStateTo(ws, newRoom);
+    this.broadcastRoomUserCount(newRoom);
+    
+    return true;
 }
 
+  
   handleMessage(ws, raw) {
     if (ws.readyState !== 1) return;
 
@@ -1301,6 +1289,7 @@ export default {
     }
   }
 };
+
 
 
 
