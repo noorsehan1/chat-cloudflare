@@ -645,7 +645,7 @@ export class ChatServer {
       const count = this.getJumlahRoom()[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
 
-      // ✅ PERBAIKAN: Kirim VIP badges TANPA setTimeout (REAL-TIME)
+      // ✅ PERBAIKAN: Kirim VIP badges LANGSUNG tanpa setTimeout
       const vipBadges = this.getAllVipBadges(room);
       if (vipBadges.length > 0) {
         for (let i = 0; i < vipBadges.length; i++) {
@@ -726,7 +726,7 @@ export class ChatServer {
       this.safeSend(ws, ["allPointsList", room, allPoints]);
       this.safeSend(ws, ["allUpdateKursiList", room, meta]);
 
-      // ✅ PERBAIKAN: Kirim VIP badges TANPA setTimeout (REAL-TIME)
+      // ✅ PERBAIKAN: Kirim VIP badges LANGSUNG tanpa setTimeout
       const vipBadges = this.getAllVipBadges(room);
       if (vipBadges.length > 0) {
         for (let i = 0; i < vipBadges.length; i++) {
@@ -1285,4 +1285,4 @@ export default {
       return new Response("Internal Server Error", { status: 500 });
     }
   }
-};
+}
