@@ -671,7 +671,7 @@ export class ChatServer {
     }
   }
 
-  senderrorstate(ws, room) {
+ senderrorstate(ws, room) {
     if (ws.readyState !== 1) return;
 
     try {
@@ -686,17 +686,27 @@ export class ChatServer {
       // Kirim semua VIP badges untuk room ini ke user baru
       const vipBadges = this.getAllVipBadges(room);
       if (vipBadges.length > 0) {
-        for (const vipData of vipBadges) {
-          this.safeSend(ws, [
-            "vipbadge", 
-            room,
-            vipData[0], // seat
-            vipData[1], // numbadge
-            vipData[2]  // colorvip
-          ]);
+        for (let i = 0; i < vipBadges.length; i++) {
+          const vipData = vipBadges[i];
+          
+          // Delay 50ms untuk setiap badge
+          setTimeout(() => {
+            if (ws.readyState === 1) { // Cek lagi sebelum kirim
+              this.safeSend(ws, [
+                "vipbadge", 
+                room,
+                vipData[0], // seat
+                vipData[1], // numbadge
+                vipData[2]  // colorvip
+              ]);
+            }
+          }, 50 * i);
         }
       }
-
+    } catch (error) {
+      // suppress
+    }
+}
       const kursiUpdates = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
@@ -727,7 +737,7 @@ export class ChatServer {
     }
   }
 
-  sendAllStateTo(ws, room) {
+ sendAllStateTo(ws, room) {
     if (ws.readyState !== 1) return;
 
     try {
@@ -765,23 +775,32 @@ export class ChatServer {
       this.safeSend(ws, ["allPointsList", room, allPoints]);
       this.safeSend(ws, ["allUpdateKursiList", room, meta]);
 
-     // Kirim semua VIP badges untuk room ini
-const vipBadges = this.getAllVipBadges(room);
-if (vipBadges.length > 0) {
-  for (let i = 0; i < vipBadges.length; i++) {
-    const vipData = vipBadges[i];
-    
-    // Delay 50ms untuk setiap badge
-    setTimeout(() => {
-      this.safeSend(ws, [
-        "vipbadge", 
-        room,
-        vipData[0], // seat
-        vipData[1], // numbadge
-        vipData[2]  // colorvip
-      ]);
-    }, 50 * i); // Delay bertambah 50ms untuk setiap iterasi
-  }
+      // Kirim semua VIP badges untuk room ini
+      const vipBadges = this.getAllVipBadges(room);
+      if (vipBadges.length > 0) {
+        for (let i = 0; i < vipBadges.length; i++) {
+          const vipData = vipBadges[i];
+          
+          setTimeout(() => {
+            try {
+              if (ws.readyState === 1) {
+                this.safeSend(ws, [
+                  "vipbadge", 
+                  room,
+                  vipData[0], // seat
+                  vipData[1], // numbadge
+                  vipData[2]  // colorvip
+                ]);
+              }
+            } catch (error) {
+              console.error(`Error sending VIP badge for seat ${vipData[0]}:`, error);
+            }
+          }, 50 * i);
+        }
+      }
+    } catch (error) {
+      // suppress
+    }
 }
 
   cleanupClientSafely(ws) {
@@ -1423,4 +1442,5 @@ export default {
     }
   }
 };
+
 
