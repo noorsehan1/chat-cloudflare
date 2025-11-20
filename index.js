@@ -1,4 +1,4 @@
-// ChatServer Durable Object - FINAL FIX dengan VIP Badge System
+// ChatServer Durable Object - TANPA VIP Badge System
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
@@ -42,9 +42,7 @@ export class ChatServer {
       this.roomSeats.set(room, seatMap);
     }
 
-    // VIP Badge System - Map terpisah
-    this.vipBadgeMap = new Map();
-
+    // ❌ HAPUS VIP Badge System
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
     this.privateMessageBuffer = new Map();
@@ -87,81 +85,6 @@ export class ChatServer {
     this.MAX_MESSAGES_PER_SECOND = 20;
   }
 
-  // ==================== VIP BADGE SYSTEM ====================
-
-  handleVipBadge(room, seat, numbadge, colorvip) {
-    if (!roomList.includes(room)) return false;
-    if (seat < 1 || seat > this.MAX_SEATS) return false;
-    
-    if (!this.vipBadgeMap.has(room)) {
-      this.vipBadgeMap.set(room, new Map());
-    }
-    
-    const roomVipMap = this.vipBadgeMap.get(room);
-    
-    if (numbadge > 0) {
-      // ✅ SELALU OVERWRITE data existing
-      roomVipMap.set(seat, {
-        numbadge: numbadge,
-        colorvip: colorvip,
-        timestamp: Date.now()
-      });
-    } else {
-      // Remove VIP badge
-      roomVipMap.delete(seat);
-    }
-    
-    // ✅ HANYA INI YANG KIRIM VIP BADGE - REAL-TIME
-    if (numbadge > 0) {
-      this.broadcastToRoom(room, [
-        "vipbadge", 
-        room,
-        seat,
-        numbadge, 
-        colorvip
-      ]);
-    } else {
-      this.broadcastToRoom(room, [
-        "vipbadgeremove", 
-        room,
-        seat
-      ]);
-    }
-    
-    return true;
-  }
-
-  getAllVipBadges(room) {
-    if (!this.vipBadgeMap.has(room)) return [];
-    
-    const roomVipMap = this.vipBadgeMap.get(room);
-    const vipBadges = [];
-    
-    for (const [seat, vipData] of roomVipMap) {
-      vipBadges.push([
-        seat,
-        vipData.numbadge,
-        vipData.colorvip
-      ]);
-    }
-    
-    return vipBadges;
-  }
-
-  removeVipBadgeFromSeat(room, seat) {
-    if (this.vipBadgeMap.has(room)) {
-      const roomVipMap = this.vipBadgeMap.get(room);
-      if (roomVipMap.has(seat)) {
-        roomVipMap.delete(seat);
-        this.broadcastToRoom(room, [
-          "vipbadgeremove", 
-          room,
-          seat
-        ]);
-      }
-    }
-  }
-
   // ==================== CORE FUNCTIONS ====================
 
   scheduleCleanupTimeout(idtarget) {
@@ -200,8 +123,7 @@ export class ChatServer {
       this.seatLocks,
       this.messageCounts,
       this.usersToRemove,
-      this.cleanupInProgress,
-      this.vipBadgeMap
+      this.cleanupInProgress
     ];
     
     for (const buffer of buffersToClear) {
@@ -243,7 +165,6 @@ export class ChatServer {
 
         if (n === idtarget || n === `__LOCK__${idtarget}`) {
           Object.assign(info, createEmptySeat());
-          this.removeVipBadgeFromSeat(room, seatNumber);
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
           this.broadcastRoomUserCount(room);
         }
@@ -645,7 +566,6 @@ export class ChatServer {
       const count = this.getJumlahRoom()[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
 
-      // ❌ HAPUS VIP BADGES DARI SINI - TIDAK DIKIRIM LAGI
       const kursiUpdates = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
@@ -712,8 +632,6 @@ export class ChatServer {
       this.safeSend(ws, ["allPointsList", room, allPoints]);
       this.safeSend(ws, ["allUpdateKursiList", room, meta]);
 
-      // ❌ HAPUS VIP BADGES DARI SINI - TIDAK DIKIRIM LAGI
-
     } catch (error) {}
   }
 
@@ -772,7 +690,6 @@ export class ChatServer {
       const currentSeat = seatMap.get(seat);
       if (currentSeat.namauser === idtarget || currentSeat.namauser === `__LOCK__${idtarget}`) {
         Object.assign(currentSeat, createEmptySeat());
-        this.removeVipBadgeFromSeat(room, seat);
         this.broadcastToRoom(room, ["removeKursi", room, seat]);
         this.broadcastRoomUserCount(room);
       }
@@ -827,7 +744,6 @@ export class ChatServer {
             for (const [seatNumber, seatInfo] of seatMap) {
                 if (seatInfo.namauser === id) {
                     Object.assign(seatInfo, createEmptySeat());
-                    this.removeVipBadgeFromSeat(room, seatNumber);
                     this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
                 }
             }
@@ -1124,7 +1040,6 @@ export class ChatServer {
           if (!roomList.includes(room)) return;
           const seatMap = this.roomSeats.get(room);
           Object.assign(seatMap.get(seat), createEmptySeat());
-          this.removeVipBadgeFromSeat(room, seat);
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.broadcastRoomUserCount(room);
           break;
@@ -1168,19 +1083,7 @@ export class ChatServer {
           break;
         }
 
-        // ==================== VIP BADGE CASES ====================
-        case "vipbadge": {
-          const [, room, seat, numbadge, colorvip] = data;
-          this.handleVipBadge(room, seat, numbadge, colorvip);
-          break;
-        }
-
-        case "vipbadgeremove": {
-          const [, room, seat] = data;
-          this.removeVipBadgeFromSeat(room, seat);
-          break;
-        }
-
+        // ❌ HAPUS SEMUA VIP BADGE CASES
         case "gameLowCardStart":
         case "gameLowCardJoin":
         case "gameLowCardNumber":
