@@ -1,6 +1,5 @@
-// ChatServer Durable Object dengan VIP Badge System
 import { LowCardGameManager } from "./lowcard.js";
-import { VipBadgeManager } from "./vipbadge.js"; // Import VIP Manager
+import { VipBadgeManager } from "./vipbadge.js";
 
 const roomList = [
   "LowCard", "General", "Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
@@ -49,7 +48,6 @@ export class ChatServer {
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
     this.privateMessageBuffer = new Map();
-
     this.seatLocks = new Map();
 
     this.currentNumber = 1;
@@ -866,14 +864,13 @@ export class ChatServer {
 
     try {
       switch (evt) {
-        // ✅ VIP BADGE HANDLERS - REAL-TIME
+        // ✅ VIP BADGE HANDLERS - SELALU PROSES
         case "vipbadge":
         case "removeVipBadge": 
         case "getAllVipBadges":
           this.vipManager.handleEvent(ws, data);
           break;
 
-        // EXISTING MESSAGE HANDLERS
         case "isInRoom": {
           const idtarget = ws.idtarget;
           if (!idtarget) {
