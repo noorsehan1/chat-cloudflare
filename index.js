@@ -863,30 +863,25 @@ export class ChatServer {
     try {
       switch (evt) {
     
-         // ✅ 1. SEND VIP BADGE - HANYA EXECUTE, TIDAK KIRIM RESPONSE
-            case "vipbadge": {
-                const [, room, seat, numbadge, colortext] = data;
-                this.vipManager.sendVipBadge(room, seat, numbadge, colortext);
-                // ✅ TIDAK KIRIM RESPONSE - real-time broadcast sudah cukup
-                break;
-            }
+       // Dalam method handleMessage tambahkan:
+case "vipbadge": {
+    const [, room, seat, numbadge, colortext] = data;
+    this.vipManager.sendVipBadge(room, seat, numbadge, colortext);
+    break;
+}
 
-            // ✅ 2. REMOVE VIP BADGE - HANYA EXECUTE, TIDAK KIRIM RESPONSE
-            case "removeVipBadge": {
-                const [, room, seat] = data;
-                this.vipManager.removeVipBadge(room, seat);
-                // ✅ TIDAK KIRIM RESPONSE - real-time broadcast sudah cukup
-                break;
-            }
+case "removeVipBadge": {
+    const [, room, seat] = data;
+    this.vipManager.removeVipBadge(room, seat);
+    break;
+}
 
-            // ✅ 3. GET ALL VIP BADGES - KIRIM DATA KE REQUESTER SAJA
-            case "getAllVipBadges": {
-                const [, room] = data;
-                const vipBadges = this.vipManager.getAllVipBadges(room);
-                this.safeSend(ws, ["allVipBadges", room, vipBadges]);
-                break;
-            }
-           
+case "getAllVipBadges": {
+    const [, room] = data;
+    const vipBadges = this.vipManager.getAllVipBadges(room);
+    this.safeSend(ws, ["allVipBadges", room, vipBadges]);
+    break;
+}
 
         // EXISTING MESSAGE HANDLERS
         case "isInRoom": {
@@ -1204,6 +1199,7 @@ export default {
     }
   }
 }
+
 
 
 
