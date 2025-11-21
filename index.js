@@ -86,6 +86,18 @@ export class ChatServer {
     this.MAX_MESSAGES_PER_SECOND = 20;
   }
 
+  // ----------------- NEW: utility to clear buffered updates for a seat -----------------
+  clearSeatBuffer(room, seatNumber) {
+    try {
+      if (!room || typeof seatNumber !== "number") return;
+      if (this.updateKursiBuffer.has(room)) {
+        this.updateKursiBuffer.get(room).delete(seatNumber);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
   // ==================== CORE FUNCTIONS ====================
 
   scheduleCleanupTimeout(idtarget) {
@@ -170,6 +182,10 @@ export class ChatServer {
         if (n === idtarget || n === `__LOCK__${idtarget}`) {
           Object.assign(info, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
+
+          // ---- CLEAR BUFFER FOR THIS SEAT (IMPORTANT FIX) ----
+          this.clearSeatBuffer(room, seatNumber);
+
           this.broadcastRoomUserCount(room);
         }
       }
@@ -452,6 +468,10 @@ export class ChatServer {
             if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
               Object.assign(info, createEmptySeat());
               this.broadcastToRoom(room, ["removeKursi", room, seat]);
+
+              // ---- CLEAR BUFFER FOR THIS SEAT (IMPORTANT FIX) ----
+              this.clearSeatBuffer(room, seat);
+
               this.broadcastRoomUserCount(room);
               cleanedLocks++;
             }
@@ -537,6 +557,8 @@ export class ChatServer {
 
         if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
           Object.assign(info, createEmptySeat());
+          // clear buffer when we remove expired lock
+          this.clearSeatBuffer(room, seat);
           locksCleaned++;
         }
       }
@@ -698,6 +720,10 @@ export class ChatServer {
         }
         
         Object.assign(currentSeat, createEmptySeat());
+
+        // ---- CLEAR BUFFER FOR THIS SEAT (IMPORTANT FIX) ----
+        this.clearSeatBuffer(room, seat);
+
         this.broadcastToRoom(room, ["removeKursi", room, seat]);
         this.broadcastRoomUserCount(room);
       }
@@ -758,6 +784,9 @@ export class ChatServer {
                     
                     Object.assign(seatInfo, createEmptySeat());
                     this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
+
+                    // ---- CLEAR BUFFER FOR THIS SEAT (IMPORTANT FIX) ----
+                    this.clearSeatBuffer(room, seatNumber);
                 }
             }
             this.broadcastRoomUserCount(room);
@@ -802,7 +831,7 @@ export class ChatServer {
         }
         this.privateMessageBuffer.delete(id);
     }
-}
+  }
 
   handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
@@ -1060,6 +1089,10 @@ export class ChatServer {
           if (!roomList.includes(room)) return;
           const seatMap = this.roomSeats.get(room);
           Object.assign(seatMap.get(seat), createEmptySeat());
+
+          // ---- CLEAR BUFFER FOR THIS SEAT (IMPORTANT FIX) ----
+          this.clearSeatBuffer(room, seat);
+
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.broadcastRoomUserCount(room);
           break;
