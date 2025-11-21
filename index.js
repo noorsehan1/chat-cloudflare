@@ -837,6 +837,10 @@ export class ChatServer {
     }
     
     this.sendAllStateTo(ws, newRoom);
+    
+    // ✅ KIRIM SEMUA VIP BADGES SAAT JOIN ROOM
+    this.vipManager.getAllVipBadges(ws, newRoom);
+    
     this.broadcastRoomUserCount(newRoom);
     
     return true;
@@ -844,32 +848,30 @@ export class ChatServer {
 
   // ==================== VIP BADGE MESSAGE HANDLERS ====================
 
+  handleMessage(ws, raw) {
+    if (ws.readyState !== 1) return;
 
-handleMessage(ws, raw) {
-  if (ws.readyState !== 1) return;
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      return;
+    }
 
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch (e) {
-    return;
-  }
+    if (!Array.isArray(data) || data.length === 0) return;
 
-  if (!Array.isArray(data) || data.length === 0) return;
+    const evt = data[0];
 
-  const evt = data[0];
+    if (!this.checkRateLimit(ws, evt)) return;
 
-  if (!this.checkRateLimit(ws, evt)) return;
-
-  try {
-    switch (evt) {
-      // ✅ VIP BADGE HANDLERS - REAL-TIME
-      case "vipbadge":
-      case "removeVipBadge": 
-      case "getAllVipBadges":
-        this.vipManager.handleEvent(ws, data);
-        break;
-
+    try {
+      switch (evt) {
+        // ✅ VIP BADGE HANDLERS - REAL-TIME
+        case "vipbadge":
+        case "removeVipBadge": 
+        case "getAllVipBadges":
+          this.vipManager.handleEvent(ws, data);
+          break;
 
         // EXISTING MESSAGE HANDLERS
         case "isInRoom": {
@@ -1187,8 +1189,3 @@ export default {
     }
   }
 }
-
-
-
-
-
