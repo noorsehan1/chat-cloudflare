@@ -1,4 +1,3 @@
-// VIP Badge Manager Class - Clean Version
 export class VipBadgeManager {
   constructor(chatServer) {
     this.chatServer = chatServer;
