@@ -29,7 +29,6 @@ export class VipBadgeManager {
       const seatInfo = seatMap.get(seat);
       if (!seatInfo) return false;
 
-      // ✅ PERBAIKAN PENTING: Biarkan seat kosong bisa dapat VIP badge
       if (seatInfo.namauser && seatInfo.namauser.startsWith("__LOCK__")) return false;
 
       seatInfo.vip = numbadge;
