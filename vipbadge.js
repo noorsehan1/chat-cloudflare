@@ -1,6 +1,3 @@
-// ============================
-// VipBadgeManager (Real-time Multi-room)
-// ============================
 export class VipBadgeManager {
   constructor(chatServer) {
     this.chatServer = chatServer;
@@ -32,7 +29,7 @@ export class VipBadgeManager {
       const seatInfo = seatMap.get(seat);
       if (!seatInfo) return false;
 
-      // Allow empty seats to receive VIP badges
+      // ✅ PERBAIKAN PENTING: Biarkan seat kosong bisa dapat VIP badge
       if (seatInfo.namauser && seatInfo.namauser.startsWith("__LOCK__")) return false;
 
       seatInfo.vip = numbadge;
@@ -102,7 +99,6 @@ export class VipBadgeManager {
       }
 
       this.chatServer.safeSend(ws, ["allVipBadges", room, result]);
-
     } catch (error) {}
   }
 
