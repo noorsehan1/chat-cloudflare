@@ -844,44 +844,32 @@ export class ChatServer {
 
   // ==================== VIP BADGE MESSAGE HANDLERS ====================
 
-  handleMessage(ws, raw) {
-    if (ws.readyState !== 1) return;
 
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch (e) {
-      return;
-    }
+handleMessage(ws, raw) {
+  if (ws.readyState !== 1) return;
 
-    if (!Array.isArray(data) || data.length === 0) return;
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    return;
+  }
 
-    const evt = data[0];
+  if (!Array.isArray(data) || data.length === 0) return;
 
-    if (!this.checkRateLimit(ws, evt)) return;
+  const evt = data[0];
 
-    try {
-      switch (evt) {
-    
-       // Dalam method handleMessage tambahkan:
-case "vipbadge": {
-    const [, room, seat, numbadge, colortext] = data;
-    this.vipManager.sendVipBadge(room, seat, numbadge, colortext);
-    break;
-}
+  if (!this.checkRateLimit(ws, evt)) return;
 
-case "removeVipBadge": {
-    const [, room, seat] = data;
-    this.vipManager.removeVipBadge(room, seat);
-    break;
-}
+  try {
+    switch (evt) {
+      // ✅ VIP BADGE HANDLERS - REAL-TIME
+      case "vipbadge":
+      case "removeVipBadge": 
+      case "getAllVipBadges":
+        this.vipManager.handleEvent(ws, data);
+        break;
 
-case "getAllVipBadges": {
-    const [, room] = data;
-    const vipBadges = this.vipManager.getAllVipBadges(room);
-    this.safeSend(ws, ["allVipBadges", room, vipBadges]);
-    break;
-}
 
         // EXISTING MESSAGE HANDLERS
         case "isInRoom": {
@@ -1199,6 +1187,7 @@ export default {
     }
   }
 }
+
 
 
 
