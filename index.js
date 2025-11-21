@@ -864,35 +864,32 @@ export class ChatServer {
       switch (evt) {
         // ✅ 1. SEND VIP BADGE
         case "vipbadge": {
-          const [, room, seat, numbadge, colortext] = data;
-          const success = this.vipManager.sendVipBadge(room, seat, numbadge, colortext);
-          this.safeSend(ws, ["vipbadgeResult", success]);
-          break;
-        }
+                const [, room, seat, numbadge, colortext] = data;
+                const success = this.vipManager.sendVipBadge(room, seat, numbadge, colortext);
+                this.safeSend(ws, ["vipbadgeResult", success]);
+                break;
+            }
 
-        // ✅ 2. REMOVE VIP BADGE
-        case "removeVipBadge": {
-          const [, room, seat] = data;
-          const success = this.vipManager.removeVipBadge(room, seat);
-          this.safeSend(ws, ["removeVipBadgeResult", success]);
-          break;
-        }
+            case "removeVipBadge": {
+                const [, room, seat] = data;
+                const success = this.vipManager.removeVipBadge(room, seat);
+                this.safeSend(ws, ["removeVipBadgeResult", success]);
+                break;
+            }
 
-        // ✅ 3. GET ALL VIP BADGES (berdasarkan kursi)
-        case "getAllVipBadges": {
-          const [, room] = data;
-          const vipBadges = this.vipManager.getAllVipBadges(room);
-          this.safeSend(ws, ["allVipBadges", room, vipBadges]);
-          break;
-        }
+            case "getAllVipBadges": {
+                const [, room] = data;
+                const vipBadges = this.vipManager.getAllVipBadges(room);
+                this.safeSend(ws, ["allVipBadges", room, vipBadges]);
+                break;
+            }
 
-        // GET VIP BADGE untuk kursi tertentu
-        case "getVipBadge": {
-          const [, room, seat] = data;
-          const vipBadge = this.vipManager.getVipBadge(room, seat);
-          this.safeSend(ws, ["vipBadge", room, seat, vipBadge]);
-          break;
-        }
+            case "getVipBadge": {
+                const [, room, seat] = data;
+                const vipBadge = this.vipManager.getVipBadge(room, seat);
+                this.safeSend(ws, ["vipBadge", room, seat, vipBadge]);
+                break;
+            }
 
         // EXISTING MESSAGE HANDLERS
         case "isInRoom": {
@@ -1210,3 +1207,4 @@ export default {
     }
   }
 }
+
