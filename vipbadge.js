@@ -4,7 +4,7 @@
 export class VipBadgeManager {
   constructor(chatServer) {
     this.chatServer = chatServer;
-    this.vipBadges = new Map(); // key: room, value: Map(seat -> vipData)
+    this.vipBadges = new Map();
   }
 
   handleEvent(ws, data) {
@@ -24,39 +24,32 @@ export class VipBadgeManager {
 
   sendVipBadge(ws, room, seat, numbadge, colortext) {
     try {
-      // Validasi room dan seat
       if (!room || seat < 1 || seat > 35) return false;
 
       const seatMap = this.chatServer.roomSeats.get(room);
       if (!seatMap) return false;
 
       const seatInfo = seatMap.get(seat);
-      if (!seatInfo || !seatInfo.namauser || seatInfo.namauser.startsWith("__LOCK__")) return false;
+      if (!seatInfo) return false;
 
-      // Update seat state
+      // Allow empty seats to receive VIP badges
+      if (seatInfo.namauser && seatInfo.namauser.startsWith("__LOCK__")) return false;
+
       seatInfo.vip = numbadge;
       seatInfo.viptanda = 1;
       seatInfo.lastActivity = Date.now();
 
-      // Update VIP badges storage
       if (!this.vipBadges.has(room)) {
         this.vipBadges.set(room, new Map());
       }
-      
+
       this.vipBadges.get(room).set(seat, {
         badgeCount: numbadge,
-        color: colortext,
-        timestamp: Date.now()
+        color: colortext
       });
 
-      // ✅ BROADCAST REAL-TIME KE SEMUA CLIENT DI ROOM
-      this.chatServer.broadcastToRoom(room, [
-        "vipbadge", 
-        room, 
-        seat, 
-        numbadge, 
-        colortext
-      ]);
+      const vipMessage = ["vipbadge", room, seat, numbadge, colortext];
+      this.chatServer.broadcastToRoom(room, vipMessage);
 
       return true;
     } catch (error) {
@@ -74,22 +67,16 @@ export class VipBadgeManager {
       const seatInfo = seatMap.get(seat);
       if (!seatInfo) return false;
 
-      // Update seat state
       seatInfo.vip = 0;
       seatInfo.viptanda = 0;
       seatInfo.lastActivity = Date.now();
 
-      // Remove from VIP storage
       if (this.vipBadges.has(room)) {
         this.vipBadges.get(room).delete(seat);
       }
 
-      // ✅ BROADCAST REAL-TIME REMOVAL
-      this.chatServer.broadcastToRoom(room, [
-        "removeVipBadge", 
-        room, 
-        seat
-      ]);
+      const removeMessage = ["removeVipBadge", room, seat];
+      this.chatServer.broadcastToRoom(room, removeMessage);
 
       return true;
     } catch (error) {
@@ -114,12 +101,7 @@ export class VipBadgeManager {
         }
       }
 
-      // ✅ KIRIM KE REQUESTER SAJA
-      this.chatServer.safeSend(ws, [
-        "allVipBadges", 
-        room, 
-        result
-      ]);
+      this.chatServer.safeSend(ws, ["allVipBadges", room, result]);
 
     } catch (error) {}
   }
@@ -135,24 +117,5 @@ export class VipBadgeManager {
         }
       }
     } catch (error) {}
-  }
-
-  // Get VIP data for specific room and seat
-  getVipBadge(room, seat) {
-    try {
-      const roomVipData = this.vipBadges.get(room);
-      return roomVipData ? roomVipData.get(seat) : null;
-    } catch (error) {
-      return null;
-    }
-  }
-
-  // Get all VIP badges for room (internal use)
-  getRoomVipBadges(room) {
-    try {
-      return this.vipBadges.get(room) || new Map();
-    } catch (error) {
-      return new Map();
-    }
   }
 }
