@@ -884,12 +884,7 @@ export class ChatServer {
                 break;
             }
 
-            case "getVipBadge": {
-                const [, room, seat] = data;
-                const vipBadge = this.vipManager.getVipBadge(room, seat);
-                this.safeSend(ws, ["vipBadge", room, seat, vipBadge]);
-                break;
-            }
+           
 
         // EXISTING MESSAGE HANDLERS
         case "isInRoom": {
@@ -1207,4 +1202,5 @@ export default {
     }
   }
 }
+
 
