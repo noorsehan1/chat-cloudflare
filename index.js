@@ -1,5 +1,6 @@
-// ChatServer Durable Object - TANPA VIP Badge System
+// ChatServer Durable Object dengan VIP Badge System
 import { LowCardGameManager } from "./lowcard.js";
+import { VipBadgeManager } from "./vipbadge.js"; // Import VIP Manager
 
 const roomList = [
   "LowCard", "General", "Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
@@ -42,7 +43,9 @@ export class ChatServer {
       this.roomSeats.set(room, seatMap);
     }
 
-    // ❌ HAPUS VIP Badge System
+    // ✅ INIT VIP BADGE MANAGER
+    this.vipManager = new VipBadgeManager(this);
+
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
     this.privateMessageBuffer = new Map();
@@ -148,6 +151,9 @@ export class ChatServer {
 
   fullRemoveById(idtarget) {
     if (!idtarget) return;
+
+    // ✅ CLEANUP VIP BADGES USER INI
+    this.vipManager.cleanupUserVipBadges(idtarget);
 
     this.usersToRemove.delete(idtarget);
     if (this.pingTimeouts.has(idtarget)) {
@@ -688,6 +694,11 @@ export class ChatServer {
 
       const currentSeat = seatMap.get(seat);
       if (currentSeat.namauser === idtarget || currentSeat.namauser === `__LOCK__${idtarget}`) {
+        // ✅ REMOVE VIP BADGE JIKA ADA
+        if (currentSeat.viptanda > 0) {
+          this.vipManager.removeVipBadge(room, seat);
+        }
+        
         Object.assign(currentSeat, createEmptySeat());
         this.broadcastToRoom(room, ["removeKursi", room, seat]);
         this.broadcastRoomUserCount(room);
@@ -742,6 +753,11 @@ export class ChatServer {
 
             for (const [seatNumber, seatInfo] of seatMap) {
                 if (seatInfo.namauser === id) {
+                    // ✅ REMOVE VIP BADGE JIKA ADA
+                    if (seatInfo.viptanda > 0) {
+                      this.vipManager.removeVipBadge(room, seatNumber);
+                    }
+                    
                     Object.assign(seatInfo, createEmptySeat());
                     this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
                 }
@@ -826,6 +842,8 @@ export class ChatServer {
     return true;
   }
 
+  // ==================== VIP BADGE MESSAGE HANDLERS ====================
+
   handleMessage(ws, raw) {
     if (ws.readyState !== 1) return;
 
@@ -844,26 +862,54 @@ export class ChatServer {
 
     try {
       switch (evt) {
+        // ✅ 1. SEND VIP BADGE
+        case "vipbadge": {
+          const [, room, seat, numbadge, colortext] = data;
+          const success = this.vipManager.sendVipBadge(room, seat, numbadge, colortext);
+          this.safeSend(ws, ["vipbadgeResult", success]);
+          break;
+        }
+
+        // ✅ 2. REMOVE VIP BADGE
+        case "removeVipBadge": {
+          const [, room, seat] = data;
+          const success = this.vipManager.removeVipBadge(room, seat);
+          this.safeSend(ws, ["removeVipBadgeResult", success]);
+          break;
+        }
+
+        // ✅ 3. GET ALL VIP BADGES (berdasarkan kursi)
+        case "getAllVipBadges": {
+          const [, room] = data;
+          const vipBadges = this.vipManager.getAllVipBadges(room);
+          this.safeSend(ws, ["allVipBadges", room, vipBadges]);
+          break;
+        }
+
+        // GET VIP BADGE untuk kursi tertentu
+        case "getVipBadge": {
+          const [, room, seat] = data;
+          const vipBadge = this.vipManager.getVipBadge(room, seat);
+          this.safeSend(ws, ["vipBadge", room, seat, vipBadge]);
+          break;
+        }
+
+        // EXISTING MESSAGE HANDLERS
         case "isInRoom": {
           const idtarget = ws.idtarget;
-          
           if (!idtarget) {
             this.safeSend(ws, ["inRoomStatus", false]);
             return;
           }
-          
           const seatInfo = this.userToSeat.get(idtarget);
           if (!seatInfo) {
             this.safeSend(ws, ["inRoomStatus", false]);
             return;
           }
-          
           const { room, seat } = seatInfo;
           const seatMap = this.roomSeats.get(room);
           const seatData = seatMap?.get(seat);
-          
           const isInRoom = seatData?.namauser === idtarget;
-          
           this.safeSend(ws, ["inRoomStatus", isInRoom]);
           break;
         }
@@ -1056,7 +1102,9 @@ export class ChatServer {
             const currentInfo = seatMap.get(seat) || createEmptySeat();
 
             Object.assign(currentInfo, {
-              noimageUrl, namauser, color, itembawah, itematas, vip, viptanda,
+              noimageUrl, namauser, color, itembawah, itematas, 
+              vip: vip || 0,
+              viptanda: viptanda || 0,
               lastActivity: Date.now()
             });
 
@@ -1081,7 +1129,6 @@ export class ChatServer {
           break;
         }
 
-        // ❌ HAPUS SEMUA VIP BADGE CASES
         case "gameLowCardStart":
         case "gameLowCardJoin":
         case "gameLowCardNumber":
@@ -1092,7 +1139,9 @@ export class ChatServer {
           break;
         }
       }
-    } catch (error) {}
+    } catch (error) {
+      console.error("Error handling message:", error);
+    }
   }
 
   async fetch(request) {
