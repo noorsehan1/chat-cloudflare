@@ -862,28 +862,30 @@ export class ChatServer {
 
     try {
       switch (evt) {
-        // ✅ 1. SEND VIP BADGE
-        case "vipbadge": {
+    
+         // ✅ 1. SEND VIP BADGE - HANYA EXECUTE, TIDAK KIRIM RESPONSE
+            case "vipbadge": {
                 const [, room, seat, numbadge, colortext] = data;
-                const success = this.vipManager.sendVipBadge(room, seat, numbadge, colortext);
-                this.safeSend(ws, ["vipbadgeResult", success]);
+                this.vipManager.sendVipBadge(room, seat, numbadge, colortext);
+                // ✅ TIDAK KIRIM RESPONSE - real-time broadcast sudah cukup
                 break;
             }
 
+            // ✅ 2. REMOVE VIP BADGE - HANYA EXECUTE, TIDAK KIRIM RESPONSE
             case "removeVipBadge": {
                 const [, room, seat] = data;
-                const success = this.vipManager.removeVipBadge(room, seat);
-                this.safeSend(ws, ["removeVipBadgeResult", success]);
+                this.vipManager.removeVipBadge(room, seat);
+                // ✅ TIDAK KIRIM RESPONSE - real-time broadcast sudah cukup
                 break;
             }
 
+            // ✅ 3. GET ALL VIP BADGES - KIRIM DATA KE REQUESTER SAJA
             case "getAllVipBadges": {
                 const [, room] = data;
                 const vipBadges = this.vipManager.getAllVipBadges(room);
                 this.safeSend(ws, ["allVipBadges", room, vipBadges]);
                 break;
             }
-
            
 
         // EXISTING MESSAGE HANDLERS
@@ -1202,5 +1204,6 @@ export default {
     }
   }
 }
+
 
 
