@@ -31,6 +31,7 @@ export class VipBadgeManager {
 
       if (seatInfo.namauser && seatInfo.namauser.startsWith("__LOCK__")) return false;
 
+      // ✅ SELALU UPDATE - TANPA PENGECCEKAN PERUBAHAN
       seatInfo.vip = numbadge;
       seatInfo.viptanda = 1;
       seatInfo.lastActivity = Date.now();
@@ -39,11 +40,13 @@ export class VipBadgeManager {
         this.vipBadges.set(room, new Map());
       }
 
+      // ✅ SELALU UPDATE STORAGE
       this.vipBadges.get(room).set(seat, {
         badgeCount: numbadge,
         color: colortext
       });
 
+      // ✅ SELALU BROADCAST - MESKI DATA SAMA
       const vipMessage = ["vipbadge", room, seat, numbadge, colortext];
       this.chatServer.broadcastToRoom(room, vipMessage);
 
