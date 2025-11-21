@@ -19,9 +19,9 @@ export class VipBadgeManager {
     }
   }
 
-  // ============================================
-  //   ALWAYS WRITE, ALWAYS BROADCAST
-  // ============================================
+  // ======================================================
+  //    ALWAYS UPDATE - ALWAYS BROADCAST - NO FILTERS
+  // ======================================================
   sendVipBadge(ws, room, seat, numbadge, colortext) {
     try {
       if (!room || seat < 1 || seat > 35) return false;
@@ -32,28 +32,39 @@ export class VipBadgeManager {
       const seatInfo = seatMap.get(seat);
       if (!seatInfo) return false;
 
-      // ✔ selalu update, tanpa lock dan tanpa cek sama
+      // ✔ Selalu update kursi
       seatInfo.vip = numbadge;
       seatInfo.viptanda = 1;
       seatInfo.lastActivity = Date.now();
 
-      // ✔ siapkan penyimpanan room
+      // ✔ Siapkan penyimpanan room jika belum ada
       if (!this.vipBadges.has(room)) {
         this.vipBadges.set(room, new Map());
       }
 
-      // ✔ simpan berdasarkan nomor kursi
+      // ✔ Simpan (overwrite) berdasarkan nomor seat
       this.vipBadges.get(room).set(seat, {
         badgeCount: numbadge,
-        color: colortext
+        color: colortext,
+        updateAt: Date.now() // dipakai untuk memaksa perubahan
       });
 
-      // ✔ broadcast selalu
-      const vipMessage = ["vipbadge", room, seat, numbadge, colortext];
+      // ======================================================
+      //   FIX 100% BROADCAST — timestamp memastikan berubah
+      // ======================================================
+      const vipMessage = [
+        "vipbadge",
+        room,
+        seat,
+        numbadge,
+        colortext,
+        Date.now() // memaksa client menerima update
+      ];
+
       this.chatServer.broadcastToRoom(room, vipMessage);
 
       return true;
-    } catch (err) {
+    } catch (error) {
       return false;
     }
   }
@@ -76,11 +87,12 @@ export class VipBadgeManager {
         this.vipBadges.get(room).delete(seat);
       }
 
-      const msg = ["removeVipBadge", room, seat];
+      const msg = ["removeVipBadge", room, seat, Date.now()];
+
       this.chatServer.broadcastToRoom(room, msg);
 
       return true;
-    } catch (err) {
+    } catch (error) {
       return false;
     }
   }
@@ -95,18 +107,18 @@ export class VipBadgeManager {
       if (roomData) {
         for (const [seat, vipData] of roomData) {
           result.push({
-            seat: seat,
+            seat,
             badgeCount: vipData.badgeCount,
-            color: vipData.color
+            color: vipData.color,
+            updateAt: vipData.updateAt
           });
         }
       }
 
       this.chatServer.safeSend(ws, ["allVipBadges", room, result]);
-    } catch (err) {}
+    } catch (error) {}
   }
 
-  // OPTIONAL kalau kamu mau hapus vip berdasarkan user
   cleanupUserVipBadges(username) {
     try {
       for (const [room, seatMap] of this.vipBadges) {
@@ -117,6 +129,6 @@ export class VipBadgeManager {
           }
         }
       }
-    } catch (err) {}
+    } catch (error) {}
   }
 }
