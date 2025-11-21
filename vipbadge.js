@@ -31,7 +31,7 @@ export class VipBadgeManager {
 
       if (seatInfo.namauser && seatInfo.namauser.startsWith("__LOCK__")) return false;
 
-      // ✅ SELALU UPDATE - TANPA PENGECCEKAN PERUBAHAN
+      // ✅ SELALU UPDATE - TANPA CEK PERUBAHAN
       seatInfo.vip = numbadge;
       seatInfo.viptanda = 1;
       seatInfo.lastActivity = Date.now();
