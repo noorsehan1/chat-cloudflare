@@ -19,6 +19,9 @@ export class VipBadgeManager {
     }
   }
 
+  // ============================================
+  //   ALWAYS WRITE, ALWAYS BROADCAST
+  // ============================================
   sendVipBadge(ws, room, seat, numbadge, colortext) {
     try {
       if (!room || seat < 1 || seat > 35) return false;
@@ -29,29 +32,28 @@ export class VipBadgeManager {
       const seatInfo = seatMap.get(seat);
       if (!seatInfo) return false;
 
-      if (seatInfo.namauser && seatInfo.namauser.startsWith("__LOCK__")) return false;
-
-      // ✅ SELALU UPDATE - TANPA CEK PERUBAHAN
+      // ✔ selalu update, tanpa lock dan tanpa cek sama
       seatInfo.vip = numbadge;
       seatInfo.viptanda = 1;
       seatInfo.lastActivity = Date.now();
 
+      // ✔ siapkan penyimpanan room
       if (!this.vipBadges.has(room)) {
         this.vipBadges.set(room, new Map());
       }
 
-      // ✅ SELALU UPDATE STORAGE
+      // ✔ simpan berdasarkan nomor kursi
       this.vipBadges.get(room).set(seat, {
         badgeCount: numbadge,
         color: colortext
       });
 
-      // ✅ SELALU BROADCAST - MESKI DATA SAMA
+      // ✔ broadcast selalu
       const vipMessage = ["vipbadge", room, seat, numbadge, colortext];
       this.chatServer.broadcastToRoom(room, vipMessage);
 
       return true;
-    } catch (error) {
+    } catch (err) {
       return false;
     }
   }
@@ -74,11 +76,11 @@ export class VipBadgeManager {
         this.vipBadges.get(room).delete(seat);
       }
 
-      const removeMessage = ["removeVipBadge", room, seat];
-      this.chatServer.broadcastToRoom(room, removeMessage);
+      const msg = ["removeVipBadge", room, seat];
+      this.chatServer.broadcastToRoom(room, msg);
 
       return true;
-    } catch (error) {
+    } catch (err) {
       return false;
     }
   }
@@ -87,11 +89,11 @@ export class VipBadgeManager {
     try {
       if (!room) return;
 
+      const roomData = this.vipBadges.get(room);
       const result = [];
-      const roomVipData = this.vipBadges.get(room);
-      
-      if (roomVipData) {
-        for (const [seat, vipData] of roomVipData) {
+
+      if (roomData) {
+        for (const [seat, vipData] of roomData) {
           result.push({
             seat: seat,
             badgeCount: vipData.badgeCount,
@@ -101,19 +103,20 @@ export class VipBadgeManager {
       }
 
       this.chatServer.safeSend(ws, ["allVipBadges", room, result]);
-    } catch (error) {}
+    } catch (err) {}
   }
 
+  // OPTIONAL kalau kamu mau hapus vip berdasarkan user
   cleanupUserVipBadges(username) {
     try {
       for (const [room, seatMap] of this.vipBadges) {
-        for (const [seat, vipData] of seatMap) {
+        for (const [seat] of seatMap) {
           const seatInfo = this.chatServer.roomSeats.get(room)?.get(seat);
           if (seatInfo && seatInfo.namauser === username) {
             this.removeVipBadge(null, room, seat);
           }
         }
       }
-    } catch (error) {}
+    } catch (err) {}
   }
 }
