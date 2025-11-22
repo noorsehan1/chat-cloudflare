@@ -711,7 +711,7 @@ sendAllStateTo(ws, room) {
     return users;
   }
 
-  handleSetIdTarget2(ws, id, baru) {
+ handleSetIdTarget2(ws, id, baru) {
     ws.idtarget = id;
 
     if (this.pingTimeouts.has(id)) {
@@ -747,6 +747,7 @@ sendAllStateTo(ws, room) {
         ws.numkursi = new Set();
     }
     else if (baru === false) {
+        // ✅ USER RECONNECT: KIRIM CHAT HISTORY YANG TERLEWAT
         const seatInfo = this.userToSeat.get(id);
 
         if (seatInfo) {
@@ -759,8 +760,43 @@ sendAllStateTo(ws, room) {
                 if (seatData.namauser === id) {
                     ws.roomname = room;
                     ws.numkursi = new Set([seat]);
+                    
+                    // ✅ 1. KIRIM CHAT HISTORY YANG TERLEWAT SELAMA DISCONNECT
+                    if (this.roomChatHistory.has(room)) {
+                        const history = this.roomChatHistory.get(room);
+                        const disconnectTime = this.userDisconnectTime.get(id) || 0;
+                        
+                        if (disconnectTime > 0) {
+                            // ✅ FILTER: HANYA CHAT YANG LEBIH BARU DARI DISCONNECT TIME
+                            const newChatsAfterDisconnect = history.filter(chat => 
+                                chat.timestamp > disconnectTime
+                            );
+                            
+                            // ✅ KIRIM CHAT YANG TERLEWAT
+                            if (newChatsAfterDisconnect.length > 0) {
+                                for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
+                                    const chat = newChatsAfterDisconnect[i];
+                                    this.safeSend(ws, [
+                                        "restoreChatHistory", 
+                                        room, 
+                                        chat.noImageURL, 
+                                        chat.username, 
+                                        chat.message, 
+                                        chat.usernameColor, 
+                                        chat.chatTextColor
+                                    ]);
+                                }
+                            }
+                        }
+                        
+                        // ✅ HAPUS DISCONNECT TIME SETELAH PROSES
+                        this.userDisconnectTime.delete(id);
+                    }
+                    
+                    // ✅ 2. KIRIM SEMUA STATE ROOM (kursi, points, dll)
                     this.sendAllStateTo(ws, room);
                     this.broadcastRoomUserCount(room);
+                    
                 } else {
                     this.userToSeat.delete(id);
                     this.safeSend(ws, ["needJoinRoom"]);
@@ -773,7 +809,7 @@ sendAllStateTo(ws, room) {
             this.safeSend(ws, ["needJoinRoom"]);
         }
     }
-  }
+}
 
   handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
@@ -1157,4 +1193,5 @@ export default {
     }
   }
 }
+
 
