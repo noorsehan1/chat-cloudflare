@@ -16,8 +16,12 @@ function createEmptySeat() {
     vip: 0,
     viptanda: 0,
     lastPoint: null,
-    lockTime: undefined
+    lockTime: undefined,
     // ❌ HAPUS: lastActivity
+    // preserve other fields used by UI (e.g., id, avataruser, wktu) if needed by updateKursi
+    id: "",
+    avataruser: "",
+    wktu: 0
   };
 }
 
@@ -26,7 +30,6 @@ export class ChatServer {
     this.state = state;
     this.env = env;
 
-    // core sets/maps (names retained)
     this.clients = new Set();
     this.userToSeat = new Map();
     this.hasEverSetId = false;
@@ -34,7 +37,6 @@ export class ChatServer {
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
 
-    // initialize seats
     for (const room of roomList) {
       const seatMap = new Map();
       for (let i = 1; i <= this.MAX_SEATS; i++) {
@@ -43,16 +45,13 @@ export class ChatServer {
       this.roomSeats.set(room, seatMap);
     }
 
-    // managers (retain names)
     this.vipManager = new VipBadgeManager(this);
 
-    // buffers & locks (retain names)
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
     this.privateMessageBuffer = new Map();
     this.seatLocks = new Map();
 
-    // histories/timers
     this.roomChatHistory = new Map();
     this.userDisconnectTime = new Map();
 
@@ -60,23 +59,22 @@ export class ChatServer {
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
 
-    // initialize buffers per room
     for (const room of roomList) {
       this.updateKursiBuffer.set(room, new Map());
       this.chatMessageBuffer.set(room, []);
     }
 
-    // optimized timings (no ping/pong)
+    // No ping/pong per request
     this._tickTimer = setInterval(() => {
       this.tick().catch(() => {});
     }, this.intervalMillis);
 
-    // frequent flush but light work
+    // Frequent flush to reduce perceived latency
     this._flushTimer = setInterval(() => {
       if (this.clients.size > 0) {
         this.periodicFlush().catch(() => {});
       }
-    }, 50); // 50ms flush for responsiveness
+    }, 50);
 
     this.lowcard = new LowCardGameManager(this);
 
@@ -89,6 +87,9 @@ export class ChatServer {
     this.MAX_MESSAGES_PER_SECOND = 20;
   }
 
+  // -------------------------
+  // Utility helpers
+  // -------------------------
   clearSeatBuffer(room, seatNumber) {
     try {
       if (!room || typeof seatNumber !== "number") return;
@@ -103,38 +104,30 @@ export class ChatServer {
   restoreRecentChatHistory(ws, room) {
     try {
       if (!this.roomChatHistory.has(room)) return;
-      
+
       const history = this.roomChatHistory.get(room);
       const id = ws.idtarget;
-      
       if (!id) return;
-      
+
       const disconnectTime = this.userDisconnectTime.get(id) || 0;
-      
-      const chatsAfterDisconnect = history.filter(chat => 
-        chat.timestamp > disconnectTime
-      );
-      
+      const chatsAfterDisconnect = history.filter(chat => chat.timestamp > disconnectTime);
       const recentChats = chatsAfterDisconnect.slice(-10);
-      
+
       for (let i = 0; i < recentChats.length; i++) {
         const chat = recentChats[i];
-        
         this.safeSend(ws, [
-          "restoreChatHistory", 
+          "restoreChatHistory",
           room,
           chat.noImageURL || "",
-          chat.username || "", 
+          chat.username || "",
           chat.message || "",
           chat.usernameColor || "#000000",
           chat.chatTextColor || "#000000"
         ]);
       }
-      
+
       this.userDisconnectTime.delete(id);
-      
     } catch (error) {
-      // log if needed
       console.error("Error restoring chat history:", error);
     }
   }
@@ -144,14 +137,14 @@ export class ChatServer {
       clearTimeout(this.pingTimeouts.get(idtarget));
       this.pingTimeouts.delete(idtarget);
     }
-    
+
     const timeout = setTimeout(() => {
       if (this.pingTimeouts.has(idtarget)) {
         this.pingTimeouts.delete(idtarget);
       }
       this.usersToRemove.set(idtarget, Date.now());
     }, this.RECONNECT_TIMEOUT);
-    
+
     this.pingTimeouts.set(idtarget, timeout);
   }
 
@@ -168,7 +161,7 @@ export class ChatServer {
 
     const buffersToClear = [
       this.chatMessageBuffer,
-      this.updateKursiBuffer, 
+      this.updateKursiBuffer,
       this.privateMessageBuffer,
       this.roomSeats,
       this.userToSeat,
@@ -179,9 +172,9 @@ export class ChatServer {
       this.roomChatHistory,
       this.userDisconnectTime
     ];
-    
+
     for (const buffer of buffersToClear) {
-      if (buffer && typeof buffer.clear === 'function') {
+      if (buffer && typeof buffer.clear === "function") {
         buffer.clear();
       }
     }
@@ -195,7 +188,7 @@ export class ChatServer {
     }
     this.clients.clear();
 
-    if (this.lowcard && typeof this.lowcard.destroy === 'function') {
+    if (this.lowcard && typeof this.lowcard.destroy === "function") {
       this.lowcard.destroy();
     }
   }
@@ -318,7 +311,7 @@ export class ChatServer {
     }
 
     if (stats.count++ > limit) {
-      this.safeSend(ws, ['error', 'Rate limit exceeded']);
+      this.safeSend(ws, ["error", "Rate limit exceeded"]);
       return false;
     }
 
@@ -330,7 +323,6 @@ export class ChatServer {
       const now = Date.now();
       const removalThreshold = 25000;
 
-      // maintain locks but light cleaning
       this.cleanExpiredLocks();
 
       const usersToRemoveNow = [];
@@ -405,10 +397,9 @@ export class ChatServer {
     return false;
   }
 
-  // Broadcast same as original, but attempt to minimize wasted iteration
+  // Broadcast same as original but left as-is (we kept original pattern)
   broadcastToRoom(room, msg) {
     let sentCount = 0;
-    // iterate clients but short-circuit checks first
     for (const c of this.clients) {
       if (c.roomname === room && c.readyState === 1) {
         try {
@@ -419,6 +410,29 @@ export class ChatServer {
       }
     }
     return sentCount;
+  }
+
+  // sendAllSeat EXACT format (mirror kode awal)
+  sendAllSeat(room) {
+    try {
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) return [];
+      // produce array in seat index order 1..MAX_SEATS
+      const out = [];
+      for (let i = 1; i <= this.MAX_SEATS; i++) {
+        const s = seatMap.get(i) || createEmptySeat();
+        out.push({
+          id: s.id || "",
+          namauser: s.namauser || "",
+          avataruser: s.avataruser || "",
+          vip: s.vip || "",
+          wktu: s.wktu || 0
+        });
+      }
+      return out;
+    } catch (e) {
+      return [];
+    }
   }
 
   getJumlahRoom() {
@@ -561,7 +575,7 @@ export class ChatServer {
     } catch (error) {}
   }
 
-  // Optimized lockSeat but keeping function name
+  // Optimized lockSeat but keeping function name and behavior mirror
   lockSeat(room, ws) {
     if (!ws.idtarget) return null;
 
@@ -603,6 +617,7 @@ export class ChatServer {
             if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
             this.updateKursiBuffer.get(room).set(i, { ...current, lastPoint: current.lastPoint });
 
+            // After assigning seat, broadcast seat list to room and send joinroom to ws
             return i;
           } else {
             // compat: if previously locked with __LOCK__ for same id, convert
@@ -705,7 +720,7 @@ export class ChatServer {
       if (lastPointsData.length > 0) {
         this.safeSend(ws, ["allPointsList", room, lastPointsData]);
       }
-      
+
       this.safeSend(ws, ["allUpdateKursiList", room, meta]);
 
     } catch (error) {}
@@ -769,7 +784,7 @@ export class ChatServer {
         if (currentSeat.viptanda > 0) {
           this.vipManager.removeVipBadge(room, seat);
         }
-        
+
         Object.assign(currentSeat, createEmptySeat());
         this.clearSeatBuffer(room, seat);
         this.broadcastToRoom(room, ["removeKursi", room, seat]);
@@ -811,75 +826,74 @@ export class ChatServer {
     ws.idtarget = id;
 
     if (this.pingTimeouts.has(id)) {
-        clearTimeout(this.pingTimeouts.get(id));
-        this.pingTimeouts.delete(id);
+      clearTimeout(this.pingTimeouts.get(id));
+      this.pingTimeouts.delete(id);
     }
     this.usersToRemove.delete(id);
     this.privateMessageBuffer.delete(id);
     this.messageCounts.delete(id);
 
     if (baru === true) {
-        this.userDisconnectTime.delete(id);
-        
-        for (const room of roomList) {
-            const seatMap = this.roomSeats.get(room);
-            if (!seatMap) continue;
+      this.userDisconnectTime.delete(id);
 
-            for (const [seatNumber, seatInfo] of seatMap) {
-                if (seatInfo.namauser === id) {
-                    if (seatInfo.viptanda > 0) {
-                      this.vipManager.removeVipBadge(room, seatNumber);
-                    }
-                    
-                    Object.assign(seatInfo, createEmptySeat());
-                    this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
-                    this.clearSeatBuffer(room, seatNumber);
-                }
+      for (const room of roomList) {
+        const seatMap = this.roomSeats.get(room);
+        if (!seatMap) continue;
+
+        for (const [seatNumber, seatInfo] of seatMap) {
+          if (seatInfo.namauser === id) {
+            if (seatInfo.viptanda > 0) {
+              this.vipManager.removeVipBadge(room, seatNumber);
             }
+
+            Object.assign(seatInfo, createEmptySeat());
+            this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
+            this.clearSeatBuffer(room, seatNumber);
+          }
+        }
+        this.broadcastRoomUserCount(room);
+      }
+
+      this.userToSeat.delete(id);
+      ws.roomname = undefined;
+      ws.numkursi = new Set();
+    } else if (baru === false) {
+      const seatInfo = this.userToSeat.get(id);
+
+      if (seatInfo) {
+        const { room, seat } = seatInfo;
+        const seatMap = this.roomSeats.get(room);
+
+        if (seatMap?.has(seat)) {
+          const seatData = seatMap.get(seat);
+
+          if (seatData.namauser === id) {
+            ws.roomname = room;
+            ws.numkursi = new Set([seat]);
+            // ❌ HAPUS: lastActivity
+
+            this.restoreRecentChatHistory(ws, room);
+
+            this.sendAllStateTo(ws, room);
             this.broadcastRoomUserCount(room);
-        }
-
-        this.userToSeat.delete(id);
-        ws.roomname = undefined;
-        ws.numkursi = new Set();
-    }
-    else if (baru === false) {
-        const seatInfo = this.userToSeat.get(id);
-
-        if (seatInfo) {
-            const { room, seat } = seatInfo;
-            const seatMap = this.roomSeats.get(room);
-
-            if (seatMap?.has(seat)) {
-                const seatData = seatMap.get(seat);
-
-                if (seatData.namauser === id) {
-                    ws.roomname = room;
-                    ws.numkursi = new Set([seat]);
-                    // ❌ HAPUS: lastActivity
-                    
-                    this.restoreRecentChatHistory(ws, room);
-                    
-                    this.sendAllStateTo(ws, room);
-                    this.broadcastRoomUserCount(room);
-                } else {
-                    this.userToSeat.delete(id);
-                    this.safeSend(ws, ["needJoinRoom"]);
-                }
-            } else {
-                this.userToSeat.delete(id);
-                this.safeSend(ws, ["needJoinRoom"]);
-            }
-        } else {
+          } else {
+            this.userToSeat.delete(id);
             this.safeSend(ws, ["needJoinRoom"]);
+          }
+        } else {
+          this.userToSeat.delete(id);
+          this.safeSend(ws, ["needJoinRoom"]);
         }
+      } else {
+        this.safeSend(ws, ["needJoinRoom"]);
+      }
     }
 
     if (this.privateMessageBuffer.has(id)) {
-        for (const msg of this.privateMessageBuffer.get(id)) {
-            this.safeSend(ws, msg);
-        }
-        this.privateMessageBuffer.delete(id);
+      for (const msg of this.privateMessageBuffer.get(id)) {
+        this.safeSend(ws, msg);
+      }
+      this.privateMessageBuffer.delete(id);
     }
   }
 
@@ -892,6 +906,9 @@ export class ChatServer {
     } catch (error) {}
   }
 
+  // -------------------------
+  // handleJoinRoom (mirror original behavior, but optimized internals)
+  // -------------------------
   handleJoinRoom(ws, newRoom) {
     if (!roomList.includes(newRoom)) return false;
 
@@ -901,22 +918,24 @@ export class ChatServer {
     const foundSeat = this.lockSeat(newRoom, ws);
 
     if (foundSeat === null) {
-        this.safeSend(ws, ["roomFull", newRoom]);
-        return false;
+      this.safeSend(ws, ["roomFull", newRoom]);
+      return false;
     }
 
     ws.numkursi = new Set([foundSeat]);
-    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+    // send joinroom EXACT as original format: ["joinroom","ya", sendAllSeat]
+    this.safeSend(ws, ["joinroom", "ya", this.sendAllSeat(newRoom)]);
+    // also notify room that a seat update happened (mirror pattern)
+    this.broadcastToRoom(newRoom, ["seatupdate", this.sendAllSeat(newRoom)]);
 
     if (ws.idtarget) {
-        this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+      this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
     }
-    
+
     this.sendAllStateTo(ws, newRoom);
     this.vipManager.getAllVipBadges(ws, newRoom);
     this.broadcastRoomUserCount(newRoom);
-    
+
     return true;
   }
 
@@ -939,7 +958,7 @@ export class ChatServer {
     try {
       switch (evt) {
         case "vipbadge":
-        case "removeVipBadge": 
+        case "removeVipBadge":
         case "getAllVipBadges":
           this.vipManager.handleEvent(ws, data);
           break;
@@ -1108,27 +1127,27 @@ export class ChatServer {
             this.chatMessageBuffer.set(roomname, []);
           this.chatMessageBuffer.get(roomname)
             .push(["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
-          
+
           if (!this.roomChatHistory.has(roomname)) {
             this.roomChatHistory.set(roomname, []);
           }
           const history = this.roomChatHistory.get(roomname);
-          
+
           const chatData = {
             timestamp: Date.now(),
             noImageURL: noImageURL || "",
-            username: username || "", 
+            username: username || "",
             message: message || "",
             usernameColor: usernameColor || "#000000",
             chatTextColor: chatTextColor || "#000000"
           };
-          
+
           history.push(chatData);
-          
+
           if (history.length > 10) {
             this.roomChatHistory.set(roomname, history.slice(-10));
           }
-          
+
           break;
         }
 
@@ -1141,7 +1160,7 @@ export class ChatServer {
 
           si.lastPoint = { x, y, fast, timestamp: Date.now() };
           // ❌ HAPUS: lastActivity
-          
+
           this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
           break;
         }
@@ -1170,7 +1189,7 @@ export class ChatServer {
             const currentInfo = seatMap.get(seat) || createEmptySeat();
 
             Object.assign(currentInfo, {
-              noimageUrl, namauser, color, itembawah, itematas, 
+              noimageUrl, namauser, color, itembawah, itematas,
               vip: vip || 0,
               viptanda: viptanda || 0
               // ❌ HAPUS: lastActivity
@@ -1180,6 +1199,9 @@ export class ChatServer {
             if (!this.updateKursiBuffer.has(room))
               this.updateKursiBuffer.set(room, new Map());
             this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, lastPoint: currentInfo.lastPoint });
+
+            // Mirror old behavior: broadcast seat list to room after update
+            this.broadcastToRoom(room, ["seatupdate", this.sendAllSeat(room)]);
             this.broadcastRoomUserCount(room);
           } finally {
             this.seatLocks.delete(lockKey);
@@ -1220,7 +1242,7 @@ export class ChatServer {
 
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
-      
+
       await server.accept();
 
       const ws = server;
@@ -1279,4 +1301,4 @@ export default {
       return new Response("Internal Server Error", { status: 500 });
     }
   }
-}
+};
