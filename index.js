@@ -84,7 +84,7 @@ export class ChatServer {
     this.MAX_MESSAGES_PER_SECOND = 20;
   }
 
-  // ----------------- NEW: utility to clear buffered updates for a seat -----------------
+  // ----------------- Utility to clear buffered updates for a seat -----------------
   clearSeatBuffer(room, seatNumber) {
     try {
       if (!room || typeof seatNumber !== "number") return;
@@ -180,7 +180,7 @@ export class ChatServer {
           Object.assign(info, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
 
-          // ---- CLEAR BUFFER FOR THIS SEAT (IMPORTANT FIX) ----
+          // ---- CLEAR BUFFER FOR THIS SEAT ----
           this.clearSeatBuffer(room, seatNumber);
 
           this.broadcastRoomUserCount(room);
@@ -312,11 +312,6 @@ export class ChatServer {
 
           if (!stillActive) {
             this.fullRemoveById(idtarget);
-
-            for (const client of this.clients) {
-              if (client.idtarget === idtarget && client.readyState === 1) {
-              }
-            }
           }
 
           this.usersToRemove.delete(idtarget);
@@ -465,7 +460,7 @@ export class ChatServer {
               Object.assign(info, createEmptySeat());
               this.broadcastToRoom(room, ["removeKursi", room, seat]);
 
-              // ---- CLEAR BUFFER FOR THIS SEAT (IMPORTANT FIX) ----
+              // ---- CLEAR BUFFER FOR THIS SEAT ----
               this.clearSeatBuffer(room, seat);
 
               this.broadcastRoomUserCount(room);
@@ -509,7 +504,6 @@ export class ChatServer {
 
         if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
           Object.assign(info, createEmptySeat());
-          // clear buffer when we remove expired lock
           this.clearSeatBuffer(room, seat);
           locksCleaned++;
         }
@@ -569,6 +563,7 @@ export class ChatServer {
     } catch (error) {}
   }
 
+  // ✅ NEW: OVERWRITE STYLE - NO BIG ARRAYS
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1) return;
 
@@ -576,36 +571,53 @@ export class ChatServer {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) return;
 
-      const allPoints = [];
-      const meta = {};
+      const pointsBatch = [];
+      const seatsBatch = [];
 
+      // 🔄 PROCESS ALL SEATS - OVERWRITE STYLE
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         if (!info) continue;
 
+        // 📍 COLLECT POINTS BATCH
         if (info.points.length > 0) {
           const recentPoints = info.points.slice(-5);
-          for (let i = 0; i < recentPoints.length; i++) {
-            const point = recentPoints[i];
-            allPoints.push({ seat, ...point });
-          }
+          pointsBatch.push([seat, recentPoints]);
         }
 
+        // 👥 COLLECT SEAT META BATCH
         if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-          meta[seat] = {
-            noimageUrl: info.noimageUrl,
-            namauser: info.namauser,
-            color: info.color,
-            itembawah: info.itembawah,
-            itematas: info.itematas,
-            vip: info.vip,
-            viptanda: info.viptanda
-          };
+          seatsBatch.push([
+            seat,
+            info.noimageUrl,
+            info.namauser,
+            info.color,
+            info.itembawah,
+            info.itematas,
+            info.vip,
+            info.viptanda
+          ]);
         }
       }
 
-      this.safeSend(ws, ["allPointsList", room, allPoints]);
-      this.safeSend(ws, ["allUpdateKursiList", room, meta]);
+      // 📤 SEND ALL AT ONCE - OVERWRITE SEMANTICS
+
+      // 1. SEND ALL POINTS (OVERWRITE)
+      if (pointsBatch.length > 0) {
+        this.safeSend(ws, ["allPointsOverwrite", room, pointsBatch]);
+      }
+
+      // 2. SEND ALL SEATS (OVERWRITE)
+      if (seatsBatch.length > 0) {
+        this.safeSend(ws, ["allSeatsOverwrite", room, seatsBatch]);
+      }
+
+      // 3. SEND CURRENT NUMBER
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
+
+      // 4. SEND ROOM COUNT
+      const count = this.getJumlahRoom()[room] || 0;
+      this.safeSend(ws, ["roomUserCount", room, count]);
 
     } catch (error) {}
   }
@@ -669,10 +681,7 @@ export class ChatServer {
         }
         
         Object.assign(currentSeat, createEmptySeat());
-
-        // ---- CLEAR BUFFER FOR THIS SEAT (IMPORTANT FIX) ----
         this.clearSeatBuffer(room, seat);
-
         this.broadcastToRoom(room, ["removeKursi", room, seat]);
         this.broadcastRoomUserCount(room);
       }
@@ -725,15 +734,12 @@ export class ChatServer {
 
             for (const [seatNumber, seatInfo] of seatMap) {
                 if (seatInfo.namauser === id) {
-                    // ✅ REMOVE VIP BADGE JIKA ADA
                     if (seatInfo.viptanda > 0) {
                       this.vipManager.removeVipBadge(room, seatNumber);
                     }
                     
                     Object.assign(seatInfo, createEmptySeat());
                     this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
-
-                    // ---- CLEAR BUFFER FOR THIS SEAT (IMPORTANT FIX) ----
                     this.clearSeatBuffer(room, seatNumber);
                 }
             }
@@ -804,16 +810,13 @@ export class ChatServer {
     }
     
     this.sendAllStateTo(ws, newRoom);
-    
-    // ✅ KIRIM SEMUA VIP BADGES SAAT JOIN ROOM
     this.vipManager.getAllVipBadges(ws, newRoom);
-    
     this.broadcastRoomUserCount(newRoom);
     
     return true;
   }
 
-  // ==================== VIP BADGE MESSAGE HANDLERS ====================
+  // ==================== MESSAGE HANDLER ====================
 
   handleMessage(ws, raw) {
     if (ws.readyState !== 1) return;
@@ -833,7 +836,7 @@ export class ChatServer {
 
     try {
       switch (evt) {
-        // ✅ VIP BADGE HANDLERS - SELALU PROSES
+        // ✅ VIP BADGE HANDLERS
         case "vipbadge":
         case "removeVipBadge": 
         case "getAllVipBadges":
@@ -1009,10 +1012,7 @@ export class ChatServer {
           if (!roomList.includes(room)) return;
           const seatMap = this.roomSeats.get(room);
           Object.assign(seatMap.get(seat), createEmptySeat());
-
-          // ---- CLEAR BUFFER FOR THIS SEAT (IMPORTANT FIX) ----
           this.clearSeatBuffer(room, seat);
-
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.broadcastRoomUserCount(room);
           break;
