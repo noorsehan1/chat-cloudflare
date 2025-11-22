@@ -530,70 +530,69 @@ export class ChatServer {
   }
 
   // ✅ METHOD BARU UNTUK KIRIM STATE CEPAT
-  sendImmediateState(ws, room) {
-    if (ws.readyState !== 1) return;
+// ✅ METHOD UNTUK KIRIM STATE CEPAT - SESUAI FORMAT CLIENT
+sendImmediateState(ws, room) {
+  if (ws.readyState !== 1) return;
 
-    try {
-      const seatMap = this.roomSeats.get(room);
-      if (!seatMap) return;
+  try {
+    const seatMap = this.roomSeats.get(room);
+    if (!seatMap) return;
 
-      // 1. KIRIM CURRENT NUMBER LANGSUNG
-      this.safeSend(ws, ["currentNumber", this.currentNumber]);
+    // 1. KIRIM CURRENT NUMBER LANGSUNG
+    this.safeSend(ws, ["currentNumber", this.currentNumber]);
 
-      // 2. KIRIM ROOM COUNT LANGSUNG
-      const count = this.getJumlahRoom()[room] || 0;
-      this.safeSend(ws, ["roomUserCount", room, count]);
+    // 2. KIRIM ROOM COUNT LANGSUNG
+    const count = this.getJumlahRoom()[room] || 0;
+    this.safeSend(ws, ["roomUserCount", room, count]);
 
-      // 3. KIRIM KURSI DATA YANG ADA ISI SAJA (OPTIMIZED)
-      const kursiUpdates = [];
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const info = seatMap.get(seat);
-        if (!info) continue;
+    // 3. KIRIM KURSI DATA DALAM FORMAT allUpdateKursiList
+    const kursiMeta = {};
+    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+      const info = seatMap.get(seat);
+      if (!info) continue;
 
-        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-          kursiUpdates.push([
-            seat,
-            {
-              noimageUrl: info.noimageUrl,
-              namauser: info.namauser,
-              color: info.color,
-              itembawah: info.itembawah,
-              itematas: info.itematas,
-              vip: info.vip,
-              viptanda: info.viptanda
-            }
-          ]);
-        }
+      if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+        kursiMeta[seat] = {
+          noimageUrl: info.noimageUrl,
+          namauser: info.namauser,
+          color: info.color,
+          itembawah: info.itembawah,
+          itematas: info.itematas,
+          vip: info.vip,
+          viptanda: info.viptanda
+        };
       }
-
-      if (kursiUpdates.length > 0) {
-        this.safeSend(ws, ["kursiBatchUpdate", room, kursiUpdates]);
-      }
-
-      // 4. KIRIM LAST POINTS YANG ADA SAJA
-      const lastPointsData = [];
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const info = seatMap.get(seat);
-        if (!info || !info.lastPoint) continue;
-        
-        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-          lastPointsData.push({
-            seat: seat,
-            x: info.lastPoint.x,
-            y: info.lastPoint.y,
-            fast: info.lastPoint.fast
-          });
-        }
-      }
-
-      if (lastPointsData.length > 0) {
-        this.safeSend(ws, ["allPointsList", room, lastPointsData]);
-      }
-
-    } catch (error) {
-      console.error("Error sending immediate state:", error);
     }
+
+    // ✅ KIRIM allUpdateKursiList DENGAN FORMAT YANG DIMINTA CLIENT
+    if (Object.keys(kursiMeta).length > 0) {
+      this.safeSend(ws, ["allUpdateKursiList", room, kursiMeta]);
+    }
+
+    // 4. KIRIM LAST POINTS (jika ada)
+    const lastPointsData = [];
+    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+      const info = seatMap.get(seat);
+      if (!info || !info.lastPoint) continue;
+      
+      if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+        lastPointsData.push({
+          seat: seat,
+          x: info.lastPoint.x,
+          y: info.lastPoint.y,
+          fast: info.lastPoint.fast
+        });
+      }
+    }
+
+    if (lastPointsData.length > 0) {
+      this.safeSend(ws, ["allPointsList", room, lastPointsData]);
+    }
+
+  } catch (error) {
+    console.error("Error sending immediate state:", error);
   }
+}
 
   handleJoinRoom(ws, newRoom) {
     if (!roomList.includes(newRoom)) {
@@ -1128,3 +1127,4 @@ export default {
     }
   }
 }
+
