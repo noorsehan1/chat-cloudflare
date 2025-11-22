@@ -603,7 +603,7 @@ export class ChatServer {
             for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
               const chat = newChatsAfterDisconnect[i];
               this.safeSend(ws, [
-                "chat", 
+                "chatres", 
                 room, 
                 chat.noImageURL, 
                 chat.username, 
@@ -1222,3 +1222,4 @@ export default {
     }
   }
 }
+
