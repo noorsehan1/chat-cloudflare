@@ -620,14 +620,19 @@ export class ChatServer {
         this.userDisconnectTime.delete(userId);
       }
 
-      // ✅ 2. KIRIM SEMUA POINTS OVERWRITE
+      // ✅ 2. KIRIM SEMUA POINTS OVERWRITE - UBAH SEMUA FAST MENJADI FALSE
       const pointsBatch = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         if (!info) continue;
 
         if (info.points.length > 0) {
-          pointsBatch.push([seat, info.points]);
+          // ✅ UBAH SEMUA POINT MENJADI fast: false
+          const pointsWithFastFalse = info.points.map(point => ({
+            ...point,
+            fast: false  // ← DI SINI PERUBAHANNYA
+          }));
+          pointsBatch.push([seat, pointsWithFastFalse]);
         }
       }
       if (pointsBatch.length > 0) {
