@@ -563,7 +563,7 @@ export class ChatServer {
     } catch (error) {}
   }
 
-  // ✅ NEW: OVERWRITE STYLE - NO BIG ARRAYS
+  // ✅ OVERWRITE SEMANTICS: GUNAKAN CASE YANG SUDAH ADA
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1) return;
 
@@ -571,51 +571,53 @@ export class ChatServer {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) return;
 
-      const pointsBatch = [];
-      const seatsBatch = [];
-
-      // 🔄 PROCESS ALL SEATS - OVERWRITE STYLE
+      // ✅ KIRIM POINTS DENGAN pointUpdated (OVERWRITE SEMANTICS)
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         if (!info) continue;
 
-        // 📍 COLLECT POINTS BATCH
-        if (info.points.length > 0) {
-          const recentPoints = info.points.slice(-5);
-          pointsBatch.push([seat, recentPoints]);
-        }
+        // ✅ KIRIM SETIAP POINT SEBAGAI INDIVIDUAL UPDATE
+        // Client harus handle sebagai overwrite
+        info.points.forEach(point => {
+          this.safeSend(ws, [
+            "pointUpdated", 
+            room, 
+            seat, 
+            point.x, 
+            point.y, 
+            point.fast
+          ]);
+        });
+      }
 
-        // 👥 COLLECT SEAT META BATCH
+      // ✅ KIRIM KURSI DENGAN kursiBatchUpdate (OVERWRITE SEMANTICS)
+      const kursiUpdates = [];
+      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        const info = seatMap.get(seat);
+        if (!info) continue;
+
         if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-          seatsBatch.push([
+          kursiUpdates.push([
             seat,
-            info.noimageUrl,
-            info.namauser,
-            info.color,
-            info.itembawah,
-            info.itematas,
-            info.vip,
-            info.viptanda
+            {
+              noimageUrl: info.noimageUrl,
+              namauser: info.namauser,
+              color: info.color,
+              itembawah: info.itembawah,
+              itematas: info.itematas,
+              vip: info.vip,
+              viptanda: info.viptanda
+            }
           ]);
         }
       }
 
-      // 📤 SEND ALL AT ONCE - OVERWRITE SEMANTICS
-
-      // 1. SEND ALL POINTS (OVERWRITE)
-      if (pointsBatch.length > 0) {
-        this.safeSend(ws, ["allPointsOverwrite", room, pointsBatch]);
+      if (kursiUpdates.length > 0) {
+        this.safeSend(ws, ["kursiBatchUpdate", room, kursiUpdates]);
       }
 
-      // 2. SEND ALL SEATS (OVERWRITE)
-      if (seatsBatch.length > 0) {
-        this.safeSend(ws, ["allSeatsOverwrite", room, seatsBatch]);
-      }
-
-      // 3. SEND CURRENT NUMBER
+      // ✅ INFORMASI ROOM
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
-
-      // 4. SEND ROOM COUNT
       const count = this.getJumlahRoom()[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
 
@@ -998,11 +1000,13 @@ export class ChatServer {
           const si = seatMap.get(seat);
           if (!si) return;
 
-          si.points.push({ x, y, fast, timestamp: Date.now() });
-
-          const now = Date.now();
-          si.points = si.points.filter(point => now - point.timestamp < 3000);
-
+          // ✅ OVERWRITE: DATA BARU OVERWRITE DATA LAMA untuk seat ini
+          const newPoint = { x, y, fast, timestamp: Date.now() };
+          
+          // ✅ TAMBAH POINT BARU (bisa diubah jadi si.points = [newPoint] untuk full overwrite)
+          si.points.push(newPoint);
+          
+          // ✅ BROADCAST DENGAN CASE YANG SUDAH ADA
           this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
           break;
         }
@@ -1011,7 +1015,10 @@ export class ChatServer {
           const [, room, seat] = data;
           if (!roomList.includes(room)) return;
           const seatMap = this.roomSeats.get(room);
+          
+          // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
           Object.assign(seatMap.get(seat), createEmptySeat());
+          
           this.clearSeatBuffer(room, seat);
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.broadcastRoomUserCount(room);
@@ -1028,18 +1035,26 @@ export class ChatServer {
 
           try {
             const seatMap = this.roomSeats.get(room);
-            const currentInfo = seatMap.get(seat) || createEmptySeat();
-
-            Object.assign(currentInfo, {
-              noimageUrl, namauser, color, itembawah, itematas, 
+            
+            // ✅ OVERWRITE: GANTI SELURUH DATA SEAT INI
+            const newSeatData = {
+              noimageUrl,
+              namauser, 
+              color,
+              itembawah,
+              itematas,
               vip: vip || 0,
-              viptanda: viptanda || 0
-            });
+              viptanda: viptanda || 0,
+              points: [], // ✅ RESET POINTS saat kursi di-update
+              lockTime: undefined
+            };
 
-            seatMap.set(seat, currentInfo);
+            seatMap.set(seat, newSeatData);
+            
             if (!this.updateKursiBuffer.has(room))
               this.updateKursiBuffer.set(room, new Map());
-            this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
+            this.updateKursiBuffer.get(room).set(seat, { ...newSeatData });
+            
             this.broadcastRoomUserCount(room);
           } finally {
             this.seatLocks.delete(lockKey);
