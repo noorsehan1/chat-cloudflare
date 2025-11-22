@@ -902,36 +902,15 @@ export class ChatServer {
           break;
         }
 
-        case "onDestroy": {
+       case "onDestroy": {
   const idtarget = ws.idtarget;
   if (idtarget) {
-    // ✅ LANGSUNG HAPUS SEMUA DATA USER TANPA TIMEOUT
+    // ✅ USER SENGAJA KELUAR APP - LANGSUNG BERSIHKAN SEMUA
     this.fullRemoveById(idtarget);
-    
-    // ✅ HAPUS DARI CLIENTS
     this.clients.delete(ws);
-    
-    // ✅ HAPUS DARI SEMUA MAP & SET LAINNYA
-    this.userToSeat.delete(idtarget);
-    this.messageCounts.delete(idtarget);
-    this.usersToRemove.delete(idtarget);
-    this.cleanupInProgress.delete(idtarget);
-    this.userDisconnectTime.delete(idtarget);
-    
-    // ✅ BERSIHKAN PING TIMEOUT
-    if (this.pingTimeouts.has(idtarget)) {
-      clearTimeout(this.pingTimeouts.get(idtarget));
-      this.pingTimeouts.delete(idtarget);
-    }
   }
   break;
 }
-        case "setIdTarget2": {
-          const id = data[1];
-          const baru = data[2];
-          this.handleSetIdTarget2(ws, id, baru);
-          break;
-        }
 
         case "setIdTarget": {
           const newId = data[1];
@@ -1217,5 +1196,6 @@ export default {
     }
   }
 }
+
 
 
