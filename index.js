@@ -46,7 +46,6 @@ export class ChatServer {
 
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
-    this.privateMessageBuffer = new Map();
     this.seatLocks = new Map();
 
     this.currentNumber = 1;
@@ -129,7 +128,6 @@ export class ChatServer {
     const buffersToClear = [
       this.chatMessageBuffer,
       this.updateKursiBuffer, 
-      this.privateMessageBuffer,
       this.roomSeats,
       this.userToSeat,
       this.seatLocks,
@@ -191,7 +189,6 @@ export class ChatServer {
     }
 
     this.userToSeat.delete(idtarget);
-    this.privateMessageBuffer.delete(idtarget);
     this.messageCounts.delete(idtarget);
     this.cleanupInProgress.delete(idtarget);
 
@@ -485,33 +482,6 @@ export class ChatServer {
       this.flushKursiUpdates();
       this.flushChatBuffer();
       this.cleanExpiredLocks();
-
-      const now = Date.now();
-
-      let messagesDelivered = 0;
-      const maxMessagesPerFlush = 50;
-
-      for (const [id, msgs] of this.privateMessageBuffer) {
-        if (messagesDelivered >= maxMessagesPerFlush) break;
-
-        let delivered = false;
-        for (const c of this.clients) {
-          if (c.idtarget === id && c.readyState === 1) {
-            const batch = msgs.slice(0, 10);
-            for (let i = 0; i < batch.length; i++) {
-              const m = batch[i];
-              this.safeSend(c, m);
-              messagesDelivered++;
-              if (messagesDelivered >= maxMessagesPerFlush) break;
-            }
-            delivered = true;
-            break;
-          }
-        }
-        if (delivered) {
-          this.privateMessageBuffer.delete(id);
-        }
-      }
     } catch (error) {}
   }
 
@@ -670,7 +640,6 @@ export class ChatServer {
       if (activeConnections.length === 0) {
         this.fullRemoveById(id);
       } else {
-        this.privateMessageBuffer.delete(id);
         this.messageCounts.delete(id);
       }
 
@@ -747,7 +716,6 @@ export class ChatServer {
         this.pingTimeouts.delete(id);
     }
     this.usersToRemove.delete(id);
-    this.privateMessageBuffer.delete(id);
     this.messageCounts.delete(id);
 
     if (baru === true) {
@@ -802,13 +770,6 @@ export class ChatServer {
         } else {
             this.safeSend(ws, ["needJoinRoom"]);
         }
-    }
-
-    if (this.privateMessageBuffer.has(id)) {
-        for (const msg of this.privateMessageBuffer.get(id)) {
-            this.safeSend(ws, msg);
-        }
-        this.privateMessageBuffer.delete(id);
     }
   }
 
@@ -946,12 +907,6 @@ export class ChatServer {
 
           this.hasEverSetId = true;
 
-          if (this.privateMessageBuffer.has(newId)) {
-            for (const msg of this.privateMessageBuffer.get(newId))
-              this.safeSend(ws, msg);
-            this.privateMessageBuffer.delete(newId);
-          }
-
           if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
           break;
         }
@@ -959,17 +914,11 @@ export class ChatServer {
         case "sendnotif": {
           const [, idtarget, noimageUrl, username, deskripsi] = data;
           const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
-          let delivered = false;
           for (const c of this.clients) {
             if (c.idtarget === idtarget && c.readyState === 1) {
               this.safeSend(c, notif);
-              delivered = true;
+              break;
             }
-          }
-          if (!delivered) {
-            if (!this.privateMessageBuffer.has(idtarget))
-              this.privateMessageBuffer.set(idtarget, []);
-            this.privateMessageBuffer.get(idtarget).push(notif);
           }
           break;
         }
@@ -979,17 +928,11 @@ export class ChatServer {
           const ts = Date.now();
           const out = ["private", idt, url, msg, ts, sender];
           this.safeSend(ws, out);
-          let delivered = false;
           for (const c of this.clients) {
             if (c.idtarget === idt && c.readyState === 1) {
               this.safeSend(c, out);
-              delivered = true;
+              break;
             }
-          }
-          if (!delivered) {
-            if (!this.privateMessageBuffer.has(idt))
-              this.privateMessageBuffer.set(idt, []);
-            this.privateMessageBuffer.get(idt).push(out);
           }
           break;
         }
