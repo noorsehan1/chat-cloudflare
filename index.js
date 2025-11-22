@@ -557,100 +557,65 @@ export class ChatServer {
     } catch (error) {}
   }
 
-  // ✅ PERBAIKAN: Kirim event yang sesuai dengan client
-  sendAllStateTo(ws, room) {
-    if (ws.readyState !== 1) return;
+// ✅ VERSI OPTIMAL: Kirim last point hanya untuk kursi yang ada user
+sendAllStateTo(ws, room) {
+  if (ws.readyState !== 1) return;
 
-    try {
-      const seatMap = this.roomSeats.get(room);
-      if (!seatMap) return;
+  try {
+    const seatMap = this.roomSeats.get(room);
+    if (!seatMap) return;
+    
+    // ✅ 1. KIRIM STATE KURSI TERAKHIR + LAST POINT SEKALIGUS
+    const allKursiMeta = {};
+    const lastPointsData = [];
+    
+    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+      const info = seatMap.get(seat);
+      if (!info) continue;
 
-      const userId = ws.idtarget;
-      
-      // ✅ 1. KIRIM SEMUA KURSI - FORMAT allUpdateKursiList
-      const allKursiMeta = {};
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const info = seatMap.get(seat);
-        if (!info) continue;
+      // ✅ HANYA PROSES KURSI YANG ADA USER-NYA
+      if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+        // Kirim state kursi
+        allKursiMeta[seat] = {
+          noimageUrl: info.noimageUrl,
+          namauser: info.namauser,
+          color: info.color,
+          itembawah: info.itembawah,
+          itematas: info.itematas,
+          vip: info.vip,
+          viptanda: info.viptanda
+        };
 
-        // ✅ KIRIM SEMUA SEATS YANG ADA USER-NYA
-        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-          allKursiMeta[seat] = {
-            noimageUrl: info.noimageUrl,
-            namauser: info.namauser,
-            color: info.color,
-            itembawah: info.itembawah,
-            itematas: info.itematas,
-            vip: info.vip,
-            viptanda: info.viptanda
-          };
-        }
-      }
-      
-      // ✅ KIRIM EVENT allUpdateKursiList KE CLIENT
-      if (Object.keys(allKursiMeta).length > 0) {
-        this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
-      }
-
-      // ✅ 2. KIRIM SEMUA POINTS - FORMAT allPointsList
-      const allPointsData = [];
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const info = seatMap.get(seat);
-        if (!info) continue;
-
+        // ✅ KIRIM LAST POINT JIKA ADA
         if (info.points.length > 0) {
-          // Format points sesuai yang diharapkan client
-          info.points.forEach(point => {
-            allPointsData.push({
-              seat: seat,
-              x: point.x,
-              y: point.y,
-              fast: point.fast
-            });
+          const lastPoint = info.points[info.points.length - 1];
+          lastPointsData.push({
+            seat: seat,
+            x: lastPoint.x,
+            y: lastPoint.y,
+            fast: lastPoint.fast
           });
         }
       }
-      
-      if (allPointsData.length > 0) {
-        this.safeSend(ws, ["allPointsList", room, allPointsData]);
-      }
+    }
+    
+    // ✅ KIRIM STATE KURSI KE CLIENT
+    if (Object.keys(allKursiMeta).length > 0) {
+      this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
+    }
 
-      // ✅ 3. INFORMASI ROOM LAINNYA
-      this.safeSend(ws, ["currentNumber", this.currentNumber]);
-      const count = this.getJumlahRoom()[room] || 0;
-      this.safeSend(ws, ["roomUserCount", room, count]);
+    // ✅ KIRIM LAST POINTS KE CLIENT
+    if (lastPointsData.length > 0) {
+      this.safeSend(ws, ["allPointsList", room, lastPointsData]);
+    }
 
-      // ✅ 4. KIRIM CHAT HISTORY JIKA ADA
-      if (userId && this.roomChatHistory.has(room)) {
-        const history = this.roomChatHistory.get(room);
-        const disconnectTime = this.userDisconnectTime.get(userId) || 0;
-        
-        if (disconnectTime > 0) {
-          const newChatsAfterDisconnect = history.filter(chat => 
-            chat.timestamp > disconnectTime
-          );
-          
-          if (newChatsAfterDisconnect.length > 0) {
-            for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
-              const chat = newChatsAfterDisconnect[i];
-              this.safeSend(ws, [
-                "chat", 
-                room, 
-                chat.noImageURL, 
-                chat.username, 
-                chat.message, 
-                chat.usernameColor, 
-                chat.chatTextColor
-              ]);
-            }
-          }
-        }
-        
-        this.userDisconnectTime.delete(userId);
-      }
+    // ✅ INFORMASI DASAR ROOM
+    this.safeSend(ws, ["currentNumber", this.currentNumber]);
+    const count = this.getJumlahRoom()[room] || 0;
+    this.safeSend(ws, ["roomUserCount", room, count]);
 
-    } catch (error) {}
-  }
+  } catch (error) {}
+}
 
   cleanupClientSafely(ws) {
     const id = ws.idtarget;
@@ -1192,3 +1157,4 @@ export default {
     }
   }
 }
+
