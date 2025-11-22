@@ -25,13 +25,10 @@ export class ChatServer {
     this.state = state;
     this.env = env;
 
+    // Initialize dengan data bersih
     this.clients = new Set();
     this.userToSeat = new Map();
     this.hasEverSetId = false;
-
-    this.GRACE_PERIOD = 30000;
-    this.RECONNECT_TIMEOUT = 10000;
-    this.userConnectionStatus = new Map();
 
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
@@ -62,8 +59,10 @@ export class ChatServer {
       this.chatMessageBuffer.set(room, []);
     }
 
+    // Unique connection id counter
     this._nextConnId = 1;
 
+    // Timers
     this._tickTimer = setInterval(() => {
       this.tick().catch(() => {});
     }, this.intervalMillis);
@@ -78,7 +77,7 @@ export class ChatServer {
       if (this.usersToRemove.size > 0 || this.userToSeat.size > 0) {
         this.batchAutoRemove().catch(() => {});
       }
-    }, 10000);
+    }, 10000); // Reduced from 30s to 10s
 
     this._resetDataTimer = setInterval(() => {
       this.resetStaleData().catch(() => {});
@@ -88,117 +87,21 @@ export class ChatServer {
       this.checkMemoryUsage();
     }, 2 * 60 * 1000);
 
-    this._healthTimer = setInterval(() => {
-      this.checkConnectionHealth();
-    }, 10000);
-
     this.lowcard = new LowCardGameManager(this);
 
     this.pingTimeouts = new Map();
+    this.RECONNECT_TIMEOUT = 10000; // Reduced from 30s to 10s
     this.cleanupInProgress = new Set();
     this.usersToRemove = new Map();
 
     this.messageCounts = new Map();
     this.MAX_MESSAGES_PER_SECOND = 20;
 
+    // NEW: User join locks to prevent double join
     this.userJoinLocks = new Map();
   }
 
-  // METHOD BARU: Force exit instant - hapus semua data user
-  forceExitUser(idtarget) {
-    if (!idtarget) return;
-    
-    // 1. Hapus dari semua tracking maps
-    this.userToSeat.delete(idtarget);
-    this.userDisconnectTime.delete(idtarget);
-    this.usersToRemove.delete(idtarget);
-    this.messageCounts.delete(idtarget);
-    this.cleanupInProgress.delete(idtarget);
-    this.userConnectionStatus.delete(idtarget);
-    this.userJoinLocks.delete(idtarget);
-    
-    // 2. Hapus dari semua seats di semua rooms
-    for (const room of roomList) {
-      const seatMap = this.roomSeats.get(room);
-      if (!seatMap) continue;
-
-      for (const [seatNumber, info] of seatMap) {
-        if (info.namauser === idtarget || info.namauser === `__LOCK__${idtarget}`) {
-          // Hapus VIP badge
-          if (info.viptanda > 0) {
-            this.vipManager.removeVipBadge(room, seatNumber);
-          }
-          
-          // Reset seat ke empty
-          Object.assign(info, createEmptySeat());
-          this.seatLocks.delete(`${room}-${seatNumber}`);
-          
-          // Broadcast instant remove
-          this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
-          this.clearSeatBuffer(room, seatNumber);
-        }
-      }
-      this.broadcastRoomUserCount(room);
-    }
-    
-    // 3. Hapus dari chat history
-    for (const [room, chatList] of this.chatMessageBuffer) {
-      if (Array.isArray(chatList)) {
-        this.chatMessageBuffer.set(room, chatList.filter(msg => msg[3] !== idtarget));
-      }
-    }
-    
-    // 4. Hapus dari room chat history
-    for (const [room, history] of this.roomChatHistory) {
-      if (Array.isArray(history)) {
-        this.roomChatHistory.set(room, history.filter(chat => chat.username !== idtarget));
-      }
-    }
-    
-    // 5. Hapus dari update buffer
-    for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
-      for (const [seat, info] of seatMapUpdates) {
-        if (info && info.namauser === idtarget) {
-          seatMapUpdates.delete(seat);
-        }
-      }
-    }
-    
-    // 6. Hapus semua client connections untuk user ini
-    for (const client of Array.from(this.clients)) {
-      if (client.idtarget === idtarget) {
-        try {
-          if (client.readyState === 1) {
-            client.close(1000, "Force exit");
-          }
-        } catch (e) {}
-        this.clients.delete(client);
-      }
-    }
-    
-    // 7. Hapus VIP badges
-    this.vipManager.cleanupUserVipBadges(idtarget);
-    
-    // 8. Clear any timeouts
-    if (this.pingTimeouts.has(idtarget)) {
-      clearTimeout(this.pingTimeouts.get(idtarget));
-      this.pingTimeouts.delete(idtarget);
-    }
-  }
-
-  checkConnectionHealth() {
-    const now = Date.now();
-    
-    for (const [id, status] of this.userConnectionStatus) {
-      if (!status.connected && (now - status.lastSeen > this.GRACE_PERIOD)) {
-        if (this.usersToRemove.has(id)) {
-          continue;
-        }
-        this.usersToRemove.set(id, status.lastSeen);
-      }
-    }
-  }
-
+  // NEW: Prevent concurrent joins for same user
   async acquireUserJoinLock(idtarget) {
     if (!idtarget) return true;
     
@@ -228,6 +131,7 @@ export class ChatServer {
         this.emergencyCleanup();
       }
     } catch (error) {
+      // silent
     }
   }
 
@@ -242,8 +146,8 @@ export class ChatServer {
       this.seatLocks.clear();
       this.userDisconnectTime.clear();
       this.userJoinLocks.clear();
-      this.userConnectionStatus.clear();
     } catch (error) {
+      // silent
     }
   }
 
@@ -275,18 +179,14 @@ export class ChatServer {
         }
       }
 
+      // Clean expired join locks
       for (const [idtarget, lockTime] of this.userJoinLocks) {
-        if (now - lockTime > 30000) {
+        if (now - lockTime > 30000) { // 30 second lock timeout
           this.userJoinLocks.delete(idtarget);
         }
       }
-
-      for (const [id, status] of this.userConnectionStatus) {
-        if (now - status.lastSeen > this.GRACE_PERIOD + 60000) {
-          this.userConnectionStatus.delete(id);
-        }
-      }
     } catch (error) {
+      // silent
     }
   }
 
@@ -298,20 +198,8 @@ export class ChatServer {
         roomMap.delete(seatNumber);
       }
     } catch (e) {
+      // silent
     }
-  }
-
-  scheduleDelayedCleanup(idtarget) {
-    if (this.pingTimeouts.has(idtarget)) {
-      clearTimeout(this.pingTimeouts.get(idtarget));
-    }
-
-    const timeout = setTimeout(() => {
-      this.fullRemoveById(idtarget);
-      this.userConnectionStatus.delete(idtarget);
-    }, this.GRACE_PERIOD);
-
-    this.pingTimeouts.set(idtarget, timeout);
   }
 
   scheduleCleanupTimeout(idtarget) {
@@ -333,7 +221,7 @@ export class ChatServer {
   async destroy() {
     const timers = [
       this._tickTimer, this._flushTimer, this._autoRemoveTimer,
-      this._resetDataTimer, this._memoryGuard, this._healthTimer
+      this._resetDataTimer, this._memoryGuard
     ];
     for (const timer of timers) {
       if (timer) clearInterval(timer);
@@ -349,7 +237,7 @@ export class ChatServer {
       this.updateKursiBuffer, this.chatMessageBuffer, this.seatLocks,
       this.roomChatHistory, this.userDisconnectTime,
       this.messageCounts, this.usersToRemove, this.cleanupInProgress,
-      this.userJoinLocks, this.userConnectionStatus
+      this.userJoinLocks
     ];
 
     for (const buffer of buffersToClear) {
@@ -360,6 +248,7 @@ export class ChatServer {
           buffer.length = 0;
         }
       } catch (e) {
+        // best-effort
       }
     }
 
@@ -381,55 +270,19 @@ export class ChatServer {
     }
   }
 
-  cleanupClientSafely(ws) {
-    const id = ws.idtarget;
-    if (!id) {
-      this.clients.delete(ws);
-      return;
-    }
-
-    if (this.cleanupInProgress.has(id)) return;
-
-    this.cleanupInProgress.add(id);
-
-    try {
-      this.userConnectionStatus.set(id, {
-        connected: false,
-        lastSeen: Date.now(),
-        hasSeat: this.userToSeat.has(id)
-      });
-
-      if (this.pingTimeouts.has(id)) {
-        clearTimeout(this.pingTimeouts.get(id));
-        this.pingTimeouts.delete(id);
-      }
-
-      const activeConnections = Array.from(this.clients).filter(
-        c => c.idtarget === id && c !== ws && c.readyState === 1
-      );
-
-      this.clients.delete(ws);
-
-      if (activeConnections.length === 0) {
-        this.scheduleDelayedCleanup(id);
-      }
-
-    } catch (error) {
-    } finally {
-      this.cleanupInProgress.delete(id);
-    }
-  }
-
+  // IMPROVED: Instant cleanup without delays
   forceUserCleanup(idtarget) {
     if (!idtarget) return;
 
+    console.log(`[CLEANUP] Force cleaning user: ${idtarget}`);
+
+    // Release join lock first
     this.releaseUserJoinLock(idtarget);
 
     this.userDisconnectTime.delete(idtarget);
     this.usersToRemove.delete(idtarget);
     this.messageCounts.delete(idtarget);
     this.cleanupInProgress.delete(idtarget);
-    this.userConnectionStatus.delete(idtarget);
 
     if (this.pingTimeouts.has(idtarget)) {
       clearTimeout(this.pingTimeouts.get(idtarget));
@@ -449,6 +302,7 @@ export class ChatServer {
           this.clearSeatBuffer(room, seatNumber);
           this.seatLocks.delete(`${room}-${seatNumber}`);
           
+          // Broadcast removal immediately
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
         }
       }
@@ -458,21 +312,27 @@ export class ChatServer {
     this.userToSeat.delete(idtarget);
   }
 
+  // IMPROVED: Complete removal with better sequencing
   fullRemoveById(idtarget) {
     if (!idtarget) return;
 
+    console.log(`[CLEANUP] Full removal for user: ${idtarget}`);
+
+    // Step 1: Release join lock
     this.releaseUserJoinLock(idtarget);
 
+    // Step 2: Clean VIP badges
     this.vipManager.cleanupUserVipBadges(idtarget);
 
+    // Step 3: Clear timeouts and tracking
     this.usersToRemove.delete(idtarget);
     if (this.pingTimeouts.has(idtarget)) {
       clearTimeout(this.pingTimeouts.get(idtarget));
       this.pingTimeouts.delete(idtarget);
     }
     this.userDisconnectTime.delete(idtarget);
-    this.userConnectionStatus.delete(idtarget);
 
+    // Step 4: Remove from all seats in all rooms
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) continue;
@@ -491,10 +351,12 @@ export class ChatServer {
       this.broadcastRoomUserCount(room);
     }
 
+    // Step 5: Clean user mappings
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
     this.cleanupInProgress.delete(idtarget);
 
+    // Step 6: Clean buffers
     for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
       for (const [seat, info] of seatMapUpdates) {
         if (info && (info.namauser === idtarget || info.namauser === `__LOCK__${idtarget}`)) {
@@ -503,6 +365,7 @@ export class ChatServer {
       }
     }
 
+    // Step 7: Clean chat history references
     for (const [room, chatList] of this.chatMessageBuffer) {
       if (!Array.isArray(chatList) || chatList.length === 0) continue;
       let changed = false;
@@ -521,6 +384,7 @@ export class ChatServer {
       }
     }
 
+    // Step 8: Clean seat locks
     for (const [lockKey, lockEntry] of Array.from(this.seatLocks.entries())) {
       const [room, seatStr] = lockKey.split("-");
       const seatNum = parseInt(seatStr, 10);
@@ -539,6 +403,7 @@ export class ChatServer {
       }
     }
 
+    // Step 9: Remove related clients
     for (const c of Array.from(this.clients)) {
       try {
         if (c && c.idtarget === idtarget) {
@@ -587,18 +452,18 @@ export class ChatServer {
   async batchAutoRemove() {
     try {
       const now = Date.now();
-      const removalThreshold = 5000;
+      const removalThreshold = 5000; // Reduced from 25s to 5s
 
       this.cleanExpiredLocks();
 
       const usersToRemoveNow = [];
       let processed = 0;
-      const maxBatchSize = 50;
+      const maxBatchSize = 50; // Increased batch size
 
       for (const [idtarget, removalTime] of this.usersToRemove) {
         if (processed >= maxBatchSize) break;
 
-        if (now - removalTime >= this.GRACE_PERIOD) {
+        if (now - removalTime >= removalThreshold) {
           usersToRemoveNow.push(idtarget);
           processed++;
         }
@@ -620,11 +485,13 @@ export class ChatServer {
 
           this.usersToRemove.delete(idtarget);
         } catch (error) {
+          console.error(`[CLEANUP] Error removing user ${idtarget}:`, error);
         } finally {
           this.cleanupInProgress.delete(idtarget);
         }
       }
 
+      // More aggressive consistency checks
       let consistencyChecks = 0;
       for (const [idtarget, seatInfo] of this.userToSeat) {
         if (consistencyChecks >= 100) break;
@@ -637,6 +504,7 @@ export class ChatServer {
 
         const seatData = seatMap.get(seat);
         if (!seatData || seatData.namauser !== idtarget) {
+          // Inconsistent state - clean up
           this.userToSeat.delete(idtarget);
           continue;
         }
@@ -652,6 +520,7 @@ export class ChatServer {
         consistencyChecks++;
       }
     } catch (error) {
+      console.error('[CLEANUP] Error in batchAutoRemove:', error);
     }
   }
 
@@ -665,6 +534,7 @@ export class ChatServer {
         return true;
       }
     } catch (e) {
+      // silent
     }
     return false;
   }
@@ -678,6 +548,7 @@ export class ChatServer {
             sentCount++;
           }
         } catch (error) {
+          // ignore individual client send errors
         }
       }
     }
@@ -704,6 +575,7 @@ export class ChatServer {
       const count = this.getJumlahRoom()[room] || 0;
       this.broadcastToRoom(room, ["roomUserCount", room, count]);
     } catch (error) {
+      // silent
     }
   }
 
@@ -751,6 +623,7 @@ export class ChatServer {
         }
       }
     } catch (error) {
+      // silent
     }
   }
 
@@ -758,7 +631,7 @@ export class ChatServer {
     try {
       const now = Date.now();
       let cleanedLocks = 0;
-      const maxLocksToClean = 50;
+      const maxLocksToClean = 50; // Increased
 
       for (const room of roomList) {
         if (cleanedLocks >= maxLocksToClean) break;
@@ -768,7 +641,7 @@ export class ChatServer {
           for (const [seat, info] of seatMap) {
             if (cleanedLocks >= maxLocksToClean) break;
 
-            if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > this.GRACE_PERIOD) {
+            if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
               Object.assign(info, createEmptySeat());
               this.seatLocks.delete(`${room}-${seat}`);
               this.broadcastToRoom(room, ["removeKursi", room, seat]);
@@ -780,6 +653,7 @@ export class ChatServer {
         }
       }
     } catch (error) {
+      // silent
     }
   }
 
@@ -789,6 +663,7 @@ export class ChatServer {
       this.flushChatBuffer();
       this.cleanExpiredLocks();
     } catch (error) {
+      // silent
     }
   }
 
@@ -799,9 +674,11 @@ export class ChatServer {
       const result = roomList.map(room => [room, allCounts[room]]);
       this.safeSend(ws, ["allRoomsUserCount", result]);
     } catch (error) {
+      // silent
     }
   }
 
+  // IMPROVED: Better seat locking with conflict detection
   lockSeat(room, ws) {
     if (!ws.idtarget) return null;
 
@@ -812,10 +689,12 @@ export class ChatServer {
       const now = Date.now();
       const userId = ws.idtarget;
 
+      // Check if user already has a seat in this room
       for (let i = 1; i <= this.MAX_SEATS; i++) {
         const seatInfo = seatMap.get(i);
         if (seatInfo && seatInfo.namauser === userId) {
-          return i;
+          // User already has a seat in this room
+          return null;
         }
       }
 
@@ -823,7 +702,7 @@ export class ChatServer {
       for (const [seat, info] of seatMap) {
         if (locksCleaned >= 10) break;
 
-        if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > this.GRACE_PERIOD) {
+        if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
           Object.assign(info, createEmptySeat());
           this.seatLocks.delete(`${room}-${seat}`);
           this.clearSeatBuffer(room, seat);
@@ -833,11 +712,7 @@ export class ChatServer {
 
       for (let i = 1; i <= this.MAX_SEATS; i++) {
         const k = seatMap.get(i);
-        if (k && (k.namauser === "" || 
-                  (String(k.namauser).startsWith("__LOCK__") && 
-                   k.lockTime && 
-                   (now - k.lockTime > this.GRACE_PERIOD)))) {
-          
+        if (k && k.namauser === "") {
           k.namauser = "__LOCK__" + userId;
           k.lockTime = now;
           this.seatLocks.set(`${room}-${i}`, { owner: userId, ts: now });
@@ -888,6 +763,7 @@ export class ChatServer {
       }
 
     } catch (error) {
+      // silent
     }
   }
 
@@ -959,6 +835,50 @@ export class ChatServer {
       }
 
     } catch (error) {
+      // silent
+    }
+  }
+
+  // IMPROVED: Instant cleanup without delays
+  cleanupClientSafely(ws) {
+    const id = ws.idtarget;
+    if (!id) {
+      this.clients.delete(ws);
+      return;
+    }
+
+    if (this.cleanupInProgress.has(id)) return;
+
+    this.cleanupInProgress.add(id);
+
+    try {
+      // Clear timeout immediately
+      if (this.pingTimeouts.has(id)) {
+        clearTimeout(this.pingTimeouts.get(id));
+        this.pingTimeouts.delete(id);
+      }
+
+      const activeConnections = Array.from(this.clients).filter(
+        c => c.idtarget === id && c !== ws && c.readyState === 1
+      );
+
+      // Remove this client
+      this.clients.delete(ws);
+
+      if (activeConnections.length === 0) {
+        // No other active connections - cleanup immediately
+        console.log(`[CLEANUP] No active connections for ${id}, cleaning immediately`);
+        this.fullRemoveById(id);
+      } else {
+        // Other connections still active - just remove message counts
+        this.messageCounts.delete(id);
+        console.log(`[CLEANUP] Other connections active for ${id}, skipping full cleanup`);
+      }
+
+    } catch (error) {
+      console.error(`[CLEANUP] Error cleaning client ${id}:`, error);
+    } finally {
+      this.cleanupInProgress.delete(id);
     }
   }
 
@@ -992,6 +912,7 @@ export class ChatServer {
       this.userToSeat.delete(idtarget);
       this.usersToRemove.delete(idtarget);
     } catch (error) {
+      console.error(`[CLEANUP] Error removing seats for ${idtarget}:`, error);
     }
   }
 
@@ -1021,9 +942,11 @@ export class ChatServer {
     return users;
   }
 
+  // IMPROVED: Better ID handling with join lock
   async handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
+    // Acquire join lock to prevent concurrent joins
     const lockAcquired = await this.acquireUserJoinLock(id);
     if (!lockAcquired) {
       this.safeSend(ws, ["error", "Another operation in progress"]);
@@ -1031,26 +954,21 @@ export class ChatServer {
     }
 
     try {
-      this.userConnectionStatus.set(id, {
-        connected: true,
-        lastSeen: Date.now(),
-        hasSeat: true
-      });
-
-      if (this.pingTimeouts.has(id)) {
-        clearTimeout(this.pingTimeouts.get(id));
-        this.pingTimeouts.delete(id);
-      }
+      // Clear previous state aggressively
+      this.forceUserCleanup(id);
 
       ws.idtarget = id;
 
       if (baru === true) {
+        // New user - ensure clean state
         this.userDisconnectTime.delete(id);
         ws.roomname = undefined;
         ws.numkursi = new Set();
+        
         this.safeSend(ws, ["needJoinRoom"]);
       }
       else if (baru === false) {
+        // Existing user - restore state
         const seatInfo = this.userToSeat.get(id);
 
         if (seatInfo) {
@@ -1059,18 +977,12 @@ export class ChatServer {
 
           if (seatMap?.has(seat)) {
             const seatData = seatMap.get(seat);
-            
-            if (seatData.namauser === id || 
-                seatData.namauser === `__LOCK__${id}` ||
-                !seatData.namauser) {
-              
-              seatData.namauser = id;
-              seatData.lockTime = undefined;
-              this.seatLocks.delete(`${room}-${seat}`);
-              
+
+            if (seatData.namauser === id) {
               ws.roomname = room;
               ws.numkursi = new Set([seat]);
 
+              // Restore chat history
               if (this.roomChatHistory.has(room)) {
                 const history = this.roomChatHistory.get(room);
                 const disconnectTime = this.userDisconnectTime.get(id) || 0;
@@ -1100,25 +1012,43 @@ export class ChatServer {
 
               this.sendAllStateTo(ws, room);
               this.broadcastRoomUserCount(room);
-              
+
             } else {
+              // Seat taken by someone else
               this.userToSeat.delete(id);
-              this.safeSend(ws, ["seatTaken", room, seat]);
               this.safeSend(ws, ["needJoinRoom"]);
             }
           } else {
+            // Seat doesn't exist
             this.userToSeat.delete(id);
             this.safeSend(ws, ["needJoinRoom"]);
           }
         } else {
+          // No seat info
           this.safeSend(ws, ["needJoinRoom"]);
         }
       }
     } finally {
+      // Release join lock
       this.releaseUserJoinLock(id);
     }
   }
 
+  // IMPROVED: Instant destruction
+  handleOnDestroy(ws, idtarget) {
+    if (!idtarget) return;
+
+    console.log(`[DESTROY] Handling destroy for: ${idtarget}`);
+    
+    try {
+      this.fullRemoveById(idtarget);
+      this.clients.delete(ws);
+    } catch (error) {
+      console.error(`[DESTROY] Error destroying ${idtarget}:`, error);
+    }
+  }
+
+  // IMPROVED: Join room with conflict prevention
   async handleJoinRoom(ws, newRoom) {
     if (!roomList.includes(newRoom)) {
       return false;
@@ -1129,6 +1059,7 @@ export class ChatServer {
       return false;
     }
 
+    // Acquire join lock
     const lockAcquired = await this.acquireUserJoinLock(ws.idtarget);
     if (!lockAcquired) {
       this.safeSend(ws, ["error", "Another join operation in progress"]);
@@ -1136,10 +1067,12 @@ export class ChatServer {
     }
 
     try {
+      // Clean previous room first
       if (ws.roomname && ws.roomname !== newRoom) {
         await this.removeAllSeatsById(ws.idtarget);
       }
 
+      // Check if user already in this room
       const existingSeatInfo = this.userToSeat.get(ws.idtarget);
       if (existingSeatInfo && existingSeatInfo.room === newRoom) {
         this.safeSend(ws, ["error", "Already in this room"]);
@@ -1161,12 +1094,6 @@ export class ChatServer {
       if (ws.idtarget) {
         this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
       }
-
-      this.userConnectionStatus.set(ws.idtarget, {
-        connected: true,
-        lastSeen: Date.now(),
-        hasSeat: true
-      });
 
       this.sendAllStateTo(ws, newRoom);
       this.vipManager.getAllVipBadges(ws, newRoom);
@@ -1221,9 +1148,9 @@ export class ChatServer {
           break;
         }
 
-        case "forceExit": {
+        case "onDestroy": {
           const idtarget = ws.idtarget;
-          this.forceExitUser(idtarget);
+          this.handleOnDestroy(ws, idtarget);
           break;
         }
 
@@ -1237,18 +1164,14 @@ export class ChatServer {
         case "setIdTarget": {
           const newId = data[1];
           
+          // Clean previous state first
           if (ws.idtarget && ws.idtarget !== newId) {
             this.forceUserCleanup(ws.idtarget);
           }
 
           ws.idtarget = newId;
 
-          this.userConnectionStatus.set(newId, {
-            connected: true,
-            lastSeen: Date.now(),
-            hasSeat: this.userToSeat.has(newId)
-          });
-
+          // Clear any existing timeouts
           if (this.pingTimeouts.has(newId)) {
             clearTimeout(this.pingTimeouts.get(newId));
             this.pingTimeouts.delete(newId);
@@ -1420,7 +1343,7 @@ export class ChatServer {
           const now = Date.now();
 
           const lockEntry = this.seatLocks.get(lockKey);
-          if (lockEntry && lockEntry.ts && (now - lockEntry.ts <  this.GRACE_PERIOD) && lockEntry.owner && lockEntry.owner !== (ws.idtarget || ws._connId)) {
+          if (lockEntry && lockEntry.ts && (now - lockEntry.ts <  this.RECONNECT_TIMEOUT) && lockEntry.owner && lockEntry.owner !== (ws.idtarget || ws._connId)) {
             return;
           }
 
@@ -1469,6 +1392,7 @@ export class ChatServer {
         }
       }
     } catch (error) {
+      console.error('[HANDLE MESSAGE] Error:', error);
     }
   }
 
@@ -1494,26 +1418,21 @@ export class ChatServer {
       this.clients.add(ws);
 
       ws.addEventListener("message", (ev) => {
-        this.handleMessage(ws, ev.data);
+        try {
+          this.handleMessage(ws, ev.data);
+        } catch (error) {
+          console.error('[WS MESSAGE] Error:', error);
+          this.cleanupClientSafely(ws);
+        }
       });
 
       ws.addEventListener("close", (event) => {
         const id = ws.idtarget;
-        
-        if (event.code === 1000) {
-          // Close code 1000: FORCE EXIT INSTANT
-          if (id) {
-            this.forceExitUser(id);
-          } else {
-            this.clients.delete(ws);
-          }
-        } else {
-          // Close code lain: grace period biasa
-          if (id) {
-            this.userDisconnectTime.set(id, Date.now());
-          }
-          this.cleanupClientSafely(ws);
+        if (id) {
+          this.userDisconnectTime.set(id, Date.now());
         }
+        // Instant cleanup without timeout
+        this.cleanupClientSafely(ws);
       });
 
       ws.addEventListener("error", (event) => {
@@ -1521,6 +1440,7 @@ export class ChatServer {
         if (id) {
           this.userDisconnectTime.set(id, Date.now());
         }
+        // Instant cleanup without timeout
         this.cleanupClientSafely(ws);
       });
 
@@ -1546,4 +1466,4 @@ export default {
       return new Response("Internal Server Error", { status: 500 });
     }
   }
-};
+}; 
