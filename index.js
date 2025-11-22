@@ -15,9 +15,9 @@ function createEmptySeat() {
     itematas: 0,
     vip: 0,
     viptanda: 0,
-    points: [],
-    lockTime: undefined,
-    lastActivity: Date.now()
+    lastPoint: null,
+    lockTime: undefined
+    // ❌ HAPUS: lastActivity
   };
 }
 
@@ -48,7 +48,6 @@ export class ChatServer {
     this.privateMessageBuffer = new Map();
     this.seatLocks = new Map();
 
-    // ✅ TAMBAH: ROOM CHAT HISTORY SYSTEM
     this.roomChatHistory = new Map();
     this.userDisconnectTime = new Map();
 
@@ -65,19 +64,11 @@ export class ChatServer {
       this.tick().catch(() => {});
     }, this.intervalMillis);
 
-    // ✅ PERBAIKI: FLUSH TIMER JADI 100ms (LEBIH CEPAT)
     this._flushTimer = setInterval(() => {
       if (this.clients.size > 0) {
         this.periodicFlush().catch(() => {});
       }
     }, 100);
-
-    // ❌ HAPUS: AUTO REMOVE TIMER (REDUNDAN)
-    // this._autoRemoveTimer = setInterval(() => {
-    //   if (this.usersToRemove.size > 0 || this.userToSeat.size > 0) {
-    //     this.batchAutoRemove().catch(() => {});
-    //   }
-    // }, 30000);
 
     this.lowcard = new LowCardGameManager(this);
 
@@ -101,13 +92,22 @@ export class ChatServer {
     }
   }
 
-  // ✅ TAMBAH: METHOD UNTUK CHAT HISTORY RESTORATION
   restoreRecentChatHistory(ws, room) {
     try {
       if (!this.roomChatHistory.has(room)) return;
       
       const history = this.roomChatHistory.get(room);
-      const recentChats = history.slice(-10);
+      const id = ws.idtarget;
+      
+      if (!id) return;
+      
+      const disconnectTime = this.userDisconnectTime.get(id) || 0;
+      
+      const chatsAfterDisconnect = history.filter(chat => 
+        chat.timestamp > disconnectTime
+      );
+      
+      const recentChats = chatsAfterDisconnect.slice(-10);
       
       for (let i = 0; i < recentChats.length; i++) {
         const chat = recentChats[i];
@@ -123,7 +123,10 @@ export class ChatServer {
         ]);
       }
       
-      console.log(`Restored ${recentChats.length} recent chats for ${ws.idtarget} in ${room}`);
+      console.log(`Restored ${recentChats.length} recent chats after disconnect for ${id} in ${room}`);
+      
+      this.userDisconnectTime.delete(id);
+      
     } catch (error) {
       console.error("Error restoring chat history:", error);
     }
@@ -146,7 +149,6 @@ export class ChatServer {
   }
 
   async destroy() {
-    // ✅ PERBAIKI: HAPUS AUTO REMOVE TIMER
     const timers = [this._tickTimer, this._flushTimer];
     for (const timer of timers) {
       if (timer) clearInterval(timer);
@@ -202,7 +204,6 @@ export class ChatServer {
       this.pingTimeouts.delete(idtarget);
     }
 
-    // ✅ TAMBAH: HAPUS DISCONNECT TIME
     this.userDisconnectTime.delete(idtarget);
 
     for (const room of roomList) {
@@ -452,7 +453,7 @@ export class ChatServer {
         for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
           if (!seatMapUpdates.has(seat)) continue;
           const info = seatMapUpdates.get(seat);
-          const { points, ...rest } = info;
+          const { lastPoint, ...rest } = info;
           updates.push([seat, rest]);
         }
         if (updates.length > 0) {
@@ -509,25 +510,6 @@ export class ChatServer {
       this.flushKursiUpdates();
       this.flushChatBuffer();
       this.cleanExpiredLocks();
-
-      const now = Date.now();
-
-      for (const client of this.clients) {
-        if (client.idtarget && client.readyState === 1) {
-          const seatInfo = this.userToSeat.get(client.idtarget);
-          if (seatInfo) {
-            const { room, seat } = seatInfo;
-            const seatMap = this.roomSeats.get(room);
-            if (seatMap && seatMap.has(seat)) {
-              const seatData = seatMap.get(seat);
-              if (seatData.namauser === client.idtarget) {
-                seatData.lastActivity = now;
-                this.usersToRemove.delete(client.idtarget);
-              }
-            }
-          }
-        }
-      }
 
       let messagesDelivered = 0;
       const maxMessagesPerFlush = 50;
@@ -590,7 +572,7 @@ export class ChatServer {
         if (k && k.namauser === "") {
           k.namauser = "__LOCK__" + ws.idtarget;
           k.lockTime = now;
-          k.lastActivity = now;
+          // ❌ HAPUS: lastActivity
           this.userToSeat.set(ws.idtarget, { room, seat: i });
           return i;
         }
@@ -648,19 +630,20 @@ export class ChatServer {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) return;
 
-      const allPoints = [];
+      const lastPointsData = [];
       const meta = {};
 
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         if (!info) continue;
 
-        if (info.points.length > 0) {
-          const recentPoints = info.points.slice(-5);
-          for (let i = 0; i < recentPoints.length; i++) {
-            const point = recentPoints[i];
-            allPoints.push({ seat, ...point });
-          }
+        if (info.lastPoint) {
+          lastPointsData.push({
+            seat: seat,
+            x: info.lastPoint.x,
+            y: info.lastPoint.y,
+            fast: info.lastPoint.fast
+          });
         }
 
         if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
@@ -676,7 +659,10 @@ export class ChatServer {
         }
       }
 
-      this.safeSend(ws, ["allPointsList", room, allPoints]);
+      if (lastPointsData.length > 0) {
+        this.safeSend(ws, ["allPointsList", room, lastPointsData]);
+      }
+      
       this.safeSend(ws, ["allUpdateKursiList", room, meta]);
 
     } catch (error) {}
@@ -705,7 +691,6 @@ export class ChatServer {
 
       if (activeConnections.length === 0) {
         this.usersToRemove.set(id, Date.now());
-        // ✅ TAMBAH: SIMPAN DISCONNECT TIME UNTUK CHAT HISTORY
         this.userDisconnectTime.set(id, Date.now());
       }
 
@@ -791,7 +776,6 @@ export class ChatServer {
     this.messageCounts.delete(id);
 
     if (baru === true) {
-        // ✅ TAMBAH: HAPUS DISCONNECT TIME
         this.userDisconnectTime.delete(id);
         
         for (const room of roomList) {
@@ -829,9 +813,8 @@ export class ChatServer {
                 if (seatData.namauser === id) {
                     ws.roomname = room;
                     ws.numkursi = new Set([seat]);
-                    seatData.lastActivity = Date.now();
+                    // ❌ HAPUS: lastActivity
                     
-                    // ✅ TAMBAH: KIRIM CHAT HISTORY SAAT RECONNECT
                     this.restoreRecentChatHistory(ws, room);
                     
                     this.sendAllStateTo(ws, room);
@@ -975,7 +958,7 @@ export class ChatServer {
               const seatInfo = seatMap.get(prevSeat.seat);
               if (seatInfo.namauser === `__LOCK__${newId}` || !seatInfo.namauser) {
                 seatInfo.namauser = newId;
-                seatInfo.lastActivity = Date.now();
+                // ❌ HAPUS: lastActivity
               }
             }
           } else {
@@ -1083,7 +1066,6 @@ export class ChatServer {
           this.chatMessageBuffer.get(roomname)
             .push(["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
           
-          // ✅ TAMBAH: SIMPAN KE CHAT HISTORY
           if (!this.roomChatHistory.has(roomname)) {
             this.roomChatHistory.set(roomname, []);
           }
@@ -1114,12 +1096,9 @@ export class ChatServer {
           const si = seatMap.get(seat);
           if (!si) return;
 
-          si.points.push({ x, y, fast, timestamp: Date.now() });
-
-          const now = Date.now();
-          si.points = si.points.filter(point => now - point.timestamp < 3000);
-
-          si.lastActivity = now;
+          si.lastPoint = { x, y, fast, timestamp: Date.now() };
+          // ❌ HAPUS: lastActivity
+          
           this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
           break;
         }
@@ -1150,14 +1129,14 @@ export class ChatServer {
             Object.assign(currentInfo, {
               noimageUrl, namauser, color, itembawah, itematas, 
               vip: vip || 0,
-              viptanda: viptanda || 0,
-              lastActivity: Date.now()
+              viptanda: viptanda || 0
+              // ❌ HAPUS: lastActivity
             });
 
             seatMap.set(seat, currentInfo);
             if (!this.updateKursiBuffer.has(room))
               this.updateKursiBuffer.set(room, new Map());
-            this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
+            this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, lastPoint: currentInfo.lastPoint });
             this.broadcastRoomUserCount(room);
           } finally {
             this.seatLocks.delete(lockKey);
@@ -1217,10 +1196,9 @@ export class ChatServer {
         }
       });
 
-      // ✅ PERBAIKI: RACE CONDITION FIX
       ws.addEventListener("close", (event) => {
         const id = ws.idtarget;
-        if (id && event.code !== 1000) {  // ✅ Hanya timeout jika bukan manual disconnect
+        if (id && event.code !== 1000) {
           this.userDisconnectTime.set(id, Date.now());
           this.scheduleCleanupTimeout(id);
         }
