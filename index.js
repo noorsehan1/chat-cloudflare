@@ -1158,12 +1158,13 @@ export class ChatServer {
       });
 
       ws.addEventListener("close", (event) => {
-        const id = ws.idtarget;
-        if (id) {
-          this.userDisconnectTime.set(id, Date.now());
-          this.scheduleCleanupTimeout(id);
-        }
-      });
+    const id = ws.idtarget;
+    // ✅ Skip timeout jika close code 1000 (normal closure) 
+    if (id && event.code !== 1000) {
+        this.userDisconnectTime.set(id, Date.now());
+        this.scheduleCleanupTimeout(id);
+    }
+});
 
       ws.addEventListener("error", (event) => {
         const id = ws.idtarget;
@@ -1196,6 +1197,7 @@ export default {
     }
   }
 }
+
 
 
 
