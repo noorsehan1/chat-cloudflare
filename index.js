@@ -177,6 +177,7 @@ export class ChatServer {
         if (!n) continue;
 
         if (n === idtarget || n === `__LOCK__${idtarget}`) {
+          // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
           Object.assign(info, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
 
@@ -457,6 +458,7 @@ export class ChatServer {
             if (cleanedLocks >= maxLocksToClean) break;
 
             if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
+              // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
               Object.assign(info, createEmptySeat());
               this.broadcastToRoom(room, ["removeKursi", room, seat]);
 
@@ -503,6 +505,7 @@ export class ChatServer {
         if (locksCleaned >= 5) break;
 
         if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
+          // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
           Object.assign(info, createEmptySeat());
           this.clearSeatBuffer(room, seat);
           locksCleaned++;
@@ -512,6 +515,7 @@ export class ChatServer {
       for (let i = 1; i <= this.MAX_SEATS; i++) {
         const k = seatMap.get(i);
         if (k && k.namauser === "") {
+          // ✅ OVERWRITE: SET LOCKED SEAT
           k.namauser = "__LOCK__" + ws.idtarget;
           k.lockTime = now;
           return i;
@@ -563,7 +567,7 @@ export class ChatServer {
     } catch (error) {}
   }
 
-  // ✅ OVERWRITE SEMANTICS: GUNAKAN CASE YANG SUDAH ADA
+  // ✅ OVERWRITE SEMANTICS: KIRIM STATE LENGKAP
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1) return;
 
@@ -571,49 +575,41 @@ export class ChatServer {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) return;
 
-      // ✅ KIRIM POINTS DENGAN pointUpdated (OVERWRITE SEMANTICS)
+      // ✅ KIRIM SEMUA POINTS OVERWRITE
+      const pointsBatch = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         if (!info) continue;
 
-        // ✅ KIRIM SETIAP POINT SEBAGAI INDIVIDUAL UPDATE
-        // Client harus handle sebagai overwrite
-        info.points.forEach(point => {
-          this.safeSend(ws, [
-            "pointUpdated", 
-            room, 
-            seat, 
-            point.x, 
-            point.y, 
-            point.fast
-          ]);
-        });
+        if (info.points.length > 0) {
+          pointsBatch.push([seat, info.points]);
+        }
+      }
+      if (pointsBatch.length > 0) {
+        this.safeSend(ws, ["allPointsOverwrite", room, pointsBatch]);
       }
 
-      // ✅ KIRIM KURSI DENGAN kursiBatchUpdate (OVERWRITE SEMANTICS)
-      const kursiUpdates = [];
+      // ✅ KIRIM SEMUA SEATS OVERWRITE  
+      const seatsBatch = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         if (!info) continue;
 
         if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-          kursiUpdates.push([
+          seatsBatch.push([
             seat,
-            {
-              noimageUrl: info.noimageUrl,
-              namauser: info.namauser,
-              color: info.color,
-              itembawah: info.itembawah,
-              itematas: info.itematas,
-              vip: info.vip,
-              viptanda: info.viptanda
-            }
+            info.noimageUrl,
+            info.namauser,
+            info.color,
+            info.itembawah,
+            info.itematas,
+            info.vip,
+            info.viptanda
           ]);
         }
       }
-
-      if (kursiUpdates.length > 0) {
-        this.safeSend(ws, ["kursiBatchUpdate", room, kursiUpdates]);
+      if (seatsBatch.length > 0) {
+        this.safeSend(ws, ["allSeatsOverwrite", room, seatsBatch]);
       }
 
       // ✅ INFORMASI ROOM
@@ -682,6 +678,7 @@ export class ChatServer {
           this.vipManager.removeVipBadge(room, seat);
         }
         
+        // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
         Object.assign(currentSeat, createEmptySeat());
         this.clearSeatBuffer(room, seat);
         this.broadcastToRoom(room, ["removeKursi", room, seat]);
@@ -740,6 +737,7 @@ export class ChatServer {
                       this.vipManager.removeVipBadge(room, seatNumber);
                     }
                     
+                    // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
                     Object.assign(seatInfo, createEmptySeat());
                     this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
                     this.clearSeatBuffer(room, seatNumber);
@@ -1000,13 +998,9 @@ export class ChatServer {
           const si = seatMap.get(seat);
           if (!si) return;
 
-          // ✅ OVERWRITE: DATA BARU OVERWRITE DATA LAMA untuk seat ini
-          const newPoint = { x, y, fast, timestamp: Date.now() };
-          
-          // ✅ TAMBAH POINT BARU (bisa diubah jadi si.points = [newPoint] untuk full overwrite)
-          si.points.push(newPoint);
-          
-          // ✅ BROADCAST DENGAN CASE YANG SUDAH ADA
+          // ✅ OVERWRITE: TAMBAH POINT BARU
+          si.points.push({ x, y, fast, timestamp: Date.now() });
+
           this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
           break;
         }
@@ -1035,26 +1029,19 @@ export class ChatServer {
 
           try {
             const seatMap = this.roomSeats.get(room);
-            
-            // ✅ OVERWRITE: GANTI SELURUH DATA SEAT INI
-            const newSeatData = {
-              noimageUrl,
-              namauser, 
-              color,
-              itembawah,
-              itematas,
-              vip: vip || 0,
-              viptanda: viptanda || 0,
-              points: [], // ✅ RESET POINTS saat kursi di-update
-              lockTime: undefined
-            };
+            const currentInfo = seatMap.get(seat) || createEmptySeat();
 
-            seatMap.set(seat, newSeatData);
-            
+            // ✅ OVERWRITE: GANTI SELURUH DATA SEAT
+            Object.assign(currentInfo, {
+              noimageUrl, namauser, color, itembawah, itematas, 
+              vip: vip || 0,
+              viptanda: viptanda || 0
+            });
+
+            seatMap.set(seat, currentInfo);
             if (!this.updateKursiBuffer.has(room))
               this.updateKursiBuffer.set(room, new Map());
-            this.updateKursiBuffer.get(room).set(seat, { ...newSeatData });
-            
+            this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
             this.broadcastRoomUserCount(room);
           } finally {
             this.seatLocks.delete(lockKey);
