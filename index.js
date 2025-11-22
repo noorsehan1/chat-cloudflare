@@ -32,7 +32,6 @@ export class ChatServer {
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
 
-    // Initialize rooms and seats
     for (const room of roomList) {
       const seatMap = new Map();
       for (let i = 1; i <= this.MAX_SEATS; i++) {
@@ -41,14 +40,12 @@ export class ChatServer {
       this.roomSeats.set(room, seatMap);
     }
 
-    // ✅ INIT VIP BADGE MANAGER
     this.vipManager = new VipBadgeManager(this);
 
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
     this.seatLocks = new Map();
 
-    // ✅ 10 CHAT HISTORY PER ROOM + DISCONNECT TIME TRACKING
     this.roomChatHistory = new Map();
     this.userDisconnectTime = new Map();
 
@@ -88,7 +85,6 @@ export class ChatServer {
     this.MAX_MESSAGES_PER_SECOND = 20;
   }
 
-  // ----------------- Utility to clear buffered updates for a seat -----------------
   clearSeatBuffer(room, seatNumber) {
     try {
       if (!room || typeof seatNumber !== "number") return;
@@ -96,11 +92,8 @@ export class ChatServer {
         this.updateKursiBuffer.get(room).delete(seatNumber);
       }
     } catch (e) {
-      // ignore
     }
   }
-
-  // ==================== CORE FUNCTIONS ====================
 
   scheduleCleanupTimeout(idtarget) {
     if (this.pingTimeouts.has(idtarget)) {
@@ -165,7 +158,6 @@ export class ChatServer {
   fullRemoveById(idtarget) {
     if (!idtarget) return;
 
-    // ✅ CLEANUP VIP BADGES USER INI
     this.vipManager.cleanupUserVipBadges(idtarget);
 
     this.usersToRemove.delete(idtarget);
@@ -174,7 +166,6 @@ export class ChatServer {
       this.pingTimeouts.delete(idtarget);
     }
 
-    // ✅ HAPUS DISCONNECT TIME USER INI
     this.userDisconnectTime.delete(idtarget);
 
     for (const room of roomList) {
@@ -186,13 +177,9 @@ export class ChatServer {
         if (!n) continue;
 
         if (n === idtarget || n === `__LOCK__${idtarget}`) {
-          // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
           Object.assign(info, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
-
-          // ---- CLEAR BUFFER FOR THIS SEAT ----
           this.clearSeatBuffer(room, seatNumber);
-
           this.broadcastRoomUserCount(room);
         }
       }
@@ -467,13 +454,9 @@ export class ChatServer {
             if (cleanedLocks >= maxLocksToClean) break;
 
             if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
-              // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
               Object.assign(info, createEmptySeat());
               this.broadcastToRoom(room, ["removeKursi", room, seat]);
-
-              // ---- CLEAR BUFFER FOR THIS SEAT ----
               this.clearSeatBuffer(room, seat);
-
               this.broadcastRoomUserCount(room);
               cleanedLocks++;
             }
@@ -514,7 +497,6 @@ export class ChatServer {
         if (locksCleaned >= 5) break;
 
         if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
-          // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
           Object.assign(info, createEmptySeat());
           this.clearSeatBuffer(room, seat);
           locksCleaned++;
@@ -524,7 +506,6 @@ export class ChatServer {
       for (let i = 1; i <= this.MAX_SEATS; i++) {
         const k = seatMap.get(i);
         if (k && k.namauser === "") {
-          // ✅ OVERWRITE: SET LOCKED SEAT
           k.namauser = "__LOCK__" + ws.idtarget;
           k.lockTime = now;
           return i;
@@ -576,7 +557,6 @@ export class ChatServer {
     } catch (error) {}
   }
 
-  // ✅ OVERWRITE SEMANTICS + SMART CHAT HISTORY
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1) return;
 
@@ -586,19 +566,15 @@ export class ChatServer {
 
       const userId = ws.idtarget;
       
-      // ✅ 1. KIRIM CHAT HISTORY: HANYA YANG SETELAH DISCONNECT
       if (userId && this.roomChatHistory.has(room)) {
         const history = this.roomChatHistory.get(room);
         const disconnectTime = this.userDisconnectTime.get(userId) || 0;
         
-        // ✅ HANYA PROSES JIKA ADA DISCONNECT TIME (user reconnect)
         if (disconnectTime > 0) {
-          // ✅ FILTER: HANYA CHAT YANG LEBIH BARU DARI DISCONNECT TIME
           const newChatsAfterDisconnect = history.filter(chat => 
             chat.timestamp > disconnectTime
           );
           
-          // ✅ KIRIM HANYA JIKA ADA CHAT BARU SETELAH DISCONNECT
           if (newChatsAfterDisconnect.length > 0) {
             for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
               const chat = newChatsAfterDisconnect[i];
@@ -613,14 +589,11 @@ export class ChatServer {
               ]);
             }
           }
-          // ❌ JIKA TIDAK ADA CHAT BARU: TIDAK KIRIM APA-APA
         }
         
-        // ✅ HAPUS DISCONNECT TIME SETELAH PROSES
         this.userDisconnectTime.delete(userId);
       }
 
-      // ✅ 2. KIRIM SEMUA POINTS OVERWRITE
       const pointsBatch = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
@@ -631,10 +604,9 @@ export class ChatServer {
         }
       }
       if (pointsBatch.length > 0) {
-        this.safeSend(ws, ["allPointsOverwrite", room, pointsBatch]);
+        this.safeSend(ws, ["allPointsList", room, pointsBatch]);
       }
 
-      // ✅ 3. KIRIM SEMUA SEATS OVERWRITE  
       const seatsBatch = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
@@ -653,11 +625,11 @@ export class ChatServer {
           ]);
         }
       }
+      
       if (seatsBatch.length > 0) {
-        this.safeSend(ws, ["allSeatsOverwrite", room, seatsBatch]);
+        this.safeSend(ws, ["allUpdateKursiList", room, seatsBatch]);
       }
 
-      // ✅ 4. INFORMASI ROOM
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
       const count = this.getJumlahRoom()[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
@@ -718,12 +690,10 @@ export class ChatServer {
 
       const currentSeat = seatMap.get(seat);
       if (currentSeat.namauser === idtarget || currentSeat.namauser === `__LOCK__${idtarget}`) {
-        // ✅ REMOVE VIP BADGE JIKA ADA
         if (currentSeat.viptanda > 0) {
           this.vipManager.removeVipBadge(room, seat);
         }
         
-        // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
         Object.assign(currentSeat, createEmptySeat());
         this.clearSeatBuffer(room, seat);
         this.broadcastToRoom(room, ["removeKursi", room, seat]);
@@ -772,7 +742,6 @@ export class ChatServer {
     this.messageCounts.delete(id);
 
     if (baru === true) {
-        // ✅ USER BARU: HAPUS DISCONNECT TIME LAMA
         this.userDisconnectTime.delete(id);
         
         for (const room of roomList) {
@@ -785,7 +754,6 @@ export class ChatServer {
                       this.vipManager.removeVipBadge(room, seatNumber);
                     }
                     
-                    // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
                     Object.assign(seatInfo, createEmptySeat());
                     this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
                     this.clearSeatBuffer(room, seatNumber);
@@ -799,7 +767,6 @@ export class ChatServer {
         ws.numkursi = new Set();
     }
     else if (baru === false) {
-        // ✅ USER RECONNECT: DISCONNECT TIME SUDAH DISIMPAN
         const seatInfo = this.userToSeat.get(id);
 
         if (seatInfo) {
@@ -812,7 +779,7 @@ export class ChatServer {
                 if (seatData.namauser === id) {
                     ws.roomname = room;
                     ws.numkursi = new Set([seat]);
-                    this.sendAllStateTo(ws, room); // ← AKAN FILTER CHAT TERLEWAT
+                    this.sendAllStateTo(ws, room);
                     this.broadcastRoomUserCount(room);
                 } else {
                     this.userToSeat.delete(id);
@@ -838,9 +805,13 @@ export class ChatServer {
   }
 
   handleJoinRoom(ws, newRoom) {
-    if (!roomList.includes(newRoom)) return false;
+    if (!roomList.includes(newRoom)) {
+      return false;
+    }
 
-    if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
+    if (ws.idtarget && ws.roomname && ws.roomname !== newRoom) {
+        this.removeAllSeatsById(ws.idtarget);
+    }
 
     ws.roomname = newRoom;
     const foundSeat = this.lockSeat(newRoom, ws);
@@ -865,8 +836,6 @@ export class ChatServer {
     return true;
   }
 
-  // ==================== MESSAGE HANDLER ====================
-
   handleMessage(ws, raw) {
     if (ws.readyState !== 1) return;
 
@@ -885,7 +854,6 @@ export class ChatServer {
 
     try {
       switch (evt) {
-        // ✅ VIP BADGE HANDLERS
         case "vipbadge":
         case "removeVipBadge": 
         case "getAllVipBadges":
@@ -1034,13 +1002,11 @@ export class ChatServer {
           const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
           if (!roomList.includes(roomname)) return;
           
-          // ✅ 1. ADD TO BUFFER (untuk kirim real-time)
           if (!this.chatMessageBuffer.has(roomname))
             this.chatMessageBuffer.set(roomname, []);
           this.chatMessageBuffer.get(roomname)
             .push(["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
           
-          // ✅ 2. ADD TO HISTORY DENGAN TIMESTAMP (MAX 10)
           if (!this.roomChatHistory.has(roomname)) {
             this.roomChatHistory.set(roomname, []);
           }
@@ -1057,7 +1023,6 @@ export class ChatServer {
           
           history.push(chatData);
           
-          // ✅ MAX 10 PESAN - BUANG YANG PALING LAMA
           if (history.length > 10) {
             this.roomChatHistory.set(roomname, history.slice(-10));
           }
@@ -1083,7 +1048,6 @@ export class ChatServer {
           if (!roomList.includes(room)) return;
           const seatMap = this.roomSeats.get(room);
           
-          // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
           Object.assign(seatMap.get(seat), createEmptySeat());
           
           this.clearSeatBuffer(room, seat);
@@ -1104,7 +1068,6 @@ export class ChatServer {
             const seatMap = this.roomSeats.get(room);
             const currentInfo = seatMap.get(seat) || createEmptySeat();
 
-            // ✅ OVERWRITE: GANTI SELURUH DATA SEAT
             Object.assign(currentInfo, {
               noimageUrl, namauser, color, itembawah, itematas, 
               vip: vip || 0,
@@ -1142,9 +1105,7 @@ export class ChatServer {
           break;
         }
       }
-    } catch (error) {
-      console.error("Error handling message:", error);
-    }
+    } catch (error) {}
   }
 
   async fetch(request) {
@@ -1177,7 +1138,6 @@ export class ChatServer {
       ws.addEventListener("close", (event) => {
         const id = ws.idtarget;
         if (id) {
-          // ✅ CATET WAKTU DISCONNECT
           this.userDisconnectTime.set(id, Date.now());
           this.scheduleCleanupTimeout(id);
         }
@@ -1187,7 +1147,6 @@ export class ChatServer {
       ws.addEventListener("error", (event) => {
         const id = ws.idtarget;
         if (id) {
-          // ✅ CATET WAKTU DISCONNECT JIKA ERROR
           this.userDisconnectTime.set(id, Date.now());
           this.scheduleCleanupTimeout(id);
         }
