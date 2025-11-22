@@ -104,6 +104,88 @@ export class ChatServer {
     this.userJoinLocks = new Map();
   }
 
+  // METHOD BARU: Force exit instant - hapus semua data user
+  forceExitUser(idtarget) {
+    if (!idtarget) return;
+    
+    // 1. Hapus dari semua tracking maps
+    this.userToSeat.delete(idtarget);
+    this.userDisconnectTime.delete(idtarget);
+    this.usersToRemove.delete(idtarget);
+    this.messageCounts.delete(idtarget);
+    this.cleanupInProgress.delete(idtarget);
+    this.userConnectionStatus.delete(idtarget);
+    this.userJoinLocks.delete(idtarget);
+    
+    // 2. Hapus dari semua seats di semua rooms
+    for (const room of roomList) {
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) continue;
+
+      for (const [seatNumber, info] of seatMap) {
+        if (info.namauser === idtarget || info.namauser === `__LOCK__${idtarget}`) {
+          // Hapus VIP badge
+          if (info.viptanda > 0) {
+            this.vipManager.removeVipBadge(room, seatNumber);
+          }
+          
+          // Reset seat ke empty
+          Object.assign(info, createEmptySeat());
+          this.seatLocks.delete(`${room}-${seatNumber}`);
+          
+          // Broadcast instant remove
+          this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
+          this.clearSeatBuffer(room, seatNumber);
+        }
+      }
+      this.broadcastRoomUserCount(room);
+    }
+    
+    // 3. Hapus dari chat history
+    for (const [room, chatList] of this.chatMessageBuffer) {
+      if (Array.isArray(chatList)) {
+        this.chatMessageBuffer.set(room, chatList.filter(msg => msg[3] !== idtarget));
+      }
+    }
+    
+    // 4. Hapus dari room chat history
+    for (const [room, history] of this.roomChatHistory) {
+      if (Array.isArray(history)) {
+        this.roomChatHistory.set(room, history.filter(chat => chat.username !== idtarget));
+      }
+    }
+    
+    // 5. Hapus dari update buffer
+    for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
+      for (const [seat, info] of seatMapUpdates) {
+        if (info && info.namauser === idtarget) {
+          seatMapUpdates.delete(seat);
+        }
+      }
+    }
+    
+    // 6. Hapus semua client connections untuk user ini
+    for (const client of Array.from(this.clients)) {
+      if (client.idtarget === idtarget) {
+        try {
+          if (client.readyState === 1) {
+            client.close(1000, "Force exit");
+          }
+        } catch (e) {}
+        this.clients.delete(client);
+      }
+    }
+    
+    // 7. Hapus VIP badges
+    this.vipManager.cleanupUserVipBadges(idtarget);
+    
+    // 8. Clear any timeouts
+    if (this.pingTimeouts.has(idtarget)) {
+      clearTimeout(this.pingTimeouts.get(idtarget));
+      this.pingTimeouts.delete(idtarget);
+    }
+  }
+
   checkConnectionHealth() {
     const now = Date.now();
     
@@ -1037,16 +1119,6 @@ export class ChatServer {
     }
   }
 
-  handleOnDestroy(ws, idtarget) {
-    if (!idtarget) return;
-    
-    try {
-      this.fullRemoveById(idtarget);
-      this.clients.delete(ws);
-    } catch (error) {
-    }
-  }
-
   async handleJoinRoom(ws, newRoom) {
     if (!roomList.includes(newRoom)) {
       return false;
@@ -1149,9 +1221,9 @@ export class ChatServer {
           break;
         }
 
-        case "onDestroy": {
+        case "forceExit": {
           const idtarget = ws.idtarget;
-          this.handleOnDestroy(ws, idtarget);
+          this.forceExitUser(idtarget);
           break;
         }
 
@@ -1400,7 +1472,7 @@ export class ChatServer {
     }
   }
 
-async fetch(request) {
+  async fetch(request) {
     try {
       const upgrade = request.headers.get("Upgrade") || "";
       if (upgrade.toLowerCase() !== "websocket")
@@ -1428,14 +1500,20 @@ async fetch(request) {
       ws.addEventListener("close", (event) => {
         const id = ws.idtarget;
         
-        // Hanya lakukan cleanup jika close code bukan 1000 (abnormal disconnect)
-        if (event.code !== 1000) {
+        if (event.code === 1000) {
+          // Close code 1000: FORCE EXIT INSTANT
+          if (id) {
+            this.forceExitUser(id);
+          } else {
+            this.clients.delete(ws);
+          }
+        } else {
+          // Close code lain: grace period biasa
           if (id) {
             this.userDisconnectTime.set(id, Date.now());
           }
           this.cleanupClientSafely(ws);
         }
-        // Untuk close code 1000 (normal closure), biarkan handleOnDestroy yang menangani
       });
 
       ws.addEventListener("error", (event) => {
