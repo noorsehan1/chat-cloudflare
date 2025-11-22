@@ -617,7 +617,6 @@ export class ChatServer {
         this.safeSend(ws, ["allPointsList", room, lastPointsData]);
       }
 
-      this.safeSend(ws, ["currentNumber", this.currentNumber]);
       const count = this.getJumlahRoom()[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
 
@@ -904,11 +903,16 @@ export class ChatServer {
         }
 
         case "onDestroy": {
-          const idtarget = ws.idtarget;
-          this.handleOnDestroy(ws, idtarget);
-          break;
-        }
-
+  const idtarget = ws.idtarget;
+  if (idtarget) {
+    // ✅ LANGSUNG PANGGIL fullRemoveById - sudah lengkap!
+    this.fullRemoveById(idtarget);
+    
+    // ✅ HAPUS WEBSOCKET DARI CLIENTS
+    this.clients.delete(ws);
+  }
+  break;
+}
         case "setIdTarget2": {
           const id = data[1];
           const baru = data[2];
@@ -1200,3 +1204,4 @@ export default {
     }
   }
 }
+
