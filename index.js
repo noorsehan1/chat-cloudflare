@@ -95,21 +95,18 @@ export class ChatServer {
   // ✅ MEMORY LIMIT ENFORCEMENT
   enforceMemoryLimits() {
     try {
-      // Limit clients
       if (this.clients.size > this.MAX_CLIENTS) {
         const clientsArray = Array.from(this.clients);
         const toRemove = clientsArray.slice(this.MAX_CLIENTS);
         toRemove.forEach(client => this.cleanupClientSafely(client));
       }
       
-      // Limit user mappings
       if (this.userToSeat.size > this.MAX_USER_MAPPINGS) {
         const entries = Array.from(this.userToSeat.entries());
         const toRemove = entries.slice(this.MAX_USER_MAPPINGS);
         toRemove.forEach(([id]) => this.comprehensiveCleanup(id));
       }
       
-      // Limit message buffers
       for (const [room, buffer] of this.chatMessageBuffer) {
         if (buffer.length > this.MAX_BUFFERED_MESSAGES) {
           this.chatMessageBuffer.set(room, buffer.slice(-100));
@@ -241,23 +238,19 @@ export class ChatServer {
     this.cleanupInProgress.add(idtarget);
     
     try {
-      // Clear all timeouts
       if (this.pingTimeouts.has(idtarget)) {
         clearTimeout(this.pingTimeouts.get(idtarget));
         this.pingTimeouts.delete(idtarget);
       }
 
-      // Remove from all tracking maps
       const trackingMaps = [
         this.usersToRemove, this.messageCounts, 
         this.userDisconnectTime
       ];
       trackingMaps.forEach(map => map.delete(idtarget));
 
-      // VIP cleanup
       this.vipManager.cleanupUserVipBadges(idtarget);
 
-      // Room & seat cleanup
       for (const room of roomList) {
         const seatMap = this.roomSeats.get(room);
         if (!seatMap) continue;
@@ -273,10 +266,8 @@ export class ChatServer {
         this.broadcastRoomUserCount(room);
       }
 
-      // Remove user mapping
       this.userToSeat.delete(idtarget);
 
-      // Remove from clients and close connections
       for (const client of Array.from(this.clients)) {
         if (client.idtarget === idtarget) {
           try {
@@ -286,7 +277,6 @@ export class ChatServer {
         }
       }
 
-      // Clean buffers
       this.cleanUserFromBuffers(idtarget);
       
     } catch (error) {
@@ -296,7 +286,6 @@ export class ChatServer {
   }
 
   cleanUserFromBuffers(idtarget) {
-    // Clean updateKursiBuffer
     for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
       for (const [seat, info] of seatMapUpdates) {
         if (info && (info.namauser === idtarget || info.namauser === `__LOCK__${idtarget}`)) {
@@ -305,7 +294,6 @@ export class ChatServer {
       }
     }
 
-    // Clean chatMessageBuffer
     for (const [room, chatList] of this.chatMessageBuffer) {
       if (Array.isArray(chatList) && chatList.length > 0) {
         this.chatMessageBuffer.set(room, chatList.filter(msg => 
@@ -314,7 +302,6 @@ export class ChatServer {
       }
     }
 
-    // Clean seatLocks
     for (const [lockKey, lockEntry] of Array.from(this.seatLocks.entries())) {
       const [room, seatStr] = lockKey.split("-");
       const seatNum = parseInt(seatStr, 10);
@@ -342,7 +329,6 @@ export class ChatServer {
 
       const now = Date.now();
 
-      // Clean expired locks first
       let locksCleaned = 0;
       for (const [seat, info] of seatMap) {
         if (locksCleaned >= 5) break;
@@ -354,17 +340,14 @@ export class ChatServer {
         }
       }
 
-      // ✅ ATOMIC SEAT FIND & LOCK
       for (let i = 1; i <= this.MAX_SEATS; i++) {
         const seatInfo = seatMap.get(i);
         
-        // Atomic check and lock
         if (seatInfo.namauser === "" || 
             (String(seatInfo.namauser).startsWith("__LOCK__") && 
              seatInfo.lockTime && 
-             (now - seatInfo.lockTime > 10000))) {
+             (now - info.lockTime > 10000))) {
           
-          // ✅ ATOMIC UPDATE
           seatInfo.namauser = "__LOCK__" + ws.idtarget;
           seatInfo.lockTime = now;
           this.seatLocks.set(`${room}-${i}`, { 
@@ -434,7 +417,6 @@ export class ChatServer {
         this.usersToRemove.delete(idtarget);
       }
 
-      // Consistency checks
       let consistencyChecks = 0;
       for (const [idtarget, seatInfo] of this.userToSeat) {
         if (consistencyChecks >= 50) break;
@@ -520,11 +502,9 @@ export class ChatServer {
     for (const [room, messages] of this.chatMessageBuffer) {
       if (messages.length > 0) {
         try {
-          const msgStr = JSON.stringify(["chatBatch", room, messages]);
-          for (const c of this.clients) {
-            if (c.roomname === room && c.readyState === 1 && c.bufferedAmount < 500000) {
-              c.send(msgStr);
-            }
+          for (let i = 0, len = messages.length; i < len; i++) {
+            const msg = messages[i];
+            this.broadcastToRoom(room, msg);
           }
           this.chatMessageBuffer.set(room, []);
         } catch (error) {
