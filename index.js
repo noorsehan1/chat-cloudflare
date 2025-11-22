@@ -576,7 +576,6 @@ export class ChatServer {
     } catch (error) {}
   }
 
- // ✅ OVERWRITE SEMANTICS + SMART CHAT HISTORY - DIUBAH UNTUK KIRIM KE CASE YANG BENAR
 // ✅ OVERWRITE SEMANTICS + SMART CHAT HISTORY - KIRIM DATA TERAKHIR SETIAP SEAT
 sendAllStateTo(ws, room) {
   if (ws.readyState !== 1) return;
@@ -592,76 +591,71 @@ sendAllStateTo(ws, room) {
       const history = this.roomChatHistory.get(room);
       const disconnectTime = this.userDisconnectTime.get(userId) || 0;
       
-      // ✅ HANYA PROSES JIKA ADA DISCONNECT TIME (user reconnect)
       if (disconnectTime > 0) {
-        // ✅ FILTER: HANYA CHAT YANG LEBIH BARU DARI DISCONNECT TIME
         const newChatsAfterDisconnect = history.filter(chat => 
           chat.timestamp > disconnectTime
         );
         
-        // ✅ KIRIM HANYA JIKA ADA CHAT BARU SETELAH DISCONNECT
         if (newChatsAfterDisconnect.length > 0) {
-          // ✅ FORMAT SESUAI DENGAN parseChatRoomJson DI ANDROID
           const chatBatch = {};
           for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
             const chat = newChatsAfterDisconnect[i];
             chatBatch[`chat_${i}`] = [
-              chat.noImageURL || "0",                    // index 0: noImageUrl (String)
-              chat.usernameColor || 0,                   // index 1: usernameColor (int)
-              chat.username || "",                       // index 2: username (String)
-              chat.message || "",                        // index 3: message (String)
-              chat.chatTextColor || 0,                   // index 4: chatTextColor (int)
-              chat.timestamp || Date.now()               // index 5: timestamp (long)
+              chat.noImageURL || "0",
+              chat.usernameColor || 0,
+              chat.username || "",
+              chat.message || "",
+              chat.chatTextColor || 0,
+              chat.timestamp || Date.now()
             ];
           }
           this.safeSend(ws, ["restoreChatHistory", room, JSON.stringify(chatBatch)]);
         }
-        // ❌ JIKA TIDAK ADA CHAT BARU: TIDAK KIRIM APA-APA
       }
       
-      // ✅ HAPUS DISCONNECT TIME SETELAH PROSES
       this.userDisconnectTime.delete(userId);
     }
 
-    // ✅ 2. KIRIM DATA TERAKHIR SETIAP KURSI KE CASE "allUpdateKursiList"
+    // ✅ 2. KIRIM SEMUA KURSI DALAM BATCH KE CASE "allUpdateKursiList"
+    const kursiBatch = {};
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
       const info = seatMap.get(seat);
       if (!info) continue;
 
-      // ✅ KIRIM JIKA ADA USER (tidak kosong dan bukan lock)
       if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-        this.safeSend(ws, ["allUpdateKursiList", room, seat, 
-          info.noimageUrl || "",
-          info.namauser || "",
-          info.color || "",
-          info.itembawah || 0,
-          info.itematas || 0,
-          info.vip || 0,
-          info.viptanda || 0
-        ]);
+        kursiBatch[seat] = {
+          noimageUrl: info.noimageUrl || "",
+          namauser: info.namauser || "",
+          color: info.color || "",
+          itembawah: info.itembawah || 0,
+          itematas: info.itematas || 0,
+          vip: info.vip || 0,
+          viptanda: info.viptanda || 0
+        };
       }
     }
+    
+    if (Object.keys(kursiBatch).length > 0) {
+      this.safeSend(ws, ["allUpdateKursiList", room, kursiBatch]);
+    }
 
-    // ✅ 3. KIRIM DATA TERAKHIR POINTS SETIAP SEAT KE CASE "allPointsList"
+    // ✅ 3. KIRIM SEMUA POINTS DALAM BATCH KE CASE "allPointsList"
+    const pointsBatch = {};
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
       const info = seatMap.get(seat);
       if (!info) continue;
 
-      // ✅ KIRIM JIKA ADA POINTS (data terakhir overwrite)
       if (info.points.length > 0) {
-        // ✅ KIRIM SEMUA POINTS YANG ADA (overwrite semua)
-        const pointsBatch = [];
-        for (let i = 0; i < info.points.length; i++) {
-          const point = info.points[i];
-          pointsBatch.push({
-            x: point.x,
-            y: point.y,
-            fast: false  // ← SELALU FALSE UNTUK RESTORE
-          });
-        }
-        
-        this.safeSend(ws, ["allPointsList", room, seat, pointsBatch]);
+        pointsBatch[seat] = info.points.map(point => ({
+          x: point.x,
+          y: point.y,
+          fast: false  // ← SELALU FALSE UNTUK RESTORE
+        }));
       }
+    }
+    
+    if (Object.keys(pointsBatch).length > 0) {
+      this.safeSend(ws, ["allPointsList", room, pointsBatch]);
     }
 
     // ✅ 4. INFORMASI ROOM
@@ -671,45 +665,6 @@ sendAllStateTo(ws, room) {
 
   } catch (error) {}
 }
-
-  cleanupClientSafely(ws) {
-    const id = ws.idtarget;
-    if (!id) {
-      this.clients.delete(ws);
-      return;
-    }
-
-    if (this.cleanupInProgress.has(id)) return;
-
-    this.cleanupInProgress.add(id);
-
-    try {
-      if (this.pingTimeouts.has(id)) {
-        clearTimeout(this.pingTimeouts.get(id));
-        this.pingTimeouts.delete(id);
-      }
-
-      const activeConnections = Array.from(this.clients).filter(
-        c => c.idtarget === id && c !== ws && c.readyState === 1
-      );
-
-      if (activeConnections.length === 0) {
-        this.usersToRemove.set(id, Date.now());
-      }
-
-      this.clients.delete(ws);
-
-      if (activeConnections.length === 0) {
-        this.fullRemoveById(id);
-      } else {
-        this.messageCounts.delete(id);
-      }
-
-    } catch (error) {
-    } finally {
-      this.cleanupInProgress.delete(id);
-    }
-  }
 
   async removeAllSeatsById(idtarget) {
     try {
@@ -1256,5 +1211,6 @@ export default {
     }
   }
 }
+
 
 
