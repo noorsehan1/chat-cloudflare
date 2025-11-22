@@ -576,104 +576,105 @@ export class ChatServer {
     } catch (error) {}
   }
 
-  // ✅ OVERWRITE SEMANTICS + SMART CHAT HISTORY - DIUBAH UNTUK KIRIM KE CASE YANG BENAR
-  sendAllStateTo(ws, room) {
-    if (ws.readyState !== 1) return;
+ // ✅ OVERWRITE SEMANTICS + SMART CHAT HISTORY - DIUBAH UNTUK KIRIM KE CASE YANG BENAR
+sendAllStateTo(ws, room) {
+  if (ws.readyState !== 1) return;
 
-    try {
-      const seatMap = this.roomSeats.get(room);
-      if (!seatMap) return;
+  try {
+    const seatMap = this.roomSeats.get(room);
+    if (!seatMap) return;
 
-      const userId = ws.idtarget;
+    const userId = ws.idtarget;
+    
+    // ✅ 1. KIRIM CHAT HISTORY: HANYA YANG SETELAH DISCONNECT
+    if (userId && this.roomChatHistory.has(room)) {
+      const history = this.roomChatHistory.get(room);
+      const disconnectTime = this.userDisconnectTime.get(userId) || 0;
       
-      // ✅ 1. KIRIM CHAT HISTORY: HANYA YANG SETELAH DISCONNECT
-      if (userId && this.roomChatHistory.has(room)) {
-        const history = this.roomChatHistory.get(room);
-        const disconnectTime = this.userDisconnectTime.get(userId) || 0;
+      // ✅ HANYA PROSES JIKA ADA DISCONNECT TIME (user reconnect)
+      if (disconnectTime > 0) {
+        // ✅ FILTER: HANYA CHAT YANG LEBIH BARU DARI DISCONNECT TIME
+        const newChatsAfterDisconnect = history.filter(chat => 
+          chat.timestamp > disconnectTime
+        );
         
-        // ✅ HANYA PROSES JIKA ADA DISCONNECT TIME (user reconnect)
-        if (disconnectTime > 0) {
-          // ✅ FILTER: HANYA CHAT YANG LEBIH BARU DARI DISCONNECT TIME
-          const newChatsAfterDisconnect = history.filter(chat => 
-            chat.timestamp > disconnectTime
-          );
-          
-          // ✅ KIRIM HANYA JIKA ADA CHAT BARU SETELAH DISCONNECT
-          if (newChatsAfterDisconnect.length > 0) {
-            // ✅ GUNAKAN CASE BARU UNTUK RESTORE CHAT HISTORY
-            const restoreChats = [];
-            for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
-              const chat = newChatsAfterDisconnect[i];
-              restoreChats.push([
-                chat.noImageURL, 
-                chat.username, 
-                chat.message, 
-                chat.usernameColor, 
-                chat.chatTextColor
-              ]);
-            }
-            this.safeSend(ws, ["restoreChatHistory", room, restoreChats]);
+        // ✅ KIRIM HANYA JIKA ADA CHAT BARU SETELAH DISCONNECT
+        if (newChatsAfterDisconnect.length > 0) {
+          // ✅ FORMAT SESUAI DENGAN parseChatRoomJson DI ANDROID
+          const chatBatch = {};
+          for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
+            const chat = newChatsAfterDisconnect[i];
+            chatBatch[`chat_${i}`] = [
+              chat.noImageURL || "0",                    // index 0: noImageUrl (String)
+              chat.usernameColor || 0,                   // index 1: usernameColor (int)
+              chat.username || "",                       // index 2: username (String)
+              chat.message || "",                        // index 3: message (String)
+              chat.chatTextColor || 0,                   // index 4: chatTextColor (int)
+              chat.timestamp || Date.now()               // index 5: timestamp (long)
+            ];
           }
-          // ❌ JIKA TIDAK ADA CHAT BARU: TIDAK KIRIM APA-APA
+          this.safeSend(ws, ["restoreChatHistory", room, JSON.stringify(chatBatch)]);
         }
-        
-        // ✅ HAPUS DISCONNECT TIME SETELAH PROSES
-        this.userDisconnectTime.delete(userId);
-      }
-
-      // ✅ 2. KIRIM SEMUA KURSI KE CASE "allUpdateKursiList"
-      const kursiMeta = {};
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const info = seatMap.get(seat);
-        if (!info) continue;
-
-        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-          kursiMeta[seat] = {
-            noimageUrl: info.noimageUrl,
-            namauser: info.namauser,
-            color: info.color,
-            itembawah: info.itembawah,
-            itematas: info.itematas,
-            vip: info.vip,
-            viptanda: info.viptanda
-          };
-        }
+        // ❌ JIKA TIDAK ADA CHAT BARU: TIDAK KIRIM APA-APA
       }
       
-      if (Object.keys(kursiMeta).length > 0) {
-        this.safeSend(ws, ["allUpdateKursiList", room, kursiMeta]);
+      // ✅ HAPUS DISCONNECT TIME SETELAH PROSES
+      this.userDisconnectTime.delete(userId);
+    }
+
+    // ✅ 2. KIRIM SEMUA KURSI KE CASE "allUpdateKursiList"
+    const kursiMeta = {};
+    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+      const info = seatMap.get(seat);
+      if (!info) continue;
+
+      if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+        kursiMeta[seat] = {
+          noimageUrl: info.noimageUrl,
+          namauser: info.namauser,
+          color: info.color,
+          itembawah: info.itembawah,
+          itematas: info.itematas,
+          vip: info.vip,
+          viptanda: info.viptanda
+        };
       }
+    }
+    
+    if (Object.keys(kursiMeta).length > 0) {
+      this.safeSend(ws, ["allUpdateKursiList", room, kursiMeta]);
+    }
 
-      // ✅ 3. KIRIM SEMUA POINTS KE CASE "allPointsList" - UBAH SEMUA FAST MENJADI FALSE
-      const allPoints = [];
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const info = seatMap.get(seat);
-        if (!info) continue;
+    // ✅ 3. KIRIM SEMUA POINTS KE CASE "allPointsList" - UBAH SEMUA FAST MENJADI FALSE
+    const allPoints = [];
+    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+      const info = seatMap.get(seat);
+      if (!info) continue;
 
-        if (info.points.length > 0) {
-          for (let i = 0; i < info.points.length; i++) {
-            const point = info.points[i];
-            allPoints.push({
-              seat: seat,
-              x: point.x,
-              y: point.y,
-              fast: false  // ← DI SINI DIUBAH JADI false
-            });
-          }
+      if (info.points.length > 0) {
+        for (let i = 0; i < info.points.length; i++) {
+          const point = info.points[i];
+          allPoints.push({
+            seat: seat,
+            x: point.x,
+            y: point.y,
+            fast: false  // ← DI SINI DIUBAH JADI false
+          });
         }
       }
-      
-      if (allPoints.length > 0) {
-        this.safeSend(ws, ["allPointsList", room, allPoints]);
-      }
+    }
+    
+    if (allPoints.length > 0) {
+      this.safeSend(ws, ["allPointsList", room, allPoints]);
+    }
 
-      // ✅ 4. INFORMASI ROOM
-      this.safeSend(ws, ["currentNumber", this.currentNumber]);
-      const count = this.getJumlahRoom()[room] || 0;
-      this.safeSend(ws, ["roomUserCount", room, count]);
+    // ✅ 4. INFORMASI ROOM
+    this.safeSend(ws, ["currentNumber", this.currentNumber]);
+    const count = this.getJumlahRoom()[room] || 0;
+    this.safeSend(ws, ["roomUserCount", room, count]);
 
-    } catch (error) {}
-  }
+  } catch (error) {}
+}
 
   cleanupClientSafely(ws) {
     const id = ws.idtarget;
@@ -1259,3 +1260,4 @@ export default {
     }
   }
 }
+
