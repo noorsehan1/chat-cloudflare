@@ -71,7 +71,7 @@ export class ChatServer {
       if (this.clients.size > 0) {
         this.periodicFlush().catch(() => {});
       }
-    }, 100); // changed to 100ms for lower CPU while keeping responsiveness
+    }, 100); // 100ms flush
 
     this._autoRemoveTimer = setInterval(() => {
       if (this.usersToRemove.size > 0 || this.userToSeat.size > 0) {
@@ -92,7 +92,7 @@ export class ChatServer {
     this.lowcard = new LowCardGameManager(this);
 
     this.pingTimeouts = new Map();
-    this.RECONNECT_TIMEOUT = 20000;
+    this.RECONNECT_TIMEOUT = 30000; // increased tolerance to 30s
     this.cleanupInProgress = new Set();
     this.usersToRemove = new Map();
 
@@ -154,6 +154,8 @@ export class ChatServer {
         // Jika room kosong lebih dari 10 menit, reset
         if (!hasActiveUsers) {
           for (let i = 1; i <= this.MAX_SEATS; i++) {
+            // ensure seatLocks cleared as well
+            this.seatLocks.delete(`${room}-${i}`);
             seatMap.set(i, createEmptySeat());
           }
         }
@@ -282,6 +284,8 @@ export class ChatServer {
           }
           Object.assign(seatInfo, createEmptySeat());
           this.clearSeatBuffer(room, seatNumber);
+          // ensure seatLocks entry removed
+          this.seatLocks.delete(`${room}-${seatNumber}`);
         }
       }
     }
@@ -312,6 +316,8 @@ export class ChatServer {
 
         if (n === idtarget || n === `__LOCK__${idtarget}`) {
           Object.assign(info, createEmptySeat());
+          // ensure seatLocks entry removed
+          this.seatLocks.delete(`${room}-${seatNumber}`);
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
           this.clearSeatBuffer(room, seatNumber);
           this.broadcastRoomUserCount(room);
@@ -495,6 +501,10 @@ export class ChatServer {
   safeSend(ws, arr) {
     try {
       if (ws && ws.readyState === 1) {
+        // Avoid piling up buffered data for slow clients (protect server memory/transport)
+        if (typeof ws.bufferedAmount === "number" && ws.bufferedAmount > 1_000_000) {
+          return false;
+        }
         ws.send(JSON.stringify(arr));
         return true;
       }
@@ -613,6 +623,8 @@ export class ChatServer {
 
             if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
               Object.assign(info, createEmptySeat());
+              // ensure seatLocks entry removed
+              this.seatLocks.delete(`${room}-${seat}`);
               this.broadcastToRoom(room, ["removeKursi", room, seat]);
               this.clearSeatBuffer(room, seat);
               this.broadcastRoomUserCount(room);
@@ -648,7 +660,7 @@ export class ChatServer {
   }
 
   // =====================
-  // LOCK SEAT (kept semantics)
+  // LOCK SEAT (kept semantics, keep lockTime consistent)
   // =====================
   lockSeat(room, ws) {
     if (!ws.idtarget) return null;
@@ -665,6 +677,8 @@ export class ChatServer {
 
         if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
           Object.assign(info, createEmptySeat());
+          // ensure seatLocks entry removed
+          this.seatLocks.delete(`${room}-${seat}`);
           this.clearSeatBuffer(room, seat);
           locksCleaned++;
         }
@@ -675,6 +689,8 @@ export class ChatServer {
         if (k && k.namauser === "") {
           k.namauser = "__LOCK__" + ws.idtarget;
           k.lockTime = now;
+          // also set seatLocks entry
+          this.seatLocks.set(`${room}-${i}`, { owner: ws.idtarget, ts: now });
           return i;
         }
       }
@@ -859,6 +875,8 @@ export class ChatServer {
 
         Object.assign(currentSeat, createEmptySeat());
         this.clearSeatBuffer(room, seat);
+        // ensure seatLocks entry removed
+        this.seatLocks.delete(`${room}-${seat}`);
         this.broadcastToRoom(room, ["removeKursi", room, seat]);
         this.broadcastRoomUserCount(room);
       }
@@ -926,6 +944,8 @@ export class ChatServer {
             }
 
             Object.assign(seatInfo, createEmptySeat());
+            // ensure seatLocks entry removed
+            this.seatLocks.delete(`${room}-${seatNumber}`);
             this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
             this.clearSeatBuffer(room, seatNumber);
           }
@@ -1119,6 +1139,8 @@ export class ChatServer {
               const seatInfo = seatMap.get(prevSeat.seat);
               if (seatInfo.namauser === `__LOCK__${newId}` || !seatInfo.namauser) {
                 seatInfo.namauser = newId;
+                seatInfo.lockTime = undefined;
+                this.seatLocks.delete(`${prevSeat.room}-${prevSeat.seat}`);
               }
             }
           } else {
@@ -1251,6 +1273,8 @@ export class ChatServer {
           const seatMap = this.roomSeats.get(room);
 
           Object.assign(seatMap.get(seat), createEmptySeat());
+          // ensure seatLocks entry removed
+          this.seatLocks.delete(`${room}-${seat}`);
 
           this.clearSeatBuffer(room, seat);
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
@@ -1263,13 +1287,23 @@ export class ChatServer {
           if (!roomList.includes(room)) return;
 
           const lockKey = `${room}-${seat}`;
-          if (this.seatLocks.has(lockKey)) return;
-          this.seatLocks.set(lockKey, true);
+          const now = Date.now();
+
+          // if locked by someone else and still fresh => skip to avoid races
+          const lockEntry = this.seatLocks.get(lockKey);
+          if (lockEntry && lockEntry.ts && (now - lockEntry.ts <  this.RECONNECT_TIMEOUT) && lockEntry.owner && lockEntry.owner !== (ws.idtarget || ws._connId)) {
+            return;
+          }
+
+          // Acquire a temporary lock with metadata
+          const seatMap = this.roomSeats.get(room);
+          const currentInfo = seatMap.get(seat) || createEmptySeat();
+          // set lockTime on seat info for consistency with cleanExpiredLocks
+          currentInfo.lockTime = Date.now();
+          // set lock entry with owner & timestamp
+          this.seatLocks.set(lockKey, { owner: ws.idtarget || ws._connId || 'unknown', ts: Date.now() });
 
           try {
-            const seatMap = this.roomSeats.get(room);
-            const currentInfo = seatMap.get(seat) || createEmptySeat();
-
             Object.assign(currentInfo, {
               noimageUrl, namauser, color, itembawah, itematas,
               vip: vip || 0,
@@ -1282,7 +1316,9 @@ export class ChatServer {
             this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, lastPoint: currentInfo.lastPoint });
             this.broadcastRoomUserCount(room);
           } finally {
+            // release lock and clear seat lockTime
             this.seatLocks.delete(lockKey);
+            currentInfo.lockTime = undefined;
           }
           break;
         }
@@ -1303,7 +1339,8 @@ export class ChatServer {
         case "gameLowCardEnd": {
           const room = ws.roomname;
           if (room !== "LowCard") return;
-          this.lowcard.handleEvent(ws, data);
+          // defer if lowcard handler might be heavy
+          setTimeout(() => this.lowcard.handleEvent(ws, data), 0);
           break;
         }
       }
