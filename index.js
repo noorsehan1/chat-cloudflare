@@ -1428,16 +1428,14 @@ async fetch(request) {
       ws.addEventListener("close", (event) => {
         const id = ws.idtarget;
         
-        if (event.code === 1000) {
-          // Untuk close code 1000 (normal closure), panggil handleOnDestroy
-          this.handleOnDestroy(ws, id);
-        } else {
-          // Untuk close code lain (abnormal disconnect), cleanup dengan grace period
+        // Hanya lakukan cleanup jika close code bukan 1000 (abnormal disconnect)
+        if (event.code !== 1000) {
           if (id) {
             this.userDisconnectTime.set(id, Date.now());
           }
           this.cleanupClientSafely(ws);
         }
+        // Untuk close code 1000 (normal closure), biarkan handleOnDestroy yang menangani
       });
 
       ws.addEventListener("error", (event) => {
