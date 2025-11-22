@@ -1426,21 +1426,21 @@ export class ChatServer {
         }
       });
 
+      // TAMBAHKAN BAGIAN INI - Error handler dengan delay cleanup
+      ws.addEventListener("error", (event) => {
+        console.log(`[WS ERROR] ${ws.idtarget}:`, event.error);
+        // Jangan langsung cleanup, beri waktu untuk reconnect
+        setTimeout(() => {
+          this.cleanupClientSafely(ws);
+        }, 5000);
+      });
+
       ws.addEventListener("close", (event) => {
         const id = ws.idtarget;
         if (id) {
           this.userDisconnectTime.set(id, Date.now());
         }
-        // Instant cleanup without timeout
-        this.cleanupClientSafely(ws);
-      });
-
-      ws.addEventListener("error", (event) => {
-        const id = ws.idtarget;
-        if (id) {
-          this.userDisconnectTime.set(id, Date.now());
-        }
-        // Instant cleanup without timeout
+        // Instant cleanup tanpa timeout untuk close event
         this.cleanupClientSafely(ws);
       });
 
@@ -1466,4 +1466,4 @@ export default {
       return new Response("Internal Server Error", { status: 500 });
     }
   }
-}; 
+};
