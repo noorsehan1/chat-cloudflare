@@ -905,63 +905,48 @@ export class ChatServer {
   }
 
   // ✅ HANDLE JOIN ROOM - DIPERBAIKI UNTUK CEK DOBEL JOIN
-  handleJoinRoom(ws, newRoom) {
-    if (!roomList.includes(newRoom)) return false;
+ handleJoinRoom(ws, newRoom) {
+  if (!roomList.includes(newRoom)) return false;
 
-    const idtarget = ws.idtarget;
-    if (!idtarget) return false;
-
-    // ✅ CEK APAKAH USER SUDAH SEDANG PROSES JOIN
-    if (this.joinLocks.has(idtarget)) {
-      this.safeSend(ws, ["error", "Join process already in progress"]);
-      return false;
-    }
-
-    // ✅ SET JOIN LOCK
-    this.joinLocks.set(idtarget, true);
-
-    try {
-      // ✅ CEK APAKAH SUDAH DI ROOM YANG SAMA
-      if (ws.roomname === newRoom) {
-        const seatInfo = this.userToSeat.get(idtarget);
-        if (seatInfo && seatInfo.room === newRoom) {
-          this.safeSend(ws, ["numberKursiSaya", seatInfo.seat]);
-          this.safeSend(ws, ["rooMasuk", seatInfo.seat, newRoom]);
-          this.sendAllStateTo(ws, newRoom);
-          this.vipManager.getAllVipBadges(ws, newRoom);
-          return true;
-        }
-      }
-
-      // ✅ HAPUS DARI SEAT SEBELUMNYA
-      this.removeAllSeatsById(idtarget);
-
-      ws.roomname = newRoom;
-      const foundSeat = this.lockSeat(newRoom, ws);
-
-      if (foundSeat === null) {
-        this.safeSend(ws, ["roomFull", newRoom]);
-        return false;
-      }
-
-      ws.numkursi = new Set([foundSeat]);
-      this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-      this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-
-      if (idtarget) {
-        this.userToSeat.set(idtarget, { room: newRoom, seat: foundSeat });
-      }
-      
+  // Kalau user sudah di room yang sama
+  if (ws.roomname === newRoom) {
+    const seatInfo = this.userToSeat.get(ws.idtarget);
+    if (seatInfo && seatInfo.room === newRoom) {
+      this.safeSend(ws, ["numberKursiSaya", seatInfo.seat]);
+      this.safeSend(ws, ["rooMasuk", seatInfo.seat, newRoom]);
       this.sendAllStateTo(ws, newRoom);
       this.vipManager.getAllVipBadges(ws, newRoom);
-      this.broadcastRoomUserCount(newRoom);
-      
       return true;
-    } finally {
-      // ✅ CLEAR JOIN LOCK
-      this.joinLocks.delete(idtarget);
     }
   }
+
+  // Bersihkan seat lama jika ada
+  if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
+
+  ws.roomname = newRoom;
+  const foundSeat = this.lockSeat(newRoom, ws);
+
+  if (foundSeat === null) {
+    this.safeSend(ws, ["roomFull", newRoom]);
+    return false;
+  }
+
+  ws.numkursi = new Set([foundSeat]);
+  this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+  this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+
+  if (ws.idtarget) {
+    this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+  }
+
+  this.sendAllStateTo(ws, newRoom);
+  this.vipManager.getAllVipBadges(ws, newRoom);
+  this.broadcastRoomUserCount(newRoom);
+
+  return true;
+}
+
+  
 
   // ✅ HANDLE GET ALL ROOMS USER COUNT
   handleGetAllRoomsUserCount(ws) {
@@ -1376,5 +1361,6 @@ export default {
     }
   }
 }
+
 
 
