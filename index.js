@@ -48,6 +48,10 @@ export class ChatServer {
     this.chatMessageBuffer = new Map();
     this.seatLocks = new Map();
 
+    // ✅ 10 CHAT HISTORY PER ROOM + DISCONNECT TIME TRACKING
+    this.roomChatHistory = new Map();
+    this.userDisconnectTime = new Map();
+
     this.currentNumber = 1;
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
@@ -133,7 +137,9 @@ export class ChatServer {
       this.seatLocks,
       this.messageCounts,
       this.usersToRemove,
-      this.cleanupInProgress
+      this.cleanupInProgress,
+      this.roomChatHistory,
+      this.userDisconnectTime
     ];
     
     for (const buffer of buffersToClear) {
@@ -167,6 +173,9 @@ export class ChatServer {
       clearTimeout(this.pingTimeouts.get(idtarget));
       this.pingTimeouts.delete(idtarget);
     }
+
+    // ✅ HAPUS DISCONNECT TIME USER INI
+    this.userDisconnectTime.delete(idtarget);
 
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
@@ -567,7 +576,7 @@ export class ChatServer {
     } catch (error) {}
   }
 
-  // ✅ OVERWRITE SEMANTICS: KIRIM STATE LENGKAP
+  // ✅ OVERWRITE SEMANTICS + 10 CHAT HISTORY + DISCONNECT TIME FILTER
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1) return;
 
@@ -575,7 +584,53 @@ export class ChatServer {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) return;
 
-      // ✅ KIRIM SEMUA POINTS OVERWRITE
+      const userId = ws.idtarget;
+      
+      // ✅ 1. KIRIM CHAT HISTORY BERDASARKAN DISCONNECT TIME
+      if (this.roomChatHistory.has(room)) {
+        const history = this.roomChatHistory.get(room);
+        if (history.length > 0) {
+          
+          if (userId) {
+            // ✅ USER RECONNECT: FILTER CHAT YANG TERLEWAT
+            const disconnectTime = this.userDisconnectTime.get(userId) || 0;
+            const missedChats = history.filter(chat => chat.timestamp > disconnectTime);
+            
+            // ✅ KIRIM HANYA CHAT YANG TERLEWAT
+            for (let i = 0; i < missedChats.length; i++) {
+              const chat = missedChats[i];
+              this.safeSend(ws, [
+                "chat", 
+                room, 
+                chat.noImageURL, 
+                chat.username, 
+                chat.message, 
+                chat.usernameColor, 
+                chat.chatTextColor
+              ]);
+            }
+            
+            // ✅ HAPUS DISCONNECT TIME SETELAH KIRIM
+            this.userDisconnectTime.delete(userId);
+          } else {
+            // ✅ USER BARU/TANPA ID: KIRIM SEMUA 10 CHAT
+            for (let i = 0; i < history.length; i++) {
+              const chat = history[i];
+              this.safeSend(ws, [
+                "chat", 
+                room, 
+                chat.noImageURL, 
+                chat.username, 
+                chat.message, 
+                chat.usernameColor, 
+                chat.chatTextColor
+              ]);
+            }
+          }
+        }
+      }
+
+      // ✅ 2. KIRIM SEMUA POINTS OVERWRITE
       const pointsBatch = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
@@ -589,7 +644,7 @@ export class ChatServer {
         this.safeSend(ws, ["allPointsOverwrite", room, pointsBatch]);
       }
 
-      // ✅ KIRIM SEMUA SEATS OVERWRITE  
+      // ✅ 3. KIRIM SEMUA SEATS OVERWRITE  
       const seatsBatch = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
@@ -612,7 +667,7 @@ export class ChatServer {
         this.safeSend(ws, ["allSeatsOverwrite", room, seatsBatch]);
       }
 
-      // ✅ INFORMASI ROOM
+      // ✅ 4. INFORMASI ROOM
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
       const count = this.getJumlahRoom()[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
@@ -727,6 +782,9 @@ export class ChatServer {
     this.messageCounts.delete(id);
 
     if (baru === true) {
+        // ✅ USER BARU: HAPUS DISCONNECT TIME LAMA
+        this.userDisconnectTime.delete(id);
+        
         for (const room of roomList) {
             const seatMap = this.roomSeats.get(room);
             if (!seatMap) continue;
@@ -751,6 +809,7 @@ export class ChatServer {
         ws.numkursi = new Set();
     }
     else if (baru === false) {
+        // ✅ USER RECONNECT: DISCONNECT TIME SUDAH DISIMPAN
         const seatInfo = this.userToSeat.get(id);
 
         if (seatInfo) {
@@ -763,7 +822,7 @@ export class ChatServer {
                 if (seatData.namauser === id) {
                     ws.roomname = room;
                     ws.numkursi = new Set([seat]);
-                    this.sendAllStateTo(ws, room);
+                    this.sendAllStateTo(ws, room); // ← AKAN FILTER CHAT TERLEWAT
                     this.broadcastRoomUserCount(room);
                 } else {
                     this.userToSeat.delete(id);
@@ -984,10 +1043,36 @@ export class ChatServer {
         case "chat": {
           const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
           if (!roomList.includes(roomname)) return;
+          
+          // ✅ 1. ADD TO BUFFER (existing)
           if (!this.chatMessageBuffer.has(roomname))
             this.chatMessageBuffer.set(roomname, []);
           this.chatMessageBuffer.get(roomname)
             .push(["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
+          
+          // ✅ 2. ADD TO HISTORY DENGAN TIMESTAMP (MAX 10)
+          if (!this.roomChatHistory.has(roomname)) {
+            this.roomChatHistory.set(roomname, []);
+          }
+          const history = this.roomChatHistory.get(roomname);
+          
+          // ✅ SIMPAN DENGAN TIMESTAMP
+          const chatData = {
+            timestamp: Date.now(),
+            noImageURL,
+            username, 
+            message,
+            usernameColor,
+            chatTextColor
+          };
+          
+          history.push(chatData);
+          
+          // ✅ MAX 10 PESAN - BUANG YANG PALING LAMA
+          if (history.length > 10) {
+            this.roomChatHistory.set(roomname, history.slice(-10));
+          }
+          
           break;
         }
 
@@ -1104,6 +1189,8 @@ export class ChatServer {
       ws.addEventListener("close", (event) => {
         const id = ws.idtarget;
         if (id) {
+          // ✅ CATET WAKTU DISCONNECT
+          this.userDisconnectTime.set(id, Date.now());
           this.scheduleCleanupTimeout(id);
         }
         this.cleanupClientSafely(ws);
@@ -1112,6 +1199,8 @@ export class ChatServer {
       ws.addEventListener("error", (event) => {
         const id = ws.idtarget;
         if (id) {
+          // ✅ CATET WAKTU DISCONNECT JIKA ERROR
+          this.userDisconnectTime.set(id, Date.now());
           this.scheduleCleanupTimeout(id);
         }
         this.cleanupClientSafely(ws);
