@@ -15,7 +15,7 @@ function createEmptySeat() {
     itematas: 0,
     vip: 0,
     viptanda: 0,
-    lastPoint: null, // ✅ OVERWRITE: ganti points[] jadi lastPoint
+    lastPoint: null,
     lockTime: undefined
   };
 }
@@ -68,16 +68,10 @@ export class ChatServer {
       }
     }, 500);
 
-    this._autoRemoveTimer = setInterval(() => {
-      if (this.usersToRemove.size > 0 || this.userToSeat.size > 0) {
-        this.batchAutoRemove().catch(() => {});
-      }
-    }, 30000);
-
     this.lowcard = new LowCardGameManager(this);
 
     this.pingTimeouts = new Map();
-    this.RECONNECT_TIMEOUT = 20000;
+    this.RECONNECT_TIMEOUT = 20000; // 20 detik
     this.cleanupInProgress = new Set();
     this.usersToRemove = new Map();
 
@@ -92,6 +86,7 @@ export class ChatServer {
         this.updateKursiBuffer.get(room).delete(seatNumber);
       }
     } catch (e) {
+      // Ignore error
     }
   }
 
@@ -112,7 +107,7 @@ export class ChatServer {
   }
 
   async destroy() {
-    const timers = [this._tickTimer, this._flushTimer, this._autoRemoveTimer];
+    const timers = [this._tickTimer, this._flushTimer];
     for (const timer of timers) {
       if (timer) clearInterval(timer);
     }
@@ -313,6 +308,7 @@ export class ChatServer {
 
           this.usersToRemove.delete(idtarget);
         } catch (error) {
+          // Ignore error
         } finally {
           this.cleanupInProgress.delete(idtarget);
         }
@@ -342,7 +338,9 @@ export class ChatServer {
         consistencyChecks++;
       }
 
-    } catch (error) {}
+    } catch (error) {
+      // Ignore error
+    }
   }
 
   safeSend(ws, arr) {
@@ -351,7 +349,9 @@ export class ChatServer {
         ws.send(JSON.stringify(arr));
         return true;
       }
-    } catch (e) {}
+    } catch (e) {
+      // Ignore error
+    }
     return false;
   }
 
@@ -363,7 +363,9 @@ export class ChatServer {
           if (this.safeSend(c, msg)) {
             sentCount++;
           }
-        } catch (error) {}
+        } catch (error) {
+          // Ignore error
+        }
       }
     }
     return sentCount;
@@ -388,7 +390,9 @@ export class ChatServer {
     try {
       const count = this.getJumlahRoom()[room] || 0;
       this.broadcastToRoom(room, ["roomUserCount", room, count]);
-    } catch (error) {}
+    } catch (error) {
+      // Ignore error
+    }
   }
 
   flushChatBuffer() {
@@ -436,7 +440,9 @@ export class ChatServer {
           this.safeSend(c, ["currentNumber", this.currentNumber]);
         }
       }
-    } catch (error) {}
+    } catch (error) {
+      // Ignore error
+    }
   }
 
   cleanExpiredLocks() {
@@ -463,7 +469,9 @@ export class ChatServer {
           }
         }
       }
-    } catch (error) {}
+    } catch (error) {
+      // Ignore error
+    }
   }
 
   async periodicFlush() {
@@ -471,7 +479,9 @@ export class ChatServer {
       this.flushKursiUpdates();
       this.flushChatBuffer();
       this.cleanExpiredLocks();
-    } catch (error) {}
+    } catch (error) {
+      // Ignore error
+    }
   }
 
   handleGetAllRoomsUserCount(ws) {
@@ -480,7 +490,9 @@ export class ChatServer {
       const allCounts = this.getJumlahRoom();
       const result = roomList.map(room => [room, allCounts[room]]);
       this.safeSend(ws, ["allRoomsUserCount", result]);
-    } catch (error) {}
+    } catch (error) {
+      // Ignore error
+    }
   }
 
   lockSeat(room, ws) {
@@ -554,7 +566,9 @@ export class ChatServer {
         this.safeSend(ws, ["kursiBatchUpdate", room, kursiUpdates]);
       }
 
-    } catch (error) {}
+    } catch (error) {
+      // Ignore error
+    }
   }
 
   sendAllStateTo(ws, room) {
@@ -566,7 +580,6 @@ export class ChatServer {
 
       const userId = ws.idtarget;
       
-      // ✅ 1. KIRIM STATE KURSI TERAKHIR
       const allKursiMeta = {};
       const lastPointsData = [];
       
@@ -575,7 +588,6 @@ export class ChatServer {
         if (!info) continue;
 
         if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-          // Kirim state kursi
           allKursiMeta[seat] = {
             noimageUrl: info.noimageUrl,
             namauser: info.namauser,
@@ -586,7 +598,6 @@ export class ChatServer {
             viptanda: info.viptanda
           };
 
-          // ✅ KIRIM LAST POINT JIKA ADA
           if (info.lastPoint) {
             lastPointsData.push({
               seat: seat,
@@ -598,22 +609,21 @@ export class ChatServer {
         }
       }
       
-      // ✅ KIRIM STATE KURSI KE CLIENT
       if (Object.keys(allKursiMeta).length > 0) {
         this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
       }
 
-      // ✅ KIRIM LAST POINTS KE CLIENT
       if (lastPointsData.length > 0) {
         this.safeSend(ws, ["allPointsList", room, lastPointsData]);
       }
 
-      // ✅ INFORMASI DASAR ROOM
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
       const count = this.getJumlahRoom()[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
 
-    } catch (error) {}
+    } catch (error) {
+      // Ignore error
+    }
   }
 
   cleanupClientSafely(ws) {
@@ -651,6 +661,7 @@ export class ChatServer {
       }
 
     } catch (error) {
+      // Ignore error
     } finally {
       this.cleanupInProgress.delete(id);
     }
@@ -682,7 +693,9 @@ export class ChatServer {
 
       this.userToSeat.delete(idtarget);
       this.usersToRemove.delete(idtarget);
-    } catch (error) {}
+    } catch (error) {
+      // Ignore error
+    }
   }
 
   getAllOnlineUsers() {
@@ -760,7 +773,6 @@ export class ChatServer {
                     ws.roomname = room;
                     ws.numkursi = new Set([seat]);
                     
-                    // ✅ KIRIM CHAT HISTORY YANG TERLEWAT
                     if (this.roomChatHistory.has(room)) {
                         const history = this.roomChatHistory.get(room);
                         const disconnectTime = this.userDisconnectTime.get(id) || 0;
@@ -811,7 +823,9 @@ export class ChatServer {
     try {
       this.fullRemoveById(idtarget);
       this.clients.delete(ws);
-    } catch (error) {}
+    } catch (error) {
+      // Ignore error
+    }
   }
 
   handleJoinRoom(ws, newRoom) {
@@ -1047,7 +1061,6 @@ export class ChatServer {
           const si = seatMap.get(seat);
           if (!si) return;
 
-          // ✅ OVERWRITE: Simpan hanya point terakhir
           si.lastPoint = { x, y, fast, timestamp: Date.now() };
           
           this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
@@ -1116,7 +1129,9 @@ export class ChatServer {
           break;
         }
       }
-    } catch (error) {}
+    } catch (error) {
+      // Ignore error
+    }
   }
 
   async fetch(request) {
@@ -1152,7 +1167,6 @@ export class ChatServer {
           this.userDisconnectTime.set(id, Date.now());
           this.scheduleCleanupTimeout(id);
         }
-        this.cleanupClientSafely(ws);
       });
 
       ws.addEventListener("error", (event) => {
@@ -1161,7 +1175,6 @@ export class ChatServer {
           this.userDisconnectTime.set(id, Date.now());
           this.scheduleCleanupTimeout(id);
         }
-        this.cleanupClientSafely(ws);
       });
 
       return new Response(null, { status: 101, webSocket: client });
