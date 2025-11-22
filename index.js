@@ -15,7 +15,7 @@ function createEmptySeat() {
     itematas: 0,
     vip: 0,
     viptanda: 0,
-    points: [],
+    lastPoint: null, // ✅ OVERWRITE: ganti points[] jadi lastPoint
     lockTime: undefined
   };
 }
@@ -414,7 +414,7 @@ export class ChatServer {
         for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
           if (!seatMapUpdates.has(seat)) continue;
           const info = seatMapUpdates.get(seat);
-          const { points, ...rest } = info;
+          const { lastPoint, ...rest } = info;
           updates.push([seat, rest]);
         }
         if (updates.length > 0) {
@@ -557,65 +557,64 @@ export class ChatServer {
     } catch (error) {}
   }
 
-// ✅ VERSI OPTIMAL: Kirim last point hanya untuk kursi yang ada user
-sendAllStateTo(ws, room) {
-  if (ws.readyState !== 1) return;
+  sendAllStateTo(ws, room) {
+    if (ws.readyState !== 1) return;
 
-  try {
-    const seatMap = this.roomSeats.get(room);
-    if (!seatMap) return;
-    
-    // ✅ 1. KIRIM STATE KURSI TERAKHIR + LAST POINT SEKALIGUS
-    const allKursiMeta = {};
-    const lastPointsData = [];
-    
-    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-      const info = seatMap.get(seat);
-      if (!info) continue;
+    try {
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) return;
 
-      // ✅ HANYA PROSES KURSI YANG ADA USER-NYA
-      if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-        // Kirim state kursi
-        allKursiMeta[seat] = {
-          noimageUrl: info.noimageUrl,
-          namauser: info.namauser,
-          color: info.color,
-          itembawah: info.itembawah,
-          itematas: info.itematas,
-          vip: info.vip,
-          viptanda: info.viptanda
-        };
+      const userId = ws.idtarget;
+      
+      // ✅ 1. KIRIM STATE KURSI TERAKHIR
+      const allKursiMeta = {};
+      const lastPointsData = [];
+      
+      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        const info = seatMap.get(seat);
+        if (!info) continue;
 
-        // ✅ KIRIM LAST POINT JIKA ADA
-        if (info.points.length > 0) {
-          const lastPoint = info.points[info.points.length - 1];
-          lastPointsData.push({
-            seat: seat,
-            x: lastPoint.x,
-            y: lastPoint.y,
-            fast: lastPoint.fast
-          });
+        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+          // Kirim state kursi
+          allKursiMeta[seat] = {
+            noimageUrl: info.noimageUrl,
+            namauser: info.namauser,
+            color: info.color,
+            itembawah: info.itembawah,
+            itematas: info.itematas,
+            vip: info.vip,
+            viptanda: info.viptanda
+          };
+
+          // ✅ KIRIM LAST POINT JIKA ADA
+          if (info.lastPoint) {
+            lastPointsData.push({
+              seat: seat,
+              x: info.lastPoint.x,
+              y: info.lastPoint.y,
+              fast: info.lastPoint.fast
+            });
+          }
         }
       }
-    }
-    
-    // ✅ KIRIM STATE KURSI KE CLIENT
-    if (Object.keys(allKursiMeta).length > 0) {
-      this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
-    }
+      
+      // ✅ KIRIM STATE KURSI KE CLIENT
+      if (Object.keys(allKursiMeta).length > 0) {
+        this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
+      }
 
-    // ✅ KIRIM LAST POINTS KE CLIENT
-    if (lastPointsData.length > 0) {
-      this.safeSend(ws, ["allPointsList", room, lastPointsData]);
-    }
+      // ✅ KIRIM LAST POINTS KE CLIENT
+      if (lastPointsData.length > 0) {
+        this.safeSend(ws, ["allPointsList", room, lastPointsData]);
+      }
 
-    // ✅ INFORMASI DASAR ROOM
-    this.safeSend(ws, ["currentNumber", this.currentNumber]);
-    const count = this.getJumlahRoom()[room] || 0;
-    this.safeSend(ws, ["roomUserCount", room, count]);
+      // ✅ INFORMASI DASAR ROOM
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
+      const count = this.getJumlahRoom()[room] || 0;
+      this.safeSend(ws, ["roomUserCount", room, count]);
 
-  } catch (error) {}
-}
+    } catch (error) {}
+  }
 
   cleanupClientSafely(ws) {
     const id = ws.idtarget;
@@ -640,6 +639,7 @@ sendAllStateTo(ws, room) {
 
       if (activeConnections.length === 0) {
         this.usersToRemove.set(id, Date.now());
+        this.userDisconnectTime.set(id, Date.now());
       }
 
       this.clients.delete(ws);
@@ -711,7 +711,7 @@ sendAllStateTo(ws, room) {
     return users;
   }
 
- handleSetIdTarget2(ws, id, baru) {
+  handleSetIdTarget2(ws, id, baru) {
     ws.idtarget = id;
 
     if (this.pingTimeouts.has(id)) {
@@ -747,7 +747,6 @@ sendAllStateTo(ws, room) {
         ws.numkursi = new Set();
     }
     else if (baru === false) {
-        // ✅ USER RECONNECT: KIRIM CHAT HISTORY YANG TERLEWAT
         const seatInfo = this.userToSeat.get(id);
 
         if (seatInfo) {
@@ -761,18 +760,16 @@ sendAllStateTo(ws, room) {
                     ws.roomname = room;
                     ws.numkursi = new Set([seat]);
                     
-                    // ✅ 1. KIRIM CHAT HISTORY YANG TERLEWAT SELAMA DISCONNECT
+                    // ✅ KIRIM CHAT HISTORY YANG TERLEWAT
                     if (this.roomChatHistory.has(room)) {
                         const history = this.roomChatHistory.get(room);
                         const disconnectTime = this.userDisconnectTime.get(id) || 0;
                         
                         if (disconnectTime > 0) {
-                            // ✅ FILTER: HANYA CHAT YANG LEBIH BARU DARI DISCONNECT TIME
                             const newChatsAfterDisconnect = history.filter(chat => 
                                 chat.timestamp > disconnectTime
                             );
                             
-                            // ✅ KIRIM CHAT YANG TERLEWAT
                             if (newChatsAfterDisconnect.length > 0) {
                                 for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
                                     const chat = newChatsAfterDisconnect[i];
@@ -788,12 +785,9 @@ sendAllStateTo(ws, room) {
                                 }
                             }
                         }
-                        
-                        // ✅ HAPUS DISCONNECT TIME SETELAH PROSES
                         this.userDisconnectTime.delete(id);
                     }
                     
-                    // ✅ 2. KIRIM SEMUA STATE ROOM (kursi, points, dll)
                     this.sendAllStateTo(ws, room);
                     this.broadcastRoomUserCount(room);
                     
@@ -809,7 +803,7 @@ sendAllStateTo(ws, room) {
             this.safeSend(ws, ["needJoinRoom"]);
         }
     }
-}
+  }
 
   handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
@@ -845,7 +839,6 @@ sendAllStateTo(ws, room) {
         this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
     }
     
-    // ✅ KIRIM SEMUA STATE KE USER BARU
     this.sendAllStateTo(ws, newRoom);
     this.vipManager.getAllVipBadges(ws, newRoom);
     this.broadcastRoomUserCount(newRoom);
@@ -1054,8 +1047,9 @@ sendAllStateTo(ws, room) {
           const si = seatMap.get(seat);
           if (!si) return;
 
-          si.points.push({ x, y, fast, timestamp: Date.now() });
-
+          // ✅ OVERWRITE: Simpan hanya point terakhir
+          si.lastPoint = { x, y, fast, timestamp: Date.now() };
+          
           this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
           break;
         }
@@ -1094,7 +1088,7 @@ sendAllStateTo(ws, room) {
             seatMap.set(seat, currentInfo);
             if (!this.updateKursiBuffer.has(room))
               this.updateKursiBuffer.set(room, new Map());
-            this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
+            this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, lastPoint: currentInfo.lastPoint });
             this.broadcastRoomUserCount(room);
           } finally {
             this.seatLocks.delete(lockKey);
@@ -1193,5 +1187,3 @@ export default {
     }
   }
 }
-
-
