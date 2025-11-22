@@ -577,6 +577,7 @@ export class ChatServer {
   }
 
  // ✅ OVERWRITE SEMANTICS + SMART CHAT HISTORY - DIUBAH UNTUK KIRIM KE CASE YANG BENAR
+// ✅ OVERWRITE SEMANTICS + SMART CHAT HISTORY - KIRIM DATA TERAKHIR SETIAP SEAT
 sendAllStateTo(ws, room) {
   if (ws.readyState !== 1) return;
 
@@ -622,50 +623,45 @@ sendAllStateTo(ws, room) {
       this.userDisconnectTime.delete(userId);
     }
 
-    // ✅ 2. KIRIM SEMUA KURSI KE CASE "allUpdateKursiList"
-    const kursiMeta = {};
+    // ✅ 2. KIRIM DATA TERAKHIR SETIAP KURSI KE CASE "allUpdateKursiList"
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
       const info = seatMap.get(seat);
       if (!info) continue;
 
+      // ✅ KIRIM JIKA ADA USER (tidak kosong dan bukan lock)
       if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-        kursiMeta[seat] = {
-          noimageUrl: info.noimageUrl,
-          namauser: info.namauser,
-          color: info.color,
-          itembawah: info.itembawah,
-          itematas: info.itematas,
-          vip: info.vip,
-          viptanda: info.viptanda
-        };
+        this.safeSend(ws, ["allUpdateKursiList", room, seat, 
+          info.noimageUrl || "",
+          info.namauser || "",
+          info.color || "",
+          info.itembawah || 0,
+          info.itematas || 0,
+          info.vip || 0,
+          info.viptanda || 0
+        ]);
       }
     }
-    
-    if (Object.keys(kursiMeta).length > 0) {
-      this.safeSend(ws, ["allUpdateKursiList", room, kursiMeta]);
-    }
 
-    // ✅ 3. KIRIM SEMUA POINTS KE CASE "allPointsList" - UBAH SEMUA FAST MENJADI FALSE
-    const allPoints = [];
+    // ✅ 3. KIRIM DATA TERAKHIR POINTS SETIAP SEAT KE CASE "allPointsList"
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
       const info = seatMap.get(seat);
       if (!info) continue;
 
+      // ✅ KIRIM JIKA ADA POINTS (data terakhir overwrite)
       if (info.points.length > 0) {
+        // ✅ KIRIM SEMUA POINTS YANG ADA (overwrite semua)
+        const pointsBatch = [];
         for (let i = 0; i < info.points.length; i++) {
           const point = info.points[i];
-          allPoints.push({
-            seat: seat,
+          pointsBatch.push({
             x: point.x,
             y: point.y,
-            fast: false  // ← DI SINI DIUBAH JADI false
+            fast: false  // ← SELALU FALSE UNTUK RESTORE
           });
         }
+        
+        this.safeSend(ws, ["allPointsList", room, seat, pointsBatch]);
       }
-    }
-    
-    if (allPoints.length > 0) {
-      this.safeSend(ws, ["allPointsList", room, allPoints]);
     }
 
     // ✅ 4. INFORMASI ROOM
@@ -1260,4 +1256,5 @@ export default {
     }
   }
 }
+
 
