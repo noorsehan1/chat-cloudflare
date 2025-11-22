@@ -807,15 +807,9 @@ export class ChatServer {
   handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
-    // ✅ CEK APAKAH USER SUDAH SEDANG PROSES JOIN
-    if (this.joinLocks.has(id)) {
-      this.safeSend(ws, ["error", "Join process already in progress"]);
-      return;
-    }
+   
 
-    // ✅ SET JOIN LOCK
-    this.joinLocks.set(id, true);
-
+    
     try {
       ws.idtarget = id;
       this.addClientConnection(ws);
@@ -1366,3 +1360,4 @@ export default {
     }
   }
 }
+
