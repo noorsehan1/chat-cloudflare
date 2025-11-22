@@ -1432,7 +1432,7 @@ export class ChatServer {
         // Jangan langsung cleanup, beri waktu untuk reconnect
         setTimeout(() => {
           this.cleanupClientSafely(ws);
-        }, 5000);
+        }, 20000);
       });
 
       ws.addEventListener("close", (event) => {
@@ -1467,3 +1467,4 @@ export default {
     }
   }
 };
+
