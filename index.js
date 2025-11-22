@@ -66,7 +66,7 @@ export class ChatServer {
       if (this.clients.size > 0) {
         this.periodicFlush().catch(() => {});
       }
-    }, 500);
+    }, 100); // ✅ DARI 500ms JADI 100ms
 
     this.lowcard = new LowCardGameManager(this);
 
@@ -529,18 +529,22 @@ export class ChatServer {
     }
   }
 
-  senderrorstate(ws, room) {
+  // ✅ METHOD BARU UNTUK KIRIM STATE CEPAT
+  sendImmediateState(ws, room) {
     if (ws.readyState !== 1) return;
 
     try {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) return;
 
+      // 1. KIRIM CURRENT NUMBER LANGSUNG
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
 
+      // 2. KIRIM ROOM COUNT LANGSUNG
       const count = this.getJumlahRoom()[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
 
+      // 3. KIRIM KURSI DATA YANG ADA ISI SAJA (OPTIMIZED)
       const kursiUpdates = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
@@ -566,63 +570,64 @@ export class ChatServer {
         this.safeSend(ws, ["kursiBatchUpdate", room, kursiUpdates]);
       }
 
-    } catch (error) {
-      // Ignore error
-    }
-  }
-
-  sendAllStateTo(ws, room) {
-    if (ws.readyState !== 1) return;
-
-    try {
-      const seatMap = this.roomSeats.get(room);
-      if (!seatMap) return;
-
-      const userId = ws.idtarget;
-      
-      const allKursiMeta = {};
+      // 4. KIRIM LAST POINTS YANG ADA SAJA
       const lastPointsData = [];
-      
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
-        if (!info) continue;
-
+        if (!info || !info.lastPoint) continue;
+        
         if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-          allKursiMeta[seat] = {
-            noimageUrl: info.noimageUrl,
-            namauser: info.namauser,
-            color: info.color,
-            itembawah: info.itembawah,
-            itematas: info.itematas,
-            vip: info.vip,
-            viptanda: info.viptanda
-          };
-
-          if (info.lastPoint) {
-            lastPointsData.push({
-              seat: seat,
-              x: info.lastPoint.x,
-              y: info.lastPoint.y,
-              fast: info.lastPoint.fast
-            });
-          }
+          lastPointsData.push({
+            seat: seat,
+            x: info.lastPoint.x,
+            y: info.lastPoint.y,
+            fast: info.lastPoint.fast
+          });
         }
-      }
-      
-      if (Object.keys(allKursiMeta).length > 0) {
-        this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
       }
 
       if (lastPointsData.length > 0) {
         this.safeSend(ws, ["allPointsList", room, lastPointsData]);
       }
 
-      const count = this.getJumlahRoom()[room] || 0;
-      this.safeSend(ws, ["roomUserCount", room, count]);
-
     } catch (error) {
-      // Ignore error
+      console.error("Error sending immediate state:", error);
     }
+  }
+
+  handleJoinRoom(ws, newRoom) {
+    if (!roomList.includes(newRoom)) {
+      return false;
+    }
+
+    if (ws.idtarget && ws.roomname && ws.roomname !== newRoom) {
+        this.removeAllSeatsById(ws.idtarget);
+    }
+
+    ws.roomname = newRoom;
+    const foundSeat = this.lockSeat(newRoom, ws);
+
+    if (foundSeat === null) {
+        this.safeSend(ws, ["roomFull", newRoom]);
+        return false;
+    }
+
+    ws.numkursi = new Set([foundSeat]);
+    
+    // ✅ KIRIM LANGSUNG TANPA BUFFER
+    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+
+    if (ws.idtarget) {
+        this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+    }
+    
+    // ✅ KIRIM STATE LANGSUNG, JANGAN PAKAI sendAllStateTo YANG COMPLEX
+    this.sendImmediateState(ws, newRoom);
+    this.vipManager.getAllVipBadges(ws, newRoom);
+    this.broadcastRoomUserCount(newRoom);
+    
+    return true;
   }
 
   cleanupClientSafely(ws) {
@@ -726,93 +731,44 @@ export class ChatServer {
   handleSetIdTarget2(ws, id, baru) {
     ws.idtarget = id;
 
+    // ✅ CLEANUP TIMEOUT & STATE
     if (this.pingTimeouts.has(id)) {
-        clearTimeout(this.pingTimeouts.get(id));
-        this.pingTimeouts.delete(id);
+      clearTimeout(this.pingTimeouts.get(id));
+      this.pingTimeouts.delete(id);
     }
     this.usersToRemove.delete(id);
     this.messageCounts.delete(id);
 
     if (baru === true) {
-        this.userDisconnectTime.delete(id);
-        
-        for (const room of roomList) {
-            const seatMap = this.roomSeats.get(room);
-            if (!seatMap) continue;
+      // ✅ USER BARU - RESET SEMUA
+      this.userDisconnectTime.delete(id);
+      this.userToSeat.delete(id);
+      ws.roomname = undefined;
+      ws.numkursi = new Set();
+      
+    } else if (baru === false) {
+      // ✅ USER EXISTING - CEK QUICK & REJOIN
+      const seatInfo = this.userToSeat.get(id);
+      
+      if (seatInfo) {
+        const { room, seat } = seatInfo;
+        const seatMap = this.roomSeats.get(room);
+        const seatData = seatMap?.get(seat);
 
-            for (const [seatNumber, seatInfo] of seatMap) {
-                if (seatInfo.namauser === id) {
-                    if (seatInfo.viptanda > 0) {
-                      this.vipManager.removeVipBadge(room, seatNumber);
-                    }
-                    
-                    Object.assign(seatInfo, createEmptySeat());
-                    this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
-                    this.clearSeatBuffer(room, seatNumber);
-                }
-            }
-            this.broadcastRoomUserCount(room);
-        }
-
-        this.userToSeat.delete(id);
-        ws.roomname = undefined;
-        ws.numkursi = new Set();
-    }
-    else if (baru === false) {
-        const seatInfo = this.userToSeat.get(id);
-
-        if (seatInfo) {
-            const { room, seat } = seatInfo;
-            const seatMap = this.roomSeats.get(room);
-
-            if (seatMap?.has(seat)) {
-                const seatData = seatMap.get(seat);
-
-                if (seatData.namauser === id) {
-                    ws.roomname = room;
-                    ws.numkursi = new Set([seat]);
-                    
-                    if (this.roomChatHistory.has(room)) {
-                        const history = this.roomChatHistory.get(room);
-                        const disconnectTime = this.userDisconnectTime.get(id) || 0;
-                        
-                        if (disconnectTime > 0) {
-                            const newChatsAfterDisconnect = history.filter(chat => 
-                                chat.timestamp > disconnectTime
-                            );
-                            
-                            if (newChatsAfterDisconnect.length > 0) {
-                                for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
-                                    const chat = newChatsAfterDisconnect[i];
-                                    this.safeSend(ws, [
-                                        "restoreChatHistory", 
-                                        room, 
-                                        chat.noImageURL, 
-                                        chat.username, 
-                                        chat.message, 
-                                        chat.usernameColor, 
-                                        chat.chatTextColor
-                                    ]);
-                                }
-                            }
-                        }
-                        this.userDisconnectTime.delete(id);
-                    }
-                    
-                    this.sendAllStateTo(ws, room);
-                    this.broadcastRoomUserCount(room);
-                    
-                } else {
-                    this.userToSeat.delete(id);
-                    this.safeSend(ws, ["needJoinRoom"]);
-                }
-            } else {
-                this.userToSeat.delete(id);
-                this.safeSend(ws, ["needJoinRoom"]);
-            }
+        if (seatData?.namauser === id) {
+          // ✅ MASIH ADA DI KURSI - REJOIN CEPAT
+          ws.roomname = room;
+          ws.numkursi = new Set([seat]);
+          this.sendImmediateState(ws, room); // ✅ PAKAI YANG CEPAT
+          this.broadcastRoomUserCount(room);
         } else {
-            this.safeSend(ws, ["needJoinRoom"]);
+          // ✅ KURSI SUDAH KOSONG - RESET
+          this.userToSeat.delete(id);
+          this.safeSend(ws, ["needJoinRoom"]);
         }
+      } else {
+        this.safeSend(ws, ["needJoinRoom"]);
+      }
     }
   }
 
@@ -825,38 +781,6 @@ export class ChatServer {
     } catch (error) {
       // Ignore error
     }
-  }
-
-  handleJoinRoom(ws, newRoom) {
-    if (!roomList.includes(newRoom)) {
-      return false;
-    }
-
-    if (ws.idtarget && ws.roomname && ws.roomname !== newRoom) {
-        this.removeAllSeatsById(ws.idtarget);
-    }
-
-    ws.roomname = newRoom;
-    const foundSeat = this.lockSeat(newRoom, ws);
-
-    if (foundSeat === null) {
-        this.safeSend(ws, ["roomFull", newRoom]);
-        return false;
-    }
-
-    ws.numkursi = new Set([foundSeat]);
-    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-
-    if (ws.idtarget) {
-        this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-    }
-    
-    this.sendAllStateTo(ws, newRoom);
-    this.vipManager.getAllVipBadges(ws, newRoom);
-    this.broadcastRoomUserCount(newRoom);
-    
-    return true;
   }
 
   handleMessage(ws, raw) {
@@ -902,15 +826,22 @@ export class ChatServer {
           break;
         }
 
-       case "onDestroy": {
-  const idtarget = ws.idtarget;
-  if (idtarget) {
-    // ✅ USER SENGAJA KELUAR APP - LANGSUNG BERSIHKAN SEMUA
-    this.fullRemoveById(idtarget);
-    this.clients.delete(ws);
-  }
-  break;
-}
+        case "onDestroy": {
+          const idtarget = ws.idtarget;
+          if (idtarget) {
+            // ✅ USER SENGAJA KELUAR APP - LANGSUNG BERSIHKAN SEMUA
+            this.fullRemoveById(idtarget);
+            this.clients.delete(ws);
+          }
+          break;
+        }
+
+        case "setIdTarget2": {
+          const id = data[1];
+          const baru = data[2];
+          this.handleSetIdTarget2(ws, id, baru);
+          break;
+        }
 
         case "setIdTarget": {
           const newId = data[1];
@@ -930,7 +861,7 @@ export class ChatServer {
           if (prevSeat) {
             ws.roomname = prevSeat.room;
             ws.numkursi = new Set([prevSeat.seat]);
-            this.senderrorstate(ws, prevSeat.room);
+            this.sendImmediateState(ws, prevSeat.room); // ✅ PAKAI YANG CEPAT
 
             const seatMap = this.roomSeats.get(prevSeat.room);
             if (seatMap) {
@@ -1158,13 +1089,13 @@ export class ChatServer {
       });
 
       ws.addEventListener("close", (event) => {
-    const id = ws.idtarget;
-    // ✅ Skip timeout jika close code 1000 (normal closure) 
-    if (id && event.code !== 1000) {
-        this.userDisconnectTime.set(id, Date.now());
-        this.scheduleCleanupTimeout(id);
-    }
-});
+        const id = ws.idtarget;
+        // ✅ HANYA SCHEDULE TIMEOUT JIKA BUKAN NORMAL CLOSURE (1000)
+        if (id && event.code !== 1000) {
+          this.userDisconnectTime.set(id, Date.now());
+          this.scheduleCleanupTimeout(id);
+        }
+      });
 
       ws.addEventListener("error", (event) => {
         const id = ws.idtarget;
@@ -1197,7 +1128,3 @@ export default {
     }
   }
 }
-
-
-
-
