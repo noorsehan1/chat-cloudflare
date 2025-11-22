@@ -26,6 +26,7 @@ export class ChatServer {
     this.state = state;
     this.env = env;
 
+    // core sets/maps (names retained)
     this.clients = new Set();
     this.userToSeat = new Map();
     this.hasEverSetId = false;
@@ -33,6 +34,7 @@ export class ChatServer {
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
 
+    // initialize seats
     for (const room of roomList) {
       const seatMap = new Map();
       for (let i = 1; i <= this.MAX_SEATS; i++) {
@@ -41,13 +43,16 @@ export class ChatServer {
       this.roomSeats.set(room, seatMap);
     }
 
+    // managers (retain names)
     this.vipManager = new VipBadgeManager(this);
 
+    // buffers & locks (retain names)
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
     this.privateMessageBuffer = new Map();
     this.seatLocks = new Map();
 
+    // histories/timers
     this.roomChatHistory = new Map();
     this.userDisconnectTime = new Map();
 
@@ -55,20 +60,23 @@ export class ChatServer {
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
 
+    // initialize buffers per room
     for (const room of roomList) {
       this.updateKursiBuffer.set(room, new Map());
       this.chatMessageBuffer.set(room, []);
     }
 
+    // optimized timings (no ping/pong)
     this._tickTimer = setInterval(() => {
       this.tick().catch(() => {});
     }, this.intervalMillis);
 
+    // frequent flush but light work
     this._flushTimer = setInterval(() => {
       if (this.clients.size > 0) {
         this.periodicFlush().catch(() => {});
       }
-    }, 100);
+    }, 50); // 50ms flush for responsiveness
 
     this.lowcard = new LowCardGameManager(this);
 
@@ -123,11 +131,10 @@ export class ChatServer {
         ]);
       }
       
-      console.log(`Restored ${recentChats.length} recent chats after disconnect for ${id} in ${room}`);
-      
       this.userDisconnectTime.delete(id);
       
     } catch (error) {
+      // log if needed
       console.error("Error restoring chat history:", error);
     }
   }
@@ -196,7 +203,9 @@ export class ChatServer {
   fullRemoveById(idtarget) {
     if (!idtarget) return;
 
-    this.vipManager.cleanupUserVipBadges(idtarget);
+    try {
+      this.vipManager.cleanupUserVipBadges(idtarget);
+    } catch (e) {}
 
     this.usersToRemove.delete(idtarget);
     if (this.pingTimeouts.has(idtarget)) {
@@ -321,6 +330,7 @@ export class ChatServer {
       const now = Date.now();
       const removalThreshold = 25000;
 
+      // maintain locks but light cleaning
       this.cleanExpiredLocks();
 
       const usersToRemoveNow = [];
@@ -384,6 +394,7 @@ export class ChatServer {
     } catch (error) {}
   }
 
+  // Minimal safeSend (used widely)
   safeSend(ws, arr) {
     try {
       if (ws.readyState === 1) {
@@ -394,8 +405,10 @@ export class ChatServer {
     return false;
   }
 
+  // Broadcast same as original, but attempt to minimize wasted iteration
   broadcastToRoom(room, msg) {
     let sentCount = 0;
+    // iterate clients but short-circuit checks first
     for (const c of this.clients) {
       if (c.roomname === room && c.readyState === 1) {
         try {
@@ -478,6 +491,7 @@ export class ChatServer {
     } catch (error) {}
   }
 
+  // Clean up stale __LOCK__ entries lightly
   cleanExpiredLocks() {
     try {
       const now = Date.now();
@@ -512,7 +526,7 @@ export class ChatServer {
       this.cleanExpiredLocks();
 
       let messagesDelivered = 0;
-      const maxMessagesPerFlush = 50;
+      const maxMessagesPerFlush = 100;
 
       for (const [id, msgs] of this.privateMessageBuffer) {
         if (messagesDelivered >= maxMessagesPerFlush) break;
@@ -547,6 +561,7 @@ export class ChatServer {
     } catch (error) {}
   }
 
+  // Optimized lockSeat but keeping function name
   lockSeat(room, ws) {
     if (!ws.idtarget) return null;
 
@@ -556,10 +571,10 @@ export class ChatServer {
 
       const now = Date.now();
 
+      // Clean a few stale __LOCK__ seats (compat for older clients).
       let locksCleaned = 0;
       for (const [seat, info] of seatMap) {
         if (locksCleaned >= 5) break;
-
         if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
           Object.assign(info, createEmptySeat());
           this.clearSeatBuffer(room, seat);
@@ -568,15 +583,43 @@ export class ChatServer {
       }
 
       for (let i = 1; i <= this.MAX_SEATS; i++) {
-        const k = seatMap.get(i);
-        if (k && k.namauser === "") {
-          k.namauser = "__LOCK__" + ws.idtarget;
-          k.lockTime = now;
-          // ❌ HAPUS: lastActivity
-          this.userToSeat.set(ws.idtarget, { room, seat: i });
-          return i;
+        const key = `${room}-${i}`;
+
+        // If some other process has an in-memory lock, skip
+        if (this.seatLocks.has(key)) continue;
+
+        this.seatLocks.set(key, true);
+        try {
+          const current = seatMap.get(i);
+          if (!current) continue;
+
+          // available if empty string or falsy
+          if (!current.namauser || current.namauser === "") {
+            current.namauser = ws.idtarget;
+            current.lockTime = undefined;
+            this.userToSeat.set(ws.idtarget, { room, seat: i });
+
+            // buffer update for kursiBatchUpdate; store snapshot
+            if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
+            this.updateKursiBuffer.get(room).set(i, { ...current, lastPoint: current.lastPoint });
+
+            return i;
+          } else {
+            // compat: if previously locked with __LOCK__ for same id, convert
+            if (String(current.namauser) === `__LOCK__${ws.idtarget}`) {
+              current.namauser = ws.idtarget;
+              current.lockTime = undefined;
+              this.userToSeat.set(ws.idtarget, { room, seat: i });
+              if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
+              this.updateKursiBuffer.get(room).set(i, { ...current, lastPoint: current.lastPoint });
+              return i;
+            }
+          }
+        } finally {
+          this.seatLocks.delete(key);
         }
       }
+
       return null;
     } catch (error) {
       return null;
