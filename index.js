@@ -186,11 +186,13 @@ export class ChatServer {
         if (!n) continue;
 
         if (n === idtarget || n === `__LOCK__${idtarget}`) {
-          // ✅ OVERWRITE: HANYA RESET USERNAME, BIARKAN DATA LAIN TETAP
-          info.namauser = "";
-          info.lockTime = undefined;
+          // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
+          Object.assign(info, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
+
+          // ---- CLEAR BUFFER FOR THIS SEAT ----
           this.clearSeatBuffer(room, seatNumber);
+
           this.broadcastRoomUserCount(room);
         }
       }
@@ -465,11 +467,13 @@ export class ChatServer {
             if (cleanedLocks >= maxLocksToClean) break;
 
             if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
-              // ✅ OVERWRITE: HANYA RESET USERNAME, BIARKAN DATA LAIN TETAP
-              info.namauser = "";
-              info.lockTime = undefined;
-              this.clearSeatBuffer(room, seat);
+              // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
+              Object.assign(info, createEmptySeat());
               this.broadcastToRoom(room, ["removeKursi", room, seat]);
+
+              // ---- CLEAR BUFFER FOR THIS SEAT ----
+              this.clearSeatBuffer(room, seat);
+
               this.broadcastRoomUserCount(room);
               cleanedLocks++;
             }
@@ -510,9 +514,8 @@ export class ChatServer {
         if (locksCleaned >= 5) break;
 
         if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
-          // ✅ OVERWRITE: HANYA RESET USERNAME, BIARKAN DATA LAIN TETAP
-          info.namauser = "";
-          info.lockTime = undefined;
+          // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
+          Object.assign(info, createEmptySeat());
           this.clearSeatBuffer(room, seat);
           locksCleaned++;
         }
@@ -573,7 +576,7 @@ export class ChatServer {
     } catch (error) {}
   }
 
-  // ✅ OVERWRITE SEMANTICS BERDASARKAN KEY SEAT
+  // ✅ OVERWRITE SEMANTICS + SMART CHAT HISTORY
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1) return;
 
@@ -588,73 +591,71 @@ export class ChatServer {
         const history = this.roomChatHistory.get(room);
         const disconnectTime = this.userDisconnectTime.get(userId) || 0;
         
+        // ✅ HANYA PROSES JIKA ADA DISCONNECT TIME (user reconnect)
         if (disconnectTime > 0) {
+          // ✅ FILTER: HANYA CHAT YANG LEBIH BARU DARI DISCONNECT TIME
           const newChatsAfterDisconnect = history.filter(chat => 
             chat.timestamp > disconnectTime
           );
           
+          // ✅ KIRIM HANYA JIKA ADA CHAT BARU SETELAH DISCONNECT
           if (newChatsAfterDisconnect.length > 0) {
-            const chatBatch = {};
             for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
               const chat = newChatsAfterDisconnect[i];
-              chatBatch[`chat_${i}`] = [
-                chat.noImageURL || "0",
-                chat.usernameColor || 0,
-                chat.username || "",
-                chat.message || "",
-                chat.chatTextColor || 0,
-                chat.timestamp || Date.now()
-              ];
+              this.safeSend(ws, [
+                "chat", 
+                room, 
+                chat.noImageURL, 
+                chat.username, 
+                chat.message, 
+                chat.usernameColor, 
+                chat.chatTextColor
+              ]);
             }
-            this.safeSend(ws, ["restoreChatHistory", room, JSON.stringify(chatBatch)]);
           }
+          // ❌ JIKA TIDAK ADA CHAT BARU: TIDAK KIRIM APA-APA
         }
         
+        // ✅ HAPUS DISCONNECT TIME SETELAH PROSES
         this.userDisconnectTime.delete(userId);
       }
 
-      // ✅ 2. KIRIM SEMUA KURSI BERDASARKAN KEY SEAT - OVERWRITE SEMUA
-      const kursiBatch = {};
+      // ✅ 2. KIRIM SEMUA POINTS OVERWRITE
+      const pointsBatch = [];
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         if (!info) continue;
 
-        // ✅ KIRIM SEMUA SEAT BERDASARKAN KEY (1-35)
-        kursiBatch[seat] = {
-          noimageUrl: info.noimageUrl || "",
-          namauser: info.namauser || "",  // Bisa kosong jika tidak ada user
-          color: info.color || "",
-          itembawah: info.itembawah || 0,
-          itematas: info.itematas || 0,
-          vip: info.vip || 0,
-          viptanda: info.viptanda || 0
-        };
-      }
-      
-      // ✅ KIRIM OVERWRITE SEMUA KURSI BERDASARKAN KEY
-      this.safeSend(ws, ["allUpdateKursiList", room, kursiBatch]);
-
-      // ✅ 3. KIRIM SEMUA POINTS BERDASARKAN KEY SEAT - OVERWRITE SEMUA
-      const pointsBatch = {};
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const info = seatMap.get(seat);
-        if (!info) continue;
-
-        // ✅ KIRIM POINTS JIKA ADA, BERDASARKAN KEY SEAT
         if (info.points.length > 0) {
-          pointsBatch[seat] = info.points.map(point => ({
-            x: point.x,
-            y: point.y,
-            fast: false  // ← SELALU FALSE UNTUK RESTORE
-          }));
-        } else {
-          // ✅ JIKA TIDAK ADA POINTS, KIRIM ARRAY KOSONG UNTUK OVERWRITE
-          pointsBatch[seat] = [];
+          pointsBatch.push([seat, info.points]);
         }
       }
-      
-      // ✅ KIRIM OVERWRITE SEMUA POINTS BERDASARKAN KEY
-      this.safeSend(ws, ["allPointsList", room, pointsBatch]);
+      if (pointsBatch.length > 0) {
+        this.safeSend(ws, ["allPointsOverwrite", room, pointsBatch]);
+      }
+
+      // ✅ 3. KIRIM SEMUA SEATS OVERWRITE  
+      const seatsBatch = [];
+      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        const info = seatMap.get(seat);
+        if (!info) continue;
+
+        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+          seatsBatch.push([
+            seat,
+            info.noimageUrl,
+            info.namauser,
+            info.color,
+            info.itembawah,
+            info.itematas,
+            info.vip,
+            info.viptanda
+          ]);
+        }
+      }
+      if (seatsBatch.length > 0) {
+        this.safeSend(ws, ["allSeatsOverwrite", room, seatsBatch]);
+      }
 
       // ✅ 4. INFORMASI ROOM
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
@@ -722,10 +723,8 @@ export class ChatServer {
           this.vipManager.removeVipBadge(room, seat);
         }
         
-        // ✅ OVERWRITE: HANYA RESET USERNAME, BIARKAN DATA LAIN TETAP
-        currentSeat.namauser = "";
-        currentSeat.lockTime = undefined;
-        
+        // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
+        Object.assign(currentSeat, createEmptySeat());
         this.clearSeatBuffer(room, seat);
         this.broadcastToRoom(room, ["removeKursi", room, seat]);
         this.broadcastRoomUserCount(room);
@@ -786,8 +785,8 @@ export class ChatServer {
                       this.vipManager.removeVipBadge(room, seatNumber);
                     }
                     
-                    // ✅ OVERWRITE: HANYA RESET USERNAME, BIARKAN DATA LAIN TETAP
-                    seatInfo.namauser = "";
+                    // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
+                    Object.assign(seatInfo, createEmptySeat());
                     this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
                     this.clearSeatBuffer(room, seatNumber);
                 }
@@ -813,7 +812,7 @@ export class ChatServer {
                 if (seatData.namauser === id) {
                     ws.roomname = room;
                     ws.numkursi = new Set([seat]);
-                    this.sendAllStateTo(ws, room); // ← AKAN KIRIM OVERWRITE SEMUA DATA
+                    this.sendAllStateTo(ws, room); // ← AKAN FILTER CHAT TERLEWAT
                     this.broadcastRoomUserCount(room);
                 } else {
                     this.userToSeat.delete(id);
@@ -892,46 +891,6 @@ export class ChatServer {
         case "getAllVipBadges":
           this.vipManager.handleEvent(ws, data);
           break;
-
-        // ✅ CASE BARU UNTUK RESTORE CHAT HISTORY
-        case "restoreChatHistory": {
-          const [, room, jsonString] = data;
-          if (!roomList.includes(room)) return;
-          
-          // ✅ SIMPAN KE CHAT HISTORY DENGAN TIMESTAMP
-          if (!this.roomChatHistory.has(room)) {
-            this.roomChatHistory.set(room, []);
-          }
-          const history = this.roomChatHistory.get(room);
-          
-          try {
-            const jsonObject = new JSON.parse(jsonString);
-            const keys = Object.keys(jsonObject);
-            const now = Date.now();
-            
-            for (const key of keys) {
-              const chatData = jsonObject[key];
-              if (Array.isArray(chatData) && chatData.length >= 6) {
-                history.push({
-                  timestamp: now,
-                  noImageURL: chatData[0],
-                  username: chatData[2],
-                  message: chatData[3],
-                  usernameColor: chatData[1],
-                  chatTextColor: chatData[4]
-                });
-              }
-            }
-            
-            // ✅ MAX 10 PESAN - BUANG YANG PALING LAMA
-            if (history.length > 10) {
-              this.roomChatHistory.set(room, history.slice(-10));
-            }
-          } catch (e) {
-            // ignore JSON parse error
-          }
-          break;
-        }
 
         case "isInRoom": {
           const idtarget = ws.idtarget;
@@ -1124,7 +1083,7 @@ export class ChatServer {
           if (!roomList.includes(room)) return;
           const seatMap = this.roomSeats.get(room);
           
-          // ✅ OVERWRITE: RESET KE EMPTY SEAT
+          // ✅ OVERWRITE: GANTI DENGAN EMPTY SEAT
           Object.assign(seatMap.get(seat), createEmptySeat());
           
           this.clearSeatBuffer(room, seat);
