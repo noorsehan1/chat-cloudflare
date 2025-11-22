@@ -905,11 +905,24 @@ export class ChatServer {
         case "onDestroy": {
   const idtarget = ws.idtarget;
   if (idtarget) {
-    // ✅ LANGSUNG PANGGIL fullRemoveById - sudah lengkap!
+    // ✅ LANGSUNG HAPUS SEMUA DATA USER TANPA TIMEOUT
     this.fullRemoveById(idtarget);
     
-    // ✅ HAPUS WEBSOCKET DARI CLIENTS
+    // ✅ HAPUS DARI CLIENTS
     this.clients.delete(ws);
+    
+    // ✅ HAPUS DARI SEMUA MAP & SET LAINNYA
+    this.userToSeat.delete(idtarget);
+    this.messageCounts.delete(idtarget);
+    this.usersToRemove.delete(idtarget);
+    this.cleanupInProgress.delete(idtarget);
+    this.userDisconnectTime.delete(idtarget);
+    
+    // ✅ BERSIHKAN PING TIMEOUT
+    if (this.pingTimeouts.has(idtarget)) {
+      clearTimeout(this.pingTimeouts.get(idtarget));
+      this.pingTimeouts.delete(idtarget);
+    }
   }
   break;
 }
@@ -1204,4 +1217,5 @@ export default {
     }
   }
 }
+
 
