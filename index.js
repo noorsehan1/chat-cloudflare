@@ -1400,7 +1400,7 @@ export class ChatServer {
     }
   }
 
- async fetch(request) {
+async fetch(request) {
     try {
       const upgrade = request.headers.get("Upgrade") || "";
       if (upgrade.toLowerCase() !== "websocket")
@@ -1451,8 +1451,8 @@ export class ChatServer {
       return new Response("Internal Server Error", { status: 500 });
     }
   }
+}
 
-  
 export default {
   async fetch(req, env) {
     try {
