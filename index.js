@@ -576,7 +576,7 @@ export class ChatServer {
     } catch (error) {}
   }
 
-  // ✅ OVERWRITE SEMANTICS + SMART CHAT HISTORY
+  // ✅ OVERWRITE SEMANTICS + SMART CHAT HISTORY - DIUBAH UNTUK KIRIM KE CASE YANG BENAR
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1) return;
 
@@ -600,11 +600,11 @@ export class ChatServer {
           
           // ✅ KIRIM HANYA JIKA ADA CHAT BARU SETELAH DISCONNECT
           if (newChatsAfterDisconnect.length > 0) {
+            // ✅ GUNAKAN CASE BARU UNTUK RESTORE CHAT HISTORY
+            const restoreChats = [];
             for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
               const chat = newChatsAfterDisconnect[i];
-              this.safeSend(ws, [
-                "chatres", 
-                room, 
+              restoreChats.push([
                 chat.noImageURL, 
                 chat.username, 
                 chat.message, 
@@ -612,6 +612,7 @@ export class ChatServer {
                 chat.chatTextColor
               ]);
             }
+            this.safeSend(ws, ["restoreChatHistory", room, restoreChats]);
           }
           // ❌ JIKA TIDAK ADA CHAT BARU: TIDAK KIRIM APA-APA
         }
@@ -620,46 +621,50 @@ export class ChatServer {
         this.userDisconnectTime.delete(userId);
       }
 
-      // ✅ 2. KIRIM SEMUA POINTS OVERWRITE - UBAH SEMUA FAST MENJADI FALSE
-      const pointsBatch = [];
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const info = seatMap.get(seat);
-        if (!info) continue;
-
-        if (info.points.length > 0) {
-          // ✅ UBAH SEMUA POINT MENJADI fast: false
-          const pointsWithFastFalse = info.points.map(point => ({
-            ...point,
-            fast: false  // ← DI SINI PERUBAHANNYA
-          }));
-          pointsBatch.push([seat, pointsWithFastFalse]);
-        }
-      }
-      if (pointsBatch.length > 0) {
-        this.safeSend(ws, ["allPointsOverwrite", room, pointsBatch]);
-      }
-
-      // ✅ 3. KIRIM SEMUA SEATS OVERWRITE  
-      const seatsBatch = [];
+      // ✅ 2. KIRIM SEMUA KURSI KE CASE "allUpdateKursiList"
+      const kursiMeta = {};
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         if (!info) continue;
 
         if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-          seatsBatch.push([
-            seat,
-            info.noimageUrl,
-            info.namauser,
-            info.color,
-            info.itembawah,
-            info.itematas,
-            info.vip,
-            info.viptanda
-          ]);
+          kursiMeta[seat] = {
+            noimageUrl: info.noimageUrl,
+            namauser: info.namauser,
+            color: info.color,
+            itembawah: info.itembawah,
+            itematas: info.itematas,
+            vip: info.vip,
+            viptanda: info.viptanda
+          };
         }
       }
-      if (seatsBatch.length > 0) {
-        this.safeSend(ws, ["allSeatsOverwrite", room, seatsBatch]);
+      
+      if (Object.keys(kursiMeta).length > 0) {
+        this.safeSend(ws, ["allUpdateKursiList", room, kursiMeta]);
+      }
+
+      // ✅ 3. KIRIM SEMUA POINTS KE CASE "allPointsList" - UBAH SEMUA FAST MENJADI FALSE
+      const allPoints = [];
+      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        const info = seatMap.get(seat);
+        if (!info) continue;
+
+        if (info.points.length > 0) {
+          for (let i = 0; i < info.points.length; i++) {
+            const point = info.points[i];
+            allPoints.push({
+              seat: seat,
+              x: point.x,
+              y: point.y,
+              fast: false  // ← DI SINI DIUBAH JADI false
+            });
+          }
+        }
+      }
+      
+      if (allPoints.length > 0) {
+        this.safeSend(ws, ["allPointsList", room, allPoints]);
       }
 
       // ✅ 4. INFORMASI ROOM
@@ -817,7 +822,7 @@ export class ChatServer {
                 if (seatData.namauser === id) {
                     ws.roomname = room;
                     ws.numkursi = new Set([seat]);
-                    this.sendAllStateTo(ws, room); // ← AKAN FILTER CHAT TERLEWAT
+                    this.sendAllStateTo(ws, room); // ← AKAN KIRIM KE CASE YANG BENAR
                     this.broadcastRoomUserCount(room);
                 } else {
                     this.userToSeat.delete(id);
@@ -896,6 +901,38 @@ export class ChatServer {
         case "getAllVipBadges":
           this.vipManager.handleEvent(ws, data);
           break;
+
+        // ✅ CASE BARU UNTUK RESTORE CHAT HISTORY
+        case "restoreChatHistory": {
+          const [, room, chats] = data;
+          if (!roomList.includes(room)) return;
+          
+          // ✅ SIMPAN KE CHAT HISTORY DENGAN TIMESTAMP
+          if (!this.roomChatHistory.has(room)) {
+            this.roomChatHistory.set(room, []);
+          }
+          const history = this.roomChatHistory.get(room);
+          
+          const now = Date.now();
+          for (let i = 0; i < chats.length; i++) {
+            const chat = chats[i];
+            const chatData = {
+              timestamp: now,
+              noImageURL: chat[0],
+              username: chat[1],
+              message: chat[2],
+              usernameColor: chat[3],
+              chatTextColor: chat[4]
+            };
+            history.push(chatData);
+          }
+          
+          // ✅ MAX 10 PESAN - BUANG YANG PALING LAMA
+          if (history.length > 10) {
+            this.roomChatHistory.set(room, history.slice(-10));
+          }
+          break;
+        }
 
         case "isInRoom": {
           const idtarget = ws.idtarget;
@@ -1222,4 +1259,3 @@ export default {
     }
   }
 }
-
