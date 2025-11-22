@@ -16,8 +16,7 @@ function createEmptySeat() {
     vip: 0,
     viptanda: 0,
     points: [],
-    lockTime: undefined,
-    lastActivity: Date.now()
+    lockTime: undefined
   };
 }
 
@@ -489,23 +488,6 @@ export class ChatServer {
 
       const now = Date.now();
 
-      for (const client of this.clients) {
-        if (client.idtarget && client.readyState === 1) {
-          const seatInfo = this.userToSeat.get(client.idtarget);
-          if (seatInfo) {
-            const { room, seat } = seatInfo;
-            const seatMap = this.roomSeats.get(room);
-            if (seatMap && seatMap.has(seat)) {
-              const seatData = seatMap.get(seat);
-              if (seatData.namauser === client.idtarget) {
-                seatData.lastActivity = now;
-                this.usersToRemove.delete(client.idtarget);
-              }
-            }
-          }
-        }
-      }
-
       let messagesDelivered = 0;
       const maxMessagesPerFlush = 50;
 
@@ -568,8 +550,6 @@ export class ChatServer {
         if (k && k.namauser === "") {
           k.namauser = "__LOCK__" + ws.idtarget;
           k.lockTime = now;
-          k.lastActivity = now;
-          this.userToSeat.set(ws.idtarget, { room, seat: i });
           return i;
         }
       }
@@ -809,7 +789,6 @@ export class ChatServer {
                 if (seatData.namauser === id) {
                     ws.roomname = room;
                     ws.numkursi = new Set([seat]);
-                    seatData.lastActivity = Date.now();
                     this.sendAllStateTo(ws, room);
                     this.broadcastRoomUserCount(room);
                 } else {
@@ -957,7 +936,6 @@ export class ChatServer {
               const seatInfo = seatMap.get(prevSeat.seat);
               if (seatInfo.namauser === `__LOCK__${newId}` || !seatInfo.namauser) {
                 seatInfo.namauser = newId;
-                seatInfo.lastActivity = Date.now();
               }
             }
           } else {
@@ -1079,7 +1057,6 @@ export class ChatServer {
           const now = Date.now();
           si.points = si.points.filter(point => now - point.timestamp < 3000);
 
-          si.lastActivity = now;
           this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
           break;
         }
@@ -1113,8 +1090,7 @@ export class ChatServer {
             Object.assign(currentInfo, {
               noimageUrl, namauser, color, itembawah, itematas, 
               vip: vip || 0,
-              viptanda: viptanda || 0,
-              lastActivity: Date.now()
+              viptanda: viptanda || 0
             });
 
             seatMap.set(seat, currentInfo);
@@ -1217,5 +1193,5 @@ export default {
     } catch (error) {
       return new Response("Internal Server Error", { status: 500 });
     }
-  }  
+  }
 }
