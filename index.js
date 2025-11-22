@@ -576,7 +576,7 @@ export class ChatServer {
     } catch (error) {}
   }
 
-  // ✅ OVERWRITE SEMANTICS + 10 CHAT HISTORY + DISCONNECT TIME FILTER
+  // ✅ OVERWRITE SEMANTICS + SMART CHAT HISTORY
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1) return;
 
@@ -586,36 +586,22 @@ export class ChatServer {
 
       const userId = ws.idtarget;
       
-      // ✅ 1. KIRIM CHAT HISTORY BERDASARKAN DISCONNECT TIME
-      if (this.roomChatHistory.has(room)) {
+      // ✅ 1. KIRIM CHAT HISTORY: HANYA YANG SETELAH DISCONNECT
+      if (userId && this.roomChatHistory.has(room)) {
         const history = this.roomChatHistory.get(room);
-        if (history.length > 0) {
+        const disconnectTime = this.userDisconnectTime.get(userId) || 0;
+        
+        // ✅ HANYA PROSES JIKA ADA DISCONNECT TIME (user reconnect)
+        if (disconnectTime > 0) {
+          // ✅ FILTER: HANYA CHAT YANG LEBIH BARU DARI DISCONNECT TIME
+          const newChatsAfterDisconnect = history.filter(chat => 
+            chat.timestamp > disconnectTime
+          );
           
-          if (userId) {
-            // ✅ USER RECONNECT: FILTER CHAT YANG TERLEWAT
-            const disconnectTime = this.userDisconnectTime.get(userId) || 0;
-            const missedChats = history.filter(chat => chat.timestamp > disconnectTime);
-            
-            // ✅ KIRIM HANYA CHAT YANG TERLEWAT
-            for (let i = 0; i < missedChats.length; i++) {
-              const chat = missedChats[i];
-              this.safeSend(ws, [
-                "chat", 
-                room, 
-                chat.noImageURL, 
-                chat.username, 
-                chat.message, 
-                chat.usernameColor, 
-                chat.chatTextColor
-              ]);
-            }
-            
-            // ✅ HAPUS DISCONNECT TIME SETELAH KIRIM
-            this.userDisconnectTime.delete(userId);
-          } else {
-            // ✅ USER BARU/TANPA ID: KIRIM SEMUA 10 CHAT
-            for (let i = 0; i < history.length; i++) {
-              const chat = history[i];
+          // ✅ KIRIM HANYA JIKA ADA CHAT BARU SETELAH DISCONNECT
+          if (newChatsAfterDisconnect.length > 0) {
+            for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
+              const chat = newChatsAfterDisconnect[i];
               this.safeSend(ws, [
                 "chat", 
                 room, 
@@ -627,7 +613,11 @@ export class ChatServer {
               ]);
             }
           }
+          // ❌ JIKA TIDAK ADA CHAT BARU: TIDAK KIRIM APA-APA
         }
+        
+        // ✅ HAPUS DISCONNECT TIME SETELAH PROSES
+        this.userDisconnectTime.delete(userId);
       }
 
       // ✅ 2. KIRIM SEMUA POINTS OVERWRITE
@@ -1044,7 +1034,7 @@ export class ChatServer {
           const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
           if (!roomList.includes(roomname)) return;
           
-          // ✅ 1. ADD TO BUFFER (existing)
+          // ✅ 1. ADD TO BUFFER (untuk kirim real-time)
           if (!this.chatMessageBuffer.has(roomname))
             this.chatMessageBuffer.set(roomname, []);
           this.chatMessageBuffer.get(roomname)
@@ -1056,7 +1046,6 @@ export class ChatServer {
           }
           const history = this.roomChatHistory.get(roomname);
           
-          // ✅ SIMPAN DENGAN TIMESTAMP
           const chatData = {
             timestamp: Date.now(),
             noImageURL,
@@ -1083,7 +1072,6 @@ export class ChatServer {
           const si = seatMap.get(seat);
           if (!si) return;
 
-          // ✅ OVERWRITE: TAMBAH POINT BARU
           si.points.push({ x, y, fast, timestamp: Date.now() });
 
           this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
