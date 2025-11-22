@@ -557,6 +557,7 @@ export class ChatServer {
     } catch (error) {}
   }
 
+  // ✅ PERBAIKAN: Kirim event yang sesuai dengan client
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1) return;
 
@@ -566,6 +567,60 @@ export class ChatServer {
 
       const userId = ws.idtarget;
       
+      // ✅ 1. KIRIM SEMUA KURSI - FORMAT allUpdateKursiList
+      const allKursiMeta = {};
+      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        const info = seatMap.get(seat);
+        if (!info) continue;
+
+        // ✅ KIRIM SEMUA SEATS YANG ADA USER-NYA
+        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+          allKursiMeta[seat] = {
+            noimageUrl: info.noimageUrl,
+            namauser: info.namauser,
+            color: info.color,
+            itembawah: info.itembawah,
+            itematas: info.itematas,
+            vip: info.vip,
+            viptanda: info.viptanda
+          };
+        }
+      }
+      
+      // ✅ KIRIM EVENT allUpdateKursiList KE CLIENT
+      if (Object.keys(allKursiMeta).length > 0) {
+        this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
+      }
+
+      // ✅ 2. KIRIM SEMUA POINTS - FORMAT allPointsList
+      const allPointsData = [];
+      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        const info = seatMap.get(seat);
+        if (!info) continue;
+
+        if (info.points.length > 0) {
+          // Format points sesuai yang diharapkan client
+          info.points.forEach(point => {
+            allPointsData.push({
+              seat: seat,
+              x: point.x,
+              y: point.y,
+              fast: point.fast
+            });
+          });
+        }
+      }
+      
+      if (allPointsData.length > 0) {
+        this.safeSend(ws, ["allPointsList", room, allPointsData]);
+      }
+
+      // ✅ 3. INFORMASI ROOM LAINNYA
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
+      const count = this.getJumlahRoom()[room] || 0;
+      this.safeSend(ws, ["roomUserCount", room, count]);
+
+      // ✅ 4. KIRIM CHAT HISTORY JIKA ADA
       if (userId && this.roomChatHistory.has(room)) {
         const history = this.roomChatHistory.get(room);
         const disconnectTime = this.userDisconnectTime.get(userId) || 0;
@@ -593,46 +648,6 @@ export class ChatServer {
         
         this.userDisconnectTime.delete(userId);
       }
-
-      const pointsBatch = [];
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const info = seatMap.get(seat);
-        if (!info) continue;
-
-        if (info.points.length > 0) {
-          pointsBatch.push([seat, info.points]);
-        }
-      }
-      if (pointsBatch.length > 0) {
-        this.safeSend(ws, ["allPointsList", room, pointsBatch]);
-      }
-
-      const seatsBatch = [];
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const info = seatMap.get(seat);
-        if (!info) continue;
-
-        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-          seatsBatch.push([
-            seat,
-            info.noimageUrl,
-            info.namauser,
-            info.color,
-            info.itembawah,
-            info.itematas,
-            info.vip,
-            info.viptanda
-          ]);
-        }
-      }
-      
-      if (seatsBatch.length > 0) {
-        this.safeSend(ws, ["allUpdateKursiList", room, seatsBatch]);
-      }
-
-      this.safeSend(ws, ["currentNumber", this.currentNumber]);
-      const count = this.getJumlahRoom()[room] || 0;
-      this.safeSend(ws, ["roomUserCount", room, count]);
 
     } catch (error) {}
   }
@@ -829,6 +844,7 @@ export class ChatServer {
         this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
     }
     
+    // ✅ KIRIM SEMUA STATE KE USER BARU
     this.sendAllStateTo(ws, newRoom);
     this.vipManager.getAllVipBadges(ws, newRoom);
     this.broadcastRoomUserCount(newRoom);
