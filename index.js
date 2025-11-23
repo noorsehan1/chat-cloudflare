@@ -64,6 +64,15 @@ export class ChatServer {
       if (this.clients.size > 0) this.periodicFlush().catch(() => {});
     }, 100);
 
+    this._lockCleanupTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [id, lockTime] of this.userJoinLocks.entries()) {
+        if (now - lockTime > 2000) {
+          this.userJoinLocks.delete(id);
+        }
+      }
+    }, 1000);
+
     this.lowcard = new LowCardGameManager(this);
 
     this.messageCounts = new Map();
@@ -73,8 +82,20 @@ export class ChatServer {
 
   async acquireUserJoinLock(idtarget) {
     if (!idtarget) return true;
-    if (this.userJoinLocks.has(idtarget)) return false;
-    this.userJoinLocks.set(idtarget, Date.now());
+    
+    const now = Date.now();
+    
+    for (const [id, lockTime] of this.userJoinLocks.entries()) {
+      if (now - lockTime > 2000) {
+        this.userJoinLocks.delete(id);
+      }
+    }
+    
+    if (this.userJoinLocks.has(idtarget)) {
+      return false;
+    }
+    
+    this.userJoinLocks.set(idtarget, now);
     return true;
   }
 
@@ -252,7 +273,10 @@ export class ChatServer {
 
     const lockAcquired = await this.acquireUserJoinLock(id);
     if (!lockAcquired) {
-      this.safeSend(ws, ["error", "Another operation in progress"]);
+      const message = baru === true 
+        ? "Please wait a moment..." 
+        : "Please wait...";
+      this.safeSend(ws, ["error", message]);
       return;
     }
 
@@ -263,12 +287,14 @@ export class ChatServer {
       if (baru === true) {
         ws.roomname = undefined;
         ws.numkursi = new Set();
+        this.userToSeat.delete(id);
         this.safeSend(ws, ["needJoinRoom"]);
-      } else if (baru === false) {
+      } else {
         const seatInfo = this.userToSeat.get(id);
         if (seatInfo) {
           const { room, seat } = seatInfo;
           const seatMap = this.roomSeats.get(room);
+          
           if (seatMap?.has(seat)) {
             const seatData = seatMap.get(seat);
             if (seatData.namauser === id) {
@@ -288,8 +314,46 @@ export class ChatServer {
           this.safeSend(ws, ["needJoinRoom"]);
         }
       }
+    } catch (error) {
+      this.safeSend(ws, ["error", "Setup failed"]);
     } finally {
       this.releaseUserJoinLock(id);
+    }
+  }
+
+  async handleSetIdTarget(ws, newId) {
+    if (!newId) return;
+
+    const lockAcquired = await this.acquireUserJoinLock(newId);
+    if (!lockAcquired) {
+      this.safeSend(ws, ["error", "Please wait..."]);
+      return;
+    }
+
+    try {
+      if (ws.idtarget && ws.idtarget !== newId) {
+        this.forceUserCleanup(ws.idtarget);
+      }
+      
+      ws.idtarget = newId;
+
+      const prevSeat = this.userToSeat.get(newId);
+      if (prevSeat) {
+        ws.roomname = prevSeat.room;
+        ws.numkursi = new Set([prevSeat.seat]);
+        this.sendAllStateTo(ws, prevSeat.room);
+      } else {
+        if (this.hasEverSetId) {
+          this.safeSend(ws, ["needJoinRoom"]);
+        }
+      }
+
+      this.hasEverSetId = true;
+      if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+    } catch (error) {
+      this.safeSend(ws, ["error", "Setup failed"]);
+    } finally {
+      this.releaseUserJoinLock(newId);
     }
   }
 
@@ -462,6 +526,11 @@ export class ChatServer {
 
   cleanupClientSafely(ws) {
     const id = ws.idtarget;
+    
+    if (id) {
+      this.releaseUserJoinLock(id);
+    }
+    
     if (!id) {
       this.clients.delete(ws);
       return;
@@ -568,28 +637,9 @@ export class ChatServer {
           this.handleSetIdTarget2(ws, data[1], data[2]); 
           break;
 
-        case "setIdTarget": {
-          const newId = data[1];
-          if (ws.idtarget && ws.idtarget !== newId) {
-            this.forceUserCleanup(ws.idtarget);
-          }
-          ws.idtarget = newId;
-
-          const prevSeat = this.userToSeat.get(newId);
-          if (prevSeat) {
-            ws.roomname = prevSeat.room;
-            ws.numkursi = new Set([prevSeat.seat]);
-            this.sendAllStateTo(ws, prevSeat.room);
-          } else {
-            if (this.hasEverSetId) {
-              this.safeSend(ws, ["needJoinRoom"]);
-            }
-          }
-
-          this.hasEverSetId = true;
-          if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
+        case "setIdTarget": 
+          this.handleSetIdTarget(ws, data[1]); 
           break;
-        }
 
         case "sendnotif": {
           const [, idtarget, noimageUrl, username, deskripsi] = data;
