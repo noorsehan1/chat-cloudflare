@@ -21,7 +21,7 @@ export class ChatServer {
 
     this.clients = new Set();
     this.userToSeat = new Map();
-    this.hasEverSetId = false; // NEW: Track if user ever set ID
+    this.hasEverSetId = false;
 
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
@@ -46,7 +46,6 @@ export class ChatServer {
     this.vipManager = new VipBadgeManager(this);
     this.lowcard = new LowCardGameManager(this);
 
-    // NEW: User disconnect tracking for setIdTarget2
     this.userDisconnectTime = new Map();
   }
 
@@ -146,7 +145,6 @@ export class ChatServer {
     const seatMap = this.roomSeats.get(room);
     if (!seatMap) return null;
 
-    // Check if already in this room
     const existingSeat = this.userToSeat.get(ws.idtarget);
     if (existingSeat && existingSeat.room === room) {
       return existingSeat.seat;
@@ -164,50 +162,13 @@ export class ChatServer {
     return null;
   }
 
-  // NEW: Helper untuk send state saat error/reconnect
-  senderrorstate(ws, room) {
-    if (ws.readyState !== 1) return;
-
-    const seatMap = this.roomSeats.get(room);
-    if (!seatMap) return;
-
-    this.safeSend(ws, ["currentNumber", this.currentNumber]);
-
-    const count = this.getJumlahRoom()[room] || 0;
-    this.safeSend(ws, ["roomUserCount", room, count]);
-
-    const kursiUpdates = [];
-    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-      const info = seatMap.get(seat);
-      if (!info) continue;
-
-      if (info.namauser && !info.namauser.startsWith("__LOCK__")) {
-        kursiUpdates.push([
-          seat,
-          {
-            noimageUrl: info.noimageUrl,
-            namauser: info.namauser,
-            color: info.color,
-            itembawah: info.itembawah,
-            itematas: info.itematas,
-            vip: info.vip,
-            viptanda: info.viptanda
-          }
-        ]);
-      }
-    }
-
-    if (kursiUpdates.length > 0) {
-      this.safeSend(ws, ["kursiBatchUpdate", room, kursiUpdates]);
-    }
-  }
-
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1) return;
 
     const seatMap = this.roomSeats.get(room);
     if (!seatMap) return;
 
+    // FIXED: Format untuk client Android
     const allKursiMeta = {};
     const lastPointsData = [];
 
@@ -235,15 +196,18 @@ export class ChatServer {
       }
     }
 
+    // Kirim allUpdateKursiList dengan format yang diharapkan client
     if (Object.keys(allKursiMeta).length > 0) {
       this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
     }
 
+    // Kirim allPointsList
     if (lastPointsData.length > 0) {
       this.safeSend(ws, ["allPointsList", room, lastPointsData]);
     }
 
     this.safeSend(ws, ["currentNumber", this.currentNumber]);
+    
     const count = this.getJumlahRoom()[room] || 0;
     this.safeSend(ws, ["roomUserCount", room, count]);
 
@@ -271,26 +235,21 @@ export class ChatServer {
     this.userToSeat.delete(idtarget);
   }
 
-  // NEW: handleSetIdTarget2 implementation
   handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
     console.log("setIdTarget2:", id, "baru:", baru);
 
-    // Cleanup previous session
     this.removeAllSeatsById(id);
-
     ws.idtarget = id;
 
     if (baru === true) {
-      // User baru - reset everything
       this.userDisconnectTime.delete(id);
       ws.roomname = undefined;
       ws.numkursi = new Set();
       this.safeSend(ws, ["needJoinRoom"]);
     }
     else if (baru === false) {
-      // Returning user - try to restore previous state
       const seatInfo = this.userToSeat.get(id);
 
       if (seatInfo) {
@@ -301,18 +260,14 @@ export class ChatServer {
           const seatData = seatMap.get(seat);
 
           if (seatData.namauser === id) {
-            // Successfully restore previous session
             ws.roomname = room;
             ws.numkursi = new Set([seat]);
 
-            // Send room state
             this.sendAllStateTo(ws, room);
             this.broadcastRoomUserCount(room);
 
-            // Handle chat history restoration if needed
             if (this.userDisconnectTime.has(id)) {
               const disconnectTime = this.userDisconnectTime.get(id);
-              // Logic untuk restore chat history bisa ditambahkan di sini
               this.userDisconnectTime.delete(id);
             }
 
@@ -322,7 +277,6 @@ export class ChatServer {
         }
       }
 
-      // Jika tidak bisa restore, minta join room baru
       this.userToSeat.delete(id);
       this.safeSend(ws, ["needJoinRoom"]);
     }
@@ -349,7 +303,6 @@ export class ChatServer {
         this.vipManager.handleEvent(ws, data);
         break;
 
-      // NEW: setIdTarget2 handler
       case "setIdTarget2": {
         const id = data[1];
         const baru = data[2];
@@ -369,7 +322,6 @@ export class ChatServer {
         const prevSeat = this.userToSeat.get(newId);
 
         if (prevSeat) {
-          // Restore previous session
           ws.roomname = prevSeat.room;
           ws.numkursi = new Set([prevSeat.seat]);
           this.senderrorstate(ws, prevSeat.room);
@@ -500,7 +452,14 @@ export class ChatServer {
 
       case "getAllRoomsUserCount": {
         const allCounts = this.getJumlahRoom();
-        const result = roomList.map(room => [room, allCounts[room]]);
+        // FIXED: Format untuk client Android
+        const result = [];
+        for (const room of roomList) {
+          result.push({
+            roomName: room,
+            userCount: allCounts[room] || 0
+          });
+        }
         this.safeSend(ws, ["allRoomsUserCount", result]);
         break;
       }
@@ -535,6 +494,7 @@ export class ChatServer {
         ws.roomname = newRoom;
         ws.numkursi = new Set([foundSeat]);
         
+        // FIXED: Urutan sesuai client Android [seat, room]
         this.safeSend(ws, ["numberKursiSaya", foundSeat]);
         this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
         
@@ -637,7 +597,6 @@ export class ChatServer {
   cleanupClient(ws) {
     const id = ws.idtarget;
     
-    // Track disconnect time untuk setIdTarget2
     if (id) {
       this.userDisconnectTime.set(id, Date.now());
       this.removeAllSeatsById(id);
