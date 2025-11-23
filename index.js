@@ -190,7 +190,13 @@ export class ChatServer {
       this.safeSend(ws, ["allPointsList", room, pointsData]);
     }
 
-   
+    // Kirim chat history
+    if (this.roomChatHistory.has(room)) {
+      const history = this.roomChatHistory.get(room);
+      for (const chat of history.slice(-15)) {
+        this.safeSend(ws, ["chat", room, chat.noImageURL, chat.username, chat.message, chat.usernameColor, chat.chatTextColor]);
+      }
+    }
   }
 
   async handleSetIdTarget2(ws, id, baru) {
@@ -202,7 +208,7 @@ export class ChatServer {
     if (baru === true) {
       ws.roomname = undefined;
       this.userDisconnectTime.delete(id);
-      
+      this.safeSend(ws, ["needJoinRoom"]);
     } else if (baru === false) {
       const seatInfo = this.userToSeat.get(id);
 
@@ -218,7 +224,7 @@ export class ChatServer {
             const history = this.roomChatHistory.get(room);
             const missedChats = history.filter(chat => chat.timestamp > disconnectTime);
             for (const chat of missedChats) {
-              this.safeSend(ws, ["restoreChatHistory", room, chat.noImageURL, chat.username, chat.message, chat.usernameColor, chat.chatTextColor]);
+              this.safeSend(ws, ["chat", room, chat.noImageURL, chat.username, chat.message, chat.usernameColor, chat.chatTextColor]);
             }
           }
           this.userDisconnectTime.delete(id);
@@ -308,7 +314,6 @@ export class ChatServer {
         }
 
         case "onDestroy":
-          ws._manualDisconnect = true;
           this.removeUserData(ws.idtarget);
           this.clients.delete(ws);
           break;
@@ -449,7 +454,6 @@ export class ChatServer {
 
         case "getAllRoomsUserCount":
           const allCounts = this.getJumlahRoom();
-          // Sesuai dengan format yang di-expect client Java
           const result = Object.entries(allCounts).map(([roomName, userCount]) => ({
             roomName,
             userCount
@@ -485,7 +489,6 @@ export class ChatServer {
 
         case "vipbadge": {
           const [, room, seat, numbadge, colortext] = data;
-          // Tambahkan timestamp untuk client Java
           this.broadcastToRoom(room, ["vipbadge", room, seat, numbadge, colortext, Date.now()]);
           break;
         }
@@ -498,7 +501,6 @@ export class ChatServer {
 
         case "getAllVipBadges": {
           const room = data[1];
-          // Delegate ke vipManager
           this.vipManager.handleEvent(ws, data);
           break;
         }
@@ -530,7 +532,6 @@ export class ChatServer {
 
       const ws = server;
       ws._connId = `conn#${this._nextConnId++}`;
-      ws._manualDisconnect = false;
       ws.roomname = undefined;
       ws.idtarget = undefined;
 
@@ -539,14 +540,11 @@ export class ChatServer {
       ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
       ws.addEventListener("error", (event) => {
         const id = ws.idtarget;
-        if (id && !ws._manualDisconnect) this.pendingCleanups.set(id, Date.now());
+        if (id) this.pendingCleanups.set(id, Date.now());
       });
       ws.addEventListener("close", (event) => {
         const id = ws.idtarget;
-        if (ws._manualDisconnect) {
-          this.removeUserData(id);
-          this.clients.delete(ws);
-        } else if (id) {
+        if (id) {
           this.userDisconnectTime.set(id, Date.now());
           this.pendingCleanups.set(id, Date.now());
         } else {
