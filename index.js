@@ -155,27 +155,42 @@ export class ChatServer {
     const count = this.getJumlahRoom()[room] || 0;
     this.safeSend(ws, ["roomUserCount", room, count]);
 
-    const kursiUpdates = [];
+    // Kirim allUpdateKursiList untuk client Java
+    const allKursiMeta = {};
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
       const info = seatMap.get(seat);
       if (info?.namauser && !info.namauser.startsWith("__LOCK__")) {
-        kursiUpdates.push([seat, {
-          noimageUrl: info.noimageUrl, namauser: info.namauser, color: info.color,
-          itembawah: info.itembawah, itematas: info.itematas, vip: info.vip, viptanda: info.viptanda
-        }]);
+        allKursiMeta[seat] = {
+          noimageUrl: info.noimageUrl,
+          namauser: info.namauser,
+          color: info.color,
+          itembawah: info.itembawah,
+          itematas: info.itematas,
+          vip: info.vip,
+          viptanda: info.viptanda
+        };
       }
     }
+    this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
 
-    if (kursiUpdates.length > 0) {
-      this.safeSend(ws, ["kursiBatchUpdate", room, kursiUpdates]);
-    }
-
-    if (this.roomChatHistory.has(room)) {
-      const history = this.roomChatHistory.get(room);
-      for (const chat of history.slice(-15)) {
-        this.safeSend(ws, ["chat", room, chat.noImageURL, chat.username, chat.message, chat.usernameColor, chat.chatTextColor]);
+    // Kirim allPointsList untuk client Java
+    const pointsData = [];
+    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+      const info = seatMap.get(seat);
+      if (info?.lastPoint) {
+        pointsData.push({
+          seat: seat,
+          x: info.lastPoint.x,
+          y: info.lastPoint.y,
+          fast: info.lastPoint.fast
+        });
       }
     }
+    if (pointsData.length > 0) {
+      this.safeSend(ws, ["allPointsList", room, pointsData]);
+    }
+
+   
   }
 
   async handleSetIdTarget2(ws, id, baru) {
@@ -187,6 +202,7 @@ export class ChatServer {
     if (baru === true) {
       ws.roomname = undefined;
       this.userDisconnectTime.delete(id);
+      
     } else if (baru === false) {
       const seatInfo = this.userToSeat.get(id);
 
@@ -259,6 +275,19 @@ export class ChatServer {
 
     try {
       switch (evt) {
+        case "resetRoom": {
+          const roomName = data[1];
+          const seatMap = this.roomSeats.get(roomName);
+          if (seatMap) {
+            for (let i = 1; i <= this.MAX_SEATS; i++) {
+              Object.assign(seatMap.get(i), createEmptySeat());
+              this.broadcastToRoom(roomName, ["removeKursi", roomName, i]);
+            }
+          }
+          this.broadcastRoomUserCount(roomName);
+          break;
+        }
+
         case "isInRoom": {
           const idtarget = ws.idtarget;
           if (!idtarget) {
@@ -420,7 +449,11 @@ export class ChatServer {
 
         case "getAllRoomsUserCount":
           const allCounts = this.getJumlahRoom();
-          const result = roomList.map(room => [room, allCounts[room]]);
+          // Sesuai dengan format yang di-expect client Java
+          const result = Object.entries(allCounts).map(([roomName, userCount]) => ({
+            roomName,
+            userCount
+          }));
           this.safeSend(ws, ["allRoomsUserCount", result]);
           break;
 
@@ -450,11 +483,25 @@ export class ChatServer {
           this.safeSend(ws, ["roomOnlineUsers", roomName, roomUsers]);
           break;
 
-        case "vipbadge":
-        case "removeVipBadge":
-        case "getAllVipBadges":
+        case "vipbadge": {
+          const [, room, seat, numbadge, colortext] = data;
+          // Tambahkan timestamp untuk client Java
+          this.broadcastToRoom(room, ["vipbadge", room, seat, numbadge, colortext, Date.now()]);
+          break;
+        }
+
+        case "removeVipBadge": {
+          const [, room, seat] = data;
+          this.broadcastToRoom(room, ["removeVipBadge", room, seat]);
+          break;
+        }
+
+        case "getAllVipBadges": {
+          const room = data[1];
+          // Delegate ke vipManager
           this.vipManager.handleEvent(ws, data);
           break;
+        }
 
         case "gameLowCardStart":
         case "gameLowCardJoin":
