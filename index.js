@@ -167,7 +167,7 @@ export class ChatServer {
     }
 
     if (kursiUpdates.length > 0) {
-      this.safeSend(ws, ["allUpdateKursiList", room, kursiUpdates]);
+      this.safeSend(ws, ["kursiBatchUpdate", room, kursiUpdates]);
     }
 
     if (this.roomChatHistory.has(room)) {
@@ -238,7 +238,7 @@ export class ChatServer {
     }
 
     this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+    this.safeSend(ws, ["roomMasuk", foundSeat, newRoom]);
 
     this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
     this.sendAllStateTo(ws, newRoom);
@@ -259,6 +259,25 @@ export class ChatServer {
 
     try {
       switch (evt) {
+        case "isInRoom": {
+          const idtarget = ws.idtarget;
+          if (!idtarget) {
+            this.safeSend(ws, ["inRoomStatus", false]);
+            return;
+          }
+          const seatInfo = this.userToSeat.get(idtarget);
+          if (!seatInfo) {
+            this.safeSend(ws, ["inRoomStatus", false]);
+            return;
+          }
+          const { room, seat } = seatInfo;
+          const seatMap = this.roomSeats.get(room);
+          const seatData = seatMap?.get(seat);
+          const isInRoom = seatData?.namauser === idtarget;
+          this.safeSend(ws, ["inRoomStatus", isInRoom]);
+          break;
+        }
+
         case "onDestroy":
           ws._manualDisconnect = true;
           this.removeUserData(ws.idtarget);
@@ -280,37 +299,13 @@ export class ChatServer {
           const prevSeat = this.userToSeat.get(newId);
           if (prevSeat) {
             ws.roomname = prevSeat.room;
-            
-            // ❌ DIHAPUS: Chat history restoration di setIdTarget
-            // Hanya handleSetIdTarget2 yang punya chat history restoration
             this.userDisconnectTime.delete(newId);
-            
             this.sendAllStateTo(ws, prevSeat.room);
           } else {
             this.safeSend(ws, ["needJoinRoom"]);
           }
           break;
 
-case "isInRoom": {
-  const idtarget = ws.idtarget;
-  if (!idtarget) {
-    this.safeSend(ws, ["inRoomStatus", false]);
-    return;
-  }
-  const seatInfo = this.userToSeat.get(idtarget);
-  if (!seatInfo) {
-    this.safeSend(ws, ["inRoomStatus", false]);
-    return;
-  }
-  const { room, seat } = seatInfo;
-  const seatMap = this.roomSeats.get(room);
-  const seatData = seatMap?.get(seat);
-  const isInRoom = seatData?.namauser === idtarget;
-  this.safeSend(ws, ["inRoomStatus", isInRoom]);
-  break;
-}
-
-          
         case "joinRoom":
           this.handleJoinRoom(ws, data[1]);
           this.processPendingCleanups();
@@ -533,4 +528,4 @@ export default {
       return new Response("Internal Server Error", { status: 500 });
     }
   }
-}; 
+};
