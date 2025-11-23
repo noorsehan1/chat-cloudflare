@@ -8,13 +8,12 @@ const roomList = [
 
 const CONSTANTS = {
   MAX_SEATS: 35,
-  RECONNECT_TIMEOUT: 3000,
+  RECONNECT_TIMEOUT: 30000, // Diperpanjang jadi 30 detik
   FLUSH_INTERVAL: 50,
-  AUTO_REMOVE_INTERVAL: 2000,
   MESSAGE_RATE_LIMIT: 20,
   CHAT_RATE_LIMIT: 30,
   POINT_RATE_LIMIT: 50,
-  SESSION_TIMEOUT: 5000
+  SESSION_TIMEOUT: 60000 // Diperpanjang jadi 60 detik
 };
 
 function createEmptySeat() {
@@ -55,18 +54,12 @@ export class ChatServer {
 
     this.pingTimeouts = new Map();
     this.cleanupInProgress = new Set();
-    this.usersToRemove = new Map();
     this.messageCounts = new Map();
     this.userOperations = new Map();
 
-    this._startTimers();
-  }
-
-  _startTimers() {
+    // HANYA timer yang diperlukan saja
     this._tickTimer = setInterval(() => this._safeTick(), 15 * 60 * 1000);
     this._flushTimer = setInterval(() => this._safeFlush(), CONSTANTS.FLUSH_INTERVAL);
-    this._autoRemoveTimer = setInterval(() => this._safeAutoRemove(), CONSTANTS.AUTO_REMOVE_INTERVAL);
-    this._sessionCleanupTimer = setInterval(() => this._cleanupExpiredSessions(), 10000);
   }
 
   _safeTick() {
@@ -85,14 +78,6 @@ export class ChatServer {
       if (this.clients.size > 0) this.periodicFlush();
     } catch (error) {
       this._resetBuffers();
-    }
-  }
-
-  _safeAutoRemove() {
-    try {
-      this.batchAutoRemove();
-    } catch (error) {
-      this.cleanupInProgress.clear();
     }
   }
 
@@ -121,16 +106,6 @@ export class ChatServer {
     session.lastActivity = Date.now();
     if (currentSessionId && session.id !== currentSessionId) return false;
     return true;
-  }
-
-  _cleanupExpiredSessions() {
-    const now = Date.now();
-    for (const [idtarget, session] of this.userSessions) {
-      if (now - session.lastActivity > CONSTANTS.SESSION_TIMEOUT) {
-        this.userSessions.delete(idtarget);
-        this.fullRemoveById(idtarget);
-      }
-    }
   }
 
   _closeExistingConnection(idtarget, newSessionId = null) {
@@ -245,9 +220,10 @@ export class ChatServer {
     if (this.pingTimeouts.has(idtarget)) {
       clearTimeout(this.pingTimeouts.get(idtarget));
     }
+    // HANYA schedule timeout, TIDAK ada auto remove
     const timeout = setTimeout(() => {
       this.pingTimeouts.delete(idtarget);
-      this.usersToRemove.set(idtarget, Date.now());
+      // TIDAK ada usersToRemove.set() di sini
     }, CONSTANTS.RECONNECT_TIMEOUT);
     this.pingTimeouts.set(idtarget, timeout);
   }
@@ -256,7 +232,6 @@ export class ChatServer {
     if (!idtarget) return;
     this.releaseUserLock(idtarget, 'join');
     this.releaseUserLock(idtarget, 'setId');
-    this.usersToRemove.delete(idtarget);
     this.messageCounts.delete(idtarget);
     this.cleanupInProgress.delete(idtarget);
     this.userDisconnectTime.delete(idtarget);
@@ -287,7 +262,6 @@ export class ChatServer {
     this.releaseUserLock(idtarget, 'join');
     this.releaseUserLock(idtarget, 'setId');
     this.vipManager.cleanupUserVipBadges(idtarget);
-    this.usersToRemove.delete(idtarget);
     this.userDisconnectTime.delete(idtarget);
     this.userToConnection.delete(idtarget);
     if (this.pingTimeouts.has(idtarget)) {
@@ -345,34 +319,6 @@ export class ChatServer {
       return false;
     }
     return true;
-  }
-
-  async batchAutoRemove() {
-    try {
-      const now = Date.now();
-      const usersToRemoveNow = [];
-      for (const [idtarget, removalTime] of this.usersToRemove) {
-        if (usersToRemoveNow.length >= 10) break;
-        const isUserInOperation = this.userOperations.has(`${idtarget}-join`) || 
-                                 this.userOperations.has(`${idtarget}-setId`);
-        if (now - removalTime >= 1000 && !isUserInOperation) {
-          usersToRemoveNow.push(idtarget);
-        }
-      }
-      for (const idtarget of usersToRemoveNow) {
-        if (this.cleanupInProgress.has(idtarget)) continue;
-        this.cleanupInProgress.add(idtarget);
-        try {
-          const stillActive = Array.from(this.clients).some(
-            c => c.idtarget === idtarget && c.readyState === 1
-          );
-          if (!stillActive) this.fullRemoveById(idtarget);
-          this.usersToRemove.delete(idtarget);
-        } finally {
-          this.cleanupInProgress.delete(idtarget);
-        }
-      }
-    } catch (error) {}
   }
 
   safeSend(ws, arr) {
@@ -569,7 +515,7 @@ export class ChatServer {
     for (const [seatNumber, seatInfo] of seatMap) {
       if (String(seatInfo.namauser).startsWith("__LOCK__") && 
           seatInfo.lockTime && 
-          (now - seatInfo.lockTime > 10000)) {
+          (now - seatInfo.lockTime > 30000)) { // Diperpanjang jadi 30 detik
         const lockOwner = seatInfo.namauser.replace("__LOCK__", "");
         const isOwnerActive = this.userToConnection.has(lockOwner) && 
                              this.userToConnection.get(lockOwner)?.readyState === 1;
@@ -683,7 +629,6 @@ export class ChatServer {
         this.broadcastRoomUserCount(room);
       }
       this.userToSeat.delete(idtarget);
-      this.usersToRemove.delete(idtarget);
     } catch (error) {}
   }
 
@@ -809,7 +754,6 @@ export class ChatServer {
             clearTimeout(this.pingTimeouts.get(newId));
             this.pingTimeouts.delete(newId);
           }
-          this.usersToRemove.delete(newId);
           const prevSeat = this.userToSeat.get(newId);
           if (prevSeat) {
             ws.roomname = prevSeat.room;
