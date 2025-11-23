@@ -235,7 +235,7 @@ export class ChatServer {
       switch (evt) {
         case "setIdTarget": {
           const newId = data[1];
-          this.cleanupClientById(newId);
+       
           ws.idtarget = newId;
           this.safeSend(ws, ["setIdTargetAck", ws.idtarget]);
           break;
@@ -486,3 +486,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
