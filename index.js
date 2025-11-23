@@ -64,6 +64,7 @@ export class ChatServer {
 
     this._nextConnId = 1;
 
+    // ✅ OPTIMIZED TIMERS - HANYA YANG PERLU
     this._tickTimer = setInterval(() => {
       this.tick().catch(() => {});
     }, this.intervalMillis);
@@ -74,23 +75,9 @@ export class ChatServer {
       }
     }, 100);
 
-    this._autoRemoveTimer = setInterval(() => {
-      if (this.usersToRemove.size > 0 || this.userToSeat.size > 0) {
-        this.batchAutoRemove().catch(() => {});
-      }
-    }, 10000);
-
-    this._resetDataTimer = setInterval(() => {
-      this.resetStaleData().catch(() => {});
-    }, 5 * 60 * 1000);
-
-    this._memoryGuard = setInterval(() => {
-      this.checkMemoryUsage();
-    }, 2 * 60 * 1000);
-
-    this._healthTimer = setInterval(() => {
-      this.checkConnectionHealth();
-    }, 10000);
+    this._memoryCleanupTimer = setInterval(() => {
+      this.memoryCleanup().catch(() => {});
+    }, 30000); // ✅ MEMORY CLEANUP SETIAP 30 DETIK
 
     this.lowcard = new LowCardGameManager(this);
 
@@ -99,9 +86,123 @@ export class ChatServer {
     this.usersToRemove = new Map();
 
     this.messageCounts = new Map();
-    this.MAX_MESSAGES_PER_SECOND = 20;
+    this.MAX_MESSAGES_PER_SECOND = 50; // ✅ DINAIKKAN: 50 pesan/detik
 
     this.userJoinLocks = new Map();
+
+    // ✅ MEMORY MANAGEMENT CONFIG
+    this.memoryConfig = {
+      MAX_CHAT_BUFFER_SIZE: 500,
+      MAX_ROOM_HISTORY: 20,
+      MAX_UPDATE_BUFFER_SIZE: 200,
+      MAX_MESSAGE_COUNTS_AGE: 30 * 60 * 1000 // 30 menit
+    };
+  }
+
+  // ✅ IMPROVED MEMORY CLEANUP
+  async memoryCleanup() {
+    try {
+      const now = Date.now();
+      
+      // 1. CLEANUP CHAT BUFFERS
+      for (const [room, messages] of this.chatMessageBuffer) {
+        if (messages.length > this.memoryConfig.MAX_CHAT_BUFFER_SIZE) {
+          this.chatMessageBuffer.set(room, messages.slice(-this.memoryConfig.MAX_CHAT_BUFFER_SIZE));
+        }
+      }
+      
+      // 2. CLEANUP ROOM HISTORY
+      for (const [room, history] of this.roomChatHistory) {
+        if (history.length > this.memoryConfig.MAX_ROOM_HISTORY) {
+          this.roomChatHistory.set(room, history.slice(-this.memoryConfig.MAX_ROOM_HISTORY));
+        }
+      }
+      
+      // 3. CLEANUP MESSAGE COUNTS
+      for (const [key, stats] of this.messageCounts) {
+        if (now - (stats.window * 1000) > this.memoryConfig.MAX_MESSAGE_COUNTS_AGE) {
+          this.messageCounts.delete(key);
+        }
+      }
+      
+      // 4. CLEANUP STALE LOCKS
+      for (const [id, lockTime] of this.userJoinLocks) {
+        if (now - lockTime > 60000) { // 1 menit
+          this.userJoinLocks.delete(id);
+        }
+      }
+      
+      // 5. CLEANUP STALE CONNECTION STATUS
+      for (const [id, status] of this.userConnectionStatus) {
+        if (now - status.lastSeen > 300000) { // 5 menit
+          this.userConnectionStatus.delete(id);
+        }
+      }
+      
+    } catch (error) {
+      // Silent fail - jangan crash server karena memory cleanup
+    }
+  }
+
+  // ✅ IMPROVED RATE LIMITING
+  checkRateLimit(ws, messageType) {
+    const now = Date.now();
+    const key = ws.idtarget || ws._connId || 'anonymous';
+    const windowStart = Math.floor(now / 1000);
+
+    if (!this.messageCounts.has(key)) {
+      this.messageCounts.set(key, { count: 0, window: windowStart });
+    }
+
+    const stats = this.messageCounts.get(key);
+    if (stats.window !== windowStart) {
+      stats.count = 0;
+      stats.window = windowStart;
+    }
+
+    // ✅ LIMIT LEBIH REALISTIC
+    let limit = this.MAX_MESSAGES_PER_SECOND;
+    if (messageType === "chat") {
+      limit = 100; // 100 pesan/detik untuk chat
+    } else if (messageType === "updatePoint") {
+      limit = 150; // 150 update/detik untuk points
+    } else if (messageType === "vipbadge" || messageType === "removeVipBadge") {
+      limit = 30; // 30 operasi/detik untuk VIP
+    }
+
+    stats.count += 1;
+    
+    // ✅ GRADUAL RATE LIMITING - WARNING DULU
+    if (stats.count > limit) {
+      if (stats.count <= limit + 5) {
+        // ✅ KIRIM WARNING, TAPI MASIH BISA KIRIM
+        this.safeSend(ws, ['warning', 'Slow down! Rate limit approaching']);
+        return true;
+      } else {
+        // ✅ BLOCK JIKA TERLALU BANYAK
+        this.safeSend(ws, ['error', 'Rate limit exceeded - please wait a moment']);
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  // ✅ IMPROVED SAFE SEND DENGAN BETTER ERROR HANDLING
+  safeSend(ws, arr) {
+    try {
+      if (ws && ws.readyState === 1) {
+        // ✅ BUFFER CHECK YANG LEBIH REALISTIC
+        if (typeof ws.bufferedAmount === "number" && ws.bufferedAmount > 2_000_000) {
+          return false; // Buffer hampir penuh
+        }
+        ws.send(JSON.stringify(arr));
+        return true;
+      }
+    } catch (e) {
+      // Silent fail - jangan crash
+    }
+    return false;
   }
 
   // METHOD BARU: Force exit instant - hapus semua data user
@@ -112,7 +213,6 @@ export class ChatServer {
     this.userToSeat.delete(idtarget);
     this.userDisconnectTime.delete(idtarget);
     this.usersToRemove.delete(idtarget);
-    this.messageCounts.delete(idtarget);
     this.cleanupInProgress.delete(idtarget);
     this.userConnectionStatus.delete(idtarget);
     this.userJoinLocks.delete(idtarget);
@@ -215,81 +315,6 @@ export class ChatServer {
     this.userJoinLocks.delete(idtarget);
   }
 
-  checkMemoryUsage() {
-    try {
-      const userCount = this.userToSeat.size;
-      const clientCount = this.clients.size;
-      let bufferSizes = 0;
-      for (const buf of this.chatMessageBuffer.values()) {
-        bufferSizes += (Array.isArray(buf) ? buf.length : 0);
-      }
-
-      if (userCount > 1000 || bufferSizes > 1000) {
-        this.emergencyCleanup();
-      }
-    } catch (error) {
-    }
-  }
-
-  emergencyCleanup() {
-    try {
-      for (const room of roomList) {
-        this.chatMessageBuffer.set(room, []);
-        this.updateKursiBuffer.set(room, new Map());
-      }
-
-      this.messageCounts.clear();
-      this.seatLocks.clear();
-      this.userDisconnectTime.clear();
-      this.userJoinLocks.clear();
-      this.userConnectionStatus.clear();
-    } catch (error) {
-    }
-  }
-
-  async resetStaleData() {
-    try {
-      const now = Date.now();
-
-      for (const [room, seatMap] of this.roomSeats) {
-        let hasActiveUsers = false;
-
-        for (const [seat, info] of seatMap) {
-          if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-            hasActiveUsers = true;
-            break;
-          }
-        }
-
-        if (!hasActiveUsers) {
-          for (let i = 1; i <= this.MAX_SEATS; i++) {
-            this.seatLocks.delete(`${room}-${i}`);
-            seatMap.set(i, createEmptySeat());
-          }
-        }
-      }
-
-      for (const [room, buffer] of this.chatMessageBuffer) {
-        if (Array.isArray(buffer) && buffer.length > 100) {
-          this.chatMessageBuffer.set(room, buffer.slice(-50));
-        }
-      }
-
-      for (const [idtarget, lockTime] of this.userJoinLocks) {
-        if (now - lockTime > 30000) {
-          this.userJoinLocks.delete(idtarget);
-        }
-      }
-
-      for (const [id, status] of this.userConnectionStatus) {
-        if (now - status.lastSeen > this.GRACE_PERIOD + 60000) {
-          this.userConnectionStatus.delete(id);
-        }
-      }
-    } catch (error) {
-    }
-  }
-
   clearSeatBuffer(room, seatNumber) {
     try {
       if (!room || typeof seatNumber !== "number") return;
@@ -332,8 +357,7 @@ export class ChatServer {
 
   async destroy() {
     const timers = [
-      this._tickTimer, this._flushTimer, this._autoRemoveTimer,
-      this._resetDataTimer, this._memoryGuard, this._healthTimer
+      this._tickTimer, this._flushTimer, this._memoryCleanupTimer
     ];
     for (const timer of timers) {
       if (timer) clearInterval(timer);
@@ -381,6 +405,7 @@ export class ChatServer {
     }
   }
 
+  // ✅ IMPROVED CLEANUP CLIENT SAFELY
   cleanupClientSafely(ws) {
     const id = ws.idtarget;
     if (!id) {
@@ -393,6 +418,9 @@ export class ChatServer {
     this.cleanupInProgress.add(id);
 
     try {
+      // ✅ RELEASE LOCKS SAAT DISCONNECT
+      this.releaseUserJoinLock(id);
+      
       this.userConnectionStatus.set(id, {
         connected: false,
         lastSeen: Date.now(),
@@ -415,6 +443,7 @@ export class ChatServer {
       }
 
     } catch (error) {
+      // Silent fail
     } finally {
       this.cleanupInProgress.delete(id);
     }
@@ -427,7 +456,6 @@ export class ChatServer {
 
     this.userDisconnectTime.delete(idtarget);
     this.usersToRemove.delete(idtarget);
-    this.messageCounts.delete(idtarget);
     this.cleanupInProgress.delete(idtarget);
     this.userConnectionStatus.delete(idtarget);
 
@@ -492,7 +520,6 @@ export class ChatServer {
     }
 
     this.userToSeat.delete(idtarget);
-    this.messageCounts.delete(idtarget);
     this.cleanupInProgress.delete(idtarget);
 
     for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
@@ -551,37 +578,6 @@ export class ChatServer {
         }
       } catch (e) {}
     }
-  }
-
-  checkRateLimit(ws, messageType) {
-    const now = Date.now();
-    const key = ws.idtarget || ws._connId || ws._id || 'anonymous';
-    const windowStart = Math.floor(now / 1000);
-
-    if (!this.messageCounts.has(key)) {
-      this.messageCounts.set(key, { count: 0, window: windowStart });
-    }
-
-    const stats = this.messageCounts.get(key);
-    if (stats.window !== windowStart) {
-      stats.count = 0;
-      stats.window = windowStart;
-    }
-
-    let limit = this.MAX_MESSAGES_PER_SECOND;
-    if (messageType === "chat") {
-      limit = 50;
-    } else if (messageType === "updatePoint") {
-      limit = 100;
-    }
-
-    stats.count += 1;
-    if (stats.count > limit) {
-      this.safeSend(ws, ['error', 'Rate limit exceeded']);
-      return false;
-    }
-
-    return true;
   }
 
   async batchAutoRemove() {
@@ -655,28 +651,16 @@ export class ChatServer {
     }
   }
 
-  safeSend(ws, arr) {
-    try {
-      if (ws && ws.readyState === 1) {
-        if (typeof ws.bufferedAmount === "number" && ws.bufferedAmount > 1_000_000) {
-          return false;
-        }
-        ws.send(JSON.stringify(arr));
-        return true;
-      }
-    } catch (e) {
-    }
-    return false;
-  }
-
   broadcastToRoom(room, msg) {
     let sentCount = 0;
+    // ✅ OPTIMIZED: SINGLE JSON STRINGIFY
+    const msgStr = JSON.stringify(msg);
+    
     for (const c of this.clients) {
       if (c.roomname === room && c.readyState === 1) {
         try {
-          if (this.safeSend(c, msg)) {
-            sentCount++;
-          }
+          c.send(msgStr);
+          sentCount++;
         } catch (error) {
         }
       }
@@ -715,6 +699,7 @@ export class ChatServer {
             const msg = messages[i];
             this.broadcastToRoom(room, msg);
           }
+          // ✅ PASTIKAN BUFFER DIKOSONGKAN SETELAH FLUSH
           this.chatMessageBuffer.set(room, []);
         } catch (error) {
           this.chatMessageBuffer.set(room, []);
@@ -734,6 +719,7 @@ export class ChatServer {
         if (updates.length > 0) {
           this.broadcastToRoom(room, ["kursiBatchUpdate", room, updates]);
         }
+        // ✅ PASTIKAN BUFFER DIKOSONGKAN SETELAH FLUSH
         this.updateKursiBuffer.set(room, new Map());
       } catch (error) {
         this.updateKursiBuffer.set(room, new Map());
@@ -1048,7 +1034,6 @@ export class ChatServer {
         this.userDisconnectTime.delete(id);
         ws.roomname = undefined;
         ws.numkursi = new Set();
-        this.safeSend(ws, ["needJoinRoom"]);
       }
       else if (baru === false) {
         const seatInfo = this.userToSeat.get(id);
@@ -1178,6 +1163,7 @@ export class ChatServer {
     }
   }
 
+  // ✅ IMPROVED MESSAGE HANDLING DENGAN BETTER ERROR HANDLING
   handleMessage(ws, raw) {
     if (ws.readyState !== 1) return;
 
@@ -1185,14 +1171,21 @@ export class ChatServer {
     try {
       data = JSON.parse(raw);
     } catch (e) {
+      // ✅ KIRIM ERROR MESSAGE KE CLIENT
+      this.safeSend(ws, ['error', 'Invalid message format']);
       return;
     }
 
-    if (!Array.isArray(data) || data.length === 0) return;
+    if (!Array.isArray(data) || data.length === 0) {
+      this.safeSend(ws, ['error', 'Empty or invalid message']);
+      return;
+    }
 
     const evt = data[0];
 
-    if (!this.checkRateLimit(ws, evt)) return;
+    if (!this.checkRateLimit(ws, evt)) {
+      return;
+    }
 
     try {
       switch (evt) {
@@ -1469,6 +1462,9 @@ export class ChatServer {
         }
       }
     } catch (error) {
+      // ✅ CATCH SEMUA ERROR DAN KIRIM FEEDBACK KE CLIENT
+      console.error('Message processing error:', error);
+      this.safeSend(ws, ['error', 'Server error processing message']);
     }
   }
 
