@@ -15,7 +15,8 @@ function createEmptySeat() {
     itematas: 0,
     vip: 0,
     viptanda: 0,
-    lastPoint: null
+    lastPoint: null,
+    lockTime: undefined
   };
 }
 
@@ -40,7 +41,12 @@ export class ChatServer {
     }
 
     this.vipManager = new VipBadgeManager(this);
+
+    // KEEP: Buffer yang diperlukan
+    this.updateKursiBuffer = new Map();
+    this.chatMessageBuffer = new Map();
     this.seatLocks = new Map();
+
     this.roomChatHistory = new Map();
     this.userDisconnectTime = new Map();
 
@@ -48,11 +54,24 @@ export class ChatServer {
     this.maxNumber = 6;
     this.intervalMillis = 15 * 60 * 1000;
 
+    // Initialize buffers untuk setiap room
+    for (const room of roomList) {
+      this.updateKursiBuffer.set(room, new Map());
+      this.chatMessageBuffer.set(room, []);
+    }
+
     this._nextConnId = 1;
 
+    // Timers - KEEP flush timer
     this._tickTimer = setInterval(() => {
       this.tick().catch(() => {});
     }, this.intervalMillis);
+
+    this._flushTimer = setInterval(() => {
+      if (this.clients.size > 0) {
+        this.periodicFlush().catch(() => {});
+      }
+    }, 100); // FLUSH PERLU DIPERTAHANKAN
 
     this._autoRemoveTimer = setInterval(() => {
       this.batchAutoRemove().catch(() => {});
@@ -113,12 +132,33 @@ export class ChatServer {
         }
       }
 
+      // Clean chat buffers yang terlalu besar
+      for (const [room, buffer] of this.chatMessageBuffer) {
+        if (Array.isArray(buffer) && buffer.length > 100) {
+          this.chatMessageBuffer.set(room, buffer.slice(-50));
+        }
+      }
+
+      // Clean expired join locks
       for (const [idtarget, lockTime] of this.userJoinLocks) {
         if (now - lockTime > 30000) {
           this.userJoinLocks.delete(idtarget);
         }
       }
     } catch (error) {
+      // silent
+    }
+  }
+
+  // KEEP: Method untuk clear seat buffer
+  clearSeatBuffer(room, seatNumber) {
+    try {
+      if (!room || typeof seatNumber !== "number") return;
+      const roomMap = this.updateKursiBuffer.get(room);
+      if (roomMap) {
+        roomMap.delete(seatNumber);
+      }
+    } catch (e) {
       // silent
     }
   }
@@ -166,6 +206,7 @@ export class ChatServer {
             this.vipManager.removeVipBadge(room, seatNumber);
           }
           Object.assign(seatInfo, createEmptySeat());
+          this.clearSeatBuffer(room, seatNumber);
           this.seatLocks.delete(`${room}-${seatNumber}`);
           
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
@@ -204,6 +245,7 @@ export class ChatServer {
           Object.assign(info, createEmptySeat());
           this.seatLocks.delete(`${room}-${seatNumber}`);
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
+          this.clearSeatBuffer(room, seatNumber);
         }
       }
       this.broadcastRoomUserCount(room);
@@ -299,33 +341,6 @@ export class ChatServer {
           this.cleanupInProgress.delete(idtarget);
         }
       }
-
-      let consistencyChecks = 0;
-      for (const [idtarget, seatInfo] of this.userToSeat) {
-        if (consistencyChecks >= 100) break;
-
-        if (this.usersToRemove.has(idtarget)) continue;
-
-        const { room, seat } = seatInfo;
-        const seatMap = this.roomSeats.get(room);
-        if (!seatMap) continue;
-
-        const seatData = seatMap.get(seat);
-        if (!seatData || seatData.namauser !== idtarget) {
-          this.userToSeat.delete(idtarget);
-          continue;
-        }
-
-        const hasActiveConnection = Array.from(this.clients).some(
-          c => c.idtarget === idtarget && c.readyState === 1
-        );
-
-        if (!hasActiveConnection) {
-          this.usersToRemove.set(idtarget, now);
-        }
-
-        consistencyChecks++;
-      }
     } catch (error) {
       console.error('[CLEANUP] Error in batchAutoRemove:', error);
     }
@@ -386,6 +401,51 @@ export class ChatServer {
     }
   }
 
+  // KEEP: Flush methods yang penting
+  flushChatBuffer() {
+    for (const [room, messages] of this.chatMessageBuffer) {
+      if (messages.length > 0) {
+        try {
+          for (let i = 0, len = messages.length; i < len; i++) {
+            const msg = messages[i];
+            this.broadcastToRoom(room, msg);
+          }
+          this.chatMessageBuffer.set(room, []);
+        } catch (error) {
+          this.chatMessageBuffer.set(room, []);
+        }
+      }
+    }
+  }
+
+  flushKursiUpdates() {
+    for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
+      try {
+        const updates = [];
+        for (const [seat, info] of seatMapUpdates.entries()) {
+          const { lastPoint, ...rest } = info;
+          updates.push([seat, rest]);
+        }
+        if (updates.length > 0) {
+          this.broadcastToRoom(room, ["kursiBatchUpdate", room, updates]);
+        }
+        this.updateKursiBuffer.set(room, new Map());
+      } catch (error) {
+        this.updateKursiBuffer.set(room, new Map());
+      }
+    }
+  }
+
+  async periodicFlush() {
+    try {
+      this.flushKursiUpdates();
+      this.flushChatBuffer();
+      this.cleanExpiredLocks();
+    } catch (error) {
+      // silent
+    }
+  }
+
   async tick() {
     try {
       this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
@@ -418,6 +478,7 @@ export class ChatServer {
               Object.assign(info, createEmptySeat());
               this.seatLocks.delete(`${room}-${seat}`);
               this.broadcastToRoom(room, ["removeKursi", room, seat]);
+              this.clearSeatBuffer(room, seat);
               this.broadcastRoomUserCount(room);
               cleanedLocks++;
             }
@@ -450,6 +511,7 @@ export class ChatServer {
       const now = Date.now();
       const userId = ws.idtarget;
 
+      // Check if user already has a seat in this room
       for (let i = 1; i <= this.MAX_SEATS; i++) {
         const seatInfo = seatMap.get(i);
         if (seatInfo && seatInfo.namauser === userId) {
@@ -464,6 +526,7 @@ export class ChatServer {
         if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
           Object.assign(info, createEmptySeat());
           this.seatLocks.delete(`${room}-${seat}`);
+          this.clearSeatBuffer(room, seat);
           locksCleaned++;
         }
       }
@@ -575,22 +638,7 @@ export class ChatServer {
       const count = this.getJumlahRoom()[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
 
-      if (this.roomChatHistory.has(room)) {
-        const history = this.roomChatHistory.get(room);
-        const recentChats = history.slice(-10);
-        for (let i = 0; i < recentChats.length; i++) {
-          const chat = recentChats[i];
-          this.safeSend(ws, [
-            "chat",
-            room,
-            chat.noImageURL,
-            chat.username,
-            chat.message,
-            chat.usernameColor,
-            chat.chatTextColor
-          ]);
-        }
-      }
+     
 
     } catch (error) {
       // silent
@@ -656,6 +704,7 @@ export class ChatServer {
         }
 
         Object.assign(currentSeat, createEmptySeat());
+        this.clearSeatBuffer(room, seat);
         this.seatLocks.delete(`${room}-${seat}`);
         this.broadcastToRoom(room, ["removeKursi", room, seat]);
         this.broadcastRoomUserCount(room);
@@ -712,8 +761,7 @@ export class ChatServer {
         this.userDisconnectTime.delete(id);
         ws.roomname = undefined;
         ws.numkursi = new Set();
-        
-        this.safeSend(ws, ["needJoinRoom"]);
+      
       }
       else if (baru === false) {
         const seatInfo = this.userToSeat.get(id);
@@ -1015,7 +1063,11 @@ export class ChatServer {
           const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
           if (!roomList.includes(roomname)) return;
 
-          this.broadcastToRoom(roomname, ["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
+          // KEEP: Gunakan buffer untuk chat
+          if (!this.chatMessageBuffer.has(roomname))
+            this.chatMessageBuffer.set(roomname, []);
+          this.chatMessageBuffer.get(roomname)
+            .push(["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
 
           if (!this.roomChatHistory.has(roomname)) {
             this.roomChatHistory.set(roomname, []);
@@ -1061,6 +1113,7 @@ export class ChatServer {
           Object.assign(seatMap.get(seat), createEmptySeat());
           this.seatLocks.delete(`${room}-${seat}`);
 
+          this.clearSeatBuffer(room, seat);
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.broadcastRoomUserCount(room);
           break;
@@ -1091,7 +1144,10 @@ export class ChatServer {
             });
 
             seatMap.set(seat, currentInfo);
-            this.broadcastToRoom(room, ["kursiUpdated", room, seat, currentInfo]);
+            // KEEP: Gunakan buffer untuk update kursi
+            if (!this.updateKursiBuffer.has(room))
+              this.updateKursiBuffer.set(room, new Map());
+            this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, lastPoint: currentInfo.lastPoint });
             this.broadcastRoomUserCount(room);
           } finally {
             this.seatLocks.delete(lockKey);
@@ -1103,7 +1159,11 @@ export class ChatServer {
         case "gift": {
           const [, roomname, sender, receiver, giftName] = data;
           if (!roomList.includes(roomname)) return;
-          this.broadcastToRoom(roomname, ["gift", roomname, sender, receiver, giftName, Date.now()]);
+          // KEEP: Gunakan buffer untuk gift
+          if (!this.chatMessageBuffer.has(roomname))
+            this.chatMessageBuffer.set(roomname, []);
+          this.chatMessageBuffer.get(roomname)
+            .push(["gift", roomname, sender, receiver, giftName, Date.now()]);
           break;
         }
 
