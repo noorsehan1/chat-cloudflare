@@ -1007,102 +1007,158 @@ export class ChatServer {
     return users;
   }
 
-  async handleSetIdTarget2(ws, id, baru) {
-    if (!id) return;
+async handleSetIdTarget2(ws, id, baru) {
+  // ✅ 1. VALIDASI INPUT LEBIH KETAT
+  if (!id || typeof id !== 'string' || id.trim() === '') {
+    this.safeSend(ws, ["error", "Invalid user ID"]);
+    return;
+  }
 
-    const lockAcquired = await this.acquireUserJoinLock(id);
-    if (!lockAcquired) {
-      this.safeSend(ws, ["error", "Another operation in progress"]);
-      return;
+  // ✅ 2. NORMALIZE USER ID
+  const normalizedId = id.trim();
+  
+  const lockAcquired = await this.acquireUserJoinLock(normalizedId);
+  if (!lockAcquired) {
+    return;
+  }
+
+  try {
+    // ✅ 3. UPDATE CONNECTION STATUS
+    this.userConnectionStatus.set(normalizedId, {
+      connected: true,
+      lastSeen: Date.now(),
+      hasSeat: false // ❗ Set false dulu, nanti diupdate jika ada seat
+    });
+
+    // ✅ 4. CLEANUP TIMEOUTS
+    if (this.pingTimeouts.has(normalizedId)) {
+      clearTimeout(this.pingTimeouts.get(normalizedId));
+      this.pingTimeouts.delete(normalizedId);
     }
 
-    try {
-      this.userConnectionStatus.set(id, {
-        connected: true,
-        lastSeen: Date.now(),
-        hasSeat: true
-      });
+    // ✅ 5. SET WEBSOCKET ID
+    ws.idtarget = normalizedId;
 
-      if (this.pingTimeouts.has(id)) {
-        clearTimeout(this.pingTimeouts.get(id));
-        this.pingTimeouts.delete(id);
-      }
+    if (baru === true) {
+      // ✅ NEW USER - COMPLETE CLEANUP
+      await this.forceExitUser(normalizedId);
+      this.userDisconnectTime.delete(normalizedId);
+      ws.roomname = undefined;
+      ws.numkursi = new Set();
+      
+      // ✅ KIRIM KONFIRMASI KE CLIENT
+      
+    } else if (baru === false) {
+      // ✅ EXISTING USER - RESTORE STATE
+      await this.handleExistingUserRestore(ws, normalizedId);
+    } else {
+    }
 
-      ws.idtarget = id;
+  } catch (error) {
+    console.error(`Error in handleSetIdTarget2 for ${id}:`, error);
+  } finally {
+    this.releaseUserJoinLock(normalizedId);
+  }
+}
 
-      if (baru === true) {
-        this.userDisconnectTime.delete(id);
-        ws.roomname = undefined;
-        ws.numkursi = new Set();
-      }
-      else if (baru === false) {
-        const seatInfo = this.userToSeat.get(id);
+// ✅ 6. EXTRACT METHOD UNTUK RESTORE EXISTING USER
+async handleExistingUserRestore(ws, userId) {
+  const seatInfo = this.userToSeat.get(userId);
 
-        if (seatInfo) {
-          const { room, seat } = seatInfo;
-          const seatMap = this.roomSeats.get(room);
+  if (!seatInfo) {
+    this.safeSend(ws, ["needJoinRoom"]);
+    return;
+  }
 
-          if (seatMap?.has(seat)) {
-            const seatData = seatMap.get(seat);
-            
-            if (seatData.namauser === id || 
-                seatData.namauser === `__LOCK__${id}` ||
-                !seatData.namauser) {
-              
-              seatData.namauser = id;
-              seatData.lockTime = undefined;
-              this.seatLocks.delete(`${room}-${seat}`);
-              
-              ws.roomname = room;
-              ws.numkursi = new Set([seat]);
+  const { room, seat } = seatInfo;
+  const seatMap = this.roomSeats.get(room);
 
-              if (this.roomChatHistory.has(room)) {
-                const history = this.roomChatHistory.get(room);
-                const disconnectTime = this.userDisconnectTime.get(id) || 0;
+  // ✅ VALIDASI SEAT MASIH ADA
+  if (!seatMap?.has(seat)) {
+    this.userToSeat.delete(userId);
+    this.safeSend(ws, ["needJoinRoom"]);
+    return;
+  }
 
-                if (disconnectTime > 0) {
-                  const newChatsAfterDisconnect = history.filter(chat =>
-                    chat.timestamp > disconnectTime
-                  );
+  const seatData = seatMap.get(seat);
+  
+  // ✅ VALIDASI SEAT OWNERSHIP
+  const isValidSeat = seatData.namauser === userId || 
+                     seatData.namauser === `__LOCK__${userId}` ||
+                     !seatData.namauser;
 
-                  if (newChatsAfterDisconnect.length > 0) {
-                    for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
-                      const chat = newChatsAfterDisconnect[i];
-                      this.safeSend(ws, [
-                        "restoreChatHistory",
-                        room,
-                        chat.noImageURL,
-                        chat.username,
-                        chat.message,
-                        chat.usernameColor,
-                        chat.chatTextColor
-                      ]);
-                    }
-                  }
-                }
-                this.userDisconnectTime.delete(id);
-              }
+  if (!isValidSeat) {
+    // ❗ SEAT DIAMBIL USER LAIN - CLEANUP & MINTA JOIN ROOM BARU
+    this.userToSeat.delete(userId);
+    this.safeSend(ws, ["needJoinRoom"]);
+    return;
+  }
 
-              this.sendAllStateTo(ws, room);
-              this.broadcastRoomUserCount(room);
-              
-            } else {
-              this.userToSeat.delete(id);
-              this.safeSend(ws, ["seatTaken", room, seat]);
-              this.safeSend(ws, ["needJoinRoom"]);
-            }
-          } else {
-            this.userToSeat.delete(id);
-            this.safeSend(ws, ["needJoinRoom"]);
+  // ✅ CLAIM SEAT KEMBALI
+  seatData.namauser = userId;
+  seatData.lockTime = undefined;
+  this.seatLocks.delete(`${room}-${seat}`);
+  
+  // ✅ UPDATE WEBSOCKET STATE
+  ws.roomname = room;
+  ws.numkursi = new Set([seat]);
+
+  // ✅ UPDATE CONNECTION STATUS
+  this.userConnectionStatus.set(userId, {
+    connected: true,
+    lastSeen: Date.now(),
+    hasSeat: true
+  });
+
+  // ✅ RESTORE CHAT HISTORY & ROOM STATE
+  await this.restoreUserState(ws, room, userId);
+  
+  this.safeSend(ws, ["idSet", userId, "restored", room, seat]);
+}
+
+// ✅ 7. METHOD TERPISAH UNTUK RESTORE STATE
+async restoreUserState(ws, room, userId) {
+  try {
+    // RESTORE CHAT HISTORY
+    if (this.roomChatHistory.has(room)) {
+      const history = this.roomChatHistory.get(room);
+      const disconnectTime = this.userDisconnectTime.get(userId) || 0;
+
+      if (disconnectTime > 0) {
+        const newChatsAfterDisconnect = history.filter(chat =>
+          chat.timestamp > disconnectTime
+        );
+
+        // ✅ BATCH SEND UNTUK EFISIENSI
+        for (let i = 0; i < newChatsAfterDisconnect.length; i++) {
+          const chat = newChatsAfterDisconnect[i];
+          this.safeSend(ws, [
+            "restoreChatHistory",
+            room,
+            chat.noImageURL,
+            chat.username,
+            chat.message,
+            chat.usernameColor,
+            chat.chatTextColor
+          ]);
+          
+          // ✅ JEDA UNTUK MENGHINDARI OVERLOAD
+          if (i % 5 === 0) {
+            await new Promise(resolve => setTimeout(resolve, 1));
           }
-        } else {
-          this.safeSend(ws, ["needJoinRoom"]);
         }
       }
-    } finally {
-      this.releaseUserJoinLock(id);
+      this.userDisconnectTime.delete(userId);
     }
+
+    // ✅ SEND ROOM STATE
+    this.sendAllStateTo(ws, room);
+    this.broadcastRoomUserCount(room);
+    
+  } catch (error) {
+    console.error(`Error restoring state for ${userId} in ${room}:`, error);
   }
+}
 
   async handleJoinRoom(ws, newRoom) {
     if (!roomList.includes(newRoom)) {
@@ -1214,7 +1270,7 @@ export class ChatServer {
           break;
         }
 
-        case "forceExit": {
+        case "onDestroy": {
           const idtarget = ws.idtarget;
           this.forceExitUser(idtarget);
           break;
@@ -1543,3 +1599,4 @@ export default {
     }
   }
 };
+
