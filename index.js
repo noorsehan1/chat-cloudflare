@@ -375,7 +375,6 @@ export class ChatServer {
         this.sendAllStateTo(ws, prevSeat.room);
       } else {
         if (this.hasEverSetId) {
-          this.safeSend(ws, ["needJoinRoom"]);
         }
       }
 
@@ -926,3 +925,4 @@ export default {
     }
   }
 };
+
