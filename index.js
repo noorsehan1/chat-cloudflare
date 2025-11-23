@@ -64,20 +64,6 @@ export class ChatServer {
       if (this.clients.size > 0) this.periodicFlush().catch(() => {});
     }, 100);
 
-    this._lockCleanupTimer = setInterval(() => {
-      const now = Date.now();
-      for (const [id, lockTime] of this.userJoinLocks.entries()) {
-        if (now - lockTime > 2000) {
-          this.userJoinLocks.delete(id);
-        }
-      }
-      for (const [seatKey, lockTime] of this.seatLocks.entries()) {
-        if (now - lockTime > 3000) {
-          this.seatLocks.delete(seatKey);
-        }
-      }
-    }, 1000);
-
     this.lowcard = new LowCardGameManager(this);
 
     this.messageCounts = new Map();
@@ -88,20 +74,8 @@ export class ChatServer {
 
   async acquireUserJoinLock(idtarget) {
     if (!idtarget) return true;
-    
-    const now = Date.now();
-    
-    for (const [id, lockTime] of this.userJoinLocks.entries()) {
-      if (now - lockTime > 2000) {
-        this.userJoinLocks.delete(id);
-      }
-    }
-    
-    if (this.userJoinLocks.has(idtarget)) {
-      return false;
-    }
-    
-    this.userJoinLocks.set(idtarget, now);
+    if (this.userJoinLocks.has(idtarget)) return false;
+    this.userJoinLocks.set(idtarget, true);
     return true;
   }
 
@@ -112,19 +86,8 @@ export class ChatServer {
 
   async acquireSeatLock(room, seatNumber) {
     const seatKey = `${room}-${seatNumber}`;
-    const now = Date.now();
-    
-    for (const [key, lockTime] of this.seatLocks.entries()) {
-      if (now - lockTime > 3000) {
-        this.seatLocks.delete(key);
-      }
-    }
-    
-    if (this.seatLocks.has(seatKey)) {
-      return false;
-    }
-    
-    this.seatLocks.set(seatKey, now);
+    if (this.seatLocks.has(seatKey)) return false;
+    this.seatLocks.set(seatKey, true);
     return true;
   }
 
@@ -375,6 +338,7 @@ export class ChatServer {
         this.sendAllStateTo(ws, prevSeat.room);
       } else {
         if (this.hasEverSetId) {
+          this.safeSend(ws, ["needJoinRoom"]);
         }
       }
 
@@ -423,7 +387,6 @@ export class ChatServer {
         return false;
       }
 
-      // LOCK KURSI sebelum assign
       const seatLockAcquired = await this.acquireSeatLock(newRoom, foundSeat);
       if (!seatLockAcquired) {
         this.safeSend(ws, ["error", "Seat unavailable, please try again"]);
@@ -431,7 +394,6 @@ export class ChatServer {
       }
 
       try {
-        // DOUBLE CHECK: Pastikan kursi masih kosong setelah dapat lock
         const seatMap = this.roomSeats.get(newRoom);
         const currentSeat = seatMap.get(foundSeat);
         if (currentSeat.namauser) {
@@ -439,8 +401,16 @@ export class ChatServer {
           return false;
         }
 
-        // Assign user ke kursi
-        currentSeat.namauser = ws.idtarget;
+        Object.assign(currentSeat, {
+          noimageUrl: "",
+          namauser: ws.idtarget,
+          color: "",
+          itembawah: 0,
+          itematas: 0,
+          vip: 0,
+          viptanda: 0,
+          lastPoint: null
+        });
         
         ws.numkursi = new Set([foundSeat]);
         this.safeSend(ws, ["numberKursiSaya", foundSeat]);
@@ -450,6 +420,8 @@ export class ChatServer {
           this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
         }
 
+        this.clearSeatBuffer(newRoom, foundSeat);
+        
         this.sendAllStateTo(ws, newRoom);
         this.vipManager.getAllVipBadges(ws, newRoom);
         this.broadcastRoomUserCount(newRoom);
@@ -477,11 +449,9 @@ export class ChatServer {
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const k = seatMap.get(i);
       if (k && !k.namauser) {
-        // Coba lock kursi ini untuk mencegah race condition
         const seatLockAcquired = await this.acquireSeatLock(room, i);
         if (seatLockAcquired) {
           try {
-            // Double check setelah dapat lock
             const currentSeat = seatMap.get(i);
             if (currentSeat && !currentSeat.namauser) {
               return i;
@@ -508,13 +478,13 @@ export class ChatServer {
       if (!info) continue;
       if (info.namauser) {
         allKursiMeta[seat] = {
-          noimageUrl: info.noimageUrl,
-          namauser: info.namauser,
-          color: info.color,
-          itembawah: info.itembawah,
-          itematas: info.itematas,
-          vip: info.vip,
-          viptanda: info.viptanda
+          noimageUrl: info.noimageUrl || "",
+          namauser: info.namauser || "",
+          color: info.color || "",
+          itembawah: info.itembawah || 0,
+          itematas: info.itematas || 0,
+          vip: info.vip || 0,
+          viptanda: info.viptanda || 0
         };
 
         if (info.lastPoint) {
@@ -826,10 +796,22 @@ export class ChatServer {
           const seatMap = this.roomSeats.get(room);
           const currentInfo = seatMap.get(seat) || createEmptySeat();
           
+          if (currentInfo.namauser && currentInfo.namauser !== namauser) {
+            return;
+          }
+          
+          if (!currentInfo.namauser && namauser) {
+            return;
+          }
+
           Object.assign(currentInfo, {
-            noimageUrl, namauser, color, itembawah, itematas,
-            vip: vip || 0,
-            viptanda: viptanda || 0
+            noimageUrl: noimageUrl || currentInfo.noimageUrl,
+            namauser: namauser || currentInfo.namauser,
+            color: color || currentInfo.color,
+            itembawah: itembawah || currentInfo.itembawah,
+            itematas: itematas || currentInfo.itematas,
+            vip: vip || currentInfo.vip,
+            viptanda: viptanda || currentInfo.viptanda
           });
 
           seatMap.set(seat, currentInfo);
@@ -925,4 +907,3 @@ export default {
     }
   }
 };
-
