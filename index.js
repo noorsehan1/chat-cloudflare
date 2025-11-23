@@ -8,7 +8,7 @@ const roomList = [
 
 const CONSTANTS = {
   MAX_SEATS: 35,
-  RECONNECT_TIMEOUT: 20000,
+  RECONNECT_TIMEOUT: 3000,
   FLUSH_INTERVAL: 50,
   AUTO_REMOVE_INTERVAL: 2000,
   MESSAGE_RATE_LIMIT: 20,
@@ -163,6 +163,28 @@ export class ChatServer {
       }
       this.safeSend(ws, ["chatHistoryComplete", room, recentChats.length]);
     }
+  }
+
+  async removeUserFromPreviousRoom(idtarget, previousRoom) {
+    if (!idtarget || !previousRoom) return;
+
+    try {
+      const seatMap = this.roomSeats.get(previousRoom);
+      if (!seatMap) return;
+
+      for (const [seatNumber, seatInfo] of seatMap) {
+        if (seatInfo.namauser === idtarget || seatInfo.namauser === `__LOCK__${idtarget}`) {
+          if (seatInfo.viptanda > 0) {
+            this.vipManager.removeVipBadge(previousRoom, seatNumber);
+          }
+          Object.assign(seatInfo, createEmptySeat());
+          this.clearSeatBuffer(previousRoom, seatNumber);
+          this.seatLocks.delete(`${previousRoom}-${seatNumber}`);
+          this.broadcastToRoom(previousRoom, ["removeKursi", previousRoom, seatNumber]);
+        }
+      }
+      this.broadcastRoomUserCount(previousRoom);
+    } catch (error) {}
   }
 
   async acquireUserLock(idtarget, operation = 'general') {
@@ -399,10 +421,12 @@ export class ChatServer {
 
   async handleSetIdTarget2(ws, id, baru, sessionId = null) {
     if (!id) {
+      this.safeSend(ws, ["error", "Invalid user ID"]);
       return;
     }
     const lockAcquired = await this.acquireUserLock(id, 'setId');
     if (!lockAcquired) {
+      this.safeSend(ws, ["error", "Another operation in progress"]);
       return;
     }
     try {
@@ -423,6 +447,7 @@ export class ChatServer {
         ws.roomname = undefined;
         ws.numkursi = new Set();
         this.forceUserCleanup(id);
+        this.safeSend(ws, ["sessionCreated", newSessionId]);
       } else if (baru === false) {
         const seatInfo = this.userToSeat.get(id);
         if (seatInfo && this._validateUserSession(id, sessionId)) {
@@ -436,6 +461,7 @@ export class ChatServer {
               this.sendAllStateTo(ws, room);
               this._sendRecentChatHistory(ws, room);
               this.broadcastRoomUserCount(room);
+              this.safeSend(ws, ["sessionRestored", newSessionId]);
             } else {
               this.userToSeat.delete(id);
               this.forceUserCleanup(id);
@@ -463,20 +489,23 @@ export class ChatServer {
       return false;
     }
     if (!ws.idtarget) {
+      this.safeSend(ws, ["error", "No user ID set"]);
       return false;
     }
     const idtarget = ws.idtarget;
     const lockAcquired = await this.acquireUserLock(idtarget, 'join');
     if (!lockAcquired) {
+      this.safeSend(ws, ["error", "Another join operation in progress"]);
       return false;
     }
     try {
       const existingSeatInfo = this.userToSeat.get(idtarget);
       if (existingSeatInfo && existingSeatInfo.room === newRoom) {
+        this.safeSend(ws, ["error", "Already in this room"]);
         return false;
       }
       if (ws.roomname && ws.roomname !== newRoom) {
-        await this.removeAllSeatsById(idtarget);
+        await this.removeUserFromPreviousRoom(idtarget, ws.roomname);
       }
       ws.roomname = newRoom;
       const foundSeat = this.lockSeat(newRoom, ws);
@@ -494,6 +523,7 @@ export class ChatServer {
       this.broadcastRoomUserCount(newRoom);
       return true;
     } catch (error) {
+      this.safeSend(ws, ["error", "Join room failed"]);
       return false;
     } finally {
       this.releaseUserLock(idtarget, 'join');
