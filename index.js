@@ -1,25 +1,35 @@
+// ChatServer Durable Object - OPTIMIZED VERSION
 import { LowCardGameManager } from "./lowcard.js";
-import { VipBadgeManager } from "./vipbadge.js";
 
 const roomList = [
   "LowCard", "General", "Indonesia", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
   "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
 ];
 
+// Constants untuk konsistensi
 const CONSTANTS = {
   MAX_SEATS: 35,
-  RECONNECT_TIMEOUT: 30000, // Diperpanjang jadi 30 detik
-  FLUSH_INTERVAL: 50,
-  MESSAGE_RATE_LIMIT: 20,
-  CHAT_RATE_LIMIT: 30,
-  POINT_RATE_LIMIT: 50,
-  SESSION_TIMEOUT: 60000 // Diperpanjang jadi 60 detik
+  RECONNECT_TIMEOUT: 20000,
+  MAX_MESSAGES_PER_SECOND: 20,
+  LOCK_TIMEOUT: 10000,
+  CLEANUP_BATCH_SIZE: 30,
+  FLUSH_INTERVAL: 500,
+  AUTO_REMOVE_INTERVAL: 30000,
+  TICK_INTERVAL: 15 * 60 * 1000
 };
 
 function createEmptySeat() {
   return {
-    noimageUrl: "", namauser: "", color: "", itembawah: 0, itematas: 0, 
-    vip: 0, viptanda: 0, lastPoint: null, lockTime: undefined
+    noimageUrl: "",
+    namauser: "",
+    color: "",
+    itembawah: 0,
+    itematas: 0,
+    vip: 0,
+    viptanda: 0,
+    points: [],
+    lockTime: undefined,
+    lastActivity: Date.now()
   };
 }
 
@@ -28,344 +38,395 @@ export class ChatServer {
     this.state = state;
     this.env = env;
 
+    // Core collections
     this.clients = new Set();
     this.userToSeat = new Map();
-    this.userToConnection = new Map();
-    this.userSessions = new Map();
-    
-    this.roomSeats = new Map(roomList.map(room => [
-      room, new Map(Array.from({length: CONSTANTS.MAX_SEATS}, (_, i) => 
-        [i + 1, createEmptySeat()]
-      ))
-    ]));
+    this.hasEverSetId = false;
 
-    this.vipManager = new VipBadgeManager(this);
-    this.lowcard = new LowCardGameManager(this);
+    // Room management
+    this.roomSeats = new Map();
+    this.initializeRooms();
 
-    this.updateKursiBuffer = new Map(roomList.map(room => [room, new Map()]));
-    this.chatMessageBuffer = new Map(roomList.map(room => [room, []]));
+    // Buffers dengan size limits
+    this.updateKursiBuffer = new Map();
+    this.chatMessageBuffer = new Map();
+    this.privateMessageBuffer = new Map();
+
+    // Concurrency control
     this.seatLocks = new Map();
-    this.roomChatHistory = new Map(roomList.map(room => [room, []]));
-    this.userDisconnectTime = new Map();
 
-    this._nextConnId = 1;
+    // Game state
     this.currentNumber = 1;
     this.maxNumber = 6;
 
+    // Initialize buffers
+    this.initializeBuffers();
+
+    // Session management
     this.pingTimeouts = new Map();
     this.cleanupInProgress = new Set();
+    this.usersToRemove = new Map();
     this.messageCounts = new Map();
-    this.userOperations = new Map();
 
-    // HANYA timer yang diperlukan saja
-    this._tickTimer = setInterval(() => this._safeTick(), 15 * 60 * 1000);
-    this._flushTimer = setInterval(() => this._safeFlush(), CONSTANTS.FLUSH_INTERVAL);
+    // Game manager
+    this.lowcard = new LowCardGameManager(this);
+
+    // Start timers
+    this.initializeTimers();
   }
 
-  _safeTick() {
-    try {
-      this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
-      for (const c of this.clients) {
-        if (c.readyState === 1 && c.roomname) {
-          this.safeSend(c, ["currentNumber", this.currentNumber]);
-        }
+  initializeRooms() {
+    for (const room of roomList) {
+      const seatMap = new Map();
+      for (let i = 1; i <= CONSTANTS.MAX_SEATS; i++) {
+        seatMap.set(i, createEmptySeat());
       }
-    } catch (error) {}
-  }
-
-  _safeFlush() {
-    try {
-      if (this.clients.size > 0) this.periodicFlush();
-    } catch (error) {
-      this._resetBuffers();
+      this.roomSeats.set(room, seatMap);
     }
   }
 
-  _resetBuffers() {
+  initializeBuffers() {
     for (const room of roomList) {
       this.updateKursiBuffer.set(room, new Map());
       this.chatMessageBuffer.set(room, []);
     }
   }
 
-  _createUserSession(idtarget) {
-    if (!idtarget) return;
-    const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    this.userSessions.set(idtarget, {
-      id: sessionId,
-      createdAt: Date.now(),
-      lastActivity: Date.now()
-    });
-    return sessionId;
-  }
+  initializeTimers() {
+    // Optimized timers dengan error handling
+    this._tickTimer = setInterval(() => {
+      this.tick().catch(() => {});
+    }, CONSTANTS.TICK_INTERVAL);
 
-  _validateUserSession(idtarget, currentSessionId = null) {
-    if (!idtarget) return false;
-    const session = this.userSessions.get(idtarget);
-    if (!session) return false;
-    session.lastActivity = Date.now();
-    if (currentSessionId && session.id !== currentSessionId) return false;
-    return true;
-  }
-
-  _closeExistingConnection(idtarget, newSessionId = null) {
-    if (!idtarget) return;
-    const existingConnection = this.userToConnection.get(idtarget);
-    if (existingConnection && existingConnection.readyState === 1) {
-      this.safeSend(existingConnection, ["sessionExpired", newSessionId]);
-      existingConnection.close(1008, "New session started");
-      this.clients.delete(existingConnection);
-    }
-    this.userToConnection.set(idtarget, null);
-  }
-
-  _sendRecentChatHistory(ws, room) {
-    if (ws.readyState !== 1) return;
-    if (this.roomChatHistory.has(room)) {
-      const history = this.roomChatHistory.get(room);
-      const recentChats = history.slice(-10);
-      for (let i = 0; i < recentChats.length; i++) {
-        const chat = recentChats[i];
-        this.safeSend(ws, [
-          "chat",
-          room,
-          chat.noImageURL,
-          chat.username,
-          chat.message,
-          chat.usernameColor,
-          chat.chatTextColor
-        ]);
+    this._flushTimer = setInterval(() => {
+      if (this.clients.size > 0) {
+        this.periodicFlush().catch(() => {});
       }
-      this.safeSend(ws, ["chatHistoryComplete", room, recentChats.length]);
-    }
+    }, CONSTANTS.FLUSH_INTERVAL);
+
+    this._autoRemoveTimer = setInterval(() => {
+      if (this.usersToRemove.size > 0 || this.userToSeat.size > 0) {
+        this.batchAutoRemove().catch(() => {});
+      }
+    }, CONSTANTS.AUTO_REMOVE_INTERVAL);
   }
 
-  async removeUserFromPreviousRoom(idtarget, previousRoom) {
-    if (!idtarget || !previousRoom) return;
+  async destroy() {
+    console.log('ChatServer Durable Object destroying...');
+    
+    // Clear semua timers
+    const timers = [this._tickTimer, this._flushTimer, this._autoRemoveTimer];
+    for (const timer of timers) {
+      if (timer) clearInterval(timer);
+    }
 
+    // Clear semua timeouts
+    for (const timeout of this.pingTimeouts.values()) {
+      clearTimeout(timeout);
+    }
+    this.pingTimeouts.clear();
+
+    // Clear semua collections
+    const collections = [
+      this.clients,
+      this.userToSeat,
+      this.roomSeats,
+      this.updateKursiBuffer,
+      this.chatMessageBuffer,
+      this.privateMessageBuffer,
+      this.seatLocks,
+      this.messageCounts,
+      this.usersToRemove,
+      this.cleanupInProgress
+    ];
+    
+    for (const collection of collections) {
+      if (collection && typeof collection.clear === 'function') {
+        collection.clear();
+      }
+    }
+
+    // Close semua websocket connections
+    for (const client of this.clients) {
+      this.safeClose(client, "Server shutdown");
+    }
+    this.clients.clear();
+
+    // Cleanup game manager
+    if (this.lowcard && typeof this.lowcard.destroy === 'function') {
+      this.lowcard.destroy();
+    }
+    
+    console.log('ChatServer Durable Object destroyed successfully');
+  }
+
+  safeClose(ws, reason = "Connection closed") {
     try {
-      const seatMap = this.roomSeats.get(previousRoom);
-      if (!seatMap) return;
-
-      for (const [seatNumber, seatInfo] of seatMap) {
-        if (seatInfo.namauser === idtarget) {
-          if (seatInfo.viptanda > 0) {
-            this.vipManager.removeVipBadge(previousRoom, seatNumber);
-          }
-          Object.assign(seatInfo, createEmptySeat());
-          this.clearSeatBuffer(previousRoom, seatNumber);
-          this.seatLocks.delete(`${previousRoom}-${seatNumber}`);
-          this.broadcastToRoom(previousRoom, ["removeKursi", previousRoom, seatNumber]);
-        }
+      if (ws && ws.readyState === 1) {
+        ws.close(1000, reason);
       }
-      this.broadcastRoomUserCount(previousRoom);
-    } catch (error) {}
-  }
-
-  _confirmSeatOwnership(room, seatNumber, idtarget, ws) {
-    const seatMap = this.roomSeats.get(room);
-    if (!seatMap || !seatMap.has(seatNumber)) return;
-
-    const seatInfo = seatMap.get(seatNumber);
-    
-    Object.assign(seatInfo, {
-      noimageUrl: ws.noimageUrl || "",
-      namauser: idtarget,
-      color: ws.color || "",
-      itembawah: ws.itembawah || 0,
-      itematas: ws.itematas || 0,
-      vip: ws.vip || 0,
-      viptanda: ws.viptanda || 0,
-      lockTime: undefined
-    });
-    
-    this.addToKursiBuffer(room, seatNumber, { ...seatInfo });
-    this.seatLocks.delete(`${room}-${seatNumber}`);
-  }
-
-  async acquireUserLock(idtarget, operation = 'general') {
-    if (!idtarget) return true;
-    const lockKey = `${idtarget}-${operation}`;
-    const now = Date.now();
-    if (this.userOperations.has(lockKey)) {
-      const lockTime = this.userOperations.get(lockKey);
-      if (now - lockTime < 3000) return false;
-      this.userOperations.delete(lockKey);
+    } catch (e) {
+      // suppress errors
     }
-    this.userOperations.set(lockKey, now);
-    return true;
-  }
-
-  releaseUserLock(idtarget, operation = 'general') {
-    if (!idtarget) return;
-    const lockKey = `${idtarget}-${operation}`;
-    this.userOperations.delete(lockKey);
-  }
-
-  clearSeatBuffer(room, seatNumber) {
-    if (!room || typeof seatNumber !== "number") return;
-    const roomMap = this.updateKursiBuffer.get(room);
-    if (roomMap) roomMap.delete(seatNumber);
-  }
-
-  addToKursiBuffer(room, seat, info) {
-    const buffer = this.updateKursiBuffer.get(room);
-    if (buffer) {
-      buffer.set(seat, info);
-    }
-  }
-
-  scheduleCleanupTimeout(idtarget) {
-    if (!idtarget) return;
-    if (this.pingTimeouts.has(idtarget)) {
-      clearTimeout(this.pingTimeouts.get(idtarget));
-    }
-    // HANYA schedule timeout, TIDAK ada auto remove
-    const timeout = setTimeout(() => {
-      this.pingTimeouts.delete(idtarget);
-      // TIDAK ada usersToRemove.set() di sini
-    }, CONSTANTS.RECONNECT_TIMEOUT);
-    this.pingTimeouts.set(idtarget, timeout);
-  }
-
-  forceUserCleanup(idtarget) {
-    if (!idtarget) return;
-    this.releaseUserLock(idtarget, 'join');
-    this.releaseUserLock(idtarget, 'setId');
-    this.messageCounts.delete(idtarget);
-    this.cleanupInProgress.delete(idtarget);
-    this.userDisconnectTime.delete(idtarget);
-    this.userToConnection.delete(idtarget);
-    if (this.pingTimeouts.has(idtarget)) {
-      clearTimeout(this.pingTimeouts.get(idtarget));
-      this.pingTimeouts.delete(idtarget);
-    }
-    for (const room of roomList) {
-      const seatMap = this.roomSeats.get(room);
-      if (!seatMap) continue;
-      for (const [seatNumber, seatInfo] of seatMap) {
-        if (seatInfo.namauser === idtarget) {
-          if (seatInfo.viptanda > 0) this.vipManager.removeVipBadge(room, seatNumber);
-          Object.assign(seatInfo, createEmptySeat());
-          this.clearSeatBuffer(room, seatNumber);
-          this.seatLocks.delete(`${room}-${seatNumber}`);
-          this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
-        }
-      }
-      this.broadcastRoomUserCount(room);
-    }
-    this.userToSeat.delete(idtarget);
-  }
-
-  fullRemoveById(idtarget) {
-    if (!idtarget) return;
-    this.releaseUserLock(idtarget, 'join');
-    this.releaseUserLock(idtarget, 'setId');
-    this.vipManager.cleanupUserVipBadges(idtarget);
-    this.userDisconnectTime.delete(idtarget);
-    this.userToConnection.delete(idtarget);
-    if (this.pingTimeouts.has(idtarget)) {
-      clearTimeout(this.pingTimeouts.get(idtarget));
-      this.pingTimeouts.delete(idtarget);
-    }
-    for (const room of roomList) {
-      const seatMap = this.roomSeats.get(room);
-      if (!seatMap) continue;
-      for (const [seatNumber, info] of seatMap) {
-        if (info.namauser === idtarget) {
-          Object.assign(info, createEmptySeat());
-          this.seatLocks.delete(`${room}-${seatNumber}`);
-          this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
-          this.clearSeatBuffer(room, seatNumber);
-        }
-      }
-      this.broadcastRoomUserCount(room);
-    }
-    this.userToSeat.delete(idtarget);
-    this.messageCounts.delete(idtarget);
-    this.cleanupInProgress.delete(idtarget);
-    const clientsToRemove = [];
-    for (const c of this.clients) {
-      if (c && c.idtarget === idtarget) {
-        clientsToRemove.push(c);
-        if (c.readyState === 1) c.close(1000, "Session removed");
-      }
-    }
-    for (const c of clientsToRemove) {
-      this.clients.delete(c);
-    }
-  }
-
-  checkRateLimit(ws, messageType) {
-    const now = Date.now();
-    const key = ws.idtarget || ws._connId || 'anonymous';
-    const windowStart = Math.floor(now / 1000);
-    if (!this.messageCounts.has(key)) {
-      this.messageCounts.set(key, { count: 1, window: windowStart });
-      return true;
-    }
-    const stats = this.messageCounts.get(key);
-    if (stats.window !== windowStart) {
-      stats.count = 1;
-      stats.window = windowStart;
-      return true;
-    }
-    let limit = CONSTANTS.MESSAGE_RATE_LIMIT;
-    if (messageType === "chat") limit = CONSTANTS.CHAT_RATE_LIMIT;
-    if (messageType === "updatePoint") limit = CONSTANTS.POINT_RATE_LIMIT;
-    stats.count++;
-    if (stats.count > limit) {
-      this.safeSend(ws, ['error', 'Rate limit exceeded']);
-      return false;
-    }
-    return true;
   }
 
   safeSend(ws, arr) {
     try {
       if (ws && ws.readyState === 1) {
-        if (typeof ws.bufferedAmount === "number" && ws.bufferedAmount > 1_000_000) return false;
         ws.send(JSON.stringify(arr));
         return true;
       }
-    } catch (e) {}
+    } catch (e) {
+      // suppress errors
+    }
     return false;
+  }
+
+  // Optimized full removal
+  fullRemoveById(idtarget) {
+    if (!idtarget) return;
+
+    // Remove scheduled operations
+    this.usersToRemove.delete(idtarget);
+    this.clearPingTimeout(idtarget);
+
+    // Remove from all rooms
+    this.removeUserFromAllRooms(idtarget);
+
+    // Cleanup mappings and buffers
+    this.userToSeat.delete(idtarget);
+    this.privateMessageBuffer.delete(idtarget);
+    this.messageCounts.delete(idtarget);
+    this.cleanupInProgress.delete(idtarget);
+
+    // Cleanup buffers
+    this.cleanupUserFromBuffers(idtarget);
+
+    // Remove client connections
+    this.removeUserConnections(idtarget);
+  }
+
+  removeUserFromAllRooms(idtarget) {
+    for (const room of roomList) {
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) continue;
+
+      for (const [seatNumber, info] of seatMap) {
+        const userName = info.namauser;
+        if (!userName) continue;
+
+        if (userName === idtarget || userName === `__LOCK__${idtarget}`) {
+          Object.assign(info, createEmptySeat());
+          this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
+          this.broadcastRoomUserCount(room);
+        }
+      }
+    }
+  }
+
+  cleanupUserFromBuffers(idtarget) {
+    // Clean updateKursiBuffer
+    for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
+      for (const [seat, info] of seatMapUpdates) {
+        if (info && (info.namauser === idtarget || info.namauser === `__LOCK__${idtarget}`)) {
+          seatMapUpdates.delete(seat);
+        }
+      }
+    }
+
+    // Clean chatMessageBuffer
+    for (const [room, chatList] of this.chatMessageBuffer) {
+      if (Array.isArray(chatList) && chatList.length > 0) {
+        const filtered = chatList.filter(msg => msg && msg[3] !== idtarget);
+        if (filtered.length !== chatList.length) {
+          this.chatMessageBuffer.set(room, filtered);
+        }
+      }
+    }
+
+    // Clean seatLocks
+    for (const [lockKey] of this.seatLocks) {
+      const [room, seatStr] = lockKey.split("-");
+      const seatNum = parseInt(seatStr, 10);
+      const seatMap = this.roomSeats.get(room);
+      
+      if (!seatMap) {
+        this.seatLocks.delete(lockKey);
+        continue;
+      }
+
+      const seatInfo = seatMap.get(seatNum);
+      if (!seatInfo || !seatInfo.namauser || 
+          seatInfo.namauser === idtarget || 
+          seatInfo.namauser === `__LOCK__${idtarget}`) {
+        this.seatLocks.delete(lockKey);
+      }
+    }
+  }
+
+  removeUserConnections(idtarget) {
+    for (const client of this.clients) {
+      try {
+        if (client && client.idtarget === idtarget) {
+          this.safeClose(client, "Session removed");
+          this.clients.delete(client);
+        }
+      } catch (e) {
+        // suppress errors
+      }
+    }
+  }
+
+  clearPingTimeout(idtarget) {
+    if (this.pingTimeouts.has(idtarget)) {
+      clearTimeout(this.pingTimeouts.get(idtarget));
+      this.pingTimeouts.delete(idtarget);
+    }
+  }
+
+  // Enhanced rate limiting
+  checkRateLimit(ws, messageType) {
+    const now = Date.now();
+    const key = ws.idtarget || ws._id;
+    const windowStart = Math.floor(now / 1000);
+
+    if (!this.messageCounts.has(key)) {
+      this.messageCounts.set(key, { count: 0, window: windowStart });
+    }
+
+    const stats = this.messageCounts.get(key);
+    if (stats.window !== windowStart) {
+      stats.count = 0;
+      stats.window = windowStart;
+    }
+
+    // Adjust limits based on message type
+    let limit = CONSTANTS.MAX_MESSAGES_PER_SECOND;
+    if (messageType === "chat") limit = 50;
+    else if (messageType === "updatePoint") limit = 100;
+
+    if (stats.count++ > limit) {
+      this.safeSend(ws, ['error', 'Rate limit exceeded']);
+      return false;
+    }
+
+    return true;
+  }
+
+  async batchAutoRemove() {
+    try {
+      const now = Date.now();
+      const removalThreshold = 25000;
+
+      this.cleanExpiredLocks();
+
+      // Process removal queue
+      const usersToRemoveNow = [];
+      for (const [idtarget, removalTime] of this.usersToRemove) {
+        if (usersToRemoveNow.length >= CONSTANTS.CLEANUP_BATCH_SIZE) break;
+
+        if (now - removalTime >= removalThreshold) {
+          usersToRemoveNow.push(idtarget);
+        }
+      }
+
+      for (const idtarget of usersToRemoveNow) {
+        if (this.cleanupInProgress.has(idtarget)) continue;
+
+        this.cleanupInProgress.add(idtarget);
+        try {
+          const stillActive = Array.from(this.clients).some(
+            c => c.idtarget === idtarget && c.readyState === 1
+          );
+
+          if (!stillActive) {
+            this.fullRemoveById(idtarget);
+            this.usersToRemove.delete(idtarget);
+          }
+        } finally {
+          this.cleanupInProgress.delete(idtarget);
+        }
+      }
+
+      // Consistency check
+      this.consistencyCheck();
+
+    } catch (error) {
+      // suppress errors
+    }
+  }
+
+  consistencyCheck() {
+    let checks = 0;
+    const now = Date.now();
+    
+    for (const [idtarget, seatInfo] of this.userToSeat) {
+      if (checks >= 50) break;
+
+      if (this.usersToRemove.has(idtarget)) continue;
+
+      const { room, seat } = seatInfo;
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) continue;
+
+      const seatData = seatMap.get(seat);
+      if (!seatData || seatData.namauser !== idtarget) continue;
+
+      const hasActiveConnection = Array.from(this.clients).some(
+        c => c.idtarget === idtarget && c.readyState === 1
+      );
+
+      if (!hasActiveConnection) {
+        this.usersToRemove.set(idtarget, now);
+      }
+
+      checks++;
+    }
   }
 
   broadcastToRoom(room, msg) {
     let sentCount = 0;
-    for (const c of this.clients) {
-      if (c.roomname === room && c.readyState === 1) {
-        if (this.safeSend(c, msg)) sentCount++;
+    for (const client of this.clients) {
+      if (client.roomname === room && client.readyState === 1) {
+        if (this.safeSend(client, msg)) {
+          sentCount++;
+        }
       }
     }
     return sentCount;
   }
 
   getJumlahRoom() {
-    const cnt = Object.fromEntries(roomList.map(r => [r, 0]));
+    const counts = {};
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
-      if (!seatMap) continue;
-      for (const info of seatMap.values()) {
-        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) cnt[room]++;
+      counts[room] = 0;
+      
+      if (seatMap) {
+        for (const info of seatMap.values()) {
+          if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+            counts[room]++;
+          }
+        }
       }
     }
-    return cnt;
+    return counts;
   }
 
   broadcastRoomUserCount(room) {
     try {
       const count = this.getJumlahRoom()[room] || 0;
       this.broadcastToRoom(room, ["roomUserCount", room, count]);
-    } catch (error) {}
+    } catch (error) {
+      // suppress errors
+    }
   }
 
   flushChatBuffer() {
     for (const [room, messages] of this.chatMessageBuffer) {
       if (messages.length > 0) {
-        for (let i = 0; i < messages.length; i++) {
-          this.broadcastToRoom(room, messages[i]);
+        for (const msg of messages) {
+          this.broadcastToRoom(room, msg);
         }
         this.chatMessageBuffer.set(room, []);
       }
@@ -375,10 +436,14 @@ export class ChatServer {
   flushKursiUpdates() {
     for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
       const updates = [];
-      for (const [seat, info] of seatMapUpdates.entries()) {
-        const { lastPoint, ...rest } = info;
-        updates.push([seat, rest]);
+      for (let seat = 1; seat <= CONSTANTS.MAX_SEATS; seat++) {
+        if (seatMapUpdates.has(seat)) {
+          const info = seatMapUpdates.get(seat);
+          const { points, ...rest } = info;
+          updates.push([seat, rest]);
+        }
       }
+      
       if (updates.length > 0) {
         this.broadcastToRoom(room, ["kursiBatchUpdate", room, updates]);
       }
@@ -386,320 +451,108 @@ export class ChatServer {
     }
   }
 
+  async tick() {
+    try {
+      this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
+
+      for (const client of this.clients) {
+        if (client.readyState === 1 && client.roomname) {
+          this.safeSend(client, ["currentNumber", this.currentNumber]);
+        }
+      }
+    } catch (error) {
+      // suppress errors
+    }
+  }
+
+  cleanExpiredLocks() {
+    try {
+      const now = Date.now();
+      let cleanedLocks = 0;
+
+      for (const room of roomList) {
+        if (cleanedLocks >= 20) break;
+
+        const seatMap = this.roomSeats.get(room);
+        if (seatMap) {
+          for (const [seat, info] of seatMap) {
+            if (cleanedLocks >= 20) break;
+
+            if (String(info.namauser).startsWith("__LOCK__") && 
+                info.lockTime && 
+                now - info.lockTime > CONSTANTS.LOCK_TIMEOUT) {
+              
+              Object.assign(info, createEmptySeat());
+              this.broadcastToRoom(room, ["removeKursi", room, seat]);
+              this.broadcastRoomUserCount(room);
+              cleanedLocks++;
+            }
+          }
+        }
+      }
+    } catch (error) {
+      // suppress errors
+    }
+  }
+
   async periodicFlush() {
     try {
       this.flushKursiUpdates();
       this.flushChatBuffer();
-    } catch (error) {}
-  }
+      this.cleanExpiredLocks();
 
-async handleSetIdTarget2(ws, id, baru, sessionId = null) {
-  if (!id) {
-    this.safeSend(ws, ["error", "Invalid user ID"]);
-    return;
-  }
-  const lockAcquired = await this.acquireUserLock(id, 'setId');
-  if (!lockAcquired) {
-    this.safeSend(ws, ["error", "Another operation in progress"]);
-    return;
-  }
-  try {
-    if (!baru && sessionId) {
-      const isValidSession = this._validateUserSession(id, sessionId);
-      if (!isValidSession) {
-        this.safeSend(ws, ["sessionExpired", null]);
-        return;
-      }
-    }
-    const newSessionId = this._createUserSession(id);
-    this._closeExistingConnection(id, newSessionId);
-    ws.idtarget = id;
-    ws.sessionId = newSessionId;
-    this.userToConnection.set(id, ws);
-    
-    if (baru === true) {
-      // ✅ USER BARU: Reset semua state dan JANGAN auto join room
-      this.userDisconnectTime.delete(id);
-      ws.roomname = undefined;
-      ws.numkursi = new Set();
-      this.forceUserCleanup(id); // Pastikan clean state
-      
-      // ✅ KIRIM RESPONSE TANPA ROOM DATA
-      
-    } else if (baru === false) {
-      // ✅ USER EXISTING: Coba restore previous state
-      const seatInfo = this.userToSeat.get(id);
-      
-      if (seatInfo && this._validateUserSession(id, sessionId)) {
-        const { room, seat } = seatInfo;
-        const seatMap = this.roomSeats.get(room);
-        
-        if (seatMap?.has(seat)) {
-          const seatData = seatMap.get(seat);
-          if (seatData.namauser === id) {
-            // ✅ AUTO JOIN ke room sebelumnya
-            ws.roomname = room;
-            ws.numkursi = new Set([seat]);
-            this.sendAllStateTo(ws, room);
-            this._sendRecentChatHistory(ws, room);
-            this.broadcastRoomUserCount(room);
-          } else {
-            // ❌ Seat sudah diambil orang lain
-            this.userToSeat.delete(id);
-            this.forceUserCleanup(id);
-            this.safeSend(ws, ["needJoinRoom"]);
+      const now = Date.now();
+
+      // Update seat activity untuk active clients
+      for (const client of this.clients) {
+        if (client.idtarget && client.readyState === 1) {
+          const seatInfo = this.userToSeat.get(client.idtarget);
+          if (seatInfo) {
+            const { room, seat } = seatInfo;
+            const seatMap = this.roomSeats.get(room);
+            if (seatMap && seatMap.has(seat)) {
+              const seatData = seatMap.get(seat);
+              if (seatData.namauser === client.idtarget) {
+                seatData.lastActivity = now;
+                this.usersToRemove.delete(client.idtarget);
+              }
+            }
           }
-        } else {
-          // ❌ Seat tidak ditemukan
-          this.userToSeat.delete(id);
-          this.forceUserCleanup(id);
-          this.safeSend(ws, ["needJoinRoom"]);
         }
-      } else {
-        // ❌ Tidak ada previous state atau session invalid
-        this.safeSend(ws, ["needJoinRoom"]);
       }
-    }
-    
-  } catch (error) {
-  } finally {
-    this.releaseUserLock(id, 'setId');
-  }
-}
 
-  async handleJoinRoom(ws, newRoom) {
-    if (!roomList.includes(newRoom)) {
-      this.safeSend(ws, ["error", "Invalid room"]);
-      return false;
-    }
-    if (!ws.idtarget) {
-      this.safeSend(ws, ["error", "No user ID set"]);
-      return false;
-    }
-    const idtarget = ws.idtarget;
-    const lockAcquired = await this.acquireUserLock(idtarget, 'join');
-    if (!lockAcquired) {
-      this.safeSend(ws, ["error", "Another join operation in progress"]);
-      return false;
-    }
-    try {
-      const existingSeatInfo = this.userToSeat.get(idtarget);
-      if (existingSeatInfo && existingSeatInfo.room === newRoom) {
-        this.safeSend(ws, ["error", "Already in this room"]);
-        return false;
-      }
-      const previousRoom = ws.roomname;
-      ws.roomname = newRoom;
-      const foundSeat = this.lockSeat(newRoom, ws);
-      if (foundSeat === null) {
-        this.safeSend(ws, ["roomFull", newRoom]);
-        ws.roomname = previousRoom;
-        return false;
-      }
-      if (previousRoom && previousRoom !== newRoom) {
-        await this.removeUserFromPreviousRoom(idtarget, previousRoom);
-      }
-      ws.numkursi = new Set([foundSeat]);
-      this.userToSeat.set(idtarget, { room: newRoom, seat: foundSeat });
-      this._confirmSeatOwnership(newRoom, foundSeat, idtarget, ws);
-      this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-      this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-      this.sendAllStateTo(ws, newRoom);
-      this.vipManager.getAllVipBadges(ws, newRoom);
-      this.broadcastRoomUserCount(newRoom);
-      return true;
+      // Deliver private messages dengan batching
+      this.deliverPrivateMessages();
     } catch (error) {
-      this.safeSend(ws, ["error", "Join room failed"]);
-      return false;
-    } finally {
-      this.releaseUserLock(idtarget, 'join');
+      // suppress errors
     }
   }
 
-  lockSeat(room, ws) {
-    if (!ws.idtarget) return null;
-    const seatMap = this.roomSeats.get(room);
-    if (!seatMap) return null;
-    const now = Date.now();
-    const userId = ws.idtarget;
-    for (const [seatNumber, seatInfo] of seatMap) {
-      if (String(seatInfo.namauser).startsWith("__LOCK__") && 
-          seatInfo.lockTime && 
-          (now - seatInfo.lockTime > 30000)) { // Diperpanjang jadi 30 detik
-        const lockOwner = seatInfo.namauser.replace("__LOCK__", "");
-        const isOwnerActive = this.userToConnection.has(lockOwner) && 
-                             this.userToConnection.get(lockOwner)?.readyState === 1;
-        if (!isOwnerActive) {
-          Object.assign(seatInfo, createEmptySeat());
-          this.seatLocks.delete(`${room}-${seatNumber}`);
-          this.clearSeatBuffer(room, seatNumber);
+  deliverPrivateMessages() {
+    let messagesDelivered = 0;
+    const maxMessagesPerFlush = 50;
+
+    for (const [id, messages] of this.privateMessageBuffer) {
+      if (messagesDelivered >= maxMessagesPerFlush) break;
+
+      let delivered = false;
+      for (const client of this.clients) {
+        if (client.idtarget === id && client.readyState === 1) {
+          const batch = messages.slice(0, 10);
+          for (const msg of batch) {
+            this.safeSend(client, msg);
+            messagesDelivered++;
+            if (messagesDelivered >= maxMessagesPerFlush) break;
+          }
+          delivered = true;
+          break;
         }
       }
-    }
-    for (let seatNumber = 1; seatNumber <= CONSTANTS.MAX_SEATS; seatNumber++) {
-      const seatInfo = seatMap.get(seatNumber);
-      if (seatInfo && seatInfo.namauser === "") {
-        Object.assign(seatInfo, {
-          noimageUrl: ws.noimageUrl || "",
-          namauser: "__LOCK__" + userId,
-          color: ws.color || "",
-          itembawah: ws.itembawah || 0,
-          itematas: ws.itematas || 0,
-          vip: ws.vip || 0,
-          viptanda: ws.viptanda || 0,
-          lockTime: now
-        });
-        this.seatLocks.set(`${room}-${seatNumber}`, { 
-          owner: userId, 
-          ts: now 
-        });
-        this.addToKursiBuffer(room, seatNumber, { ...seatInfo });
-        return seatNumber;
+      
+      if (delivered) {
+        this.privateMessageBuffer.delete(id);
       }
     }
-    return null;
-  }
-
-  sendAllStateTo(ws, room) {
-    if (ws.readyState !== 1) return;
-    const seatMap = this.roomSeats.get(room);
-    if (!seatMap) return;
-    const allKursiMeta = {};
-    const lastPointsData = [];
-    for (let seat = 1; seat <= CONSTANTS.MAX_SEATS; seat++) {
-      const info = seatMap.get(seat);
-      if (!info) continue;
-      if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
-        allKursiMeta[seat] = {
-          noimageUrl: info.noimageUrl,
-          namauser: info.namauser,
-          color: info.color,
-          itembawah: info.itembawah,
-          itematas: info.itematas,
-          vip: info.vip,
-          viptanda: info.viptanda
-        };
-        if (info.lastPoint) {
-          lastPointsData.push({
-            seat: seat,
-            x: info.lastPoint.x,
-            y: info.lastPoint.y,
-            fast: info.lastPoint.fast
-          });
-        }
-      }
-    }
-    if (Object.keys(allKursiMeta).length > 0) {
-      this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
-    }
-    if (lastPointsData.length > 0) {
-      this.safeSend(ws, ["allPointsList", room, lastPointsData]);
-    }
-    this.safeSend(ws, ["currentNumber", this.currentNumber]);
-    const count = this.getJumlahRoom()[room] || 0;
-    this.safeSend(ws, ["roomUserCount", room, count]);
-    if (this.roomChatHistory.has(room)) {
-      const history = this.roomChatHistory.get(room);
-      const recentChats = history.slice(-5);
-      for (let i = 0; i < recentChats.length; i++) {
-        const chat = recentChats[i];
-        this.safeSend(ws, [
-          "chat",
-          room,
-          chat.noImageURL,
-          chat.username,
-          chat.message,
-          chat.usernameColor,
-          chat.chatTextColor
-        ]);
-      }
-    }
-  }
-
-  async removeAllSeatsById(idtarget) {
-    if (!idtarget) return;
-    try {
-      const seatInfo = this.userToSeat.get(idtarget);
-      if (!seatInfo) return;
-      const { room, seat } = seatInfo;
-      const seatMap = this.roomSeats.get(room);
-      if (!seatMap || !seatMap.has(seat)) {
-        this.userToSeat.delete(idtarget);
-        return;
-      }
-      const currentSeat = seatMap.get(seat);
-      if (currentSeat.namauser === idtarget) {
-        if (currentSeat.viptanda > 0) {
-          this.vipManager.removeVipBadge(room, seat);
-        }
-        Object.assign(currentSeat, createEmptySeat());
-        this.clearSeatBuffer(room, seat);
-        this.seatLocks.delete(`${room}-${seat}`);
-        this.broadcastToRoom(room, ["removeKursi", room, seat]);
-        this.broadcastRoomUserCount(room);
-      }
-      this.userToSeat.delete(idtarget);
-    } catch (error) {}
-  }
-
-  cleanupClientSafely(ws) {
-    const id = ws.idtarget;
-    this.clients.delete(ws);
-    if (id && this.userToConnection.get(id) === ws) {
-      this.userToConnection.delete(id);
-    }
-    if (!id) return;
-    if (this.cleanupInProgress.has(id)) return;
-    this.cleanupInProgress.add(id);
-    try {
-      if (this.pingTimeouts.has(id)) {
-        clearTimeout(this.pingTimeouts.get(id));
-        this.pingTimeouts.delete(id);
-      }
-      const hasActiveConnection = this.userToConnection.has(id) && 
-                                 this.userToConnection.get(id)?.readyState === 1;
-      if (!hasActiveConnection) {
-        this.fullRemoveById(id);
-      } else {
-        this.messageCounts.delete(id);
-      }
-    } catch (error) {
-    } finally {
-      this.cleanupInProgress.delete(id);
-    }
-  }
-
-  handleOnDestroy(ws, idtarget) {
-    const targetId = idtarget || ws.idtarget;
-    if (!targetId) {
-      this.clients.delete(ws);
-      return;
-    }
-    if (this.userToConnection.get(targetId) === ws) {
-      this.userToConnection.delete(targetId);
-    }
-    this.fullRemoveById(targetId);
-    this.clients.delete(ws);
-  }
-
-  getAllOnlineUsers() {
-    const users = [];
-    for (const c of this.clients) {
-      if (c.idtarget && c.readyState === 1) {
-        users.push(c.idtarget);
-      }
-    }
-    return users;
-  }
-
-  getOnlineUsersByRoom(roomName) {
-    const users = [];
-    for (const c of this.clients) {
-      if (c.roomname === roomName && c.idtarget && c.readyState === 1) {
-        users.push(c.idtarget);
-      }
-    }
-    return users;
   }
 
   handleGetAllRoomsUserCount(ws) {
@@ -708,100 +561,549 @@ async handleSetIdTarget2(ws, id, baru, sessionId = null) {
       const allCounts = this.getJumlahRoom();
       const result = roomList.map(room => [room, allCounts[room]]);
       this.safeSend(ws, ["allRoomsUserCount", result]);
-    } catch (error) {}
+    } catch (error) {
+      // suppress errors
+    }
+  }
+
+  lockSeat(room, ws) {
+    if (!ws.idtarget) return null;
+
+    try {
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) return null;
+
+      const now = Date.now();
+
+      // Clean expired locks first (limited)
+      let locksCleaned = 0;
+      for (const [seat, info] of seatMap) {
+        if (locksCleaned >= 5) break;
+
+        if (String(info.namauser).startsWith("__LOCK__") && info.lockTime && now - info.lockTime > 10000) {
+          Object.assign(info, createEmptySeat());
+          locksCleaned++;
+        }
+      }
+
+      // Find available seat
+      for (let i = 1; i <= CONSTANTS.MAX_SEATS; i++) {
+        const k = seatMap.get(i);
+        if (k && k.namauser === "") {
+          k.namauser = "__LOCK__" + ws.idtarget;
+          k.lockTime = now;
+          k.lastActivity = now;
+          this.userToSeat.set(ws.idtarget, { room, seat: i });
+          return i;
+        }
+      }
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  senderrorstate(ws, room) {
+    if (ws.readyState !== 1) return;
+
+    try {
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) return;
+
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
+
+      const count = this.getJumlahRoom()[room] || 0;
+      this.safeSend(ws, ["roomUserCount", room, count]);
+
+      const kursiUpdates = [];
+      for (let seat = 1; seat <= CONSTANTS.MAX_SEATS; seat++) {
+        const info = seatMap.get(seat);
+        if (!info) continue;
+
+        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+          kursiUpdates.push([
+            seat,
+            {
+              noimageUrl: info.noimageUrl,
+              namauser: info.namauser,
+              color: info.color,
+              itembawah: info.itembawah,
+              itematas: info.itematas,
+              vip: info.vip,
+              viptanda: info.viptanda
+            }
+          ]);
+        }
+      }
+
+      if (kursiUpdates.length > 0) {
+        this.safeSend(ws, ["kursiBatchUpdate", room, kursiUpdates]);
+      }
+
+    } catch (error) {
+      // suppress errors
+    }
+  }
+
+  sendAllStateTo(ws, room) {
+    if (ws.readyState !== 1) return;
+
+    try {
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) return;
+
+      const allPoints = [];
+      const meta = {};
+
+      for (let seat = 1; seat <= CONSTANTS.MAX_SEATS; seat++) {
+        const info = seatMap.get(seat);
+        if (!info) continue;
+
+        if (info.points.length > 0) {
+          const recentPoints = info.points.slice(-5);
+          for (let i = 0; i < recentPoints.length; i++) {
+            const point = recentPoints[i];
+            allPoints.push({ seat, ...point });
+          }
+        }
+
+        if (info.namauser && !String(info.namauser).startsWith("__LOCK__")) {
+          meta[seat] = {
+            noimageUrl: info.noimageUrl,
+            namauser: info.namauser,
+            color: info.color,
+            itembawah: info.itembawah,
+            itematas: info.itematas,
+            vip: info.vip,
+            viptanda: info.viptanda
+          };
+        }
+      }
+
+      this.safeSend(ws, ["allPointsList", room, allPoints]);
+      this.safeSend(ws, ["allUpdateKursiList", room, meta]);
+    } catch (error) {
+      // suppress errors
+    }
+  }
+
+  cleanupClientSafely(ws) {
+    const id = ws.idtarget;
+    if (!id) {
+      this.clients.delete(ws);
+      return;
+    }
+
+    if (this.cleanupInProgress.has(id)) return;
+
+    this.cleanupInProgress.add(id);
+
+    try {
+      if (this.pingTimeouts.has(id)) {
+        clearTimeout(this.pingTimeouts.get(id));
+        this.pingTimeouts.delete(id);
+      }
+
+      const activeConnections = Array.from(this.clients).filter(
+        c => c.idtarget === id && c !== ws && c.readyState === 1
+      );
+
+      if (activeConnections.length === 0) {
+        this.usersToRemove.set(id, Date.now());
+      }
+
+      this.clients.delete(ws);
+
+      if (activeConnections.length === 0) {
+        this.fullRemoveById(id);
+      } else {
+        this.privateMessageBuffer.delete(id);
+        this.messageCounts.delete(id);
+      }
+
+    } catch (error) {
+      // suppress errors
+    } finally {
+      this.cleanupInProgress.delete(id);
+    }
+  }
+
+  async removeAllSeatsById(idtarget) {
+    try {
+      const seatInfo = this.userToSeat.get(idtarget);
+      if (!seatInfo) return;
+
+      const { room, seat } = seatInfo;
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap || !seatMap.has(seat)) {
+        this.userToSeat.delete(idtarget);
+        return;
+      }
+
+      const currentSeat = seatMap.get(seat);
+      if (currentSeat.namauser === idtarget || currentSeat.namauser === `__LOCK__${idtarget}`) {
+        Object.assign(currentSeat, createEmptySeat());
+        this.broadcastToRoom(room, ["removeKursi", room, seat]);
+        this.broadcastRoomUserCount(room);
+      }
+
+      this.userToSeat.delete(idtarget);
+      this.usersToRemove.delete(idtarget);
+    } catch (error) {
+      // suppress errors
+    }
+  }
+
+  getAllOnlineUsers() {
+    const users = [];
+    let count = 0;
+    for (const ws of this.clients) {
+      if (count >= 1000) break;
+      if (ws.idtarget && ws.readyState === 1) {
+        users.push(ws.idtarget);
+        count++;
+      }
+    }
+    return users;
+  }
+
+  getOnlineUsersByRoom(roomName) {
+    const users = [];
+    let count = 0;
+    for (const ws of this.clients) {
+      if (count >= 500) break;
+      if (ws.roomname === roomName && ws.idtarget && ws.readyState === 1) {
+        users.push(ws.idtarget);
+        count++;
+      }
+    }
+    return users;
+  }
+
+  handleSetIdTarget2(ws, id, baru) {
+    ws.idtarget = id;
+
+    // ✅ USER BARU (baru === true) - BUTUH CLEANUP
+    if (baru === true) {
+      // === CLEANUP DULU UNTUK USER BARU ===
+      for (const room of roomList) {
+        const seatMap = this.roomSeats.get(room);
+        if (!seatMap) continue;
+
+        for (const [seatNumber, seatInfo] of seatMap) {
+          if (seatInfo.namauser === id) {
+            Object.assign(seatInfo, createEmptySeat());
+            this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
+          }
+        }
+        this.broadcastRoomUserCount(room);
+      }
+
+      this.userToSeat.delete(id);
+      this.usersToRemove.delete(id);
+      this.privateMessageBuffer.delete(id);
+      this.messageCounts.delete(id);
+      
+      if (this.pingTimeouts.has(id)) {
+        clearTimeout(this.pingTimeouts.get(id));
+        this.pingTimeouts.delete(id);
+      }
+
+      // PROSES USER BARU
+      if (ws.roomname && ws.numkursi && ws.numkursi.size > 0) {
+        // User sudah join room manual sebelumnya
+        const room = ws.roomname;
+        const seat = Array.from(ws.numkursi)[0];
+        
+        const seatMap = this.roomSeats.get(room);
+        if (seatMap?.has(seat)) {
+          const seatData = seatMap.get(seat);
+          
+          // Assign seat ke user baru
+          seatData.namauser = id;
+          seatData.lastActivity = Date.now();
+          
+          this.userToSeat.set(id, { room, seat });
+          
+          // Broadcast update kursi
+          const updateData = {
+            noimageUrl: seatData.noimageUrl,
+            namauser: seatData.namauser,
+            color: seatData.color,
+            itembawah: seatData.itembawah,
+            itematas: seatData.itematas,
+            vip: seatData.vip,
+            viptanda: seatData.viptanda
+          };
+          
+          if (!this.updateKursiBuffer.has(room))
+            this.updateKursiBuffer.set(room, new Map());
+          this.updateKursiBuffer.get(room).set(seat, updateData);
+          
+          this.broadcastRoomUserCount(room);
+        }
+      }
+    }
+    // ✅ USER LAMA (baru === false) - HANYA RESTORE, TANPA CLEANUP
+    else if (baru === false) {
+      // Hanya hapus ping timeout (selalu perlu)
+      if (this.pingTimeouts.has(id)) {
+        clearTimeout(this.pingTimeouts.get(id));
+        this.pingTimeouts.delete(id);
+      }
+
+      this.usersToRemove.delete(id);
+
+      // LANGSUNG RESTORE DARI SEAT INFO YANG ADA
+      const seatInfo = this.userToSeat.get(id);
+
+      if (seatInfo) {
+        const { room, seat } = seatInfo;
+        const seatMap = this.roomSeats.get(room);
+
+        if (seatMap?.has(seat)) {
+          const seatData = seatMap.get(seat);
+
+          if (seatData.namauser === id) {
+            // ✅ User masih di seat yang sama - RESTORE BERHASIL
+            ws.roomname = room;
+            ws.numkursi = new Set([seat]);
+            this.broadcastRoomUserCount(room);
+          } else {
+            // ❌ Seat sudah diduduki orang lain
+            this.safeSend(ws, ["needJoinRoom"]);
+          }
+        } else {
+          // ❌ Seat tidak ada
+          this.safeSend(ws, ["needJoinRoom"]);
+        }
+      } else {
+        // ❌ Tidak ada seat info
+        this.safeSend(ws, ["needJoinRoom"]);
+      }
+    }
+
+    // Kirim private messages buffer (untuk kedua case)
+    if (this.privateMessageBuffer.has(id)) {
+      for (const msg of this.privateMessageBuffer.get(id)) {
+        this.safeSend(ws, msg);
+      }
+      this.privateMessageBuffer.delete(id);
+    }
+  }
+
+  scheduleCleanupTimeout(idtarget) {
+    if (this.pingTimeouts.has(idtarget)) {
+      clearTimeout(this.pingTimeouts.get(idtarget));
+    }
+
+    const timeout = setTimeout(() => {
+      if (this.cleanupInProgress.has(idtarget)) return;
+      this.cleanupInProgress.add(idtarget);
+
+      try {
+        const stillActive = Array.from(this.clients).some(
+          c => c.idtarget === idtarget && c.readyState === 1
+        );
+
+        if (!stillActive) {
+          this.usersToRemove.set(idtarget, Date.now());
+        }
+
+      } catch (error) {
+        // suppress errors
+      } finally {
+        this.pingTimeouts.delete(idtarget);
+        this.cleanupInProgress.delete(idtarget);
+      }
+    }, CONSTANTS.RECONNECT_TIMEOUT);
+
+    this.pingTimeouts.set(idtarget, timeout);
+  }
+
+  handleOnDestroy(ws, idtarget) {
+    if (!idtarget) return;
+
+    try {
+      this.fullRemoveById(idtarget);
+      this.clients.delete(ws);
+    } catch (error) {
+      // suppress errors
+    }
+  }
+
+  handleJoinRoom(ws, newRoom) {
+    if (!roomList.includes(newRoom)) return false;
+
+    if (ws.idtarget) this.removeAllSeatsById(ws.idtarget);
+
+    ws.roomname = newRoom;
+    const foundSeat = this.lockSeat(newRoom, ws);
+
+    if (foundSeat === null) {
+        // ✅ KIRIM EVENT ROOM FULL KE CLIENT
+        this.safeSend(ws, ["roomFull", newRoom]);
+        return false;
+    }
+
+    ws.numkursi = new Set([foundSeat]);
+    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+
+    if (ws.idtarget) {
+        this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+    }
+    
+    this.sendAllStateTo(ws, newRoom);
+    this.broadcastRoomUserCount(newRoom);
+    
+    return true;
   }
 
   handleMessage(ws, raw) {
     if (ws.readyState !== 1) return;
+
     let data;
-    try { 
-      data = JSON.parse(raw); 
-    } catch (e) { 
-      return; 
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      return;
     }
+
     if (!Array.isArray(data) || data.length === 0) return;
+
     const evt = data[0];
+
     if (!this.checkRateLimit(ws, evt)) return;
+
     try {
       switch (evt) {
-        case "vipbadge":
-        case "removeVipBadge":
-        case "getAllVipBadges":
-          this.vipManager.handleEvent(ws, data);
-          break;
         case "isInRoom": {
           const idtarget = ws.idtarget;
+          
           if (!idtarget) {
             this.safeSend(ws, ["inRoomStatus", false]);
             return;
           }
+          
           const seatInfo = this.userToSeat.get(idtarget);
           if (!seatInfo) {
             this.safeSend(ws, ["inRoomStatus", false]);
             return;
           }
+          
           const { room, seat } = seatInfo;
           const seatMap = this.roomSeats.get(room);
           const seatData = seatMap?.get(seat);
+          
           const isInRoom = seatData?.namauser === idtarget;
+          
           this.safeSend(ws, ["inRoomStatus", isInRoom]);
           break;
         }
-        case "onDestroy": 
-          this.handleOnDestroy(ws, data[1] || ws.idtarget);
+
+        case "onDestroy": {
+          const idtarget = ws.idtarget;
+          this.handleOnDestroy(ws, idtarget);
           break;
-        case "setIdTarget2": 
-          this.handleSetIdTarget2(ws, data[1], data[2], data[3]);
+        }
+
+        case "setIdTarget2": {
+          const id = data[1];
+          const baru = data[2];
+          this.handleSetIdTarget2(ws, id, baru);
           break;
+        }
+
         case "setIdTarget": {
           const newId = data[1];
-          if (ws.idtarget && ws.idtarget !== newId) {
-            this.forceUserCleanup(ws.idtarget);
-          }
           ws.idtarget = newId;
-          this.userToConnection.set(newId, ws);
+
           if (this.pingTimeouts.has(newId)) {
             clearTimeout(this.pingTimeouts.get(newId));
             this.pingTimeouts.delete(newId);
           }
+
+          if (this.usersToRemove.has(newId)) {
+            this.usersToRemove.delete(newId);
+          }
+
           const prevSeat = this.userToSeat.get(newId);
+
           if (prevSeat) {
             ws.roomname = prevSeat.room;
             ws.numkursi = new Set([prevSeat.seat]);
-            this.sendAllStateTo(ws, prevSeat.room);
+            this.senderrorstate(ws, prevSeat.room);
+
+            const seatMap = this.roomSeats.get(prevSeat.room);
+            if (seatMap) {
+              const seatInfo = seatMap.get(prevSeat.seat);
+              if (seatInfo.namauser === `__LOCK__${newId}` || !seatInfo.namauser) {
+                seatInfo.namauser = newId;
+                seatInfo.lastActivity = Date.now();
+              }
+            }
           } else {
-            this.safeSend(ws, ["needJoinRoom"]);
+            if (this.hasEverSetId) {
+              this.safeSend(ws, ["needJoinRoom"]);
+            }
           }
+
+          this.hasEverSetId = true;
+
+          if (this.privateMessageBuffer.has(newId)) {
+            for (const msg of this.privateMessageBuffer.get(newId))
+              this.safeSend(ws, msg);
+            this.privateMessageBuffer.delete(newId);
+          }
+
           if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
           break;
         }
+
         case "sendnotif": {
           const [, idtarget, noimageUrl, username, deskripsi] = data;
           const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
+          let delivered = false;
           for (const c of this.clients) {
             if (c.idtarget === idtarget && c.readyState === 1) {
               this.safeSend(c, notif);
-              break;
+              delivered = true;
             }
+          }
+          if (!delivered) {
+            if (!this.privateMessageBuffer.has(idtarget))
+              this.privateMessageBuffer.set(idtarget, []);
+            this.privateMessageBuffer.get(idtarget).push(notif);
           }
           break;
         }
+
         case "private": {
           const [, idt, url, msg, sender] = data;
           const ts = Date.now();
           const out = ["private", idt, url, msg, ts, sender];
           this.safeSend(ws, out);
+          let delivered = false;
           for (const c of this.clients) {
             if (c.idtarget === idt && c.readyState === 1) {
               this.safeSend(c, out);
-              break;
+              delivered = true;
             }
+          }
+          if (!delivered) {
+            if (!this.privateMessageBuffer.has(idt))
+              this.privateMessageBuffer.set(idt, []);
+            this.privateMessageBuffer.get(idt).push(out);
           }
           break;
         }
+
         case "isUserOnline": {
           const username = data[1];
           const tanda = data[2] ?? "";
+
+          // ✅ SEDERHANA: Cek apakah user ada yang online
           let online = false;
           for (const c of this.clients) {
             if (c.idtarget === username && c.readyState === 1) {
@@ -809,27 +1111,36 @@ async handleSetIdTarget2(ws, id, baru, sessionId = null) {
               break;
             }
           }
+
           this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
           break;
         }
-        case "getAllRoomsUserCount": 
+
+        case "getAllRoomsUserCount":
           this.handleGetAllRoomsUserCount(ws);
           break;
-        case "getCurrentNumber": 
+
+        case "getCurrentNumber":
           this.safeSend(ws, ["currentNumber", this.currentNumber]);
           break;
-        case "getOnlineUsers": 
+
+        case "getOnlineUsers":
           this.safeSend(ws, ["allOnlineUsers", this.getAllOnlineUsers()]);
           break;
+
         case "getRoomOnlineUsers": {
           const roomName = data[1];
           if (!roomList.includes(roomName)) return;
           this.safeSend(ws, ["roomOnlineUsers", roomName, this.getOnlineUsersByRoom(roomName)]);
           break;
         }
-        case "joinRoom": 
-          this.handleJoinRoom(ws, data[1]);
+
+        case "joinRoom": {
+          const newRoom = data[1];
+          this.handleJoinRoom(ws, newRoom);
           break;
+        }
+
         case "chat": {
           const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
           if (!roomList.includes(roomname)) return;
@@ -837,60 +1148,64 @@ async handleSetIdTarget2(ws, id, baru, sessionId = null) {
             this.chatMessageBuffer.set(roomname, []);
           this.chatMessageBuffer.get(roomname)
             .push(["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
-          if (!this.roomChatHistory.has(roomname)) {
-            this.roomChatHistory.set(roomname, []);
-          }
-          const history = this.roomChatHistory.get(roomname);
-          history.push({
-            timestamp: Date.now(),
-            noImageURL,
-            username,
-            message,
-            usernameColor,
-            chatTextColor
-          });
-          if (history.length > 5) {
-            this.roomChatHistory.set(roomname, history.slice(-5));
-          }
           break;
         }
+
         case "updatePoint": {
           const [, room, seat, x, y, fast] = data;
           if (!roomList.includes(room)) return;
           const seatMap = this.roomSeats.get(room);
           const si = seatMap.get(seat);
           if (!si) return;
-          si.lastPoint = { x, y, fast, timestamp: Date.now() };
+
+          si.points.push({ x, y, fast, timestamp: Date.now() });
+
+          const now = Date.now();
+          si.points = si.points.filter(point => now - point.timestamp < 3000);
+
+          si.lastActivity = now;
           this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
           break;
         }
+
         case "removeKursiAndPoint": {
           const [, room, seat] = data;
           if (!roomList.includes(room)) return;
           const seatMap = this.roomSeats.get(room);
-          if (!seatMap || !seatMap.has(seat)) return;
           Object.assign(seatMap.get(seat), createEmptySeat());
-          this.seatLocks.delete(`${room}-${seat}`);
-          this.clearSeatBuffer(room, seat);
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.broadcastRoomUserCount(room);
           break;
         }
+
         case "updateKursi": {
           const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
           if (!roomList.includes(room)) return;
-          const seatMap = this.roomSeats.get(room);
-          Object.assign(seatMap.get(seat), {
-            noimageUrl, namauser, color, itembawah, itematas,
-            vip: vip || 0,
-            viptanda: viptanda || 0
-          });
-          if (!this.updateKursiBuffer.has(room))
-            this.updateKursiBuffer.set(room, new Map());
-          this.updateKursiBuffer.get(room).set(seat, { ...seatMap.get(seat) });
-          this.broadcastRoomUserCount(room);
+
+          const lockKey = `${room}-${seat}`;
+          if (this.seatLocks.has(lockKey)) return;
+          this.seatLocks.set(lockKey, true);
+
+          try {
+            const seatMap = this.roomSeats.get(room);
+            const currentInfo = seatMap.get(seat) || createEmptySeat();
+
+            Object.assign(currentInfo, {
+              noimageUrl, namauser, color, itembawah, itematas, vip, viptanda,
+              lastActivity: Date.now()
+            });
+
+            seatMap.set(seat, currentInfo);
+            if (!this.updateKursiBuffer.has(room))
+              this.updateKursiBuffer.set(room, new Map());
+            this.updateKursiBuffer.get(room).set(seat, { ...currentInfo, points: [] });
+            this.broadcastRoomUserCount(room);
+          } finally {
+            this.seatLocks.delete(lockKey);
+          }
           break;
         }
+
         case "gift": {
           const [, roomname, sender, receiver, giftName] = data;
           if (!roomList.includes(roomname)) return;
@@ -900,36 +1215,42 @@ async handleSetIdTarget2(ws, id, baru, sessionId = null) {
             .push(["gift", roomname, sender, receiver, giftName, Date.now()]);
           break;
         }
+
         case "gameLowCardStart":
         case "gameLowCardJoin":
-        case "gameLowCardLeave":
-        case "gameLowCardSubmit":
-          if (ws.roomname === "LowCard") {
-            this.lowcard.handleEvent(ws, data);
-          }
+        case "gameLowCardNumber":
+        case "gameLowCardEnd": {
+          const room = ws.roomname;
+          if (room !== "LowCard") return;
+          this.lowcard.handleEvent(ws, data);
           break;
-        default: 
-          break;
+        }
       }
-    } catch (e) {}
+    } catch (error) {
+      // suppress errors
+    }
   }
 
   async fetch(request) {
     try {
       const upgrade = request.headers.get("Upgrade") || "";
-      if (upgrade.toLowerCase() !== "websocket") {
+      if (upgrade.toLowerCase() !== "websocket")
         return new Response("Expected WebSocket", { status: 426 });
-      }
+
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
+      
+      // ✅ FIX: Tambahkan await di sini
       await server.accept();
+
       const ws = server;
-      ws._connId = `conn#${this._nextConnId++}`;
+
       ws.roomname = undefined;
       ws.idtarget = undefined;
       ws.numkursi = new Set();
-      ws.sessionId = null;
+
       this.clients.add(ws);
+
       ws.addEventListener("message", (ev) => {
         try {
           this.handleMessage(ws, ev.data);
@@ -937,17 +1258,24 @@ async handleSetIdTarget2(ws, id, baru, sessionId = null) {
           this.cleanupClientSafely(ws);
         }
       });
-      ws.addEventListener("error", (event) => {
-        this.cleanupClientSafely(ws);
-      });
+
       ws.addEventListener("close", (event) => {
         const id = ws.idtarget;
         if (id) {
-          this.userDisconnectTime.set(id, Date.now());
           this.scheduleCleanupTimeout(id);
         }
         this.cleanupClientSafely(ws);
       });
+
+      // ✅ FIX: Perbaiki typo "reeor" menjadi "error"
+      ws.addEventListener("error", (event) => {
+        const id = ws.idtarget;
+        if (id) {
+          this.scheduleCleanupTimeout(id);
+        }
+        this.cleanupClientSafely(ws);
+      });
+
       return new Response(null, { status: 101, webSocket: client });
     } catch (error) {
       return new Response("Internal Server Error", { status: 500 });
@@ -963,13 +1291,11 @@ export default {
         const obj = env.CHAT_SERVER.get(id);
         return obj.fetch(req);
       }
-      if (new URL(req.url).pathname === "/health") {
+      if (new URL(req.url).pathname === "/health")
         return new Response("ok", { status: 200, headers: { "content-type": "text/plain" } });
-      }
       return new Response("WebSocket endpoint", { status: 200 });
     } catch (error) {
       return new Response("Internal Server Error", { status: 500 });
     }
   }
 };
-
