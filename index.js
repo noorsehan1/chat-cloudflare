@@ -68,12 +68,6 @@ export class ChatServer {
 
     this.messageCounts = new Map();
     this.MAX_MESSAGES_PER_SECOND = 20;
-    
-    // Untuk retry mechanism
-    this.pendingSetIdOperations = new Map();
-    this.pendingUrlConnections = new Map();
-    this.MAX_RETRIES = 3;
-    this.RETRY_DELAY = 100;
   }
 
   clearSeatBuffer(room, seatNumber) {
@@ -133,152 +127,128 @@ export class ChatServer {
     }
   }
 
-  // Retry mechanism untuk setIdTarget2
-  async handleSetIdTarget2WithRetry(ws, id, baru, retryCount = 0) {
+  // PERBAIKAN: Handle setIdTarget2 yang lebih sederhana
+  async handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
-    // Cek jika sudah ada operasi yang sedang berjalan untuk ID ini
-    if (this.pendingSetIdOperations.has(id)) {
-      if (retryCount < this.MAX_RETRIES) {
-        // Tunggu sebentar dan coba lagi
-        await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY * (retryCount + 1)));
-        return this.handleSetIdTarget2WithRetry(ws, id, baru, retryCount + 1);
-      } else {
-        this.safeSend(ws, ["error", "Set ID operation timeout, please try again"]);
-        return;
-      }
-    }
+    // Set ID target terlebih dahulu
+    ws.idtarget = id;
 
-    // Tandai operasi sedang berjalan
-    this.pendingSetIdOperations.set(id, true);
+    if (baru === true) {
+      // User baru - reset semua state
+      ws.roomname = undefined;
+      ws.numkursi = new Set();
+      this.forceUserCleanup(id); // Bersihkan data lama jika ada
+      this.safeSend(ws, ["needJoinRoom"]);
+      
+    } else if (baru === false) {
+      // User existing - coba restore state
+      const seatInfo = this.userToSeat.get(id);
+      
+      if (seatInfo) {
+        const { room, seat } = seatInfo;
+        const seatMap = this.roomSeats.get(room);
+        
+        if (seatMap?.has(seat)) {
+          const seatData = seatMap.get(seat);
+          
+          // Cek apakah seat masih available untuk user ini
+          if (seatData.namauser === id) {
+            // Cek apakah ada connection aktif lain dengan ID yang sama
+            const activeConnections = Array.from(this.clients).filter(
+              c => c.idtarget === id && c.readyState === 1 && c !== ws
+            );
 
-    try {
-      this.forceUserCleanup(id);
-      ws.idtarget = id;
-
-      if (baru === true) {
-        ws.roomname = undefined;
-        ws.numkursi = new Set();
-        this.safeSend(ws, ["needJoinRoom"]);
-      } else if (baru === false) {
-        const seatInfo = this.userToSeat.get(id);
-        if (seatInfo) {
-          const { room, seat } = seatInfo;
-          const seatMap = this.roomSeats.get(room);
-          if (seatMap?.has(seat)) {
-            const seatData = seatMap.get(seat);
-            if (seatData.namauser === id) {
+            if (activeConnections.length === 0) {
+              // Tidak ada connection aktif, restore state
               ws.roomname = room;
               ws.numkursi = new Set([seat]);
               this.sendAllStateTo(ws, room);
               this.broadcastRoomUserCount(room);
-            } else {
-              this.userToSeat.delete(id);
-              this.safeSend(ws, ["needJoinRoom"]);
+              return;
             }
-          } else {
-            this.userToSeat.delete(id);
-            this.safeSend(ws, ["needJoinRoom"]);
           }
-        } else {
-          this.safeSend(ws, ["needJoinRoom"]);
         }
       }
-    } finally {
-      // Hapus tanda operasi selesai
-      this.pendingSetIdOperations.delete(id);
-    }
-  }
-
-  // Handler untuk connect URL dengan retry
-  async handleConnectUrlWithRetry(ws, url, retryCount = 0) {
-    if (!url) {
-      this.safeSend(ws, ["error", "URL is required"]);
-      return;
-    }
-
-    // Cek jika URL sudah dalam proses koneksi
-    if (this.pendingUrlConnections.has(url)) {
-      if (retryCount < this.MAX_RETRIES) {
-        // Tunggu dan coba lagi
-        await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY * (retryCount + 1)));
-        return this.handleConnectUrlWithRetry(ws, url, retryCount + 1);
-      } else {
-        this.safeSend(ws, ["error", "URL connection timeout, please try again"]);
-        return;
-      }
-    }
-
-    // Tandai URL sedang diproses
-    this.pendingUrlConnections.set(url, true);
-
-    try {
-      // Simulasi proses koneksi URL (ganti dengan logic sebenarnya)
-      const isConnected = await this.attemptUrlConnection(url);
       
-      if (isConnected) {
-        this.safeSend(ws, ["urlConnected", url, true]);
-      } else {
-        if (retryCount < this.MAX_RETRIES) {
-          // Coba lagi dengan retry count yang meningkat
-          await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY * (retryCount + 1)));
-          return this.handleConnectUrlWithRetry(ws, url, retryCount + 1);
-        } else {
-          this.safeSend(ws, ["urlConnected", url, false, "Max retries exceeded"]);
-        }
-      }
-    } catch (error) {
-      if (retryCount < this.MAX_RETRIES) {
-        await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY * (retryCount + 1)));
-        return this.handleConnectUrlWithRetry(ws, url, retryCount + 1);
-      } else {
-        this.safeSend(ws, ["error", `URL connection failed: ${error.message}`]);
-      }
-    } finally {
-      // Hapus tanda URL selesai diproses
-      this.pendingUrlConnections.delete(url);
+      // Jika tidak bisa restore, kirim needJoinRoom
+      this.userToSeat.delete(id);
+      this.safeSend(ws, ["needJoinRoom"]);
     }
   }
 
-  // Method untuk mencoba koneksi URL (simulasi)
-  async attemptUrlConnection(url) {
-    try {
-      // Simulasi koneksi URL - ganti dengan logic sebenarnya
-      const response = await fetch(url, { 
-        method: 'HEAD',
-        signal: AbortSignal.timeout(5000)
+  // PERBAIKAN: Handle join room yang lebih reliable
+  async handleJoinRoom(ws, newRoom) {
+    if (!roomList.includes(newRoom)) {
+      this.safeSend(ws, ["error", "Invalid room"]);
+      return false;
+    }
+
+    if (!ws.idtarget) {
+      this.safeSend(ws, ["error", "No user ID set"]);
+      return false;
+    }
+
+    // Cleanup room sebelumnya jika ada
+    if (ws.roomname && ws.roomname !== newRoom) {
+      await this.removeAllSeatsById(ws.idtarget);
+    }
+
+    // Cari seat yang available
+    const foundSeat = this.findAvailableSeat(newRoom, ws.idtarget);
+
+    if (foundSeat === null) {
+      this.safeSend(ws, ["roomFull", newRoom]);
+      return false;
+    }
+
+    // Update seat information
+    const seatMap = this.roomSeats.get(newRoom);
+    const seatInfo = seatMap.get(foundSeat);
+    
+    if (seatInfo) {
+      // Isi data ke seat
+      Object.assign(seatInfo, {
+        namauser: ws.idtarget,
+        noimageUrl: "",
+        color: "",
+        itembawah: 0,
+        itematas: 0,
+        vip: 0,
+        viptanda: 0,
+        lastPoint: null
       });
-      return response.ok;
-    } catch (error) {
-      return false;
     }
+
+    // Update user state
+    ws.roomname = newRoom;
+    ws.numkursi = new Set([foundSeat]);
+    this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+
+    // Kirim response ke client
+    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+
+    // Kirim semua state room ke client
+    this.sendAllStateTo(ws, newRoom);
+    this.vipManager.getAllVipBadges(ws, newRoom);
+    this.broadcastRoomUserCount(newRoom);
+
+    return true;
   }
 
-  checkRateLimit(ws, messageType) {
-    const now = Date.now();
-    const key = ws.idtarget || ws._connId || 'anonymous';
-    const windowStart = Math.floor(now / 1000);
+  findAvailableSeat(room, userId) {
+    const seatMap = this.roomSeats.get(room);
+    if (!seatMap) return null;
 
-    if (!this.messageCounts.has(key)) {
-      this.messageCounts.set(key, { count: 0, window: windowStart });
+    // Cari seat kosong
+    for (let i = 1; i <= this.MAX_SEATS; i++) {
+      const k = seatMap.get(i);
+      if (k && !k.namauser) {
+        return i;
+      }
     }
-
-    const stats = this.messageCounts.get(key);
-    if (stats.window !== windowStart) {
-      stats.count = 0;
-      stats.window = windowStart;
-    }
-
-    let limit = this.MAX_MESSAGES_PER_SECOND;
-    if (messageType === "chat") limit = 50;
-    if (messageType === "updatePoint") limit = 100;
-
-    stats.count += 1;
-    if (stats.count > limit) {
-      this.safeSend(ws, ['error', 'Rate limit exceeded']);
-      return false;
-    }
-    return true;
+    return null;
   }
 
   safeSend(ws, arr) {
@@ -356,75 +326,6 @@ export class ChatServer {
         this.safeSend(c, ["currentNumber", this.currentNumber]);
       }
     }
-  }
-
-  async handleSetIdTarget2(ws, id, baru) {
-    // Gunakan retry mechanism
-    await this.handleSetIdTarget2WithRetry(ws, id, baru);
-  }
-
-  async handleJoinRoom(ws, newRoom) {
-    if (!roomList.includes(newRoom)) {
-      this.safeSend(ws, ["error", "Invalid room"]);
-      return false;
-    }
-
-    if (!ws.idtarget) {
-      this.safeSend(ws, ["error", "No user ID set"]);
-      return false;
-    }
-
-    if (ws.roomname && ws.roomname !== newRoom) {
-      await this.removeAllSeatsById(ws.idtarget);
-    }
-
-    const existingSeatInfo = this.userToSeat.get(ws.idtarget);
-    if (existingSeatInfo && existingSeatInfo.room === newRoom) {
-      this.safeSend(ws, ["error", "Already in this room"]);
-      return false;
-    }
-
-    ws.roomname = newRoom;
-    const foundSeat = this.findAvailableSeat(newRoom, ws.idtarget);
-
-    if (foundSeat === null) {
-      this.safeSend(ws, ["roomFull", newRoom]);
-      return false;
-    }
-
-    ws.numkursi = new Set([foundSeat]);
-    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-
-    if (ws.idtarget) {
-      this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-    }
-
-    this.sendAllStateTo(ws, newRoom);
-    this.vipManager.getAllVipBadges(ws, newRoom);
-    this.broadcastRoomUserCount(newRoom);
-
-    return true;
-  }
-
-  findAvailableSeat(room, userId) {
-    const seatMap = this.roomSeats.get(room);
-    if (!seatMap) return null;
-
-    for (let i = 1; i <= this.MAX_SEATS; i++) {
-      const seatInfo = seatMap.get(i);
-      if (seatInfo && seatInfo.namauser === userId) {
-        return null;
-      }
-    }
-
-    for (let i = 1; i <= this.MAX_SEATS; i++) {
-      const k = seatMap.get(i);
-      if (k && !k.namauser) {
-        return i;
-      }
-    }
-    return null;
   }
 
   sendAllStateTo(ws, room) {
@@ -591,7 +492,6 @@ export class ChatServer {
     if (!Array.isArray(data) || data.length === 0) return;
 
     const evt = data[0];
-    if (!this.checkRateLimit(ws, evt)) return;
 
     try {
       switch (evt) {
@@ -628,10 +528,6 @@ export class ChatServer {
           this.handleSetIdTarget2(ws, data[1], data[2]); 
           break;
 
-        case "connectUrl":
-          this.handleConnectUrlWithRetry(ws, data[1]);
-          break;
-
         case "setIdTarget": {
           const newId = data[1];
           if (ws.idtarget && ws.idtarget !== newId) {
@@ -652,65 +548,6 @@ export class ChatServer {
 
           this.hasEverSetId = true;
           if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-          break;
-        }
-
-        case "sendnotif": {
-          const [, idtarget, noimageUrl, username, deskripsi] = data;
-          const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
-          for (const c of this.clients) {
-            if (c.idtarget === idtarget && c.readyState === 1) {
-              this.safeSend(c, notif);
-              break;
-            }
-          }
-          break;
-        }
-
-        case "private": {
-          const [, idt, url, msg, sender] = data;
-          const ts = Date.now();
-          const out = ["private", idt, url, msg, ts, sender];
-          this.safeSend(ws, out);
-          for (const c of this.clients) {
-            if (c.idtarget === idt && c.readyState === 1) {
-              this.safeSend(c, out);
-              break;
-            }
-          }
-          break;
-        }
-
-        case "isUserOnline": {
-          const username = data[1];
-          const tanda = data[2] ?? "";
-          let online = false;
-          for (const c of this.clients) {
-            if (c.idtarget === username && c.readyState === 1) {
-              online = true;
-              break;
-            }
-          }
-          this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
-          break;
-        }
-
-        case "getAllRoomsUserCount": 
-          this.handleGetAllRoomsUserCount(ws); 
-          break;
-
-        case "getCurrentNumber": 
-          this.safeSend(ws, ["currentNumber", this.currentNumber]); 
-          break;
-
-        case "getOnlineUsers": 
-          this.safeSend(ws, ["allOnlineUsers", this.getAllOnlineUsers()]); 
-          break;
-
-        case "getRoomOnlineUsers": {
-          const roomName = data[1];
-          if (!roomList.includes(roomName)) return;
-          this.safeSend(ws, ["roomOnlineUsers", roomName, this.getOnlineUsersByRoom(roomName)]);
           break;
         }
 
