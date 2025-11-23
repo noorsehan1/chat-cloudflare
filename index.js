@@ -10,7 +10,7 @@ function createEmptySeat() {
   return {
     noimageUrl: "", namauser: "", color: "",
     itembawah: 0, itematas: 0, vip: 0, viptanda: 0,
-    lastPoint: null
+    lastPoint: null, lockTime: undefined
   };
 }
 
@@ -32,6 +32,7 @@ export class ChatServer {
 
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
+    this.privateMessageBuffer = new Map(); // NEW: Buffer for offline private messages
 
     this.currentNumber = 1;
     this.maxNumber = 6;
@@ -39,6 +40,7 @@ export class ChatServer {
 
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
+    this._cleanupTimer = setInterval(() => this.cleanExpiredLocks(), 30000); // NEW: Clean expired locks
 
     this.vipManager = new VipBadgeManager(this);
     this.lowcard = new LowCardGameManager(this);
@@ -119,41 +121,43 @@ export class ChatServer {
     }
   }
 
-  // FIXED: Improved seat locking logic
-  lockSeat(room, ws) {
-    if (!ws.idtarget) {
-      console.log("lockSeat: No idtarget");
-      return null;
+  // NEW: Clean expired locks
+  cleanExpiredLocks() {
+    const now = Date.now();
+    for (const room of roomList) {
+      const seatMap = this.roomSeats.get(room);
+      for (const [seat, info] of seatMap) {
+        if (String(info.namauser).startsWith("__LOCK__") && 
+            info.lockTime && now - info.lockTime > 10000) {
+          Object.assign(info, createEmptySeat());
+          this.broadcastToRoom(room, ["removeKursi", room, seat]);
+          this.broadcastRoomUserCount(room);
+        }
+      }
     }
+  }
+
+  lockSeat(room, ws) {
+    if (!ws.idtarget) return null;
 
     const seatMap = this.roomSeats.get(room);
-    if (!seatMap) {
-      console.log("lockSeat: Room not found", room);
-      return null;
-    }
+    if (!seatMap) return null;
 
-    // Check if user already has a seat in this room
+    // Check if already in this room
     const existingSeat = this.userToSeat.get(ws.idtarget);
     if (existingSeat && existingSeat.room === room) {
-      console.log("lockSeat: User already in room", ws.idtarget, room);
       return existingSeat.seat;
     }
 
-    // Find empty seat
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const seatInfo = seatMap.get(i);
-      if (seatInfo && seatInfo.namauser === "") {
-        console.log("lockSeat: Found empty seat", i, "for user", ws.idtarget);
-        
-        // Lock the seat
+      if (seatInfo.namauser === "") {
         seatInfo.namauser = "__LOCK__" + ws.idtarget;
+        seatInfo.lockTime = Date.now();
         this.userToSeat.set(ws.idtarget, { room, seat: i });
-        
         return i;
       }
     }
-
-    console.log("lockSeat: No empty seats in room", room);
     return null;
   }
 
@@ -168,7 +172,7 @@ export class ChatServer {
 
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
       const info = seatMap.get(seat);
-      if (info && info.namauser && !info.namauser.startsWith("__LOCK__")) {
+      if (info.namauser && !info.namauser.startsWith("__LOCK__")) {
         allKursiMeta[seat] = {
           noimageUrl: info.noimageUrl,
           namauser: info.namauser,
@@ -199,26 +203,30 @@ export class ChatServer {
     }
 
     this.safeSend(ws, ["currentNumber", this.currentNumber]);
-    
     const count = this.getJumlahRoom()[room] || 0;
     this.safeSend(ws, ["roomUserCount", room, count]);
+
+    // NEW: Deliver buffered private messages
+    if (ws.idtarget && this.privateMessageBuffer.has(ws.idtarget)) {
+      const pendingMessages = this.privateMessageBuffer.get(ws.idtarget);
+      for (const msg of pendingMessages) {
+        this.safeSend(ws, msg);
+      }
+      this.privateMessageBuffer.delete(ws.idtarget);
+    }
   }
 
   removeAllSeatsById(idtarget) {
     if (!idtarget) return;
 
-    console.log("removeAllSeatsById:", idtarget);
-    
     for (const [room, seatMap] of this.roomSeats) {
       for (const [seat, info] of seatMap) {
         if (info.namauser === "__LOCK__" + idtarget || info.namauser === idtarget) {
-          console.log("Removing seat", seat, "in room", room, "for user", idtarget);
           Object.assign(info, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
         }
       }
     }
-    
     this.userToSeat.delete(idtarget);
   }
 
@@ -229,14 +237,12 @@ export class ChatServer {
     try {
       data = JSON.parse(raw);
     } catch (e) {
-      console.log("Invalid JSON:", raw);
       return;
     }
 
     if (!Array.isArray(data) || data.length === 0) return;
 
     const evt = data[0];
-    console.log("Received event:", evt, "from:", ws.idtarget);
 
     switch (evt) {
       case "vipbadge":
@@ -247,12 +253,9 @@ export class ChatServer {
 
       case "setIdTarget": {
         const newId = data[1];
-        console.log("setIdTarget:", newId);
-        
         if (ws.idtarget && ws.idtarget !== newId) {
           this.removeAllSeatsById(ws.idtarget);
         }
-        
         ws.idtarget = newId;
         this.safeSend(ws, ["setIdTargetAck", newId]);
         break;
@@ -270,6 +273,100 @@ export class ChatServer {
         break;
       }
 
+      // NEW: Online users queries
+      case "getOnlineUsers": {
+        const users = [];
+        let count = 0;
+        for (const c of this.clients) {
+          if (count >= 1000) break;
+          if (c.idtarget && c.readyState === 1) {
+            users.push(c.idtarget);
+            count++;
+          }
+        }
+        this.safeSend(ws, ["allOnlineUsers", users]);
+        break;
+      }
+
+      case "getRoomOnlineUsers": {
+        const roomName = data[1];
+        if (!roomList.includes(roomName)) return;
+        const users = [];
+        let count = 0;
+        for (const c of this.clients) {
+          if (count >= 500) break;
+          if (c.roomname === roomName && c.idtarget && c.readyState === 1) {
+            users.push(c.idtarget);
+            count++;
+          }
+        }
+        this.safeSend(ws, ["roomOnlineUsers", roomName, users]);
+        break;
+      }
+
+      // IMPROVED: Private message with offline buffer
+      case "private": {
+        const [, idt, url, msg, sender] = data;
+        const ts = Date.now();
+        const out = ["private", idt, url, msg, ts, sender];
+        this.safeSend(ws, out);
+        
+        let delivered = false;
+        for (const c of this.clients) {
+          if (c.idtarget === idt && c.readyState === 1) {
+            this.safeSend(c, out);
+            delivered = true;
+            break;
+          }
+        }
+        
+        if (!delivered) {
+          if (!this.privateMessageBuffer.has(idt)) {
+            this.privateMessageBuffer.set(idt, []);
+          }
+          this.privateMessageBuffer.get(idt).push(out);
+          this.safeSend(ws, ["privateFailed", idt, "User offline"]);
+        }
+        break;
+      }
+
+      // IMPROVED: Notification with offline buffer
+      case "sendnotif": {
+        const [, idtarget, noimageUrl, username, deskripsi] = data;
+        const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
+        
+        let delivered = false;
+        for (const c of this.clients) {
+          if (c.idtarget === idtarget && c.readyState === 1) {
+            this.safeSend(c, notif);
+            delivered = true;
+            break;
+          }
+        }
+        
+        if (!delivered) {
+          if (!this.privateMessageBuffer.has(idtarget)) {
+            this.privateMessageBuffer.set(idtarget, []);
+          }
+          this.privateMessageBuffer.get(idtarget).push(notif);
+        }
+        break;
+      }
+
+      case "isUserOnline": {
+        const username = data[1];
+        const tanda = data[2] ?? "";
+        let online = false;
+        for (const c of this.clients) {
+          if (c.idtarget === username && c.readyState === 1) {
+            online = true;
+            break;
+          }
+        }
+        this.safeSend(ws, ["userOnlineStatus", username, online, tanda]);
+        break;
+      }
+
       case "getAllRoomsUserCount": {
         const allCounts = this.getJumlahRoom();
         const result = roomList.map(room => [room, allCounts[room]]);
@@ -281,60 +378,45 @@ export class ChatServer {
         this.safeSend(ws, ["currentNumber", this.currentNumber]);
         break;
 
-      // FIXED: Improved joinRoom handler
       case "joinRoom": {
         const newRoom = data[1];
-        console.log("joinRoom attempt:", newRoom, "by user:", ws.idtarget);
-        
         if (!roomList.includes(newRoom)) {
-          console.log("joinRoom: Unknown room", newRoom);
           this.safeSend(ws, ["error", "Unknown room: " + newRoom]);
           return;
         }
 
         if (!ws.idtarget) {
-          console.log("joinRoom: No idtarget set");
           this.safeSend(ws, ["error", "Please set ID first"]);
           return;
         }
 
-        // Remove from previous room if any
         if (ws.roomname && ws.roomname !== newRoom) {
           this.removeAllSeatsById(ws.idtarget);
         }
 
-        // Try to lock a seat
         const foundSeat = this.lockSeat(newRoom, ws);
         
         if (foundSeat === null) {
-          console.log("joinRoom: Room full", newRoom);
           this.safeSend(ws, ["roomFull", newRoom]);
           return;
         }
 
-        console.log("joinRoom: Success - room:", newRoom, "seat:", foundSeat, "user:", ws.idtarget);
-        
-        // Update client state
         ws.roomname = newRoom;
         ws.numkursi = new Set([foundSeat]);
         
-        // Send success messages
         this.safeSend(ws, ["numberKursiSaya", foundSeat]);
         this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
         
-        // Finalize seat assignment (remove lock)
+        // Finalize seat assignment
         const seatMap = this.roomSeats.get(newRoom);
         const seatInfo = seatMap.get(foundSeat);
-        if (seatInfo && seatInfo.namauser === "__LOCK__" + ws.idtarget) {
+        if (seatInfo.namauser === "__LOCK__" + ws.idtarget) {
           seatInfo.namauser = ws.idtarget;
+          seatInfo.lockTime = undefined;
         }
 
-        // Send room state
         this.sendAllStateTo(ws, newRoom);
-        
-        // Notify others
         this.broadcastRoomUserCount(newRoom);
-        
         break;
       }
 
@@ -347,6 +429,18 @@ export class ChatServer {
         }
         this.chatMessageBuffer.get(roomname)
           .push(["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
+        break;
+      }
+
+      // NEW: Gift message handler
+      case "gift": {
+        const [, roomname, sender, receiver, giftName] = data;
+        if (!roomList.includes(roomname)) return;
+        if (!this.chatMessageBuffer.has(roomname)) {
+          this.chatMessageBuffer.set(roomname, []);
+        }
+        this.chatMessageBuffer.get(roomname)
+          .push(["gift", roomname, sender, receiver, giftName, Date.now()]);
         break;
       }
 
@@ -404,7 +498,6 @@ export class ChatServer {
         break;
       }
 
-      // Add ping handler for connection health
       case "ping":
         this.safeSend(ws, ["pong"]);
         break;
@@ -413,13 +506,10 @@ export class ChatServer {
 
   cleanupClient(ws) {
     const id = ws.idtarget;
-    console.log("cleanupClient:", id);
-    
     if (id) {
       this.removeAllSeatsById(id);
     }
 
-    // Clean room seats
     const room = ws.roomname;
     const kursis = ws.numkursi;
     if (room && kursis && this.roomSeats.has(room)) {
@@ -453,17 +543,10 @@ export class ChatServer {
     ws.numkursi = new Set();
 
     this.clients.add(ws);
-    console.log("New client connected, total:", this.clients.size);
 
     ws.addEventListener("message", (ev) => this.handleMessage(ws, ev.data));
-    ws.addEventListener("close", () => {
-      console.log("Client disconnected:", ws.idtarget);
-      this.cleanupClient(ws);
-    });
-    ws.addEventListener("error", (err) => {
-      console.log("Client error:", ws.idtarget, err);
-      this.cleanupClient(ws);
-    });
+    ws.addEventListener("close", () => this.cleanupClient(ws));
+    ws.addEventListener("error", () => this.cleanupClient(ws));
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -482,7 +565,6 @@ export default {
       }
       return new Response("WebSocket endpoint", { status: 200 });
     } catch (error) {
-      console.error("Worker error:", error);
       return new Response("Internal Server Error", { status: 500 });
     }
   }
