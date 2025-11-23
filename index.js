@@ -446,7 +446,7 @@ export class ChatServer {
         this.userDisconnectTime.delete(id);
         ws.roomname = undefined;
         ws.numkursi = new Set();
-        this.forceUserCleanup(id);
+    
         this.safeSend(ws, ["sessionCreated", newSessionId]);
       } else if (baru === false) {
         const seatInfo = this.userToSeat.get(id);
@@ -976,3 +976,4 @@ export default {
     }
   }
 };
+
