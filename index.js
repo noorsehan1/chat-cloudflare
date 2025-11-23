@@ -68,6 +68,12 @@ export class ChatServer {
 
     this.messageCounts = new Map();
     this.MAX_MESSAGES_PER_SECOND = 20;
+    
+    // Untuk retry mechanism
+    this.pendingSetIdOperations = new Map();
+    this.pendingUrlConnections = new Map();
+    this.MAX_RETRIES = 3;
+    this.RETRY_DELAY = 100;
   }
 
   clearSeatBuffer(room, seatNumber) {
@@ -124,6 +130,127 @@ export class ChatServer {
         if (c.readyState === 1) c.close(1000, "Session removed");
         this.clients.delete(c);
       }
+    }
+  }
+
+  // Retry mechanism untuk setIdTarget2
+  async handleSetIdTarget2WithRetry(ws, id, baru, retryCount = 0) {
+    if (!id) return;
+
+    // Cek jika sudah ada operasi yang sedang berjalan untuk ID ini
+    if (this.pendingSetIdOperations.has(id)) {
+      if (retryCount < this.MAX_RETRIES) {
+        // Tunggu sebentar dan coba lagi
+        await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY * (retryCount + 1)));
+        return this.handleSetIdTarget2WithRetry(ws, id, baru, retryCount + 1);
+      } else {
+        this.safeSend(ws, ["error", "Set ID operation timeout, please try again"]);
+        return;
+      }
+    }
+
+    // Tandai operasi sedang berjalan
+    this.pendingSetIdOperations.set(id, true);
+
+    try {
+      this.forceUserCleanup(id);
+      ws.idtarget = id;
+
+      if (baru === true) {
+        ws.roomname = undefined;
+        ws.numkursi = new Set();
+        this.safeSend(ws, ["needJoinRoom"]);
+      } else if (baru === false) {
+        const seatInfo = this.userToSeat.get(id);
+        if (seatInfo) {
+          const { room, seat } = seatInfo;
+          const seatMap = this.roomSeats.get(room);
+          if (seatMap?.has(seat)) {
+            const seatData = seatMap.get(seat);
+            if (seatData.namauser === id) {
+              ws.roomname = room;
+              ws.numkursi = new Set([seat]);
+              this.sendAllStateTo(ws, room);
+              this.broadcastRoomUserCount(room);
+            } else {
+              this.userToSeat.delete(id);
+              this.safeSend(ws, ["needJoinRoom"]);
+            }
+          } else {
+            this.userToSeat.delete(id);
+            this.safeSend(ws, ["needJoinRoom"]);
+          }
+        } else {
+          this.safeSend(ws, ["needJoinRoom"]);
+        }
+      }
+    } finally {
+      // Hapus tanda operasi selesai
+      this.pendingSetIdOperations.delete(id);
+    }
+  }
+
+  // Handler untuk connect URL dengan retry
+  async handleConnectUrlWithRetry(ws, url, retryCount = 0) {
+    if (!url) {
+      this.safeSend(ws, ["error", "URL is required"]);
+      return;
+    }
+
+    // Cek jika URL sudah dalam proses koneksi
+    if (this.pendingUrlConnections.has(url)) {
+      if (retryCount < this.MAX_RETRIES) {
+        // Tunggu dan coba lagi
+        await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY * (retryCount + 1)));
+        return this.handleConnectUrlWithRetry(ws, url, retryCount + 1);
+      } else {
+        this.safeSend(ws, ["error", "URL connection timeout, please try again"]);
+        return;
+      }
+    }
+
+    // Tandai URL sedang diproses
+    this.pendingUrlConnections.set(url, true);
+
+    try {
+      // Simulasi proses koneksi URL (ganti dengan logic sebenarnya)
+      const isConnected = await this.attemptUrlConnection(url);
+      
+      if (isConnected) {
+        this.safeSend(ws, ["urlConnected", url, true]);
+      } else {
+        if (retryCount < this.MAX_RETRIES) {
+          // Coba lagi dengan retry count yang meningkat
+          await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY * (retryCount + 1)));
+          return this.handleConnectUrlWithRetry(ws, url, retryCount + 1);
+        } else {
+          this.safeSend(ws, ["urlConnected", url, false, "Max retries exceeded"]);
+        }
+      }
+    } catch (error) {
+      if (retryCount < this.MAX_RETRIES) {
+        await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY * (retryCount + 1)));
+        return this.handleConnectUrlWithRetry(ws, url, retryCount + 1);
+      } else {
+        this.safeSend(ws, ["error", `URL connection failed: ${error.message}`]);
+      }
+    } finally {
+      // Hapus tanda URL selesai diproses
+      this.pendingUrlConnections.delete(url);
+    }
+  }
+
+  // Method untuk mencoba koneksi URL (simulasi)
+  async attemptUrlConnection(url) {
+    try {
+      // Simulasi koneksi URL - ganti dengan logic sebenarnya
+      const response = await fetch(url, { 
+        method: 'HEAD',
+        signal: AbortSignal.timeout(5000)
+      });
+      return response.ok;
+    } catch (error) {
+      return false;
     }
   }
 
@@ -232,39 +359,8 @@ export class ChatServer {
   }
 
   async handleSetIdTarget2(ws, id, baru) {
-    if (!id) return;
-
-    this.forceUserCleanup(id);
-    ws.idtarget = id;
-
-    if (baru === true) {
-      ws.roomname = undefined;
-      ws.numkursi = new Set();
-      this.safeSend(ws, ["needJoinRoom"]);
-    } else if (baru === false) {
-      const seatInfo = this.userToSeat.get(id);
-      if (seatInfo) {
-        const { room, seat } = seatInfo;
-        const seatMap = this.roomSeats.get(room);
-        if (seatMap?.has(seat)) {
-          const seatData = seatMap.get(seat);
-          if (seatData.namauser === id) {
-            ws.roomname = room;
-            ws.numkursi = new Set([seat]);
-            this.sendAllStateTo(ws, room);
-            this.broadcastRoomUserCount(room);
-          } else {
-            this.userToSeat.delete(id);
-            this.safeSend(ws, ["needJoinRoom"]);
-          }
-        } else {
-          this.userToSeat.delete(id);
-          this.safeSend(ws, ["needJoinRoom"]);
-        }
-      } else {
-        this.safeSend(ws, ["needJoinRoom"]);
-      }
-    }
+    // Gunakan retry mechanism
+    await this.handleSetIdTarget2WithRetry(ws, id, baru);
   }
 
   async handleJoinRoom(ws, newRoom) {
@@ -530,6 +626,10 @@ export class ChatServer {
 
         case "setIdTarget2": 
           this.handleSetIdTarget2(ws, data[1], data[2]); 
+          break;
+
+        case "connectUrl":
+          this.handleConnectUrlWithRetry(ws, data[1]);
           break;
 
         case "setIdTarget": {
