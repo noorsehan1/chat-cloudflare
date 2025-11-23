@@ -393,69 +393,79 @@ export class ChatServer {
     } catch (error) {}
   }
 
-  async handleSetIdTarget2(ws, id, baru, sessionId = null) {
-    if (!id) {
-      this.safeSend(ws, ["error", "Invalid user ID"]);
-      return;
-    }
-    const lockAcquired = await this.acquireUserLock(id, 'setId');
-    if (!lockAcquired) {
-      this.safeSend(ws, ["error", "Another operation in progress"]);
-      return;
-    }
-    try {
-      if (!baru && sessionId) {
-        const isValidSession = this._validateUserSession(id, sessionId);
-        if (!isValidSession) {
-          this.safeSend(ws, ["sessionExpired", null]);
-          return;
-        }
+async handleSetIdTarget2(ws, id, baru, sessionId = null) {
+  if (!id) {
+    this.safeSend(ws, ["error", "Invalid user ID"]);
+    return;
+  }
+  const lockAcquired = await this.acquireUserLock(id, 'setId');
+  if (!lockAcquired) {
+    this.safeSend(ws, ["error", "Another operation in progress"]);
+    return;
+  }
+  try {
+    if (!baru && sessionId) {
+      const isValidSession = this._validateUserSession(id, sessionId);
+      if (!isValidSession) {
+        this.safeSend(ws, ["sessionExpired", null]);
+        return;
       }
-      const newSessionId = this._createUserSession(id);
-      this._closeExistingConnection(id, newSessionId);
-      ws.idtarget = id;
-      ws.sessionId = newSessionId;
-      this.userToConnection.set(id, ws);
-      if (baru === true) {
-        this.userDisconnectTime.delete(id);
-        ws.roomname = undefined;
-        ws.numkursi = new Set();
-        this.forceUserCleanup(id);
-        this.safeSend(ws, ["sessionCreated", newSessionId]);
-      } else if (baru === false) {
-        const seatInfo = this.userToSeat.get(id);
-        if (seatInfo && this._validateUserSession(id, sessionId)) {
-          const { room, seat } = seatInfo;
-          const seatMap = this.roomSeats.get(room);
-          if (seatMap?.has(seat)) {
-            const seatData = seatMap.get(seat);
-            if (seatData.namauser === id) {
-              ws.roomname = room;
-              ws.numkursi = new Set([seat]);
-              this.sendAllStateTo(ws, room);
-              this._sendRecentChatHistory(ws, room);
-              this.broadcastRoomUserCount(room);
-              this.safeSend(ws, ["sessionRestored", newSessionId]);
-            } else {
-              this.userToSeat.delete(id);
-              this.forceUserCleanup(id);
-              this.safeSend(ws, ["needJoinRoom"]);
-            }
+    }
+    const newSessionId = this._createUserSession(id);
+    this._closeExistingConnection(id, newSessionId);
+    ws.idtarget = id;
+    ws.sessionId = newSessionId;
+    this.userToConnection.set(id, ws);
+    
+    if (baru === true) {
+      // ✅ USER BARU: Reset semua state dan JANGAN auto join room
+      this.userDisconnectTime.delete(id);
+      ws.roomname = undefined;
+      ws.numkursi = new Set();
+      this.forceUserCleanup(id); // Pastikan clean state
+      
+      // ✅ KIRIM RESPONSE TANPA ROOM DATA
+      
+    } else if (baru === false) {
+      // ✅ USER EXISTING: Coba restore previous state
+      const seatInfo = this.userToSeat.get(id);
+      
+      if (seatInfo && this._validateUserSession(id, sessionId)) {
+        const { room, seat } = seatInfo;
+        const seatMap = this.roomSeats.get(room);
+        
+        if (seatMap?.has(seat)) {
+          const seatData = seatMap.get(seat);
+          if (seatData.namauser === id) {
+            // ✅ AUTO JOIN ke room sebelumnya
+            ws.roomname = room;
+            ws.numkursi = new Set([seat]);
+            this.sendAllStateTo(ws, room);
+            this._sendRecentChatHistory(ws, room);
+            this.broadcastRoomUserCount(room);
           } else {
+            // ❌ Seat sudah diambil orang lain
             this.userToSeat.delete(id);
             this.forceUserCleanup(id);
             this.safeSend(ws, ["needJoinRoom"]);
           }
         } else {
+          // ❌ Seat tidak ditemukan
+          this.userToSeat.delete(id);
+          this.forceUserCleanup(id);
           this.safeSend(ws, ["needJoinRoom"]);
         }
+      } else {
+        // ❌ Tidak ada previous state atau session invalid
+        this.safeSend(ws, ["needJoinRoom"]);
       }
-    } catch (error) {
-      this.safeSend(ws, ["error", "Internal server error"]);
-    } finally {
-      this.releaseUserLock(id, 'setId');
     }
+    
+  } catch (error) {
+  } finally {
+    this.releaseUserLock(id, 'setId');
   }
+}
 
   async handleJoinRoom(ws, newRoom) {
     if (!roomList.includes(newRoom)) {
@@ -962,3 +972,4 @@ export default {
     }
   }
 };
+
