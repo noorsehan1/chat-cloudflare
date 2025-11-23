@@ -68,32 +68,6 @@ export class ChatServer {
 
     this.messageCounts = new Map();
     this.MAX_MESSAGES_PER_SECOND = 20;
-    this.userJoinLocks = new Map();
-    this.seatLocks = new Map();
-  }
-
-  async acquireUserJoinLock(idtarget) {
-    if (!idtarget) return true;
-    if (this.userJoinLocks.has(idtarget)) return false;
-    this.userJoinLocks.set(idtarget, true);
-    return true;
-  }
-
-  releaseUserJoinLock(idtarget) {
-    if (!idtarget) return;
-    this.userJoinLocks.delete(idtarget);
-  }
-
-  async acquireSeatLock(room, seatNumber) {
-    const seatKey = `${room}-${seatNumber}`;
-    if (this.seatLocks.has(seatKey)) return false;
-    this.seatLocks.set(seatKey, true);
-    return true;
-  }
-
-  releaseSeatLock(room, seatNumber) {
-    const seatKey = `${room}-${seatNumber}`;
-    this.seatLocks.delete(seatKey);
   }
 
   clearSeatBuffer(room, seatNumber) {
@@ -105,8 +79,6 @@ export class ChatServer {
   forceUserCleanup(idtarget) {
     if (!idtarget) return;
 
-    this.releaseUserJoinLock(idtarget);
-
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) continue;
@@ -115,7 +87,6 @@ export class ChatServer {
           if (seatInfo.viptanda > 0) this.vipManager.removeVipBadge(room, seatNumber);
           Object.assign(seatInfo, createEmptySeat());
           this.clearSeatBuffer(room, seatNumber);
-          this.releaseSeatLock(room, seatNumber);
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
         }
       }
@@ -129,7 +100,6 @@ export class ChatServer {
   fullRemoveById(idtarget) {
     if (!idtarget) return;
 
-    this.releaseUserJoinLock(idtarget);
     this.vipManager.cleanupUserVipBadges(idtarget);
 
     for (const room of roomList) {
@@ -141,7 +111,6 @@ export class ChatServer {
           Object.assign(info, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
           this.clearSeatBuffer(room, seatNumber);
-          this.releaseSeatLock(room, seatNumber);
         }
       }
       this.broadcastRoomUserCount(room);
@@ -265,89 +234,36 @@ export class ChatServer {
   async handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
-    const lockAcquired = await this.acquireUserJoinLock(id);
-    if (!lockAcquired) {
-      const message = baru === true 
-        ? "Please wait a moment..." 
-        : "Please wait...";
-      this.safeSend(ws, ["error", message]);
-      return;
-    }
+    this.forceUserCleanup(id);
+    ws.idtarget = id;
 
-    try {
-      this.forceUserCleanup(id);
-      ws.idtarget = id;
-
-      if (baru === true) {
-        ws.roomname = undefined;
-        ws.numkursi = new Set();
-        this.userToSeat.delete(id);
-        this.safeSend(ws, ["needJoinRoom"]);
-      } else {
-        const seatInfo = this.userToSeat.get(id);
-        if (seatInfo) {
-          const { room, seat } = seatInfo;
-          const seatMap = this.roomSeats.get(room);
-          
-          if (seatMap?.has(seat)) {
-            const seatData = seatMap.get(seat);
-            if (seatData.namauser === id) {
-              ws.roomname = room;
-              ws.numkursi = new Set([seat]);
-              this.sendAllStateTo(ws, room);
-              this.broadcastRoomUserCount(room);
-            } else {
-              this.userToSeat.delete(id);
-              this.safeSend(ws, ["needJoinRoom"]);
-            }
+    if (baru === true) {
+      ws.roomname = undefined;
+      ws.numkursi = new Set();
+      this.safeSend(ws, ["needJoinRoom"]);
+    } else if (baru === false) {
+      const seatInfo = this.userToSeat.get(id);
+      if (seatInfo) {
+        const { room, seat } = seatInfo;
+        const seatMap = this.roomSeats.get(room);
+        if (seatMap?.has(seat)) {
+          const seatData = seatMap.get(seat);
+          if (seatData.namauser === id) {
+            ws.roomname = room;
+            ws.numkursi = new Set([seat]);
+            this.sendAllStateTo(ws, room);
+            this.broadcastRoomUserCount(room);
           } else {
             this.userToSeat.delete(id);
             this.safeSend(ws, ["needJoinRoom"]);
           }
         } else {
+          this.userToSeat.delete(id);
           this.safeSend(ws, ["needJoinRoom"]);
         }
-      }
-    } catch (error) {
-      this.safeSend(ws, ["error", "Setup failed"]);
-    } finally {
-      this.releaseUserJoinLock(id);
-    }
-  }
-
-  async handleSetIdTarget(ws, newId) {
-    if (!newId) return;
-
-    const lockAcquired = await this.acquireUserJoinLock(newId);
-    if (!lockAcquired) {
-      this.safeSend(ws, ["error", "Please wait..."]);
-      return;
-    }
-
-    try {
-      if (ws.idtarget && ws.idtarget !== newId) {
-        this.forceUserCleanup(ws.idtarget);
-      }
-      
-      ws.idtarget = newId;
-
-      const prevSeat = this.userToSeat.get(newId);
-      if (prevSeat) {
-        ws.roomname = prevSeat.room;
-        ws.numkursi = new Set([prevSeat.seat]);
-        this.sendAllStateTo(ws, prevSeat.room);
       } else {
-        if (this.hasEverSetId) {
-          this.safeSend(ws, ["needJoinRoom"]);
-        }
+        this.safeSend(ws, ["needJoinRoom"]);
       }
-
-      this.hasEverSetId = true;
-      if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-    } catch (error) {
-      this.safeSend(ws, ["error", "Setup failed"]);
-    } finally {
-      this.releaseUserJoinLock(newId);
     }
   }
 
@@ -362,80 +278,40 @@ export class ChatServer {
       return false;
     }
 
-    const lockAcquired = await this.acquireUserJoinLock(ws.idtarget);
-    if (!lockAcquired) {
-      this.safeSend(ws, ["error", "Another join operation in progress"]);
+    if (ws.roomname && ws.roomname !== newRoom) {
+      await this.removeAllSeatsById(ws.idtarget);
+    }
+
+    const existingSeatInfo = this.userToSeat.get(ws.idtarget);
+    if (existingSeatInfo && existingSeatInfo.room === newRoom) {
+      this.safeSend(ws, ["error", "Already in this room"]);
       return false;
     }
 
-    try {
-      if (ws.roomname && ws.roomname !== newRoom) {
-        await this.removeAllSeatsById(ws.idtarget);
-      }
+    ws.roomname = newRoom;
+    const foundSeat = this.findAvailableSeat(newRoom, ws.idtarget);
 
-      const existingSeatInfo = this.userToSeat.get(ws.idtarget);
-      if (existingSeatInfo && existingSeatInfo.room === newRoom) {
-        this.safeSend(ws, ["error", "Already in this room"]);
-        return false;
-      }
-
-      ws.roomname = newRoom;
-      const foundSeat = await this.findAvailableSeat(newRoom, ws.idtarget);
-
-      if (foundSeat === null) {
-        this.safeSend(ws, ["roomFull", newRoom]);
-        return false;
-      }
-
-      const seatLockAcquired = await this.acquireSeatLock(newRoom, foundSeat);
-      if (!seatLockAcquired) {
-        this.safeSend(ws, ["error", "Seat unavailable, please try again"]);
-        return false;
-      }
-
-      try {
-        const seatMap = this.roomSeats.get(newRoom);
-        const currentSeat = seatMap.get(foundSeat);
-        if (currentSeat.namauser) {
-          this.safeSend(ws, ["error", "Seat taken, please try another"]);
-          return false;
-        }
-
-        Object.assign(currentSeat, {
-          noimageUrl: "",
-          namauser: ws.idtarget,
-          color: "",
-          itembawah: 0,
-          itematas: 0,
-          vip: 0,
-          viptanda: 0,
-          lastPoint: null
-        });
-        
-        ws.numkursi = new Set([foundSeat]);
-        this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-        this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-
-        if (ws.idtarget) {
-          this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-        }
-
-        this.clearSeatBuffer(newRoom, foundSeat);
-        
-        this.sendAllStateTo(ws, newRoom);
-        this.vipManager.getAllVipBadges(ws, newRoom);
-        this.broadcastRoomUserCount(newRoom);
-
-        return true;
-      } finally {
-        this.releaseSeatLock(newRoom, foundSeat);
-      }
-    } finally {
-      this.releaseUserJoinLock(ws.idtarget);
+    if (foundSeat === null) {
+      this.safeSend(ws, ["roomFull", newRoom]);
+      return false;
     }
+
+    ws.numkursi = new Set([foundSeat]);
+    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+
+    if (ws.idtarget) {
+      this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+    }
+
+    this.sendAllStateTo(ws, newRoom);
+    this.vipManager.getAllVipBadges(ws, newRoom);
+    this.broadcastRoomUserCount(newRoom);
+
+    return true;
   }
 
-  async findAvailableSeat(room, userId) {
+  findAvailableSeat(room, userId) {
     const seatMap = this.roomSeats.get(room);
     if (!seatMap) return null;
 
@@ -449,17 +325,7 @@ export class ChatServer {
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const k = seatMap.get(i);
       if (k && !k.namauser) {
-        const seatLockAcquired = await this.acquireSeatLock(room, i);
-        if (seatLockAcquired) {
-          try {
-            const currentSeat = seatMap.get(i);
-            if (currentSeat && !currentSeat.namauser) {
-              return i;
-            }
-          } finally {
-            this.releaseSeatLock(room, i);
-          }
-        }
+        return i;
       }
     }
     return null;
@@ -478,13 +344,13 @@ export class ChatServer {
       if (!info) continue;
       if (info.namauser) {
         allKursiMeta[seat] = {
-          noimageUrl: info.noimageUrl || "",
-          namauser: info.namauser || "",
-          color: info.color || "",
-          itembawah: info.itembawah || 0,
-          itematas: info.itematas || 0,
-          vip: info.vip || 0,
-          viptanda: info.viptanda || 0
+          noimageUrl: info.noimageUrl,
+          namauser: info.namauser,
+          color: info.color,
+          itembawah: info.itembawah,
+          itematas: info.itematas,
+          vip: info.vip,
+          viptanda: info.viptanda
         };
 
         if (info.lastPoint) {
@@ -550,7 +416,6 @@ export class ChatServer {
 
         Object.assign(currentSeat, createEmptySeat());
         this.clearSeatBuffer(room, seat);
-        this.releaseSeatLock(room, seat);
         this.broadcastToRoom(room, ["removeKursi", room, seat]);
         this.broadcastRoomUserCount(room);
       }
@@ -561,11 +426,6 @@ export class ChatServer {
 
   cleanupClientSafely(ws) {
     const id = ws.idtarget;
-    
-    if (id) {
-      this.releaseUserJoinLock(id);
-    }
-    
     if (!id) {
       this.clients.delete(ws);
       return;
@@ -672,9 +532,28 @@ export class ChatServer {
           this.handleSetIdTarget2(ws, data[1], data[2]); 
           break;
 
-        case "setIdTarget": 
-          this.handleSetIdTarget(ws, data[1]); 
+        case "setIdTarget": {
+          const newId = data[1];
+          if (ws.idtarget && ws.idtarget !== newId) {
+            this.forceUserCleanup(ws.idtarget);
+          }
+          ws.idtarget = newId;
+
+          const prevSeat = this.userToSeat.get(newId);
+          if (prevSeat) {
+            ws.roomname = prevSeat.room;
+            ws.numkursi = new Set([prevSeat.seat]);
+            this.sendAllStateTo(ws, prevSeat.room);
+          } else {
+            if (this.hasEverSetId) {
+              this.safeSend(ws, ["needJoinRoom"]);
+            }
+          }
+
+          this.hasEverSetId = true;
+          if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
           break;
+        }
 
         case "sendnotif": {
           const [, idtarget, noimageUrl, username, deskripsi] = data;
@@ -783,7 +662,6 @@ export class ChatServer {
           const seatMap = this.roomSeats.get(room);
           Object.assign(seatMap.get(seat), createEmptySeat());
           this.clearSeatBuffer(room, seat);
-          this.releaseSeatLock(room, seat);
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.broadcastRoomUserCount(room);
           break;
@@ -796,22 +674,10 @@ export class ChatServer {
           const seatMap = this.roomSeats.get(room);
           const currentInfo = seatMap.get(seat) || createEmptySeat();
           
-          if (currentInfo.namauser && currentInfo.namauser !== namauser) {
-            return;
-          }
-          
-          if (!currentInfo.namauser && namauser) {
-            return;
-          }
-
           Object.assign(currentInfo, {
-            noimageUrl: noimageUrl || currentInfo.noimageUrl,
-            namauser: namauser || currentInfo.namauser,
-            color: color || currentInfo.color,
-            itembawah: itembawah || currentInfo.itembawah,
-            itematas: itematas || currentInfo.itematas,
-            vip: vip || currentInfo.vip,
-            viptanda: viptanda || currentInfo.viptanda
+            noimageUrl, namauser, color, itembawah, itematas,
+            vip: vip || 0,
+            viptanda: viptanda || 0
           });
 
           seatMap.set(seat, currentInfo);
