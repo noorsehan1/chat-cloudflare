@@ -21,6 +21,7 @@ export class ChatServer {
 
     this.clients = new Set();
     this.userToSeat = new Map();
+    this.hasEverSetId = false; // NEW: Track if user ever set ID
 
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
@@ -32,7 +33,7 @@ export class ChatServer {
 
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
-    this.privateMessageBuffer = new Map(); // NEW: Buffer for offline private messages
+    this.privateMessageBuffer = new Map();
 
     this.currentNumber = 1;
     this.maxNumber = 6;
@@ -40,10 +41,13 @@ export class ChatServer {
 
     this._tickTimer = setInterval(() => this.tick(), this.intervalMillis);
     this._flushTimer = setInterval(() => this.periodicFlush(), 100);
-    this._cleanupTimer = setInterval(() => this.cleanExpiredLocks(), 30000); // NEW: Clean expired locks
+    this._cleanupTimer = setInterval(() => this.cleanExpiredLocks(), 30000);
 
     this.vipManager = new VipBadgeManager(this);
     this.lowcard = new LowCardGameManager(this);
+
+    // NEW: User disconnect tracking for setIdTarget2
+    this.userDisconnectTime = new Map();
   }
 
   safeSend(ws, arr) {
@@ -121,7 +125,6 @@ export class ChatServer {
     }
   }
 
-  // NEW: Clean expired locks
   cleanExpiredLocks() {
     const now = Date.now();
     for (const room of roomList) {
@@ -159,6 +162,44 @@ export class ChatServer {
       }
     }
     return null;
+  }
+
+  // NEW: Helper untuk send state saat error/reconnect
+  senderrorstate(ws, room) {
+    if (ws.readyState !== 1) return;
+
+    const seatMap = this.roomSeats.get(room);
+    if (!seatMap) return;
+
+    this.safeSend(ws, ["currentNumber", this.currentNumber]);
+
+    const count = this.getJumlahRoom()[room] || 0;
+    this.safeSend(ws, ["roomUserCount", room, count]);
+
+    const kursiUpdates = [];
+    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+      const info = seatMap.get(seat);
+      if (!info) continue;
+
+      if (info.namauser && !info.namauser.startsWith("__LOCK__")) {
+        kursiUpdates.push([
+          seat,
+          {
+            noimageUrl: info.noimageUrl,
+            namauser: info.namauser,
+            color: info.color,
+            itembawah: info.itembawah,
+            itematas: info.itematas,
+            vip: info.vip,
+            viptanda: info.viptanda
+          }
+        ]);
+      }
+    }
+
+    if (kursiUpdates.length > 0) {
+      this.safeSend(ws, ["kursiBatchUpdate", room, kursiUpdates]);
+    }
   }
 
   sendAllStateTo(ws, room) {
@@ -206,7 +247,7 @@ export class ChatServer {
     const count = this.getJumlahRoom()[room] || 0;
     this.safeSend(ws, ["roomUserCount", room, count]);
 
-    // NEW: Deliver buffered private messages
+    // Deliver buffered private messages
     if (ws.idtarget && this.privateMessageBuffer.has(ws.idtarget)) {
       const pendingMessages = this.privateMessageBuffer.get(ws.idtarget);
       for (const msg of pendingMessages) {
@@ -230,6 +271,63 @@ export class ChatServer {
     this.userToSeat.delete(idtarget);
   }
 
+  // NEW: handleSetIdTarget2 implementation
+  handleSetIdTarget2(ws, id, baru) {
+    if (!id) return;
+
+    console.log("setIdTarget2:", id, "baru:", baru);
+
+    // Cleanup previous session
+    this.removeAllSeatsById(id);
+
+    ws.idtarget = id;
+
+    if (baru === true) {
+      // User baru - reset everything
+      this.userDisconnectTime.delete(id);
+      ws.roomname = undefined;
+      ws.numkursi = new Set();
+      this.safeSend(ws, ["needJoinRoom"]);
+    }
+    else if (baru === false) {
+      // Returning user - try to restore previous state
+      const seatInfo = this.userToSeat.get(id);
+
+      if (seatInfo) {
+        const { room, seat } = seatInfo;
+        const seatMap = this.roomSeats.get(room);
+
+        if (seatMap?.has(seat)) {
+          const seatData = seatMap.get(seat);
+
+          if (seatData.namauser === id) {
+            // Successfully restore previous session
+            ws.roomname = room;
+            ws.numkursi = new Set([seat]);
+
+            // Send room state
+            this.sendAllStateTo(ws, room);
+            this.broadcastRoomUserCount(room);
+
+            // Handle chat history restoration if needed
+            if (this.userDisconnectTime.has(id)) {
+              const disconnectTime = this.userDisconnectTime.get(id);
+              // Logic untuk restore chat history bisa ditambahkan di sini
+              this.userDisconnectTime.delete(id);
+            }
+
+            console.log("Restored session for user:", id, "in room:", room, "seat:", seat);
+            return;
+          }
+        }
+      }
+
+      // Jika tidak bisa restore, minta join room baru
+      this.userToSeat.delete(id);
+      this.safeSend(ws, ["needJoinRoom"]);
+    }
+  }
+
   handleMessage(ws, raw) {
     if (ws.readyState !== 1) return;
 
@@ -251,13 +349,49 @@ export class ChatServer {
         this.vipManager.handleEvent(ws, data);
         break;
 
+      // NEW: setIdTarget2 handler
+      case "setIdTarget2": {
+        const id = data[1];
+        const baru = data[2];
+        this.handleSetIdTarget2(ws, id, baru);
+        break;
+      }
+
       case "setIdTarget": {
         const newId = data[1];
+        
         if (ws.idtarget && ws.idtarget !== newId) {
           this.removeAllSeatsById(ws.idtarget);
         }
+        
         ws.idtarget = newId;
+
+        const prevSeat = this.userToSeat.get(newId);
+
+        if (prevSeat) {
+          // Restore previous session
+          ws.roomname = prevSeat.room;
+          ws.numkursi = new Set([prevSeat.seat]);
+          this.senderrorstate(ws, prevSeat.room);
+
+          const seatMap = this.roomSeats.get(prevSeat.room);
+          if (seatMap) {
+            const seatInfo = seatMap.get(prevSeat.seat);
+            if (seatInfo.namauser === `__LOCK__${newId}` || !seatInfo.namauser) {
+              seatInfo.namauser = newId;
+              seatInfo.lockTime = undefined;
+            }
+          }
+        } else {
+          if (this.hasEverSetId) {
+            this.safeSend(ws, ["needJoinRoom"]);
+          }
+        }
+
+        this.hasEverSetId = true;
         this.safeSend(ws, ["setIdTargetAck", newId]);
+        
+        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
         break;
       }
 
@@ -273,7 +407,6 @@ export class ChatServer {
         break;
       }
 
-      // NEW: Online users queries
       case "getOnlineUsers": {
         const users = [];
         let count = 0;
@@ -304,7 +437,6 @@ export class ChatServer {
         break;
       }
 
-      // IMPROVED: Private message with offline buffer
       case "private": {
         const [, idt, url, msg, sender] = data;
         const ts = Date.now();
@@ -330,7 +462,6 @@ export class ChatServer {
         break;
       }
 
-      // IMPROVED: Notification with offline buffer
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
         const notif = ["notif", noimageUrl, username, deskripsi, Date.now()];
@@ -432,7 +563,6 @@ export class ChatServer {
         break;
       }
 
-      // NEW: Gift message handler
       case "gift": {
         const [, roomname, sender, receiver, giftName] = data;
         if (!roomList.includes(roomname)) return;
@@ -506,7 +636,10 @@ export class ChatServer {
 
   cleanupClient(ws) {
     const id = ws.idtarget;
+    
+    // Track disconnect time untuk setIdTarget2
     if (id) {
+      this.userDisconnectTime.set(id, Date.now());
       this.removeAllSeatsById(id);
     }
 
