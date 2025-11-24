@@ -363,86 +363,100 @@ handleSetIdTarget2(ws, id, baru) {
     const now = Date.now();
 
     if (baru === true) {
-      // NEW SESSION - cleanup hanya jika masih ada di room
-      const stillInRoom = this.isUserInAnyRoom(id);
-      if (stillInRoom) {
-        this.forceUserCleanup(id);
-      }
-      ws.idtarget = id;
-      this.userDisconnectTime.delete(id);
-      ws.roomname = undefined;
-      ws.numkursi = new Set();
-      this.safeSend(ws, ["joinroomawal"]);
-    } else {
-      // RECONNECT SESSION - JANGAN force cleanup!
-      ws.idtarget = id;
-      this.userDisconnectTime.delete(id); // Hapus pending disconnect time
-      
-      // Coba reconnect ke seat sebelumnya
-      const seatInfo = this.userToSeat.get(id);
-      
-      if (seatInfo && previousDisconnectTime && (now - previousDisconnectTime) <= RECONNECT_WINDOW) {
-        const { room, seat } = seatInfo;
-        const seatMap = this.roomSeats.get(room);
-        
-        if (seatMap?.has(seat)) {
-          const seatData = seatMap.get(seat);
-          
-          // Jika seat masih available atau masih milik user ini
-          if (!seatData.namauser || seatData.namauser === id) {
-            // Restore user data jika seat kosong
-            if (!seatData.namauser) {
-              Object.assign(seatData, {
-                namauser: id,
-                noimageUrl: seatData.noimageUrl || "",
-                color: seatData.color || "",
-                itembawah: seatData.itembawah || 0,
-                itematas: seatData.itematas || 0,
-                vip: seatData.vip || 0,
-                viptanda: seatData.viptanda || 0
-              });
-            }
-            
-            ws.roomname = room;
-            ws.numkursi = new Set([seat]);
-            this.safeSend(ws, ["currentNumber", this.currentNumber]);
-
-            this.sendAllStateTo(ws, room);
-            this.broadcastRoomUserCount(room);
-            
-            // Restore chat history
-            if (this.roomChatHistory.has(room)) {
-              const recentChats = this.getChatHistorySince(room, previousDisconnectTime);
-              
-              if (recentChats.length > 0) {
-                for (let i = 0; i < recentChats.length; i++) {
-                  const chat = recentChats[i];
-                  this.safeSend(ws, [
-                    "restoreChatHistory",
-                    room,
-                    chat.noImageURL,
-                    chat.username,
-                    chat.message,
-                    chat.usernameColor,
-                    chat.chatTextColor
-                  ]);
-                }
-                
-                this.updateUserLastChatTime(id, room);
-              }
-            }
-            
-            // Broadcast bahwa user kembali online
-            return;
-          }
+        // NEW SESSION - cleanup hanya jika masih ada di room
+        const stillInRoom = this.isUserInAnyRoom(id);
+        if (stillInRoom) {
+            this.forceUserCleanup(id);
         }
-      }
-      
-      // Jika tidak bisa reconnect, hapus data lama dan minta join baru
-      this.forceUserCleanup(id); // ← HANYA di sini jika reconnect gagal
-      this.safeSend(ws, ["needJoinRoom"]);
+        ws.idtarget = id;
+        this.userDisconnectTime.delete(id);
+        ws.roomname = undefined;
+        ws.numkursi = new Set();
+        this.safeSend(ws, ["joinroomawal"]);
+    } else {
+        // RECONNECT SESSION - JANGAN force cleanup!
+        ws.idtarget = id;
+        this.userDisconnectTime.delete(id); // Hapus pending disconnect time
+        
+        // Coba reconnect ke seat sebelumnya
+        const seatInfo = this.userToSeat.get(id);
+        
+        if (seatInfo && previousDisconnectTime && (now - previousDisconnectTime) <= RECONNECT_WINDOW) {
+            const { room, seat } = seatInfo;
+            const seatMap = this.roomSeats.get(room);
+            
+            if (seatMap?.has(seat)) {
+                const seatData = seatMap.get(seat);
+                
+                // Jika seat masih available atau masih milik user ini
+                if (!seatData.namauser || seatData.namauser === id) {
+                    // Restore user data jika seat kosong
+                    if (!seatData.namauser) {
+                        Object.assign(seatData, {
+                            namauser: id,
+                            noimageUrl: seatData.noimageUrl || "",
+                            color: seatData.color || "",
+                            itembawah: seatData.itembawah || 0,
+                            itematas: seatData.itematas || 0,
+                            vip: seatData.vip || 0,
+                            viptanda: seatData.viptanda || 0
+                        });
+                    }
+                    
+                    ws.roomname = room;
+                    ws.numkursi = new Set([seat]);
+                    this.safeSend(ws, ["currentNumber", this.currentNumber]);
+
+                    this.sendAllStateTo(ws, room);
+                    this.broadcastRoomUserCount(room);
+                    
+                    // PERBAIKAN: Restore chat history dengan format yang benar
+                    if (this.roomChatHistory.has(room)) {
+                        const recentChats = this.getChatHistorySince(room, previousDisconnectTime);
+                        
+                        if (recentChats.length > 0) {
+                            console.log(`Restoring ${recentChats.length} chats for user ${id} in room ${room}`);
+                            
+                            // Kirim semua chat history dalam satu array
+                            const chatHistoryArray = [];
+                            for (let i = 0; i < recentChats.length; i++) {
+                                const chat = recentChats[i];
+                                
+                                // Format: [noImageUrl, usernameColor, username, message, chatTextColor, timestamp]
+                                chatHistoryArray.push([
+                                    chat.noImageURL || "0",          // index 0 - noImageUrl (string)
+                                    0,                               // index 1 - usernameColor (default 0)
+                                    chat.username,                   // index 2 - username
+                                    chat.message,                    // index 3 - message
+                                    0,                               // index 4 - chatTextColor (default 0)
+                                    chat.timestamp || Date.now()     // index 5 - timestamp
+                                ]);
+                            }
+                            
+                            // Kirim sebagai event restoreChatHistory dengan semua data
+                            this.safeSend(ws, [
+                                "restoreChatHistory",
+                                room,
+                                chatHistoryArray
+                            ]);
+                            
+                            this.updateUserLastChatTime(id, room);
+                        }
+                    }
+                    
+                    console.log(`User ${id} reconnected to room ${room}, seat ${seat}`);
+                    return;
+                }
+            }
+        }
+        
+        // Jika tidak bisa reconnect, hapus data lama dan minta join baru
+        this.forceUserCleanup(id); // ← HANYA di sini jika reconnect gagal
+        this.safeSend(ws, ["needJoinRoom"]);
     }
 }
+
+  
   handleJoinRoom(ws, newRoom) {
     if (!roomList.includes(newRoom)) {
       this.safeSend(ws, ["error", "Invalid room"]);
@@ -925,6 +939,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
