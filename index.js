@@ -928,8 +928,8 @@ export class ChatServer {
 
       case "gameLowCardStart":
       case "gameLowCardJoin":
-      case "gameLowCardLeave":
-      case "gameLowCardSubmit":
+      case "gameLowCardNumber":
+      case "gameLowCardEnd":
         if (ws.roomname === "LowCard") {
           setTimeout(() => this.lowcard.handleEvent(ws, data), 0);
         }
@@ -988,3 +988,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
