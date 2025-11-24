@@ -359,7 +359,7 @@ export class ChatServer {
     if (baru === true) {
       ws.roomname = undefined;
       ws.numkursi = new Set();
-      this.safeSend(ws, ["needJoinRoom"]);
+      this.safeSend(ws, ["joinroomawal"]);
     } else if (baru === false) {
       const seatInfo = this.userToSeat.get(id);
       if (seatInfo) {
@@ -877,3 +877,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
