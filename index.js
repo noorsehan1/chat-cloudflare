@@ -812,8 +812,8 @@ export class ChatServer {
           usernameColor,
           chatTextColor
         });
-        if (history.length > 30) {
-          this.roomChatHistory.set(roomname, history.slice(-30));
+        if (history.length > 15) {
+          this.roomChatHistory.set(roomname, history.slice(-15));
         }
         break;
       }
@@ -933,3 +933,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
