@@ -114,8 +114,8 @@ export class ChatServer {
     }
 
     for (const [room, history] of this.roomChatHistory.entries()) {
-      if (history.length > 30) {
-        this.roomChatHistory.set(room, history.slice(-30));
+      if (history.length > 15) {
+        this.roomChatHistory.set(room, history.slice(-15));
       }
     }
 
@@ -933,4 +933,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
