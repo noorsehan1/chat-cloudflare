@@ -370,6 +370,8 @@ export class ChatServer {
           if (seatData.namauser === id) {
             ws.roomname = room;
             ws.numkursi = new Set([seat]);
+            this.safeSend(ws, ["currentNumber", this.currentNumber]);
+
             this.sendAllStateTo(ws, room);
             this.broadcastRoomUserCount(room);
             
@@ -380,7 +382,7 @@ export class ChatServer {
                 for (let i = 0; i < recentChats.length; i++) {
                   const chat = recentChats[i];
                   this.safeSend(ws, [
-                    "chat",
+                    "restoreChatHistory",
                     room,
                     chat.noImageURL,
                     chat.username,
@@ -430,6 +432,7 @@ export class ChatServer {
 
     ws.roomname = newRoom;
     const foundSeat = this.findEmptySeat(newRoom, ws);
+    this.safeSend(ws, ["currentNumber", this.currentNumber]);
 
     if (foundSeat === null) {
       this.safeSend(ws, ["roomFull", newRoom]);
@@ -513,7 +516,6 @@ export class ChatServer {
       this.safeSend(ws, ["allPointsList", room, lastPointsData]);
     }
 
-    this.safeSend(ws, ["currentNumber", this.currentNumber]);
     const count = this.getJumlahRoom()[room] || 0;
     this.safeSend(ws, ["roomUserCount", room, count]);
   }
@@ -877,4 +879,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
