@@ -75,6 +75,24 @@ export class ChatServer {
     this._cleanupTimer = setInterval(() => {
       this.cleanupStaleData();
     }, 5 * 60 * 1000);
+
+    // Timer untuk pending cleanup (5 menit timeout)
+    this._pendingCleanupTimer = setInterval(() => {
+      this.pendingUserCleanup();
+    }, 60 * 1000);
+  }
+
+  // Method untuk membersihkan user yang sudah disconnect terlalu lama
+  pendingUserCleanup() {
+    const now = Date.now();
+    const DISCONNECT_TIMEOUT = 5 * 60 * 1000; // 5 menit
+    
+    for (const [userId, disconnectTime] of this.userDisconnectTime.entries()) {
+      if (now - disconnectTime > DISCONNECT_TIMEOUT) {
+        console.log(`Auto-removing user ${userId} after timeout`);
+        this.fullRemoveById(userId);
+      }
+    }
   }
 
   cleanupStaleData() {
@@ -340,7 +358,11 @@ export class ChatServer {
   handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
-    // Ketika baru = true, cari dan hapus semua data user yang tertinggal di semua room
+    const RECONNECT_WINDOW = 5 * 60 * 1000; // 5 menit
+    const previousDisconnectTime = this.userDisconnectTime.get(id);
+    const now = Date.now();
+
+    // Jika baru = true, cari dan hapus semua data user yang tertinggal di semua room
     if (baru === true) {
       const stillInRoom = this.isUserInAnyRoom(id);
       if (stillInRoom) {
@@ -348,26 +370,45 @@ export class ChatServer {
       }
     }
 
-    const previousDisconnectTime = this.userDisconnectTime.get(id);
-    const now = Date.now();
-
+    // Force cleanup user sebelumnya jika ada
     this.forceUserCleanup(id);
     ws.idtarget = id;
 
+    // Hapus dari disconnect time
     this.userDisconnectTime.delete(id);
 
     if (baru === true) {
+      // New session - reset everything
       ws.roomname = undefined;
       ws.numkursi = new Set();
       this.safeSend(ws, ["joinroomawal"]);
     } else if (baru === false) {
+      // Reconnecting - coba reconnect ke seat sebelumnya
       const seatInfo = this.userToSeat.get(id);
-      if (seatInfo) {
+      
+      // Cek apakah masih dalam reconnect window dan seat info valid
+      if (seatInfo && previousDisconnectTime && (now - previousDisconnectTime) <= RECONNECT_WINDOW) {
         const { room, seat } = seatInfo;
         const seatMap = this.roomSeats.get(room);
+        
         if (seatMap?.has(seat)) {
           const seatData = seatMap.get(seat);
-          if (seatData.namauser === id) {
+          
+          // Jika seat masih available atau masih milik user ini
+          if (!seatData.namauser || seatData.namauser === id) {
+            // Restore user data jika seat kosong
+            if (!seatData.namauser) {
+              Object.assign(seatData, {
+                namauser: id,
+                noimageUrl: seatData.noimageUrl || "",
+                color: seatData.color || "",
+                itembawah: seatData.itembawah || 0,
+                itematas: seatData.itematas || 0,
+                vip: seatData.vip || 0,
+                viptanda: seatData.viptanda || 0
+              });
+            }
+            
             ws.roomname = room;
             ws.numkursi = new Set([seat]);
             this.safeSend(ws, ["currentNumber", this.currentNumber]);
@@ -375,6 +416,7 @@ export class ChatServer {
             this.sendAllStateTo(ws, room);
             this.broadcastRoomUserCount(room);
             
+            // Restore chat history
             if (this.roomChatHistory.has(room)) {
               const recentChats = this.getChatHistorySince(room, previousDisconnectTime);
               
@@ -395,17 +437,17 @@ export class ChatServer {
                 this.updateUserLastChatTime(id, room);
               }
             }
-          } else {
-            this.userToSeat.delete(id);
-            this.safeSend(ws, ["needJoinRoom"]);
+            
+            // Broadcast bahwa user kembali online
+            this.broadcastToRoom(room, ["userReconnected", room, seat]);
+            return;
           }
-        } else {
-          this.userToSeat.delete(id);
-          this.safeSend(ws, ["needJoinRoom"]);
         }
-      } else {
-        this.safeSend(ws, ["needJoinRoom"]);
       }
+      
+      // Jika tidak bisa reconnect, hapus data lama dan minta join baru
+      this.userToSeat.delete(id);
+      this.safeSend(ws, ["needJoinRoom"]);
     }
   }
 
@@ -420,6 +462,7 @@ export class ChatServer {
       return false;
     }
 
+    // Jika sudah di room lain, hapus dari room sebelumnya
     if (ws.roomname && ws.roomname !== newRoom) {
       this.removeAllSeatsById(ws.idtarget);
     }
@@ -459,13 +502,15 @@ export class ChatServer {
     const seatMap = this.roomSeats.get(room);
     if (!seatMap) return null;
 
+    // Cek apakah user sudah ada seat di room ini
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const seatInfo = seatMap.get(i);
       if (seatInfo && seatInfo.namauser === ws.idtarget) {
-        return null;
+        return i; // Kembalikan seat yang sudah ada
       }
     }
 
+    // Cari seat kosong
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const k = seatMap.get(i);
       if (k && !k.namauser) {
@@ -556,7 +601,11 @@ export class ChatServer {
     if (id) {
       const seatInfo = this.userToSeat.get(id);
       if (seatInfo && seatInfo.room) {
+        // Tandai waktu disconnect untuk pending removal (5 menit)
         this.userDisconnectTime.set(id, Date.now());
+        
+        // Jangan langsung hapus dari room, biarkan pending
+        // User masih bisa reconnect dalam waktu 5 menit
       }
 
       const activeConnections = Array.from(this.clients).filter(
@@ -571,8 +620,13 @@ export class ChatServer {
 
   handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
+    
+    // Jika onDestroy dipanggil manual, langsung hapus (bukan pending)
     this.fullRemoveById(idtarget);
     this.clients.delete(ws);
+    
+    // Hapus dari pending disconnect juga
+    this.userDisconnectTime.delete(idtarget);
   }
 
   getAllOnlineUsers() {
@@ -879,5 +933,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
