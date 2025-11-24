@@ -355,38 +355,32 @@ export class ChatServer {
   }
 
   // Handle user ID setting - dengan pengecekan data tersisa di semua room
-  handleSetIdTarget2(ws, id, baru) {
+handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
     const RECONNECT_WINDOW = 5 * 60 * 1000; // 5 menit
     const previousDisconnectTime = this.userDisconnectTime.get(id);
     const now = Date.now();
 
-    // Jika baru = true, cari dan hapus semua data user yang tertinggal di semua room
     if (baru === true) {
+      // NEW SESSION - cleanup hanya jika masih ada di room
       const stillInRoom = this.isUserInAnyRoom(id);
       if (stillInRoom) {
         this.forceUserCleanup(id);
       }
-    }
-
-    // Force cleanup user sebelumnya jika ada
-    this.forceUserCleanup(id);
-    ws.idtarget = id;
-
-    // Hapus dari disconnect time
-    this.userDisconnectTime.delete(id);
-
-    if (baru === true) {
-      // New session - reset everything
+      ws.idtarget = id;
+      this.userDisconnectTime.delete(id);
       ws.roomname = undefined;
       ws.numkursi = new Set();
       this.safeSend(ws, ["joinroomawal"]);
-    } else if (baru === false) {
-      // Reconnecting - coba reconnect ke seat sebelumnya
+    } else {
+      // RECONNECT SESSION - JANGAN force cleanup!
+      ws.idtarget = id;
+      this.userDisconnectTime.delete(id); // Hapus pending disconnect time
+      
+      // Coba reconnect ke seat sebelumnya
       const seatInfo = this.userToSeat.get(id);
       
-      // Cek apakah masih dalam reconnect window dan seat info valid
       if (seatInfo && previousDisconnectTime && (now - previousDisconnectTime) <= RECONNECT_WINDOW) {
         const { room, seat } = seatInfo;
         const seatMap = this.roomSeats.get(room);
@@ -439,18 +433,16 @@ export class ChatServer {
             }
             
             // Broadcast bahwa user kembali online
-            this.broadcastToRoom(room, ["userReconnected", room, seat]);
             return;
           }
         }
       }
       
       // Jika tidak bisa reconnect, hapus data lama dan minta join baru
-      this.userToSeat.delete(id);
+      this.forceUserCleanup(id); // ← HANYA di sini jika reconnect gagal
       this.safeSend(ws, ["needJoinRoom"]);
     }
-  }
-
+}
   handleJoinRoom(ws, newRoom) {
     if (!roomList.includes(newRoom)) {
       this.safeSend(ws, ["error", "Invalid room"]);
@@ -933,5 +925,6 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
