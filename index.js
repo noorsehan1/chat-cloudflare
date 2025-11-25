@@ -901,7 +901,6 @@ ws.addEventListener("message", (ev) => {
 });
 
 ws.addEventListener("error", (event) => {
-    this.fullRemoveById(ws.idtarget); // ✅ INSTANT REMOVE ON ERROR
 });
 
 ws.addEventListener("close", (event) => {
@@ -924,4 +923,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
