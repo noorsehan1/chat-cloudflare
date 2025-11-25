@@ -145,33 +145,13 @@ export class ChatServer {
       }
       this.broadcastRoomUserCount(room);
     }
-
-    this.userToSeat.delete(idtarget);
-    this.userDisconnectTime.delete(idtarget);
-    this.userLastChatTime.delete(idtarget);
   }
 
   fullRemoveById(idtarget) {
     if (!idtarget) return;
 
     this.vipManager.cleanupUserVipBadges(idtarget);
-
-    for (const room of roomList) {
-      const seatMap = this.roomSeats.get(room);
-      if (!seatMap) continue;
-
-      for (const [seatNumber, info] of seatMap) {
-        const n = info.namauser;
-        if (!n) continue;
-
-        if (n === idtarget) {
-          Object.assign(info, createEmptySeat());
-          this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
-          this.clearSeatBuffer(room, seatNumber);
-        }
-      }
-      this.broadcastRoomUserCount(room);
-    }
+    this.forceUserCleanup(idtarget);
 
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
@@ -584,10 +564,8 @@ export class ChatServer {
   handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
     
-    ws.isManualDestroy = true;
     this.fullRemoveById(idtarget);
     this.clients.delete(ws);
-    this.userDisconnectTime.delete(idtarget);
     
     if (ws.readyState === 1) {
         ws.close(1000, "Manual destroy");
@@ -879,7 +857,7 @@ export class ChatServer {
   async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || "";
     if (upgrade.toLowerCase() !== "websocket") {
-      return new Response("Expected WebSocket", { status: 426 });
+        return new Response("Expected WebSocket", { status: 426 });
     }
 
     const pair = new WebSocketPair();
@@ -895,19 +873,23 @@ export class ChatServer {
 
     this.clients.add(ws);
 
+    this.setupWebSocketHandlers(ws);
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  setupWebSocketHandlers(ws) {
     ws.addEventListener("message", (ev) => {
-      this.handleMessage(ws, ev.data);
+        this.handleMessage(ws, ev.data);
     });
 
     ws.addEventListener("error", (event) => {
-     
+        this.cleanupClientSafely(ws);
     });
 
     ws.addEventListener("close", (event) => {
-      this.cleanupClientSafely(ws);
+        this.cleanupClientSafely(ws);
     });
-
-    return new Response(null, { status: 101, webSocket: client });
   }
 }
 
