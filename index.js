@@ -970,19 +970,20 @@ export class ChatServer {
     this.clients.add(ws);
 
     ws.addEventListener("message", (ev) => {
-      this.handleMessage(ws, ev.data);
-    });
-
-    ws.addEventListener("error", (event) => {
-    // Hanya cleanup jika bukan manual destroy  
-    if (!ws.isManualDestroy) {
-        this.cleanupClientSafely(ws);
-    }
+    this.handleMessage(ws, ev.data);
 });
 
-  ws.addEventListener("close", (event) => {
-    // Hanya cleanup jika bukan manual destroy
-    if (!ws.isManualDestroy) {
+ws.addEventListener("error", (event) => {
+    this.cleanupClientSafely(ws);
+});
+
+ws.addEventListener("close", (event) => {
+    
+    if (event.code === 1000) {
+        // Normal closure - langsung destroy
+        this.handleOnDestroy(ws, ws.idtarget);
+    } else {
+        // Abnormal closure - pending cleanup
         this.cleanupClientSafely(ws);
     }
 });
@@ -1004,5 +1005,6 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
