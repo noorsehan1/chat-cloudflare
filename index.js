@@ -900,7 +900,18 @@ ws.addEventListener("error", (event) => {
 });
 
 ws.addEventListener("close", (event) => {
-    this.fullRemoveById(ws.idtarget); // ✅ INSTANT REMOVE ON CLOSE
+    console.log(`WebSocket closed for ${ws.idtarget}, code: ${event.code}`);
+    
+    // ✅ CEK CLOSE CODE UNTUK TENTUKAN ACTION
+    if (event.code === 1000 || event.code === 1001) {
+        // MANUAL CLOSE - INSTANT REMOVE
+        console.log(`🚨 MANUAL CLOSE - Force remove: ${ws.idtarget}`);
+        this.fullRemoveById(ws.idtarget);
+    } else {
+        // ABNORMAL CLOSE (mati data, network error) - PENDING 5 MENIT  
+        console.log(`⏳ ABNORMAL CLOSE (${event.code}) - Pending 5min: ${ws.idtarget}`);
+        this.cleanupClientSafely(ws);
+    }
 });
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -919,6 +930,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
