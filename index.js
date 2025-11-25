@@ -81,14 +81,12 @@ export class ChatServer {
     }, 60 * 1000);
   }
 
-  // Method untuk membersihkan user yang sudah disconnect terlalu lama
   pendingUserCleanup() {
     const now = Date.now();
-    const DISCONNECT_TIMEOUT = 5 * 60 * 1000; // 5 menit
+    const DISCONNECT_TIMEOUT = 5 * 60 * 1000;
     
     for (const [userId, disconnectTime] of this.userDisconnectTime.entries()) {
       if (now - disconnectTime > DISCONNECT_TIMEOUT) {
-        console.log(`Auto-removing user ${userId} after timeout`);
         this.fullRemoveById(userId);
       }
     }
@@ -226,7 +224,6 @@ export class ChatServer {
 
   broadcastToRoom(room, msg) {
     if (!room || !roomList.includes(room)) {
-      console.log(`Invalid room: ${room}`);
       return 0;
     }
     
@@ -346,7 +343,6 @@ export class ChatServer {
     return history[history.length - 1].timestamp;
   }
 
-  // Cek apakah user masih ada di room manapun
   isUserInAnyRoom(idtarget) {
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
@@ -364,12 +360,7 @@ export class ChatServer {
   handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
-    const RECONNECT_WINDOW = 5 * 60 * 1000; // 5 menit
-    const previousDisconnectTime = this.userDisconnectTime.get(id);
-    const now = Date.now();
-
     if (baru === true) {
-        // NEW SESSION - cleanup hanya jika masih ada di room
         const stillInRoom = this.isUserInAnyRoom(id);
         if (stillInRoom) {
             this.forceUserCleanup(id);
@@ -380,33 +371,21 @@ export class ChatServer {
         ws.numkursi = new Set();
         this.safeSend(ws, ["joinroomawal"]);
     } else {
-        // RECONNECT SESSION - JANGAN force cleanup!
         ws.idtarget = id;
-        this.userDisconnectTime.delete(id); // Hapus pending disconnect time
+        this.userDisconnectTime.delete(id);
         
-        // Coba reconnect ke seat sebelumnya
         const seatInfo = this.userToSeat.get(id);
         
-        if (seatInfo && previousDisconnectTime && (now - previousDisconnectTime) <= RECONNECT_WINDOW) {
+        if (seatInfo) {
             const { room, seat } = seatInfo;
             const seatMap = this.roomSeats.get(room);
             
             if (seatMap?.has(seat)) {
                 const seatData = seatMap.get(seat);
                 
-                // Jika seat masih available atau masih milik user ini
                 if (!seatData.namauser || seatData.namauser === id) {
-                    // Restore user data jika seat kosong
                     if (!seatData.namauser) {
-                        Object.assign(seatData, {
-                            namauser: id,
-                            noimageUrl: seatData.noimageUrl || "",
-                            color: seatData.color || "",
-                            itembawah: seatData.itembawah || 0,
-                            itematas: seatData.itematas || 0,
-                            vip: seatData.vip || 0,
-                            viptanda: seatData.viptanda || 0
-                        });
+                        seatData.namauser = id;
                     }
                     
                     ws.roomname = room;
@@ -416,48 +395,20 @@ export class ChatServer {
                     this.sendAllStateTo(ws, room);
                     this.broadcastRoomUserCount(room);
                     
-                    // Restore chat history dengan format yang benar
                     if (this.roomChatHistory.has(room)) {
-                        const recentChats = this.getChatHistorySince(room, previousDisconnectTime);
-                        
+                        const recentChats = this.getChatHistorySince(room, this.userDisconnectTime.get(id) || 0);
                         if (recentChats.length > 0) {
-                            console.log(`Restoring ${recentChats.length} chats for user ${id} in room ${room}`);
-                            
-                            // Kirim semua chat history dalam satu array
-                            const chatHistoryArray = [];
-                            for (let i = 0; i < recentChats.length; i++) {
-                                const chat = recentChats[i];
-                                
-                                // Format: [noImageUrl, usernameColor, username, message, chatTextColor, timestamp]
-                                chatHistoryArray.push([
-                                    chat.noImageURL || "0",          // index 0 - noImageUrl (string)
-                                    0,                               // index 1 - usernameColor (default 0)
-                                    chat.username,                   // index 2 - username
-                                    chat.message,                    // index 3 - message
-                                    0,                               // index 4 - chatTextColor (default 0)
-                                    chat.timestamp || Date.now()     // index 5 - timestamp
-                                ]);
-                            }
-                            
-                            // Kirim sebagai event restoreChatHistory dengan semua data
-                            this.safeSend(ws, [
-                                "restoreChatHistory",
-                                room,
-                                chatHistoryArray
+                            const chatHistoryArray = recentChats.map(chat => [
+                                chat.noImageURL || "0", 0, chat.username, chat.message, 0, chat.timestamp || Date.now()
                             ]);
-                            
-                            this.updateUserLastChatTime(id, room);
+                            this.safeSend(ws, ["restoreChatHistory", room, chatHistoryArray]);
                         }
                     }
-                    
-                    console.log(`User ${id} reconnected to room ${room}, seat ${seat}`);
                     return;
                 }
             }
         }
         
-        // Jika tidak bisa reconnect, hapus data lama dan minta join baru
-        this.forceUserCleanup(id);
         this.safeSend(ws, ["needJoinRoom"]);
     }
   }
@@ -473,11 +424,8 @@ export class ChatServer {
       return false;
     }
 
-    // Jika sudah di room lain, hapus dari room sebelumnya
     if (ws.roomname && ws.roomname !== newRoom) {
       this.removeAllSeatsById(ws.idtarget);
-      
-      // PASTIKAN update roomname SEBELUM kirim state
       ws.roomname = newRoom;
       ws.numkursi = new Set();
     } else {
@@ -518,15 +466,13 @@ export class ChatServer {
     const seatMap = this.roomSeats.get(room);
     if (!seatMap) return null;
 
-    // Cek apakah user sudah ada seat di room ini
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const seatInfo = seatMap.get(i);
       if (seatInfo && seatInfo.namauser === ws.idtarget) {
-        return i; // Kembalikan seat yang sudah ada
+        return i;
       }
     }
 
-    // Cari seat kosong
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const k = seatMap.get(i);
       if (k && !k.namauser) {
@@ -539,9 +485,7 @@ export class ChatServer {
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1 || !room) return;
     
-    // PASTIKAN ws benar-benar di room ini sebelum kirim state
     if (ws.roomname !== room) {
-      console.log(`Warning: Client ${ws.idtarget} not in room ${room}`);
       return;
     }
     
@@ -624,7 +568,6 @@ export class ChatServer {
     if (id) {
       const seatInfo = this.userToSeat.get(id);
       if (seatInfo && seatInfo.room) {
-        // Tandai waktu disconnect untuk pending removal (5 menit)
         this.userDisconnectTime.set(id, Date.now());
       }
 
@@ -641,21 +584,15 @@ export class ChatServer {
   handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
     
-    // Set flag bahwa ini manual destroy
     ws.isManualDestroy = true;
-    
-    // Jika onDestroy dipanggil manual, langsung hapus (bukan pending)
     this.fullRemoveById(idtarget);
     this.clients.delete(ws);
-    
-    // Hapus dari pending disconnect juga
     this.userDisconnectTime.delete(idtarget);
     
-    // Tutup koneksi secara manual
     if (ws.readyState === 1) {
         ws.close(1000, "Manual destroy");
     }
-}
+  }
 
   getAllOnlineUsers() {
     const users = [];
@@ -726,10 +663,9 @@ export class ChatServer {
       }
 
       case "onDestroy": 
-    // Set flag dan langsung handle destroy
-    ws.isManualDestroy = true;
-    this.handleOnDestroy(ws, ws.idtarget); 
-    break;
+        ws.isManualDestroy = true;
+        this.handleOnDestroy(ws, ws.idtarget); 
+        break;
         
       case "setIdTarget2": 
         this.handleSetIdTarget2(ws, data[1], data[2]); 
@@ -824,9 +760,7 @@ export class ChatServer {
       case "chat": {
         const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
         
-        // Validasi: pastikan client ada di room yang benar
         if (ws.roomname !== roomname) {
-          console.log(`Security: Client ${ws.idtarget} not in room ${roomname}`);
           return;
         }
         
@@ -858,9 +792,7 @@ export class ChatServer {
       case "updatePoint": {
         const [, room, seat, x, y, fast] = data;
         
-        // VALIDASI: Pastikan client ada di room yang benar
         if (ws.roomname !== room) {
-          console.log(`Security: Client ${ws.idtarget} not in room ${room}`);
           return;
         }
         
@@ -876,9 +808,7 @@ export class ChatServer {
       case "removeKursiAndPoint": {
         const [, room, seat] = data;
         
-        // VALIDASI: Pastikan client ada di room yang benar
         if (ws.roomname !== room) {
-          console.log(`Security: Client ${ws.idtarget} not in room ${room}`);
           return;
         }
         
@@ -894,9 +824,7 @@ export class ChatServer {
       case "updateKursi": {
         const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
         
-        // VALIDASI: Pastikan client ada di room yang benar
         if (ws.roomname !== room) {
-          console.log(`Security: Client ${ws.idtarget} trying to update seat in wrong room`);
           return;
         }
         
@@ -922,9 +850,7 @@ export class ChatServer {
       case "gift": {
         const [, roomname, sender, receiver, giftName] = data;
         
-        // VALIDASI: Pastikan client ada di room yang benar
         if (ws.roomname !== roomname) {
-          console.log(`Security: Client ${ws.idtarget} not in room ${roomname}`);
           return;
         }
         
@@ -970,23 +896,16 @@ export class ChatServer {
     this.clients.add(ws);
 
     ws.addEventListener("message", (ev) => {
-    this.handleMessage(ws, ev.data);
-});
+      this.handleMessage(ws, ev.data);
+    });
 
-ws.addEventListener("error", (event) => {
-    this.cleanupClientSafely(ws);
-});
+    ws.addEventListener("error", (event) => {
+     
+    });
 
-ws.addEventListener("close", (event) => {
-    
-    if (event.code === 1000) {
-        // Normal closure - langsung destroy
-        this.handleOnDestroy(ws, ws.idtarget);
-    } else {
-        // Abnormal closure - pending cleanup
-        this.cleanupClientSafely(ws);
-    }
-});
+    ws.addEventListener("close", (event) => {
+      this.cleanupClientSafely(ws);
+    });
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -1005,6 +924,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
-
