@@ -872,10 +872,10 @@ isUserStillInSeat(idtarget, room, seat) {
     }
   }
 
-  async fetch(request) {
+async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || "";
     if (upgrade.toLowerCase() !== "websocket") {
-      return new Response("Expected WebSocket", { status: 426 });
+        return new Response("Expected WebSocket", { status: 426 });
     }
 
     const pair = new WebSocketPair();
@@ -891,32 +891,31 @@ isUserStillInSeat(idtarget, room, seat) {
 
     this.clients.add(ws);
 
-// ✅ EVENT HANDLER YANG BENAR
-ws.addEventListener("message", (ev) => {
-    this.handleMessage(ws, ev.data);
-});
+    // ✅ EVENT HANDLERS
+    ws.addEventListener("message", (ev) => {
+        this.handleMessage(ws, ev.data);
+    });
 
-ws.addEventListener("error", (event) => {
-});
+    ws.addEventListener("error", (event) => {
+        // Error handling
+    });
 
-ws.addEventListener("close", (event) => {
+   ws.addEventListener("close", (event) => {
     console.log(`WebSocket closed for ${ws.idtarget}, code: ${event.code}`);
     
-    // ✅ CEK CLOSE CODE UNTUK TENTUKAN ACTION
-    if (event.code === 1000 || event.code === 1001) {
-        // MANUAL CLOSE - INSTANT REMOVE
-        console.log(`🚨 MANUAL CLOSE - Force remove: ${ws.idtarget}`);
-        this.fullRemoveById(ws.idtarget);
+    if (event.code === 1000) {
+        this.fullRemoveById(ws.idtarget); // ✅ MANUAL CLOSE
     } else {
-        // ABNORMAL CLOSE (mati data, network error) - PENDING 5 MENIT  
-        console.log(`⏳ ABNORMAL CLOSE (${event.code}) - Pending 5min: ${ws.idtarget}`);
-        this.cleanupClientSafely(ws);
+        this.cleanupClientSafely(ws); // ✅ TASK SWITCH/NETWORK ERROR
     }
 });
+
+
+    // ✅ RETURN WEBSOCKET CLIENT KE BROWSER
     return new Response(null, { status: 101, webSocket: client });
-  }
 }
 
+  
 export default {
   async fetch(req, env) {
     if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
@@ -930,6 +929,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
