@@ -888,8 +888,14 @@ export class ChatServer {
     });
 
     ws.addEventListener("close", (event) => {
-        this.cleanupClientSafely(ws);
-    });
+    // ✅ CEK JIKA INI MANUAL DESTROY
+    if (ws.isManualDestroy) {
+       
+        this.fullRemoveById(ws.idtarget); // ✅ LANGSUNG HAPUS, NO PENDING
+    } else {
+        this.cleanupClientSafely(ws); // ✅ NORMAL DISCONNECT - Pending 5 menit
+    }
+});
   }
 }
 
@@ -906,3 +912,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
