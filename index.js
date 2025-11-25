@@ -888,33 +888,52 @@ async fetch(request) {
     ws.roomname = undefined;
     ws.idtarget = undefined;
     ws.numkursi = new Set();
+    ws.isManualDestroy = false; // ✅ TAMBAH FLAG UNTUK MANUAL DESTROY
 
     this.clients.add(ws);
 
-    // ✅ EVENT HANDLERS
+    // ✅ EVENT HANDLER UNTUK MESSAGE
     ws.addEventListener("message", (ev) => {
-        this.handleMessage(ws, ev.data);
+        try {
+            this.handleMessage(ws, ev.data);
+        } catch (error) {
+            console.error(`Error handling message: ${error}`);
+        }
     });
 
+    // ✅ EVENT HANDLER UNTUK ERROR
     ws.addEventListener("error", (event) => {
-        // Error handling
+        console.error(`WebSocket error for ${ws.idtarget}:`, event.error);
+        // Untuk error, kita pending 5 menit (bisa reconnect)
+        if (ws.idtarget) {
+            this.cleanupClientSafely(ws);
+        }
     });
 
-   ws.addEventListener("close", (event) => {
-    console.log(`WebSocket closed for ${ws.idtarget}, code: ${event.code}`);
-    
-    if (event.code === 1000) {
-        this.fullRemoveById(ws.idtarget); // ✅ MANUAL CLOSE
-    } else {
-        this.cleanupClientSafely(ws); // ✅ TASK SWITCH/NETWORK ERROR
-    }
-});
-
+    // ✅ EVENT HANDLER UNTUK CLOSE - VERSI OPTIMAL
+    ws.addEventListener("close", (event) => {
+        console.log(`WebSocket closed for ${ws.idtarget}, code: ${event.code}, reason: ${event.reason}`);
+        
+        // ✅ STRATEGI: CODE 1000 = MANUAL CLOSE, LAINNYA = PENDING
+        if (event.code === 1000 || ws.isManualDestroy) {
+            console.log(`🚨 MANUAL CLOSE - Instant remove: ${ws.idtarget}`);
+            if (ws.idtarget) {
+                this.fullRemoveById(ws.idtarget);
+            }
+        } else {
+            console.log(`⏳ ABNORMAL CLOSE - Pending 5min: ${ws.idtarget} (code: ${event.code})`);
+            if (ws.idtarget) {
+                this.cleanupClientSafely(ws);
+            }
+        }
+        
+        // ✅ PASTIKAN HAPUS DARI CLIENTS SET
+        this.clients.delete(ws);
+    });
 
     // ✅ RETURN WEBSOCKET CLIENT KE BROWSER
     return new Response(null, { status: 101, webSocket: client });
 }
-
   
 export default {
   async fetch(req, env) {
@@ -929,6 +948,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
