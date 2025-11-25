@@ -887,13 +887,12 @@ export class ChatServer {
         this.cleanupClientSafely(ws);
     });
 
-    ws.addEventListener("close", (event) => {
-    // ✅ CEK JIKA INI MANUAL DESTROY
-    if (ws.isManualDestroy) {
-       
-        this.fullRemoveById(ws.idtarget); // ✅ LANGSUNG HAPUS, NO PENDING
+   ws.addEventListener("close", (event) => {
+    // ✅ CEK CLOSE CODE untuk deteksi manual vs automatic
+    if (event.code === 1000) {
+        this.fullRemoveById(ws.idtarget); // ✅ LANGSUNG HAPUS
     } else {
-        this.cleanupClientSafely(ws); // ✅ NORMAL DISCONNECT - Pending 5 menit
+        this.cleanupClientSafely(ws); // ✅ PENDING 5 MENIT
     }
 });
   }
@@ -912,4 +911,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
