@@ -357,7 +357,7 @@ export class ChatServer {
     return false;
   }
 
-handleSetIdTarget2(ws, id, baru) {
+  handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
     if (baru === true) {
@@ -389,9 +389,10 @@ handleSetIdTarget2(ws, id, baru) {
             this.safeSend(ws, ["needJoinRoom"]);
         }
     }
-}
-// ✅ METHOD HELPER UNTUK RESTORE CHAT
-restoreChatHistory(ws, room, userId) {
+  } // ✅ CLOSING BRACE YANG DITAMBAHKAN
+
+  // ✅ METHOD HELPER UNTUK RESTORE CHAT
+  restoreChatHistory(ws, room, userId) {
     if (this.roomChatHistory.has(room)) {
         const recentChats = this.getChatHistorySince(room, this.userDisconnectTime.get(userId) || 0);
         if (recentChats.length > 0) {
@@ -401,13 +402,14 @@ restoreChatHistory(ws, room, userId) {
             this.safeSend(ws, ["restoreChatHistory", room, chatHistoryArray]);
         }
     }
-}
-// ✅ METHOD PENDUKUNG
-isUserStillInSeat(idtarget, room, seat) {
+  }
+
+  // ✅ METHOD PENDUKUNG
+  isUserStillInSeat(idtarget, room, seat) {
     const seatMap = this.roomSeats.get(room);
     const seatData = seatMap?.get(seat);
     return seatData?.namauser === idtarget;
-}
+  }
   
   handleJoinRoom(ws, newRoom) {
     if (!roomList.includes(newRoom)) {
@@ -577,7 +579,7 @@ isUserStillInSeat(idtarget, room, seat) {
     }
   }
 
- handleOnDestroy(ws, idtarget) {
+  handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
     
     this.fullRemoveById(idtarget);
@@ -588,7 +590,7 @@ isUserStillInSeat(idtarget, room, seat) {
     if (ws.readyState === 1) {
         ws.close(1000, "Manual destroy");
     }
-}
+  }
 
   getAllOnlineUsers() {
     const users = [];
@@ -872,7 +874,7 @@ isUserStillInSeat(idtarget, room, seat) {
     }
   }
 
-async fetch(request) {
+  async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || "";
     if (upgrade.toLowerCase() !== "websocket") {
         return new Response("Expected WebSocket", { status: 426 });
@@ -888,7 +890,7 @@ async fetch(request) {
     ws.roomname = undefined;
     ws.idtarget = undefined;
     ws.numkursi = new Set();
-    ws.isManualDestroy = false; // ✅ TAMBAH FLAG UNTUK MANUAL DESTROY
+    ws.isManualDestroy = false;
 
     this.clients.add(ws);
 
@@ -904,17 +906,15 @@ async fetch(request) {
     // ✅ EVENT HANDLER UNTUK ERROR
     ws.addEventListener("error", (event) => {
         console.error(`WebSocket error for ${ws.idtarget}:`, event.error);
-        // Untuk error, kita pending 5 menit (bisa reconnect)
         if (ws.idtarget) {
             this.cleanupClientSafely(ws);
         }
     });
 
-    // ✅ EVENT HANDLER UNTUK CLOSE - VERSI OPTIMAL
+    // ✅ EVENT HANDLER UNTUK CLOSE
     ws.addEventListener("close", (event) => {
         console.log(`WebSocket closed for ${ws.idtarget}, code: ${event.code}, reason: ${event.reason}`);
         
-        // ✅ STRATEGI: CODE 1000 = MANUAL CLOSE, LAINNYA = PENDING
         if (event.code === 1000 || ws.isManualDestroy) {
             console.log(`🚨 MANUAL CLOSE - Instant remove: ${ws.idtarget}`);
             if (ws.idtarget) {
@@ -927,14 +927,13 @@ async fetch(request) {
             }
         }
         
-        // ✅ PASTIKAN HAPUS DARI CLIENTS SET
         this.clients.delete(ws);
     });
 
-    // ✅ RETURN WEBSOCKET CLIENT KE BROWSER
     return new Response(null, { status: 101, webSocket: client });
+  }
 }
-  
+
 export default {
   async fetch(req, env) {
     if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
@@ -948,9 +947,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
-
-
-
-
