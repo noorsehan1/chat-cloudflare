@@ -641,13 +641,21 @@ export class ChatServer {
   handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
     
+    // Set flag bahwa ini manual destroy
+    ws.isManualDestroy = true;
+    
     // Jika onDestroy dipanggil manual, langsung hapus (bukan pending)
     this.fullRemoveById(idtarget);
     this.clients.delete(ws);
     
     // Hapus dari pending disconnect juga
     this.userDisconnectTime.delete(idtarget);
-  }
+    
+    // Tutup koneksi secara manual
+    if (ws.readyState === 1) {
+        ws.close(1000, "Manual destroy");
+    }
+}
 
   getAllOnlineUsers() {
     const users = [];
@@ -718,9 +726,11 @@ export class ChatServer {
       }
 
       case "onDestroy": 
-        this.handleOnDestroy(ws, ws.idtarget); 
-        break;
-
+    // Set flag dan langsung handle destroy
+    ws.isManualDestroy = true;
+    this.handleOnDestroy(ws, ws.idtarget); 
+    break;
+        
       case "setIdTarget2": 
         this.handleSetIdTarget2(ws, data[1], data[2]); 
         break;
@@ -964,12 +974,18 @@ export class ChatServer {
     });
 
     ws.addEventListener("error", (event) => {
-      this.cleanupClientSafely(ws);
-    });
+    // Hanya cleanup jika bukan manual destroy  
+    if (!ws.isManualDestroy) {
+        this.cleanupClientSafely(ws);
+    }
+});
 
-    ws.addEventListener("close", (event) => {
-      this.cleanupClientSafely(ws);
-    });
+  ws.addEventListener("close", (event) => {
+    // Hanya cleanup jika bukan manual destroy
+    if (!ws.isManualDestroy) {
+        this.cleanupClientSafely(ws);
+    }
+});
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -988,4 +1004,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
