@@ -901,13 +901,12 @@ ws.addEventListener("message", (ev) => {
 });
 
 ws.addEventListener("error", (event) => {
-    this.cleanupClientSafely(ws); // ✅
+    this.fullRemoveById(ws.idtarget); // ✅ INSTANT REMOVE ON ERROR
 });
 
 ws.addEventListener("close", (event) => {
-    this.cleanupClientSafely(ws); // ✅ HANYA INI SAJA
+    this.fullRemoveById(ws.idtarget); // ✅ INSTANT REMOVE ON CLOSE
 });
-
     return new Response(null, { status: 101, webSocket: client });
   }
 }
@@ -925,3 +924,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
