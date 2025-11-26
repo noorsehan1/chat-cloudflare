@@ -563,8 +563,7 @@ export class ChatServer {
       }
 
       case "onDestroy": 
-        ws.isManualDestroy = true;
-        this.handleOnDestroy(ws, ws.idtarget); 
+      
         break;
         
       case "setIdTarget2": 
@@ -788,13 +787,15 @@ export class ChatServer {
 
     ws.addEventListener("error", (event) => {
         if (ws.idtarget) {
-            this.fullRemoveById(ws.idtarget);
+            ws.isManualDestroy = true;
+        this.handleOnDestroy(ws, ws.idtarget); 
         }
     });
 
     ws.addEventListener("close", (event) => {
         if (ws.idtarget) {
-            this.fullRemoveById(ws.idtarget);
+            ws.isManualDestroy = true;
+        this.handleOnDestroy(ws, ws.idtarget); 
         }
         this.clients.delete(ws);
     });
@@ -816,3 +817,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
