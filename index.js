@@ -27,6 +27,9 @@ export class ChatServer {
     this.clients = new Set();
     this.userToSeat = new Map();
     this.hasEverSetId = false;
+    
+    this.userDisconnectTime = new Map();
+    this.userLastChatTime = new Map();
 
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
@@ -43,10 +46,12 @@ export class ChatServer {
 
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
+    this.roomChatHistory = new Map();
 
     for (const room of roomList) {
       this.updateKursiBuffer.set(room, new Map());
       this.chatMessageBuffer.set(room, []);
+      this.roomChatHistory.set(room, []);
     }
 
     this._nextConnId = 1;
@@ -68,24 +73,49 @@ export class ChatServer {
     this.messageCounts = new Map();
     this.MAX_MESSAGES_PER_SECOND = 20;
 
-    // Cleanup memory setiap 2 menit
     this._cleanupTimer = setInterval(() => {
-      this.cleanupMemory();
-    }, 2 * 60 * 1000);
+      this.cleanupStaleData();
+    }, 5 * 60 * 1000);
+
+    this._pendingCleanupTimer = setInterval(() => {
+      this.pendingUserCleanup();
+    }, 60 * 1000);
   }
 
-  cleanupMemory() {
+  pendingUserCleanup() {
     const now = Date.now();
-    const currentWindow = Math.floor(now / 1000);
+    const DISCONNECT_TIMEOUT = 5 * 60 * 1000;
     
-    // Bersihkan messageCounts yang expired (lebih dari 2 menit)
+    for (const [userId, disconnectTime] of this.userDisconnectTime.entries()) {
+      if (now - disconnectTime > DISCONNECT_TIMEOUT) {
+        console.log(`🕒 Cleaning up disconnected user: ${userId}`);
+        this.fullRemoveById(userId);
+        this.userDisconnectTime.delete(userId);
+      }
+    }
+  }
+
+  cleanupStaleData() {
+    const now = Date.now();
+    const ONE_HOUR = 60 * 60 * 1000;
+    
+    // Clean old disconnect times
+    for (const [userId, disconnectTime] of this.userDisconnectTime.entries()) {
+      if (now - disconnectTime > ONE_HOUR) {
+        this.userDisconnectTime.delete(userId);
+        this.userLastChatTime.delete(userId);
+      }
+    }
+
+    // Clean old message counts
     for (const [key, stats] of this.messageCounts.entries()) {
-      if (stats.window < currentWindow - 120) {
+      const currentWindow = Math.floor(now / 1000);
+      if (stats.window < currentWindow - 60) {
         this.messageCounts.delete(key);
       }
     }
-    
-    // Clean old points data (> 30 seconds)
+
+    // Clean old points data
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) continue;
@@ -95,17 +125,11 @@ export class ChatServer {
         }
       }
     }
-    
-    // Bersihkan buffer yang kosong
+
+    // Clean empty buffers
     for (const [room, buffer] of this.chatMessageBuffer.entries()) {
       if (buffer.length === 0) {
         this.chatMessageBuffer.delete(room);
-      }
-    }
-    
-    for (const [room, buffer] of this.updateKursiBuffer.entries()) {
-      if (buffer.size === 0) {
-        this.updateKursiBuffer.delete(room);
       }
     }
   }
@@ -134,6 +158,8 @@ export class ChatServer {
     }
 
     this.userToSeat.delete(idtarget);
+    this.userDisconnectTime.delete(idtarget);
+    this.userLastChatTime.delete(idtarget);
   }
 
   fullRemoveById(idtarget) {
@@ -146,10 +172,7 @@ export class ChatServer {
       if (!seatMap) continue;
 
       for (const [seatNumber, info] of seatMap) {
-        const n = info.namauser;
-        if (!n) continue;
-
-        if (n === idtarget) {
+        if (info.namauser === idtarget) {
           Object.assign(info, createEmptySeat());
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
           this.clearSeatBuffer(room, seatNumber);
@@ -160,7 +183,10 @@ export class ChatServer {
 
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
+    this.userDisconnectTime.delete(idtarget);
+    this.userLastChatTime.delete(idtarget);
 
+    // Close all connections for this user
     for (const c of Array.from(this.clients)) {
       if (c && c.idtarget === idtarget) {
         if (c.readyState === 1) {
@@ -204,14 +230,12 @@ export class ChatServer {
     stats.count += 1;
     
     if (stats.count > limit) {
-      // Send warning only once per minute
       if (now - stats.lastWarning > 60000) {
-        this.safeSend(ws, ["rateLimitWarning", `Too many ${messageType} messages`]);
+        this.safeSend(ws, ['rateLimitWarning', `Too many ${messageType} messages`]);
         stats.lastWarning = now;
       }
       return false;
     }
-    
     return true;
   }
 
@@ -305,6 +329,32 @@ export class ChatServer {
     }
   }
 
+  getChatHistorySince(room, sinceTime) {
+    if (!this.roomChatHistory.has(room)) {
+      return [];
+    }
+    
+    const history = this.roomChatHistory.get(room);
+    if (!sinceTime || history.length === 0) {
+      return [];
+    }
+    
+    let startIndex = -1;
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].timestamp > sinceTime) {
+        startIndex = i;
+      } else {
+        break;
+      }
+    }
+    
+    if (startIndex === -1) {
+      return [];
+    }
+    
+    return history.slice(startIndex);
+  }
+
   isUserInAnyRoom(idtarget) {
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
@@ -319,50 +369,60 @@ export class ChatServer {
     return false;
   }
 
-  isUserStillConnected(idtarget) {
-    for (const client of this.clients) {
-      if (client.idtarget === idtarget && client.readyState === 1) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  handleConnectionClose(ws) {
-    if (ws.idtarget) {
-      // Delay cleanup to allow reconnection
-      setTimeout(() => {
-        if (!this.isUserStillConnected(ws.idtarget)) {
-          this.fullRemoveById(ws.idtarget);
-        }
-      }, 5000); // 5 second grace period
-    }
-    this.clients.delete(ws);
-  }
-
   handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
     if (baru === true) {
+        // USER BARU - CLEANUP & SETUP AWAL
         this.forceUserCleanup(id);
         ws.idtarget = id;
+        this.userDisconnectTime.delete(id);
         ws.roomname = undefined;
         ws.numkursi = new Set();
         this.safeSend(ws, ["joinroomawal"]);
     } else {
+        // USER LAMA - COBA RESTORE
         ws.idtarget = id;
+        this.userDisconnectTime.delete(id);
         
         const seatInfo = this.userToSeat.get(id);
         
         if (seatInfo && this.isUserStillInSeat(id, seatInfo.room, seatInfo.seat)) {
+            // ✅ BERHASIL RESTORE
             const { room, seat } = seatInfo;
             ws.roomname = room;
             ws.numkursi = new Set([seat]);
             this.safeSend(ws, ["currentNumber", this.currentNumber]);
             this.sendAllStateTo(ws, room);
             this.broadcastRoomUserCount(room);
+            this.restoreChatHistory(ws, room, id);
         } else {
+            // ❌ GAGAL RESTORE
             this.safeSend(ws, ["needJoinRoom"]);
+        }
+    }
+  }
+
+  restoreChatHistory(ws, room, userId) {
+    const lastDisconnect = this.userDisconnectTime.get(userId);
+    if (lastDisconnect && this.roomChatHistory.has(room)) {
+        const recentChats = this.getChatHistorySince(room, lastDisconnect);
+        if (recentChats.length > 0) {
+            const chatHistoryArray = recentChats.map(chat => [
+                "chat",
+                room,
+                chat.noImageURL || "",
+                chat.username || "",
+                chat.message || "",
+                chat.usernameColor || "",
+                chat.chatTextColor || "",
+                chat.timestamp || Date.now()
+            ]);
+            // Send in batches to avoid large messages
+            for (let i = 0; i < chatHistoryArray.length; i += 5) {
+                const batch = chatHistoryArray.slice(i, i + 5);
+                this.safeSend(ws, ["restoreChatHistory", room, batch]);
+            }
         }
     }
   }
@@ -382,6 +442,11 @@ export class ChatServer {
     if (!ws.idtarget) {
       this.safeSend(ws, ["error", "No user ID set"]);
       return false;
+    }
+
+    // Leave previous room if different
+    if (ws.roomname && ws.roomname !== newRoom) {
+      this.removeAllSeatsById(ws.idtarget);
     }
 
     const foundSeat = this.findEmptySeat(newRoom);
@@ -414,6 +479,7 @@ export class ChatServer {
     const seatMap = this.roomSeats.get(room);
     if (!seatMap) return null;
 
+    // First, check if user already has a seat in this room
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const seatInfo = seatMap.get(i);
       if (seatInfo && !seatInfo.namauser) {
@@ -501,6 +567,27 @@ export class ChatServer {
     this.userToSeat.delete(idtarget);
   }
 
+  cleanupClientSafely(ws) {
+    const id = ws.idtarget;
+    
+    this.clients.delete(ws);
+
+    if (id) {
+      const seatInfo = this.userToSeat.get(id);
+      if (seatInfo && seatInfo.room) {
+        this.userDisconnectTime.set(id, Date.now());
+      }
+
+      const activeConnections = Array.from(this.clients).filter(
+        c => c.idtarget === id && c.readyState === 1
+      );
+
+      if (activeConnections.length === 0) {
+        this.messageCounts.delete(id);
+      }
+    }
+  }
+
   handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
     
@@ -510,9 +597,9 @@ export class ChatServer {
     
     if (ws.readyState === 1) {
         try {
-          ws.close(1000, "Manual destroy");
+            ws.close(1000, "Manual destroy");
         } catch (e) {
-          // Ignore close errors
+            // Ignore close errors
         }
     }
   }
@@ -606,7 +693,8 @@ export class ChatServer {
         }
 
         case "onDestroy": 
-          this.handleOnDestroy(ws, ws.idtarget);
+          ws.isManualDestroy = true;
+          this.handleOnDestroy(ws, ws.idtarget); 
           break;
           
         case "setIdTarget2": 
@@ -708,10 +796,28 @@ export class ChatServer {
           
           if (!roomList.includes(roomname)) return;
 
+          // Add to buffer for broadcasting
           if (!this.chatMessageBuffer.has(roomname))
             this.chatMessageBuffer.set(roomname, []);
           this.chatMessageBuffer.get(roomname)
             .push(["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
+
+          // Add to history for restoration
+          if (this.roomChatHistory.has(roomname)) {
+            const history = this.roomChatHistory.get(roomname);
+            history.push({
+              timestamp: Date.now(),
+              noImageURL: noImageURL || "",
+              username: username || "",
+              message: message || "",
+              usernameColor: usernameColor || "",
+              chatTextColor: chatTextColor || ""
+            });
+            // Keep only last 15 messages
+            if (history.length > 15) {
+              this.roomChatHistory.set(roomname, history.slice(-15));
+            }
+          }
           break;
         }
 
@@ -835,11 +941,20 @@ export class ChatServer {
 
     ws.addEventListener("error", (event) => {
         console.error('WebSocket error:', event);
-        this.handleConnectionClose(ws);
+        this.cleanupClientSafely(ws);
     });
 
     ws.addEventListener("close", (event) => {
-        this.handleConnectionClose(ws);
+        if (event.code === 1000 || ws.isManualDestroy) {
+            // Clean close - remove immediately
+            if (ws.idtarget) {
+                this.fullRemoveById(ws.idtarget);
+            }
+        } else {
+            // Abnormal close - mark for potential cleanup
+            this.cleanupClientSafely(ws);
+        }
+        this.clients.delete(ws);
     });
 
     return new Response(null, { status: 101, webSocket: client });
