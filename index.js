@@ -750,16 +750,27 @@ export class ChatServer {
         const seatMap = this.roomSeats.get(room);
         const currentInfo = seatMap.get(seat) || createEmptySeat();
 
-        Object.assign(currentInfo, {
-          noimageUrl, namauser, color, itembawah, itematas,
-          vip: vip || 0,
-          viptanda: viptanda || 0
-        });
+        // Hanya izinkan update kursi dari pemilik akun (namauser harus sama dengan ws.idtarget)
+        // Ini mencegah overwrite image dari koneksi lain atau data lama
+        if (!namauser || namauser !== ws.idtarget) return;
 
-        seatMap.set(seat, currentInfo);
+        // Jika kursi sudah ditempati oleh orang lain (bukan pemilik), tolak update
+        if (currentInfo.namauser && currentInfo.namauser !== namauser) return;
+
+        // Terapkan update hanya untuk properti yang dikirim client (prevent overwrite unexpected fields)
+        const updated = { ...currentInfo };
+        updated.namauser = namauser;
+        if (typeof noimageUrl === 'string') updated.noimageUrl = noimageUrl;
+        if (typeof color === 'string') updated.color = color;
+        if (typeof itembawah !== 'undefined') updated.itembawah = itembawah;
+        if (typeof itematas !== 'undefined') updated.itematas = itematas;
+        updated.vip = vip || 0;
+        updated.viptanda = viptanda || 0;
+
+        seatMap.set(seat, updated);
         if (!this.updateKursiBuffer.has(room))
           this.updateKursiBuffer.set(room, new Map());
-        this.updateKursiBuffer.get(room).set(seat, { ...currentInfo });
+        this.updateKursiBuffer.get(room).set(seat, { ...updated });
         this.broadcastRoomUserCount(room);
         break;
       }
