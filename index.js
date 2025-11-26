@@ -905,7 +905,7 @@ export class ChatServer {
 
     // ✅ EVENT HANDLER UNTUK ERROR
     ws.addEventListener("error", (event) => {
-        console.error(`WebSocket error for ${ws.idtarget}:`, event.error);
+      
         if (ws.idtarget) {
             this.cleanupClientSafely(ws);
         }
@@ -913,21 +913,7 @@ export class ChatServer {
 
     // ✅ EVENT HANDLER UNTUK CLOSE
     ws.addEventListener("close", (event) => {
-        console.log(`WebSocket closed for ${ws.idtarget}, code: ${event.code}, reason: ${event.reason}`);
-        
-        if (event.code === 1000 || ws.isManualDestroy) {
-            console.log(`🚨 MANUAL CLOSE - Instant remove: ${ws.idtarget}`);
-            if (ws.idtarget) {
-                this.fullRemoveById(ws.idtarget);
-            }
-        } else {
-            console.log(`⏳ ABNORMAL CLOSE - Pending 5min: ${ws.idtarget} (code: ${event.code})`);
-            if (ws.idtarget) {
-                this.cleanupClientSafely(ws);
-            }
-        }
-        
-        this.clients.delete(ws);
+                this.fullRemoveById(ws.idtarget); // ✅ DOUBLE CONFIRM INSTANT REMOVE
     });
 
     return new Response(null, { status: 101, webSocket: client });
@@ -947,3 +933,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
