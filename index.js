@@ -303,7 +303,17 @@ export class ChatServer {
     if (!id) return;
 
     if (baru === true) {
-        this.forceUserCleanup(id);
+        ws.idtarget = id;
+        // disconnect other sockets of same id but KEEP seat data
+        for (const c of Array.from(this.clients)) {
+          if (c !== ws && c.idtarget === id && c.readyState === 1) {
+            try { c.close(1000, "Replaced by new connection"); } catch(e) {}
+            this.clients.delete(c);
+          }
+        }
+        // try transfer existing seat to this ws (preserve noimageUrl and other props)
+        const transferred = this.transferSeatIfExists ? this.transferSeatIfExists(id, ws) : false;
+        if (transferred) return;
         ws.idtarget = id;
         ws.roomname = undefined;
         ws.numkursi = new Set();
@@ -331,7 +341,42 @@ export class ChatServer {
     const seatData = seatMap?.get(seat);
     return seatData?.namauser === idtarget;
   }
-  
+
+  // Transfer existing seat to a new websocket connection without wiping seat data
+  transferSeatIfExists(idtarget, ws) {
+    if (!idtarget) return false;
+
+    // disconnect other sockets for this idtarget but KEEP seat data
+    for (const c of Array.from(this.clients)) {
+      if (c !== ws && c.idtarget === idtarget && c.readyState === 1) {
+        try { c.close(1000, "Replaced by new connection"); } catch (e) {}
+        this.clients.delete(c);
+      }
+    }
+
+    for (const room of roomList) {
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) continue;
+
+      for (const [seatNumber, seatInfo] of seatMap) {
+        if (seatInfo.namauser === idtarget) {
+          // attach ws to that room/seat without wiping data
+          ws.roomname = room;
+          ws.numkursi = new Set([seatNumber]);
+          this.userToSeat.set(idtarget, { room, seat: seatNumber });
+
+          // send necessary state to ws (but do NOT reset seat)
+          this.safeSend(ws, ["currentNumber", this.currentNumber]);
+          this.sendAllStateTo(ws, room);
+          this.vipManager.getAllVipBadges(ws, room);
+          this.broadcastRoomUserCount(room);
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   handleJoinRoom(ws, newRoom) {
     if (!roomList.includes(newRoom)) {
       this.safeSend(ws, ["error", "Invalid room"]);
