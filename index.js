@@ -423,11 +423,7 @@ export class ChatServer {
     this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
     this.safeSend(ws, ["currentNumber", this.currentNumber]);
 
-    // Broadcast update ke semua client di room
-    this.broadcastToRoom(newRoom, ["updateKursi", newRoom, foundSeat, 
-      targetSeat.noimageUrl, targetSeat.namauser, targetSeat.color, 
-      targetSeat.itembawah, targetSeat.itematas, targetSeat.vip, targetSeat.viptanda]);
-
+    
     this.sendAllStateTo(ws, newRoom);
     this.vipManager.getAllVipBadges(ws, newRoom);
     this.broadcastRoomUserCount(newRoom);
