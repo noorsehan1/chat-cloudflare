@@ -16,7 +16,8 @@ function createEmptySeat() {
     vip: 0,
     viptanda: 0,
     lastPoint: null,
-    lastActivity: Date.now()
+    lastActivity: Date.now(),
+    isUpdating: false // Flag untuk mencegah race condition
   };
 }
 
@@ -72,6 +73,9 @@ export class ChatServer {
     this._cleanupTimer = setInterval(() => {
       this.aggressiveCleanup();
     }, 10 * 1000);
+
+    // Cache untuk user data yang konsisten
+    this.userDataCache = new Map(); // Map<idtarget, {noimageUrl, color, etc}>
   }
 
   aggressiveCleanup() {
@@ -165,6 +169,7 @@ export class ChatServer {
 
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
+    this.userDataCache.delete(idtarget);
   }
 
   fullRemoveById(idtarget) {
@@ -198,6 +203,7 @@ export class ChatServer {
 
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
+    this.userDataCache.delete(idtarget);
 
     for (const c of Array.from(this.clients)) {
       if (c && c.idtarget === idtarget) {
@@ -239,8 +245,12 @@ export class ChatServer {
   safeSend(ws, arr) {
     if (ws && ws.readyState === 1) {
       if (typeof ws.bufferedAmount === "number" && ws.bufferedAmount > 1000000) return false;
-      ws.send(JSON.stringify(arr));
-      return true;
+      try {
+        ws.send(JSON.stringify(arr));
+        return true;
+      } catch (e) {
+        return false;
+      }
     }
     return false;
   }
@@ -294,7 +304,7 @@ export class ChatServer {
       
       const updates = [];
       for (const [seat, info] of seatMapUpdates.entries()) {
-        const { lastPoint, lastActivity, ...rest } = info;
+        const { lastPoint, lastActivity, isUpdating, ...rest } = info;
         updates.push([seat, rest]);
       }
       if (updates.length > 0) {
@@ -354,7 +364,20 @@ export class ChatServer {
             
             const seatMap = this.roomSeats.get(room);
             if (seatMap && seatMap.get(seat)) {
-                seatMap.get(seat).lastActivity = Date.now();
+                const seatInfo = seatMap.get(seat);
+                seatInfo.lastActivity = Date.now();
+                
+                // Restore dari cache jika ada data yang hilang
+                const cachedData = this.userDataCache.get(id);
+                if (cachedData && (!seatInfo.noimageUrl || seatInfo.noimageUrl === "0" || !seatInfo.noimageUrl)) {
+                  console.log(`Restoring cached data for ${id}`);
+                  Object.assign(seatInfo, {
+                    noimageUrl: cachedData.noimageUrl || seatInfo.noimageUrl,
+                    color: cachedData.color || seatInfo.color,
+                    itembawah: cachedData.itembawah || seatInfo.itembawah,
+                    itematas: cachedData.itematas || seatInfo.itematas
+                  });
+                }
             }
             
             this.safeSend(ws, ["currentNumber", this.currentNumber]);
@@ -398,7 +421,8 @@ export class ChatServer {
         
         const seatMap = this.roomSeats.get(newRoom);
         if (seatMap && seatMap.get(currentSeatInfo.seat)) {
-            seatMap.get(currentSeatInfo.seat).lastActivity = Date.now();
+            const seatInfo = seatMap.get(currentSeatInfo.seat);
+            seatInfo.lastActivity = Date.now();
         }
         
         this.safeSend(ws, ["numberKursiSaya", currentSeatInfo.seat]);
@@ -430,8 +454,23 @@ export class ChatServer {
     const seatMap = this.roomSeats.get(newRoom);
     if (seatMap && seatMap.get(foundSeat)) {
       const seatInfo = seatMap.get(foundSeat);
-      seatInfo.namauser = ws.idtarget;
-      seatInfo.lastActivity = Date.now();
+      
+      // Preserve existing user data jika ada di cache
+      const cachedData = this.userDataCache.get(ws.idtarget);
+      if (cachedData) {
+        console.log(`Using cached data for ${ws.idtarget} when joining room`);
+        Object.assign(seatInfo, {
+          namauser: ws.idtarget,
+          noimageUrl: cachedData.noimageUrl || seatInfo.noimageUrl,
+          color: cachedData.color || seatInfo.color,
+          itembawah: cachedData.itembawah || seatInfo.itembawah,
+          itematas: cachedData.itematas || seatInfo.itematas,
+          lastActivity: Date.now()
+        });
+      } else {
+        seatInfo.namauser = ws.idtarget;
+        seatInfo.lastActivity = Date.now();
+      }
     }
 
     console.log(`User ${ws.idtarget} joined ${newRoom} seat ${foundSeat}`);
@@ -461,18 +500,16 @@ export class ChatServer {
 
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const seatInfo = seatMap.get(i);
-      if (seatInfo && !seatInfo.namauser) {
+      if (seatInfo && !seatInfo.namauser && !seatInfo.isUpdating) {
+        seatInfo.isUpdating = true; // Lock seat untuk mencegah race condition
         seatInfo.namauser = idtarget;
         seatInfo.lastActivity = Date.now();
+        seatInfo.isUpdating = false;
         return i;
       }
     }
     
     return null;
-  }
-
-  findEmptySeat(room, ws) {
-    return this.findAndReserveSeat(room, ws.idtarget);
   }
 
   sendAllStateTo(ws, room) {
@@ -493,13 +530,13 @@ export class ChatServer {
       if (!info) continue;
       if (info.namauser) {
         allKursiMeta[seat] = {
-          noimageUrl: info.noimageUrl,
+          noimageUrl: info.noimageUrl || "", // Pastikan tidak undefined
           namauser: info.namauser,
-          color: info.color,
-          itembawah: info.itembawah,
-          itematas: info.itematas,
-          vip: info.vip,
-          viptanda: info.viptanda
+          color: info.color || "",
+          itembawah: info.itembawah || 0,
+          itematas: info.itematas || 0,
+          vip: info.vip || 0,
+          viptanda: info.viptanda || 0
         };
 
         if (info.lastPoint) {
@@ -608,16 +645,31 @@ export class ChatServer {
       console.log(`Security violation: User ${ws.idtarget} tried to update seat ${seat} owned by ${currentInfo.namauser}`);
       return;
     }
+
+    // Cache user data untuk konsistensi
+    if (ws.idtarget && noimageUrl && noimageUrl !== "0" && noimageUrl !== "") {
+      this.userDataCache.set(ws.idtarget, {
+        noimageUrl: noimageUrl,
+        color: color || currentInfo.color,
+        itembawah: itembawah || currentInfo.itembawah,
+        itematas: itematas || currentInfo.itematas
+      });
+    }
     
     Object.assign(currentInfo, {
-      noimageUrl, 
+      noimageUrl: noimageUrl || currentInfo.noimageUrl, // Jangan overwrite dengan empty value
       namauser: namauser || currentInfo.namauser,
-      color, 
-      itembawah, 
-      itematas,
-      vip: vip || 0,
-      viptanda: viptanda || 0,
+      color: color || currentInfo.color,
+      itembawah: itembawah || currentInfo.itembawah,
+      itematas: itematas || currentInfo.itematas,
+      vip: vip || currentInfo.vip || 0,
+      viptanda: viptanda || currentInfo.viptanda || 0,
       lastActivity: Date.now()
+    });
+
+    console.log(`Updated seat ${seat} in ${room} for user ${ws.idtarget}:`, {
+      noimageUrl: currentInfo.noimageUrl,
+      color: currentInfo.color
     });
 
     seatMap.set(seat, currentInfo);
@@ -634,6 +686,7 @@ export class ChatServer {
     try { 
       data = JSON.parse(raw); 
     } catch (e) { 
+      console.error("Error parsing message:", e);
       return; 
     }
     
