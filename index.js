@@ -70,7 +70,7 @@ export class ChatServer {
 
     this._cleanupTimer = setInterval(() => {
       this.aggressiveCleanup();
-    }, 10 * 1000);
+    }, 60 * 1000);
   }
 
   aggressiveCleanup() {
@@ -327,18 +327,7 @@ export class ChatServer {
         ws.numkursi = new Set();
         this.safeSend(ws, ["joinroomawal"]);
     } else {
-        ws.idtarget = id;
         
-        const seatInfo = this.userToSeat.get(id);
-        
-        if (seatInfo && this.isUserStillInSeat(id, seatInfo.room, seatInfo.seat)) {
-            const { room, seat } = seatInfo;
-            ws.roomname = room;
-            ws.numkursi = new Set([seat]);
-            this.safeSend(ws, ["currentNumber", this.currentNumber]);
-            this.sendAllStateTo(ws, room);
-            this.broadcastRoomUserCount(room);
-        } else {
             this.safeSend(ws, ["needJoinRoom"]);
         }
     }
@@ -350,38 +339,87 @@ export class ChatServer {
     return seatData?.namauser === idtarget;
   }
   
-  handleJoinRoom(ws, newRoom) {
-    if (!roomList.includes(newRoom) || !ws.idtarget) {
-      return false;
-    }
-
-    const currentSeatInfo = this.userToSeat.get(ws.idtarget);
-    if (currentSeatInfo) {
-      const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
-      this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
-    }
-
-    const foundSeat = this.findEmptySeat(newRoom, ws);
-    if (!foundSeat) {
-      this.safeSend(ws, ["roomFull", newRoom]);
-      return false;
-    }
-
-    ws.roomname = newRoom;
-    ws.numkursi = new Set([foundSeat]);
-    
-    this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-
-    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-    this.safeSend(ws, ["currentNumber", this.currentNumber]);
-
-    this.sendAllStateTo(ws, newRoom);
-    this.vipManager.getAllVipBadges(ws, newRoom);
-    this.broadcastRoomUserCount(newRoom);
-
-    return true;
+ handleJoinRoom(ws, newRoom) {
+  if (!roomList.includes(newRoom) || !ws.idtarget) {
+    return false;
   }
+
+  // Cek apakah user sudah ada di room lain, jika ya hapus dulu
+  const currentSeatInfo = this.userToSeat.get(ws.idtarget);
+  if (currentSeatInfo) {
+    const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
+    this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
+  }
+
+  // Gunakan lock/mutex sederhana untuk mencegah race condition
+  const seatMap = this.roomSeats.get(newRoom);
+  if (!seatMap) return false;
+
+  let foundSeat = null;
+  
+  // Cek apakah user sudah ada di room ini (reconnect case)
+  for (let i = 1; i <= this.MAX_SEATS; i++) {
+    const seatInfo = seatMap.get(i);
+    if (seatInfo && seatInfo.namauser === ws.idtarget) {
+      foundSeat = i;
+      break;
+    }
+  }
+
+  // Jika tidak ditemukan, cari kursi kosong
+  if (!foundSeat) {
+    for (let i = 1; i <= this.MAX_SEATS; i++) {
+      const seatInfo = seatMap.get(i);
+      if (seatInfo && !seatInfo.namauser) {
+        // Atomic check-and-set untuk mencegah race condition
+        if (!seatInfo.namauser) {
+          foundSeat = i;
+          break;
+        }
+      }
+    }
+  }
+
+  if (!foundSeat) {
+    this.safeSend(ws, ["roomFull", newRoom]);
+    return false;
+  }
+
+  // Ambil seat info lagi untuk memastikan masih kosong
+  const targetSeat = seatMap.get(foundSeat);
+  if (targetSeat.namauser && targetSeat.namauser !== ws.idtarget) {
+    // Kursi sudah diambil user lain, cari lagi
+    return this.handleJoinRoom(ws, newRoom); // Recursive retry
+  }
+
+  // Update seat information atomically
+  ws.roomname = newRoom;
+  ws.numkursi = new Set([foundSeat]);
+  
+  // Update seat info
+  Object.assign(targetSeat, {
+    noimageUrl: targetSeat.noimageUrl || "",
+    namauser: ws.idtarget,
+    color: targetSeat.color || "",
+    itembawah: targetSeat.itembawah || 0,
+    itematas: targetSeat.itematas || 0,
+    vip: targetSeat.vip || 0,
+    viptanda: targetSeat.viptanda || 0,
+    lastPoint: targetSeat.lastPoint || null
+  });
+
+  this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+
+  this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+  this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+  this.safeSend(ws, ["currentNumber", this.currentNumber]);
+
+  this.sendAllStateTo(ws, newRoom);
+  this.vipManager.getAllVipBadges(ws, newRoom);
+  this.broadcastRoomUserCount(newRoom);
+
+  return true;
+}
 
   findEmptySeat(room, ws) {
     if (!ws.idtarget) return null;
@@ -817,3 +855,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
