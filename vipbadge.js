@@ -32,8 +32,11 @@ export class VipBadgeManager {
       const seatInfo = seatMap.get(seat);
       if (!seatInfo) return false;
 
+      // Convert to string if it's not already
+      const badgeString = String(numbadge);
+
       // ✔ Selalu update kursi
-      seatInfo.vip = numbadge;
+      seatInfo.vip = badgeString;
       seatInfo.viptanda = 1;
       seatInfo.lastActivity = Date.now();
 
@@ -44,7 +47,7 @@ export class VipBadgeManager {
 
       // ✔ Simpan (overwrite) berdasarkan nomor seat
       this.vipBadges.get(room).set(seat, {
-        badgeCount: numbadge,
+        badgeCount: badgeString,
         color: colortext,
         updateAt: Date.now() // dipakai untuk memaksa perubahan
       });
@@ -56,7 +59,7 @@ export class VipBadgeManager {
         "vipbadge",
         room,
         seat,
-        numbadge,
+        badgeString,
         colortext,
         Date.now() // memaksa client menerima update
       ];
@@ -65,6 +68,7 @@ export class VipBadgeManager {
 
       return true;
     } catch (error) {
+      console.error("Error in sendVipBadge:", error);
       return false;
     }
   }
@@ -79,7 +83,7 @@ export class VipBadgeManager {
       const seatInfo = seatMap.get(seat);
       if (!seatInfo) return false;
 
-      seatInfo.vip = 0;
+      seatInfo.vip = "0";
       seatInfo.viptanda = 0;
       seatInfo.lastActivity = Date.now();
 
@@ -93,6 +97,7 @@ export class VipBadgeManager {
 
       return true;
     } catch (error) {
+      console.error("Error in removeVipBadge:", error);
       return false;
     }
   }
@@ -116,7 +121,9 @@ export class VipBadgeManager {
       }
 
       this.chatServer.safeSend(ws, ["allVipBadges", room, result]);
-    } catch (error) {}
+    } catch (error) {
+      console.error("Error in getAllVipBadges:", error);
+    }
   }
 
   cleanupUserVipBadges(username) {
@@ -129,6 +136,71 @@ export class VipBadgeManager {
           }
         }
       }
-    } catch (error) {}
+    } catch (error) {
+      console.error("Error in cleanupUserVipBadges:", error);
+    }
+  }
+
+  // Additional utility methods
+  getVipBadge(room, seat) {
+    try {
+      if (!room || seat < 1 || seat > 35) return null;
+      
+      const roomData = this.vipBadges.get(room);
+      if (!roomData) return null;
+      
+      return roomData.get(seat) || null;
+    } catch (error) {
+      console.error("Error in getVipBadge:", error);
+      return null;
+    }
+  }
+
+  hasVipBadge(room, seat) {
+    try {
+      if (!room || seat < 1 || seat > 35) return false;
+      
+      const roomData = this.vipBadges.get(room);
+      if (!roomData) return false;
+      
+      return roomData.has(seat);
+    } catch (error) {
+      console.error("Error in hasVipBadge:", error);
+      return false;
+    }
+  }
+
+  getRoomVipBadges(room) {
+    try {
+      if (!room) return new Map();
+      
+      return this.vipBadges.get(room) || new Map();
+    } catch (error) {
+      console.error("Error in getRoomVipBadges:", error);
+      return new Map();
+    }
+  }
+
+  // Cleanup old badges (optional maintenance method)
+  cleanupOldBadges(maxAge = 24 * 60 * 60 * 1000) { // Default 24 hours
+    try {
+      const now = Date.now();
+      let cleanedCount = 0;
+
+      for (const [room, seatMap] of this.vipBadges) {
+        for (const [seat, badgeData] of seatMap) {
+          if (now - badgeData.updateAt > maxAge) {
+            this.removeVipBadge(null, room, seat);
+            cleanedCount++;
+          }
+        }
+      }
+
+      console.log(`Cleaned up ${cleanedCount} old VIP badges`);
+      return cleanedCount;
+    } catch (error) {
+      console.error("Error in cleanupOldBadges:", error);
+      return 0;
+    }
   }
 }
