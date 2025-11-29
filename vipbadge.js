@@ -19,9 +19,6 @@ export class VipBadgeManager {
     }
   }
 
-  // ======================================================
-  //    ALWAYS UPDATE - ALWAYS BROADCAST - NO FILTERS
-  // ======================================================
   sendVipBadge(ws, room, seat, numbadge, colortext) {
     try {
       if (!room || seat < 1 || seat > 35) return false;
@@ -32,43 +29,49 @@ export class VipBadgeManager {
       const seatInfo = seatMap.get(seat);
       if (!seatInfo) return false;
 
-      // Convert to string if it's not already
-      const badgeString = String(numbadge);
+      let badgeString;
+      
+      if (numbadge === null || numbadge === undefined) {
+        badgeString = "0";
+      } else if (typeof numbadge === 'number') {
+        badgeString = numbadge.toString();
+      } else if (typeof numbadge === 'string') {
+        badgeString = numbadge;
+      } else {
+        badgeString = String(numbadge);
+      }
 
-      // ✔ Selalu update kursi
+      if (badgeString.trim() === "") {
+        badgeString = "0";
+      }
+
       seatInfo.vip = badgeString;
       seatInfo.viptanda = 1;
       seatInfo.lastActivity = Date.now();
 
-      // ✔ Siapkan penyimpanan room jika belum ada
       if (!this.vipBadges.has(room)) {
         this.vipBadges.set(room, new Map());
       }
 
-      // ✔ Simpan (overwrite) berdasarkan nomor seat
       this.vipBadges.get(room).set(seat, {
         badgeCount: badgeString,
         color: colortext,
-        updateAt: Date.now() // dipakai untuk memaksa perubahan
+        updateAt: Date.now()
       });
 
-      // ======================================================
-      //   FIX 100% BROADCAST — timestamp memastikan berubah
-      // ======================================================
       const vipMessage = [
         "vipbadge",
         room,
         seat,
         badgeString,
         colortext,
-        Date.now() // memaksa client menerima update
+        Date.now()
       ];
 
       this.chatServer.broadcastToRoom(room, vipMessage);
 
       return true;
     } catch (error) {
-      console.error("Error in sendVipBadge:", error);
       return false;
     }
   }
@@ -92,12 +95,10 @@ export class VipBadgeManager {
       }
 
       const msg = ["removeVipBadge", room, seat, Date.now()];
-
       this.chatServer.broadcastToRoom(room, msg);
 
       return true;
     } catch (error) {
-      console.error("Error in removeVipBadge:", error);
       return false;
     }
   }
@@ -122,7 +123,6 @@ export class VipBadgeManager {
 
       this.chatServer.safeSend(ws, ["allVipBadges", room, result]);
     } catch (error) {
-      console.error("Error in getAllVipBadges:", error);
     }
   }
 
@@ -137,11 +137,9 @@ export class VipBadgeManager {
         }
       }
     } catch (error) {
-      console.error("Error in cleanupUserVipBadges:", error);
     }
   }
 
-  // Additional utility methods
   getVipBadge(room, seat) {
     try {
       if (!room || seat < 1 || seat > 35) return null;
@@ -151,7 +149,6 @@ export class VipBadgeManager {
       
       return roomData.get(seat) || null;
     } catch (error) {
-      console.error("Error in getVipBadge:", error);
       return null;
     }
   }
@@ -165,7 +162,6 @@ export class VipBadgeManager {
       
       return roomData.has(seat);
     } catch (error) {
-      console.error("Error in hasVipBadge:", error);
       return false;
     }
   }
@@ -176,13 +172,11 @@ export class VipBadgeManager {
       
       return this.vipBadges.get(room) || new Map();
     } catch (error) {
-      console.error("Error in getRoomVipBadges:", error);
       return new Map();
     }
   }
 
-  // Cleanup old badges (optional maintenance method)
-  cleanupOldBadges(maxAge = 24 * 60 * 60 * 1000) { // Default 24 hours
+  cleanupOldBadges(maxAge = 24 * 60 * 60 * 1000) {
     try {
       const now = Date.now();
       let cleanedCount = 0;
@@ -196,10 +190,8 @@ export class VipBadgeManager {
         }
       }
 
-      console.log(`Cleaned up ${cleanedCount} old VIP badges`);
       return cleanedCount;
     } catch (error) {
-      console.error("Error in cleanupOldBadges:", error);
       return 0;
     }
   }
