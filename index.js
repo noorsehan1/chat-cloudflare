@@ -352,7 +352,7 @@ export class ChatServer {
     return false;
   }
 
-  handleSetIdTarget2(ws, id, baru) {
+ handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
     if (baru === true) {
@@ -362,23 +362,13 @@ export class ChatServer {
         ws.numkursi = new Set();
         this.safeSend(ws, ["joinroomawal"]);
     } else {
+        this.forceUserCleanup(id);
         ws.idtarget = id;
-        
-        const seatInfo = this.userToSeat.get(id);
-        
-        if (seatInfo && this.isUserStillInSeat(id, seatInfo.room, seatInfo.seat)) {
-            const { room, seat } = seatInfo;
-            ws.roomname = room;
-            ws.numkursi = new Set([seat]);
-            this.safeSend(ws, ["currentNumber", this.currentNumber]);
-            this.sendAllStateTo(ws, room);
-            this.broadcastRoomUserCount(room);
-        } else {
-            this.safeSend(ws, ["needJoinRoom"]);
-        }
+        ws.roomname = undefined;
+        ws.numkursi = new Set();
+        this.safeSend(ws, ["needJoinRoom"]);
     }
-  }
-
+}
   isUserStillInSeat(idtarget, room, seat) {
     const seatMap = this.roomSeats.get(room);
     const seatData = seatMap?.get(seat);
@@ -905,3 +895,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
