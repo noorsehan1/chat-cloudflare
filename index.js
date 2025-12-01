@@ -257,43 +257,12 @@ export class ChatServer {
   }
 
 handleSetIdTarget2(ws, id, baru) {
-    if (!id) return;
-
-    ws.idtarget = id;
-    const prevSeatInfo = this.userToSeat.get(id);
-
-    if (prevSeatInfo) {
-        const { room, seat } = prevSeatInfo;
-        ws.roomname = room;
-
-        // Lock seat kembali jika kosong atau user lama
-        const seatMap = this.roomSeats.get(room);
-        const seatInfo = seatMap.get(seat);
-        if (seatInfo && (!seatInfo.namauser || seatInfo.namauser === id)) {
-            Object.assign(seatInfo, { namauser: id, locked: true, lockedBy: id });
-            seatMap.set(seat, seatInfo);
-        }
-
-        // Tambahkan ws ke roomClients
-        this.roomClients.get(room)?.add(ws);
-
-        // Kirim kursi dan state ke client
-      
-        this.sendAllStateTo(ws, room);
-
-        // Update jumlah user di room
-        this.broadcastRoomUserCount(room);
-
-        // Restore VIP badge
-        this.vipManager.getAllVipBadges(ws, room);
-    } else {
-        ws.roomname = undefined;
-        if (baru === true) {
-            this.safeSend(ws, ["joinroomawal"]);
-        } else {
-            this.safeSend(ws, ["needJoinRoom"]);
-        }
-    }
+  if (!id) return;
+  this.forceUserCleanup(id);
+  ws.idtarget = id;
+  ws.roomname = undefined;
+  if (baru === true) this.safeSend(ws, ["joinroomawal"]);
+  else this.safeSend(ws, ["needJoinRoom"]);
 }
 
 
@@ -540,4 +509,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
