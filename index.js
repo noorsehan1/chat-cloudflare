@@ -52,8 +52,11 @@ export class ChatServer {
     this._nextConnId = 1;
 
     // Grace period untuk cleanup (30 detik)
-    this.gracePeriod = 30 * 1000; // 30 detik
+    this.gracePeriod = 10* 1000; // 30 detik
     this.graceTimers = new Map(); // Map untuk menyimpan timer grace period per user
+    
+    // Lock untuk menghindari race condition saat join room
+    this.joinLocks = new Map();
 
     // PERTAHANKAN timer untuk currentNumber (penting)
     this.intervalMillis = 15 * 60 * 1000;
@@ -386,38 +389,117 @@ export class ChatServer {
     return seatData?.namauser === idtarget;
   }
   
-  handleJoinRoom(ws, newRoom) {
+  async handleJoinRoom(ws, newRoom) {
     if (!roomList.includes(newRoom) || !ws.idtarget) {
       return false;
     }
 
-    const currentSeatInfo = this.userToSeat.get(ws.idtarget);
-    if (currentSeatInfo) {
-      const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
-      this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
-    }
-
-    const foundSeat = this.findEmptySeat(newRoom, ws);
-    if (!foundSeat) {
-      this.safeSend(ws, ["roomFull", newRoom]);
+    // Gunakan lock berdasarkan user ID untuk mencegah join bersamaan
+    const lockKey = `join-${ws.idtarget}`;
+    
+    // Jika sudah ada lock untuk user ini, tunggu
+    if (this.joinLocks.has(lockKey)) {
+      this.safeSend(ws, ["error", "Already processing join request"]);
       return false;
     }
 
-    ws.roomname = newRoom;
-    ws.numkursi = new Set([foundSeat]);
+    // Set lock
+    this.joinLocks.set(lockKey, true);
     
-    this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+    try {
+      // Cek apakah user sudah ada di kursi lain
+      const currentSeatInfo = this.userToSeat.get(ws.idtarget);
+      if (currentSeatInfo) {
+        const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
+        this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
+      }
 
-    // Batalkan grace period karena user aktif
-    this.cancelGraceCleanup(ws.idtarget);
+      // Cari kursi kosong dengan locking
+      const foundSeat = await this.findAndReserveSeat(newRoom, ws);
+      if (!foundSeat) {
+        this.safeSend(ws, ["roomFull", newRoom]);
+        return false;
+      }
 
-    this.sendAllStateTo(ws, newRoom);
-    this.vipManager.getAllVipBadges(ws, newRoom);
-    this.broadcastRoomUserCount(newRoom);
-    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+      // Double check: pastikan kursi masih kosong
+      const seatMap = this.roomSeats.get(newRoom);
+      const seatInfo = seatMap.get(foundSeat);
+      if (seatInfo && seatInfo.namauser && seatInfo.namauser !== ws.idtarget) {
+        // Kursi sudah diambil oleh user lain, cari yang lain
+        const alternativeSeat = await this.findAndReserveSeat(newRoom, ws, foundSeat + 1);
+        if (!alternativeSeat) {
+          this.safeSend(ws, ["roomFull", newRoom]);
+          return false;
+        }
+        foundSeat = alternativeSeat;
+      }
 
-    return true;
+      // Update state
+      ws.roomname = newRoom;
+      ws.numkursi = new Set([foundSeat]);
+      
+      this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+
+      // Batalkan grace period karena user aktif
+      this.cancelGraceCleanup(ws.idtarget);
+
+      // Update kursi dengan informasi user
+      const seatMap = this.roomSeats.get(newRoom);
+      const currentSeat = seatMap.get(foundSeat);
+      Object.assign(currentSeat, {
+        noimageUrl: ws.noimageUrl || "",
+        namauser: ws.idtarget,
+        color: ws.color || "",
+        itembawah: ws.itembawah || 0,
+        itematas: ws.itematas || 0,
+        vip: ws.vip || 0,
+        viptanda: ws.viptanda || 0
+      });
+
+      // Buffer update kursi
+      if (!this.updateKursiBuffer.has(newRoom))
+        this.updateKursiBuffer.set(newRoom, new Map());
+      this.updateKursiBuffer.get(newRoom).set(foundSeat, { ...currentSeat });
+
+      // Kirim response ke client
+      this.sendAllStateTo(ws, newRoom);
+      this.vipManager.getAllVipBadges(ws, newRoom);
+      this.broadcastRoomUserCount(newRoom);
+      this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+      this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+
+      return true;
+    } finally {
+      // Lepas lock
+      this.joinLocks.delete(lockKey);
+    }
+  }
+
+  async findAndReserveSeat(room, ws, startFrom = 1) {
+    if (!ws.idtarget) return null;
+    const seatMap = this.roomSeats.get(room);
+    if (!seatMap) return null;
+
+    // Cek apakah user sudah punya kursi di room ini
+    for (let i = 1; i <= this.MAX_SEATS; i++) {
+      const seatInfo = seatMap.get(i);
+      if (seatInfo && seatInfo.namauser === ws.idtarget) {
+        return i;
+      }
+    }
+
+    // Cari kursi kosong dengan atomic check
+    for (let i = startFrom; i <= this.MAX_SEATS; i++) {
+      const k = seatMap.get(i);
+      if (k && !k.namauser) {
+        // Atomic check: cek lagi untuk memastikan masih kosong
+        const currentSeat = seatMap.get(i);
+        if (!currentSeat.namauser) {
+          return i;
+        }
+      }
+    }
+    return null;
   }
 
   findEmptySeat(room, ws) {
@@ -702,7 +784,10 @@ export class ChatServer {
       }
 
       case "joinRoom": 
-        this.handleJoinRoom(ws, data[1]); 
+        // Gunakan async wrapper untuk handleJoinRoom
+        (async () => {
+          await this.handleJoinRoom(ws, data[1]);
+        })();
         break;
 
       case "chat": {
@@ -765,6 +850,13 @@ export class ChatServer {
         const seatMap = this.roomSeats.get(room);
         const currentInfo = seatMap.get(seat) || createEmptySeat();
         
+        // Cek apakah kursi sudah ditempati oleh user lain
+        if (currentInfo.namauser && currentInfo.namauser !== namauser) {
+          // Kursi sudah ditempati, kirim error
+          this.safeSend(ws, ["error", "Seat already occupied"]);
+          return;
+        }
+        
         Object.assign(currentInfo, {
           noimageUrl, namauser, color, itembawah, itematas,
           vip: vip || 0,
@@ -825,6 +917,14 @@ export class ChatServer {
     ws.idtarget = undefined;
     ws.numkursi = new Set();
     ws.isManualDestroy = false;
+
+    // Simpan user profile data jika ada
+    ws.noimageUrl = "";
+    ws.color = "";
+    ws.itembawah = 0;
+    ws.itematas = 0;
+    ws.vip = 0;
+    ws.viptanda = 0;
 
     this.clients.add(ws);
 
