@@ -27,7 +27,6 @@ export class ChatServer {
     this.clients = new Set();
     this.userToSeat = new Map();
     this.hasEverSetId = false;
-    this.joinLocks = new Map();
 
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
@@ -72,37 +71,6 @@ export class ChatServer {
     this.MAX_MESSAGES_PER_SECOND = 20;
   }
 
-  getUserCurrentRoom(userId) {
-    for (const room of roomList) {
-      const seatMap = this.roomSeats.get(room);
-      if (!seatMap) continue;
-      
-      for (const [seatNumber, seatInfo] of seatMap) {
-        if (seatInfo.namauser === userId) {
-          return { room, seat: seatNumber };
-        }
-      }
-    }
-    return null;
-  }
-
-  isUserAlreadyInRoom(userId) {
-    return this.getUserCurrentRoom(userId) !== null;
-  }
-
-  validateUserInRoom(ws, room) {
-    if (!ws.idtarget || !room) return false;
-    
-    const seatInfo = this.userToSeat.get(ws.idtarget);
-    if (!seatInfo || seatInfo.room !== room) {
-      return false;
-    }
-    
-    const seatMap = this.roomSeats.get(room);
-    const seatData = seatMap?.get(seatInfo.seat);
-    return seatData?.namauser === ws.idtarget;
-  }
-
   scheduleGraceCleanup(idtarget) {
     if (!idtarget) return;
     
@@ -127,13 +95,24 @@ export class ChatServer {
     }
   }
 
-  shouldApplyGracePeriod(closeCode) {
+  shouldApplyGracePeriod(closeCode, reason) {
     const normalClosureCodes = [1000, 1001, 1005];
-    const gracePeriodCodes = [1006, 1011, 1012, 1013, 1014, 4000, 4001];
+    
+    if (reason && (
+      reason.toLowerCase().includes('reconnect') ||
+      reason.toLowerCase().includes('refresh') ||
+      reason.toLowerCase().includes('reload')
+    )) {
+      return false;
+    }
     
     if (normalClosureCodes.includes(closeCode)) {
       return false;
     }
+    
+    const gracePeriodCodes = [
+      1006, 1011, 1012, 1013, 1014, 4000, 4001
+    ];
     
     return gracePeriodCodes.includes(closeCode) || closeCode >= 4000;
   }
@@ -152,14 +131,9 @@ export class ChatServer {
       this.clearSeatBuffer(room, seatNumber);
       this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
       this.broadcastRoomUserCount(room);
-      
-      const currentSeatInfo = this.userToSeat.get(userId);
-      if (currentSeatInfo && 
-          currentSeatInfo.room === room && 
-          currentSeatInfo.seat === seatNumber) {
-        this.userToSeat.delete(userId);
-      }
     }
+
+    this.userToSeat.delete(userId);
   }
 
   clearSeatBuffer(room, seatNumber) {
@@ -396,58 +370,35 @@ export class ChatServer {
       return false;
     }
 
-    const lockKey = `join-${ws.idtarget}`;
-    if (this.joinLocks.has(lockKey)) {
+    const currentSeatInfo = this.userToSeat.get(ws.idtarget);
+    if (currentSeatInfo) {
+      const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
+      this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
+    }
+
+    const foundSeat = this.findEmptySeat(newRoom, ws);
+    if (!foundSeat) {
+      this.safeSend(ws, ["roomFull", newRoom]);
       return false;
     }
 
-    this.joinLocks.set(lockKey, true);
+    ws.roomname = newRoom;
+    ws.numkursi = new Set([foundSeat]);
     
-    try {
-      const existingRoomInfo = this.getUserCurrentRoom(ws.idtarget);
-      if (existingRoomInfo && existingRoomInfo.room !== newRoom) {
-        this.cleanupUserFromSeat(existingRoomInfo.room, existingRoomInfo.seat, ws.idtarget);
+    this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+
+    this.cancelGraceCleanup(ws.idtarget);
+
+    this.sendAllStateTo(ws, newRoom);
+    this.vipManager.getAllVipBadges(ws, newRoom);
+    this.broadcastRoomUserCount(newRoom);
+    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+    setTimeout(() => {
+      if (ws.readyState === 1 && ws.roomname === newRoom && ws.idtarget) {
+        this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
       }
-
-      if (existingRoomInfo && existingRoomInfo.room === newRoom) {
-        ws.roomname = newRoom;
-        ws.numkursi = new Set([existingRoomInfo.seat]);
-        this.userToSeat.set(ws.idtarget, { room: newRoom, seat: existingRoomInfo.seat });
-        
-        this.sendAllStateTo(ws, newRoom);
-        this.vipManager.getAllVipBadges(ws, newRoom);
-        this.safeSend(ws, ["numberKursiSaya", existingRoomInfo.seat]);
-        return true;
-      }
-
-      const foundSeat = this.findEmptySeat(newRoom, ws);
-      if (!foundSeat) {
-        this.safeSend(ws, ["roomFull", newRoom]);
-        return false;
-      }
-
-      ws.roomname = newRoom;
-      ws.numkursi = new Set([foundSeat]);
-      
-      this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-
-      this.cancelGraceCleanup(ws.idtarget);
-
-      this.sendAllStateTo(ws, newRoom);
-      this.vipManager.getAllVipBadges(ws, newRoom);
-      this.broadcastRoomUserCount(newRoom);
-      this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-      
-      setTimeout(() => {
-        if (ws.readyState === 1 && ws.roomname === newRoom && ws.idtarget) {
-          this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-        }
-      }, 2000);
-      
-      return true;
-    } finally {
-      setTimeout(() => this.joinLocks.delete(lockKey), 1000);
-    }
+    }, 2000);
+    return true;
   }
 
   findEmptySeat(room, ws) {
@@ -735,7 +686,7 @@ export class ChatServer {
       case "chat": {
         const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
         
-        if (!this.validateUserInRoom(ws, roomname)) {
+        if (ws.roomname !== roomname) {
           return;
         }
         
@@ -751,7 +702,7 @@ export class ChatServer {
       case "updatePoint": {
         const [, room, seat, x, y, fast] = data;
         
-        if (!this.validateUserInRoom(ws, room)) {
+        if (ws.roomname !== room) {
           return;
         }
         
@@ -767,7 +718,7 @@ export class ChatServer {
       case "removeKursiAndPoint": {
         const [, room, seat] = data;
         
-        if (!this.validateUserInRoom(ws, room)) {
+        if (ws.roomname !== room) {
           return;
         }
         
@@ -783,7 +734,7 @@ export class ChatServer {
       case "updateKursi": {
         const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
         
-        if (!this.validateUserInRoom(ws, room)) {
+        if (ws.roomname !== room) {
           return;
         }
         
@@ -809,7 +760,7 @@ export class ChatServer {
       case "gift": {
         const [, roomname, sender, receiver, giftName] = data;
         
-        if (!this.validateUserInRoom(ws, roomname)) {
+        if (ws.roomname !== roomname) {
           return;
         }
         
@@ -869,7 +820,7 @@ export class ChatServer {
 
     ws.addEventListener("close", (event) => {
       if (ws.idtarget && !ws.isManualDestroy) {
-        const shouldGracePeriod = this.shouldApplyGracePeriod(event.code);
+        const shouldGracePeriod = this.shouldApplyGracePeriod(event.code, event.reason);
         
         if (shouldGracePeriod) {
           this.scheduleGraceCleanup(ws.idtarget);
