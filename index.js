@@ -26,6 +26,7 @@ export class ChatServer {
 
     this.clients = new Set();
     this.userToSeat = new Map();
+    this.userProfiles = new Map(); // Cache untuk profil user
     this.hasEverSetId = false;
 
     this.MAX_SEATS = 35;
@@ -383,6 +384,69 @@ export class ChatServer {
     }
   }
 
+  // Handler untuk update profil user
+  handleUpdateProfile(ws, data) {
+    if (!ws.idtarget) return;
+    
+    const [, noimageUrl, color, itembawah, itematas, vip, viptanda] = data;
+    
+    // Simpan profil di WebSocket object
+    ws.noimageUrl = noimageUrl || "";
+    ws.color = color || "";
+    ws.itembawah = itembawah || 0;
+    ws.itematas = itematas || 0;
+    ws.vip = vip || 0;
+    ws.viptanda = viptanda || 0;
+    
+    // Simpan juga di cache
+    this.userProfiles.set(ws.idtarget, {
+      noimageUrl: ws.noimageUrl,
+      color: ws.color,
+      itembawah: ws.itembawah,
+      itematas: ws.itematas,
+      vip: ws.vip,
+      viptanda: ws.viptanda
+    });
+    
+    // Jika user sudah di room, update kursinya
+    if (ws.roomname) {
+      const seatInfo = this.userToSeat.get(ws.idtarget);
+      if (seatInfo) {
+        const { room, seat } = seatInfo;
+        this.updateKursiWithProfile(room, seat, ws.idtarget, {
+          noimageUrl: ws.noimageUrl,
+          color: ws.color,
+          itembawah: ws.itembawah,
+          itematas: ws.itematas,
+          vip: ws.vip,
+          viptanda: ws.viptanda
+        });
+      }
+    }
+  }
+
+  updateKursiWithProfile(room, seat, userId, profile) {
+    const seatMap = this.roomSeats.get(room);
+    if (!seatMap) return;
+    
+    const seatInfo = seatMap.get(seat);
+    if (seatInfo && seatInfo.namauser === userId) {
+      Object.assign(seatInfo, {
+        noimageUrl: profile.noimageUrl,
+        color: profile.color,
+        itembawah: profile.itembawah,
+        itematas: profile.itematas,
+        vip: profile.vip,
+        viptanda: profile.viptanda
+      });
+      
+      // Buffer update
+      if (!this.updateKursiBuffer.has(room))
+        this.updateKursiBuffer.set(room, new Map());
+      this.updateKursiBuffer.get(room).set(seat, { ...seatInfo });
+    }
+  }
+
   isUserStillInSeat(idtarget, room, seat) {
     const seatMap = this.roomSeats.get(room);
     const seatData = seatMap?.get(seat);
@@ -397,13 +461,11 @@ export class ChatServer {
     // Gunakan lock berdasarkan user ID untuk mencegah join bersamaan
     const lockKey = `join-${ws.idtarget}`;
     
-    // Jika sudah ada lock untuk user ini, tunggu
     if (this.joinLocks.has(lockKey)) {
       this.safeSend(ws, ["error", "Already processing join request"]);
       return false;
     }
 
-    // Set lock
     this.joinLocks.set(lockKey, true);
     
     try {
@@ -414,24 +476,11 @@ export class ChatServer {
         this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
       }
 
-      // Cari kursi kosong dengan locking
+      // Cari kursi kosong
       let foundSeat = await this.findAndReserveSeat(newRoom, ws);
       if (!foundSeat) {
         this.safeSend(ws, ["roomFull", newRoom]);
         return false;
-      }
-
-      // Double check: pastikan kursi masih kosong
-      const seatMap = this.roomSeats.get(newRoom);
-      const seatInfo = seatMap.get(foundSeat);
-      if (seatInfo && seatInfo.namauser && seatInfo.namauser !== ws.idtarget) {
-        // Kursi sudah diambil oleh user lain, cari yang lain
-        const alternativeSeat = await this.findAndReserveSeat(newRoom, ws, foundSeat + 1);
-        if (!alternativeSeat) {
-          this.safeSend(ws, ["roomFull", newRoom]);
-          return false;
-        }
-        foundSeat = alternativeSeat;
       }
 
       // Update state
@@ -440,20 +489,31 @@ export class ChatServer {
       
       this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
 
-      // Batalkan grace period karena user aktif
+      // Batalkan grace period
       this.cancelGraceCleanup(ws.idtarget);
 
-      // Update kursi dengan informasi user
-      const seatMap2 = this.roomSeats.get(newRoom);
-      const currentSeat = seatMap2.get(foundSeat);
-      Object.assign(currentSeat, {
+      // Ambil profil user dari cache atau WebSocket object
+      const userProfile = this.userProfiles.get(ws.idtarget) || {
         noimageUrl: ws.noimageUrl || "",
-        namauser: ws.idtarget,
         color: ws.color || "",
         itembawah: ws.itembawah || 0,
         itematas: ws.itematas || 0,
         vip: ws.vip || 0,
         viptanda: ws.viptanda || 0
+      };
+
+      // Update kursi dengan profil user
+      const seatMap = this.roomSeats.get(newRoom);
+      const currentSeat = seatMap.get(foundSeat);
+      
+      Object.assign(currentSeat, {
+        noimageUrl: userProfile.noimageUrl,
+        namauser: ws.idtarget,
+        color: userProfile.color,
+        itembawah: userProfile.itembawah,
+        itematas: userProfile.itematas,
+        vip: userProfile.vip,
+        viptanda: userProfile.viptanda
       });
 
       // Buffer update kursi
@@ -465,12 +525,14 @@ export class ChatServer {
       this.sendAllStateTo(ws, newRoom);
       this.vipManager.getAllVipBadges(ws, newRoom);
       this.broadcastRoomUserCount(newRoom);
-      this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+      
+      // Kirim event rooMasuk dengan data kursi yang sudah diupdate
       this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+      this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
 
       return true;
     } finally {
-      // Lepas lock
       this.joinLocks.delete(lockKey);
     }
   }
@@ -497,27 +559,6 @@ export class ChatServer {
         if (!currentSeat.namauser) {
           return i;
         }
-      }
-    }
-    return null;
-  }
-
-  findEmptySeat(room, ws) {
-    if (!ws.idtarget) return null;
-    const seatMap = this.roomSeats.get(room);
-    if (!seatMap) return null;
-
-    for (let i = 1; i <= this.MAX_SEATS; i++) {
-      const seatInfo = seatMap.get(i);
-      if (seatInfo && seatInfo.namauser === ws.idtarget) {
-        return i;
-      }
-    }
-
-    for (let i = 1; i <= this.MAX_SEATS; i++) {
-      const k = seatMap.get(i);
-      if (k && !k.namauser) {
-        return i;
       }
     }
     return null;
@@ -691,6 +732,11 @@ export class ChatServer {
         break;
       }
 
+      case "updateProfile": {
+        this.handleUpdateProfile(ws, data);
+        break;
+      }
+
       case "onDestroy": 
         break;
         
@@ -784,10 +830,7 @@ export class ChatServer {
       }
 
       case "joinRoom": 
-        // Gunakan async wrapper untuk handleJoinRoom
-        this.handleJoinRoom(ws, data[1]).catch(() => {
-          // Tangkap error tanpa lakukan apa-apa
-        });
+        this.handleJoinRoom(ws, data[1]).catch(() => {});
         break;
 
       case "chat": {
@@ -864,6 +907,27 @@ export class ChatServer {
         });
 
         seatMap.set(seat, currentInfo);
+        
+        // Simpan profil user
+        this.userProfiles.set(namauser, {
+          noimageUrl: noimageUrl,
+          color: color,
+          itembawah: itembawah,
+          itematas: itematas,
+          vip: vip,
+          viptanda: viptanda
+        });
+        
+        // Update WebSocket object jika ini user yang sedang aktif
+        if (ws.idtarget === namauser) {
+          ws.noimageUrl = noimageUrl;
+          ws.color = color;
+          ws.itembawah = itembawah;
+          ws.itematas = itematas;
+          ws.vip = vip;
+          ws.viptanda = viptanda;
+        }
+        
         if (!this.updateKursiBuffer.has(room))
           this.updateKursiBuffer.set(room, new Map());
         this.updateKursiBuffer.get(room).set(seat, { ...currentInfo });
@@ -918,7 +982,7 @@ export class ChatServer {
     ws.numkursi = new Set();
     ws.isManualDestroy = false;
 
-    // Simpan user profile data jika ada
+    // Inisialisasi profil user
     ws.noimageUrl = "";
     ws.color = "";
     ws.itembawah = 0;
