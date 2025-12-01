@@ -51,14 +51,19 @@ export class ChatServer {
 
     this._nextConnId = 1;
 
+    // Grace period untuk cleanup (30 detik)
+    this.gracePeriod = 30 * 1000; // 30 detik
+    this.graceTimers = new Map(); // Map untuk menyimpan timer grace period per user
+
+    // PERTAHANKAN timer untuk currentNumber (penting)
     this.intervalMillis = 15 * 60 * 1000;
     this.currentNumber = 1;
     this.maxNumber = 6;
-
     this._tickTimer = setInterval(() => {
       this.tick();
     }, this.intervalMillis);
 
+    // Timer untuk flushing tetap dipertahankan karena penting untuk performa
     this._flushTimer = setInterval(() => {
       if (this.clients.size > 0) this.periodicFlush();
     }, 16);
@@ -67,48 +72,33 @@ export class ChatServer {
 
     this.messageCounts = new Map();
     this.MAX_MESSAGES_PER_SECOND = 20;
-
-    this._cleanupTimer = setInterval(() => {
-      this.aggressiveCleanup();
-    }, 10 * 1000);
   }
 
-  aggressiveCleanup() {
-    const now = Date.now();
+  // Tambahkan grace period sebelum membersihkan user
+  scheduleGraceCleanup(idtarget) {
+    if (!idtarget) return;
     
-    for (const [key, stats] of this.messageCounts.entries()) {
-      const currentWindow = Math.floor(now / 1000);
-      if (stats.window < currentWindow - 10) {
-        this.messageCounts.delete(key);
-      }
+    // Hapus timer sebelumnya jika ada
+    if (this.graceTimers.has(idtarget)) {
+      clearTimeout(this.graceTimers.get(idtarget));
     }
-
-    for (const [room, buffer] of this.chatMessageBuffer.entries()) {
-      if (buffer.length === 0) {
-        this.chatMessageBuffer.delete(room);
-      }
-    }
-
-    this.cleanupGhostUsers();
+    
+    // Set timer baru untuk grace period
+    const timer = setTimeout(() => {
+      this.forceUserCleanup(idtarget);
+      this.graceTimers.delete(idtarget);
+    }, this.gracePeriod);
+    
+    this.graceTimers.set(idtarget, timer);
   }
 
-  cleanupGhostUsers() {
-    const activeUsers = new Set();
-    for (const client of this.clients) {
-      if (client.idtarget && client.readyState === 1) {
-        activeUsers.add(client.idtarget);
-      }
-    }
-
-    for (const room of roomList) {
-      const seatMap = this.roomSeats.get(room);
-      if (!seatMap) continue;
-
-      for (const [seatNumber, seatInfo] of seatMap) {
-        if (seatInfo.namauser && !activeUsers.has(seatInfo.namauser)) {
-          this.cleanupUserFromSeat(room, seatNumber, seatInfo.namauser);
-        }
-      }
+  // Batalkan grace period jika user reconnect
+  cancelGraceCleanup(idtarget) {
+    if (!idtarget) return;
+    
+    if (this.graceTimers.has(idtarget)) {
+      clearTimeout(this.graceTimers.get(idtarget));
+      this.graceTimers.delete(idtarget);
     }
   }
 
@@ -152,6 +142,7 @@ export class ChatServer {
 
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
+    this.graceTimers.delete(idtarget);
   }
 
   fullRemoveById(idtarget) {
@@ -183,6 +174,7 @@ export class ChatServer {
 
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
+    this.graceTimers.delete(idtarget);
 
     for (const c of Array.from(this.clients)) {
       if (c && c.idtarget === idtarget) {
@@ -224,8 +216,13 @@ export class ChatServer {
   safeSend(ws, arr) {
     if (ws && ws.readyState === 1) {
       if (typeof ws.bufferedAmount === "number" && ws.bufferedAmount > 1000000) return false;
-      ws.send(JSON.stringify(arr));
-      return true;
+      try {
+        ws.send(JSON.stringify(arr));
+        return true;
+      } catch (error) {
+        // Kosongkan error, jangan lakukan apa-apa
+        return false;
+      }
     }
     return false;
   }
@@ -329,15 +326,21 @@ export class ChatServer {
     } else {
         ws.idtarget = id;
         
+        // Batalkan grace period karena user reconnect
+        this.cancelGraceCleanup(id);
+        
         const seatInfo = this.userToSeat.get(id);
         
         if (seatInfo && this.isUserStillInSeat(id, seatInfo.room, seatInfo.seat)) {
             const { room, seat } = seatInfo;
             ws.roomname = room;
             ws.numkursi = new Set([seat]);
-            this.safeSend(ws, ["currentNumber", this.currentNumber]);
+            
             this.sendAllStateTo(ws, room);
             this.broadcastRoomUserCount(room);
+            this.vipManager.getAllVipBadges(ws, newRoom);
+          this.safeSend(ws, ["currentNumber", this.currentNumber]);
+
         } else {
             this.safeSend(ws, ["needJoinRoom"]);
         }
@@ -372,9 +375,10 @@ export class ChatServer {
     
     this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
 
-    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-    this.safeSend(ws, ["currentNumber", this.currentNumber]);
+    // Batalkan grace period karena user aktif
+    this.cancelGraceCleanup(ws.idtarget);
+
+   
 
     this.sendAllStateTo(ws, newRoom);
     this.vipManager.getAllVipBadges(ws, newRoom);
@@ -485,12 +489,22 @@ export class ChatServer {
   handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
     
-    this.fullRemoveById(idtarget);
-    this.forceUserCleanup(idtarget);
+    // Jika manual destroy, langsung hapus
+    if (ws.isManualDestroy) {
+      this.fullRemoveById(idtarget);
+    } else {
+      // Jika bukan manual destroy, schedule grace period
+      this.scheduleGraceCleanup(idtarget);
+    }
+    
     this.clients.delete(ws);
     
     if (ws.readyState === 1) {
-        ws.close(1000, "Manual destroy");
+        try {
+            ws.close(1000, "Manual destroy");
+        } catch (error) {
+            // Kosongkan error
+        }
     }
   }
 
@@ -576,6 +590,9 @@ export class ChatServer {
           this.forceUserCleanup(ws.idtarget);
         }
         ws.idtarget = newId;
+
+        // Batalkan grace period untuk ID baru
+        this.cancelGraceCleanup(newId);
 
         const prevSeat = this.userToSeat.get(newId);
         if (prevSeat) {
@@ -782,24 +799,64 @@ export class ChatServer {
     ws.addEventListener("message", (ev) => {
         try {
             this.handleMessage(ws, ev.data);
-        } catch (error) {}
+        } catch (error) {
+            // Kosongkan error
+        }
     });
 
     ws.addEventListener("error", (event) => {
-        if (ws.idtarget) {
-            ws.isManualDestroy = true;
-        this.handleOnDestroy(ws, ws.idtarget); 
-        }
+        // Kosongkan error handling, tidak perlu lakukan apa-apa
     });
 
     ws.addEventListener("close", (event) => {
-        if (ws.idtarget) {
-            ws.isManualDestroy = true;
-        this.handleOnDestroy(ws, ws.idtarget); 
+    if (ws.idtarget && !ws.isManualDestroy) {
+        // Cek kode close untuk menentukan apakah perlu grace period
+        const shouldGracePeriod = this.shouldApplyGracePeriod(event.code, event.reason);
+        
+        if (shouldGracePeriod) {
+            // Schedule grace period untuk user yang disconnect
+            this.scheduleGraceCleanup(ws.idtarget);
+        } else {
+            // Jika close normal/reconnect, langsung cleanup
+            this.forceUserCleanup(ws.idtarget);
         }
-        this.clients.delete(ws);
-    });
+    }
+    this.clients.delete(ws);
+});
 
+// Fungsi untuk menentukan apakah perlu grace period berdasarkan kode close
+shouldApplyGracePeriod(closeCode, reason) {
+    // Kode normal closure (1000-1001) atau kode yang menunjukkan intentional closure
+    const normalClosureCodes = [1000, 1001, 1005];
+    
+    // Jika ada alasan yang menunjukkan reconnect
+    if (reason && (
+        reason.toLowerCase().includes('reconnect') ||
+        reason.toLowerCase().includes('refresh') ||
+        reason.toLowerCase().includes('reload')
+    )) {
+        return false; // Tidak perlu grace period
+    }
+    
+    // Jika kode close adalah normal closure, tidak perlu grace period
+    if (normalClosureCodes.includes(closeCode)) {
+        return false;
+    }
+    
+    // Kode yang membutuhkan grace period (abnormal closure)
+    const gracePeriodCodes = [
+        1006, // Abnormal closure
+        1011, // Internal error
+        1012, // Service restart
+        1013, // Try again later
+        1014, // Bad gateway
+        4000, // Custom codes untuk timeout
+        4001  // Custom codes untuk network error
+    ];
+    
+    // Default: return true untuk kode selain normal closure
+    return gracePeriodCodes.includes(closeCode) || closeCode >= 4000;
+}
     return new Response(null, { status: 101, webSocket: client });
   }
 }
