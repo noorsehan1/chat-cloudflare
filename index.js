@@ -52,7 +52,7 @@ export class ChatServer {
     this._nextConnId = 1;
 
     // Grace period untuk cleanup (30 detik)
-    this.gracePeriod = 10* 1000; // 30 detik
+    this.gracePeriod = 30 * 1000; // 30 detik
     this.graceTimers = new Map(); // Map untuk menyimpan timer grace period per user
     
     // Lock untuk menghindari race condition saat join room
@@ -467,6 +467,7 @@ export class ChatServer {
       this.broadcastRoomUserCount(newRoom);
       this.safeSend(ws, ["numberKursiSaya", foundSeat]);
       this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
 
       return true;
     } finally {
