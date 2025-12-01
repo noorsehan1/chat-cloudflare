@@ -15,9 +15,7 @@ function createEmptySeat() {
     itematas: 0,
     vip: 0,
     viptanda: 0,
-    lastPoint: null,
-    locked: false,
-    lockedBy: null
+    lastPoint: null
   };
 }
 
@@ -75,34 +73,6 @@ export class ChatServer {
     }, 10 * 1000);
   }
 
-  lockSeat(room, seatNumber, userId) {
-    const seatMap = this.roomSeats.get(room);
-    if (!seatMap || !seatMap.has(seatNumber)) return false;
-    
-    const seatInfo = seatMap.get(seatNumber);
-    seatInfo.locked = true;
-    seatInfo.lockedBy = userId;
-    return true;
-  }
-
-  unlockSeat(room, seatNumber) {
-    const seatMap = this.roomSeats.get(room);
-    if (!seatMap || !seatMap.has(seatNumber)) return false;
-    
-    const seatInfo = seatMap.get(seatNumber);
-    seatInfo.locked = false;
-    seatInfo.lockedBy = null;
-    return true;
-  }
-
-  isSeatLocked(room, seatNumber) {
-    const seatMap = this.roomSeats.get(room);
-    if (!seatMap || !seatMap.has(seatNumber)) return false;
-    
-    const seatInfo = seatMap.get(seatNumber);
-    return seatInfo.locked && seatInfo.lockedBy !== null;
-  }
-
   aggressiveCleanup() {
     const now = Date.now();
     
@@ -152,9 +122,6 @@ export class ChatServer {
         this.vipManager.removeVipBadge(room, seatNumber);
       }
       
-      // Buka kunci kursi
-      this.unlockSeat(room, seatNumber);
-      
       Object.assign(seatInfo, createEmptySeat());
       this.clearSeatBuffer(room, seatNumber);
       this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
@@ -198,8 +165,6 @@ export class ChatServer {
 
       for (const [seatNumber, info] of seatMap) {
         if (info.namauser === idtarget) {
-          // Buka kunci kursi
-          this.unlockSeat(room, seatNumber);
           Object.assign(info, createEmptySeat());
           this.clearSeatBuffer(room, seatNumber);
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
@@ -384,13 +349,45 @@ export class ChatServer {
     const seatData = seatMap?.get(seat);
     return seatData?.namauser === idtarget;
   }
+  
+  handleJoinRoom(ws, newRoom) {
+    if (!roomList.includes(newRoom) || !ws.idtarget) {
+      return false;
+    }
+
+    const currentSeatInfo = this.userToSeat.get(ws.idtarget);
+    if (currentSeatInfo) {
+      const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
+      this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
+    }
+
+    const foundSeat = this.findEmptySeat(newRoom, ws);
+    if (!foundSeat) {
+      this.safeSend(ws, ["roomFull", newRoom]);
+      return false;
+    }
+
+    ws.roomname = newRoom;
+    ws.numkursi = new Set([foundSeat]);
+    
+    this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+
+    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+    this.safeSend(ws, ["currentNumber", this.currentNumber]);
+
+    this.sendAllStateTo(ws, newRoom);
+    this.vipManager.getAllVipBadges(ws, newRoom);
+    this.broadcastRoomUserCount(newRoom);
+
+    return true;
+  }
 
   findEmptySeat(room, ws) {
     if (!ws.idtarget) return null;
     const seatMap = this.roomSeats.get(room);
     if (!seatMap) return null;
 
-    // Cek apakah user sudah memiliki kursi di room ini
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const seatInfo = seatMap.get(i);
       if (seatInfo && seatInfo.namauser === ws.idtarget) {
@@ -398,57 +395,14 @@ export class ChatServer {
       }
     }
 
-    // Cari kursi kosong yang tidak terkunci atau dikunci oleh user yang sama
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const k = seatMap.get(i);
-      if (k && !k.namauser && (!k.locked || k.lockedBy === ws.idtarget)) {
+      if (k && !k.namauser) {
         return i;
       }
     }
     return null;
   }
-  
- handleJoinRoom(ws, newRoom) {
-  if (!roomList.includes(newRoom) || !ws.idtarget) {
-    return false;
-  }
-
-  const currentSeatInfo = this.userToSeat.get(ws.idtarget);
-  if (currentSeatInfo) {
-    const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
-    this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
-  }
-
-  const foundSeat = this.findEmptySeat(newRoom, ws);
-  if (!foundSeat) {
-    this.safeSend(ws, ["roomFull", newRoom]);
-    return false;
-  }
-
-  // Kunci kursi untuk user ini
-  this.lockSeat(newRoom, foundSeat, ws.idtarget);
-
-  ws.roomname = newRoom;
-  ws.numkursi = new Set([foundSeat]);
-  
-  this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-
-  this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-  this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-  this.safeSend(ws, ["currentNumber", this.currentNumber]);
-
-  // Tambah delay untuk sendAllStateTo
-  setTimeout(() => {
-    if (ws.readyState === 1 && ws.roomname === newRoom) {
-      this.sendAllStateTo(ws, newRoom);
-    }
-  }, 1200); // Delay 100ms
-
-  this.vipManager.getAllVipBadges(ws, newRoom);
-  this.broadcastRoomUserCount(newRoom);
-
-  return true;
-}
 
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1 || !room) return;
@@ -474,9 +428,7 @@ export class ChatServer {
           itembawah: info.itembawah,
           itematas: info.itematas,
           vip: info.vip,
-          viptanda: info.viptanda,
-          locked: info.locked,
-          lockedBy: info.lockedBy
+          viptanda: info.viptanda
         };
 
         if (info.lastPoint) {
@@ -521,8 +473,6 @@ export class ChatServer {
         this.vipManager.removeVipBadge(room, seat);
       }
 
-      // Buka kunci kursi
-      this.unlockSeat(room, seat);
       Object.assign(currentSeat, createEmptySeat());
       this.clearSeatBuffer(room, seat);
       this.broadcastToRoom(room, ["removeKursi", room, seat]);
@@ -612,35 +562,8 @@ export class ChatServer {
         break;
       }
 
-      case "lockSeat": {
-        const [, room, seat] = data;
-        if (ws.roomname !== room || !ws.idtarget) return;
-        
-        const seatMap = this.roomSeats.get(room);
-        const seatInfo = seatMap.get(seat);
-        
-        if (seatInfo && seatInfo.namauser === ws.idtarget) {
-          this.lockSeat(room, seat, ws.idtarget);
-          this.safeSend(ws, ['seatLocked', room, seat]);
-        }
-        break;
-      }
-
-      case "unlockSeat": {
-        const [, room, seat] = data;
-        if (ws.roomname !== room || !ws.idtarget) return;
-        
-        const seatMap = this.roomSeats.get(room);
-        const seatInfo = seatMap.get(seat);
-        
-        if (seatInfo && seatInfo.namauser === ws.idtarget) {
-          this.unlockSeat(room, seat);
-          this.safeSend(ws, ['seatUnlocked', room, seat]);
-        }
-        break;
-      }
-
       case "onDestroy": 
+      
         break;
         
       case "setIdTarget2": 
@@ -793,22 +716,11 @@ export class ChatServer {
         const seatMap = this.roomSeats.get(room);
         const currentInfo = seatMap.get(seat) || createEmptySeat();
         
-        // Cek jika kursi terkunci oleh user lain
-        if (currentInfo.locked && currentInfo.lockedBy !== ws.idtarget) {
-          this.safeSend(ws, ['error', 'Kursi sedang digunakan oleh user lain']);
-          return;
-        }
-        
         Object.assign(currentInfo, {
           noimageUrl, namauser, color, itembawah, itematas,
           vip: vip || 0,
           viptanda: viptanda || 0
         });
-
-        // Kunci kursi jika ada user yang mengisinya
-        if (namauser && namauser !== "") {
-          this.lockSeat(room, seat, namauser);
-        }
 
         seatMap.set(seat, currentInfo);
         if (!this.updateKursiBuffer.has(room))
