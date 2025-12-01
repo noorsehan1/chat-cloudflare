@@ -460,10 +460,7 @@ export class ChatServer {
           if (seatInfo && seatInfo.namauser === id) {
             // AUTO-RECONNECT SUKSES
             ws.roomname = room;
-            
-            // Kirim konfirmasi
-            this.safeSend(ws, ["numberKursiSaya", seat]);
-            this.safeSend(ws, ["rooMasuk", seat, room]);
+          
             this.safeSend(ws, ["currentNumber", this.currentNumber]);
             
             // Kirim state room dengan delay
@@ -715,8 +712,7 @@ export class ChatServer {
         if (prevSeat && this.isUserInGracePeriod(newId)) {
           // Auto-reconnect dalam grace period
           ws.roomname = prevSeat.room;
-          this.safeSend(ws, ["numberKursiSaya", prevSeat.seat]);
-          this.safeSend(ws, ["rooMasuk", prevSeat.seat, prevSeat.room]);
+         
           
           setTimeout(() => {
             if (ws.readyState === 1) {
@@ -928,3 +924,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
