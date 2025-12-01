@@ -260,7 +260,7 @@ handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
     if (baru === true) {
-        // User benar-benar baru → bersihkan seat lama jika ada
+        // User baru → hapus seat lama jika ada
         this.forceUserCleanup(id);
 
         ws.idtarget = id;
@@ -269,17 +269,25 @@ handleSetIdTarget2(ws, id, baru) {
     } else {
         // User reconnect → jangan hapus seat lama
         ws.idtarget = id;
-        ws.roomname = undefined;
 
         const prevSeatInfo = this.userToSeat.get(id);
         if (prevSeatInfo) {
+            // Set roomname sebelum kirim state
             ws.roomname = prevSeatInfo.room;
+
+            // Kirim semua state kursi & poin
             this.sendAllStateTo(ws, prevSeatInfo.room);
+
+            // Tidak perlu mengirim nomor kursi lagi
+            // User langsung bisa chat, gift, private, updatePoint, dll
         } else {
+            ws.roomname = undefined;
             this.safeSend(ws, ["needJoinRoom"]);
         }
     }
 }
+
+
 
 
 
@@ -525,4 +533,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
