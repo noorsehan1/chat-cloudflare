@@ -278,7 +278,7 @@ handleSetIdTarget2(ws, id, baru) {
         this.roomClients.get(room)?.add(ws);
 
         // Kirim kursi dan state ke client
-        this.safeSend(ws, ["numberKursiSaya", seat]);
+      
         this.sendAllStateTo(ws, room);
 
         // Update jumlah user di room
@@ -540,3 +540,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
