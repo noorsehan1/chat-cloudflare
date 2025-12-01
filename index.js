@@ -102,6 +102,40 @@ export class ChatServer {
     }
   }
 
+  // Fungsi untuk menentukan apakah perlu grace period berdasarkan kode close
+  shouldApplyGracePeriod(closeCode, reason) {
+    // Kode normal closure (1000-1001) atau kode yang menunjukkan intentional closure
+    const normalClosureCodes = [1000, 1001, 1005];
+    
+    // Jika ada alasan yang menunjukkan reconnect
+    if (reason && (
+      reason.toLowerCase().includes('reconnect') ||
+      reason.toLowerCase().includes('refresh') ||
+      reason.toLowerCase().includes('reload')
+    )) {
+      return false; // Tidak perlu grace period
+    }
+    
+    // Jika kode close adalah normal closure, tidak perlu grace period
+    if (normalClosureCodes.includes(closeCode)) {
+      return false;
+    }
+    
+    // Kode yang membutuhkan grace period (abnormal closure)
+    const gracePeriodCodes = [
+      1006, // Abnormal closure
+      1011, // Internal error
+      1012, // Service restart
+      1013, // Try again later
+      1014, // Bad gateway
+      4000, // Custom codes untuk timeout
+      4001  // Custom codes untuk network error
+    ];
+    
+    // Default: return true untuk kode selain normal closure
+    return gracePeriodCodes.includes(closeCode) || closeCode >= 4000;
+  }
+
   cleanupUserFromSeat(room, seatNumber, userId) {
     const seatMap = this.roomSeats.get(room);
     if (!seatMap) return;
@@ -318,32 +352,31 @@ export class ChatServer {
     if (!id) return;
 
     if (baru === true) {
-        this.forceUserCleanup(id);
-        ws.idtarget = id;
-        ws.roomname = undefined;
-        ws.numkursi = new Set();
-        this.safeSend(ws, ["joinroomawal"]);
+      this.forceUserCleanup(id);
+      ws.idtarget = id;
+      ws.roomname = undefined;
+      ws.numkursi = new Set();
+      this.safeSend(ws, ["joinroomawal"]);
     } else {
-        ws.idtarget = id;
+      ws.idtarget = id;
+      
+      // Batalkan grace period karena user reconnect
+      this.cancelGraceCleanup(id);
+      
+      const seatInfo = this.userToSeat.get(id);
+      
+      if (seatInfo && this.isUserStillInSeat(id, seatInfo.room, seatInfo.seat)) {
+        const { room, seat } = seatInfo;
+        ws.roomname = room;
+        ws.numkursi = new Set([seat]);
         
-        // Batalkan grace period karena user reconnect
-        this.cancelGraceCleanup(id);
-        
-        const seatInfo = this.userToSeat.get(id);
-        
-        if (seatInfo && this.isUserStillInSeat(id, seatInfo.room, seatInfo.seat)) {
-            const { room, seat } = seatInfo;
-            ws.roomname = room;
-            ws.numkursi = new Set([seat]);
-            
-            this.sendAllStateTo(ws, room);
-            this.broadcastRoomUserCount(room);
-            this.vipManager.getAllVipBadges(ws, newRoom);
-          this.safeSend(ws, ["currentNumber", this.currentNumber]);
-
-        } else {
-            this.safeSend(ws, ["needJoinRoom"]);
-        }
+        this.sendAllStateTo(ws, room);
+        this.broadcastRoomUserCount(room);
+        this.vipManager.getAllVipBadges(ws, room);
+        this.safeSend(ws, ["currentNumber", this.currentNumber]);
+      } else {
+        this.safeSend(ws, ["needJoinRoom"]);
+      }
     }
   }
 
@@ -378,11 +411,11 @@ export class ChatServer {
     // Batalkan grace period karena user aktif
     this.cancelGraceCleanup(ws.idtarget);
 
-   
-
     this.sendAllStateTo(ws, newRoom);
     this.vipManager.getAllVipBadges(ws, newRoom);
     this.broadcastRoomUserCount(newRoom);
+    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
 
     return true;
   }
@@ -500,11 +533,11 @@ export class ChatServer {
     this.clients.delete(ws);
     
     if (ws.readyState === 1) {
-        try {
-            ws.close(1000, "Manual destroy");
-        } catch (error) {
-            // Kosongkan error
-        }
+      try {
+        ws.close(1000, "Manual destroy");
+      } catch (error) {
+        // Kosongkan error
+      }
     }
   }
 
@@ -577,7 +610,6 @@ export class ChatServer {
       }
 
       case "onDestroy": 
-      
         break;
         
       case "setIdTarget2": 
@@ -779,7 +811,7 @@ export class ChatServer {
   async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || "";
     if (upgrade.toLowerCase() !== "websocket") {
-        return new Response("Expected WebSocket", { status: 426 });
+      return new Response("Expected WebSocket", { status: 426 });
     }
 
     const pair = new WebSocketPair();
@@ -797,66 +829,33 @@ export class ChatServer {
     this.clients.add(ws);
 
     ws.addEventListener("message", (ev) => {
-        try {
-            this.handleMessage(ws, ev.data);
-        } catch (error) {
-            // Kosongkan error
-        }
+      try {
+        this.handleMessage(ws, ev.data);
+      } catch (error) {
+        // Kosongkan error
+      }
     });
 
     ws.addEventListener("error", (event) => {
-        // Kosongkan error handling, tidak perlu lakukan apa-apa
+      // Kosongkan error handling, tidak perlu lakukan apa-apa
     });
 
     ws.addEventListener("close", (event) => {
-    if (ws.idtarget && !ws.isManualDestroy) {
+      if (ws.idtarget && !ws.isManualDestroy) {
         // Cek kode close untuk menentukan apakah perlu grace period
         const shouldGracePeriod = this.shouldApplyGracePeriod(event.code, event.reason);
         
         if (shouldGracePeriod) {
-            // Schedule grace period untuk user yang disconnect
-            this.scheduleGraceCleanup(ws.idtarget);
+          // Schedule grace period untuk user yang disconnect
+          this.scheduleGraceCleanup(ws.idtarget);
         } else {
-            // Jika close normal/reconnect, langsung cleanup
-            this.forceUserCleanup(ws.idtarget);
+          // Jika close normal/reconnect, langsung cleanup
+          this.forceUserCleanup(ws.idtarget);
         }
-    }
-    this.clients.delete(ws);
-});
+      }
+      this.clients.delete(ws);
+    });
 
-// Fungsi untuk menentukan apakah perlu grace period berdasarkan kode close
-shouldApplyGracePeriod(closeCode, reason) {
-    // Kode normal closure (1000-1001) atau kode yang menunjukkan intentional closure
-    const normalClosureCodes = [1000, 1001, 1005];
-    
-    // Jika ada alasan yang menunjukkan reconnect
-    if (reason && (
-        reason.toLowerCase().includes('reconnect') ||
-        reason.toLowerCase().includes('refresh') ||
-        reason.toLowerCase().includes('reload')
-    )) {
-        return false; // Tidak perlu grace period
-    }
-    
-    // Jika kode close adalah normal closure, tidak perlu grace period
-    if (normalClosureCodes.includes(closeCode)) {
-        return false;
-    }
-    
-    // Kode yang membutuhkan grace period (abnormal closure)
-    const gracePeriodCodes = [
-        1006, // Abnormal closure
-        1011, // Internal error
-        1012, // Service restart
-        1013, // Try again later
-        1014, // Bad gateway
-        4000, // Custom codes untuk timeout
-        4001  // Custom codes untuk network error
-    ];
-    
-    // Default: return true untuk kode selain normal closure
-    return gracePeriodCodes.includes(closeCode) || closeCode >= 4000;
-}
     return new Response(null, { status: 101, webSocket: client });
   }
 }
