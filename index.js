@@ -397,7 +397,7 @@ export class ChatServer {
       if (ws.readyState === 1 && ws.roomname === newRoom && ws.idtarget) {
         this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
       }
-    }, 2000);
+    }, 300);
     return true;
   }
 
@@ -848,3 +848,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
