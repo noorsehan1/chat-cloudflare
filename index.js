@@ -56,7 +56,7 @@ export class ChatServer {
     this._cleanupTimer = setInterval(() => { if (this.clients.size > 0) this.aggressiveCleanup(); }, 30_000);
   }
 
-  // ===== Kursi Lock / Unlock =====
+  // ===== Kursi Lock / Unlock Otomatis =====
   lockSeat(room, seatNumber, userId) {
     const seatMap = this.roomSeats.get(room);
     if (!seatMap || !seatMap.has(seatNumber)) return false;
@@ -236,9 +236,7 @@ export class ChatServer {
     const foundSeat = this.findEmptySeat(newRoom, ws);
     if (!foundSeat) { this.safeSend(ws, ["roomFull", newRoom]); return false; }
 
-    if (!this.lockSeat(newRoom, foundSeat, ws.idtarget)) {
-      this.safeSend(ws, ['error', 'Gagal lock seat']); return false;
-    }
+    this.lockSeat(newRoom, foundSeat, ws.idtarget); // otomatis lock
 
     ws.roomname = newRoom;
     this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
@@ -311,7 +309,7 @@ export class ChatServer {
     const currentSeat = seatMap.get(seat);
     if (currentSeat.namauser === idtarget) {
       if (currentSeat.viptanda > 0) this.vipManager.removeVipBadge(room, seat);
-      this.unlockSeat(room, seat);
+      this.unlockSeat(room, seat); // otomatis unlock
       Object.assign(currentSeat, createEmptySeat());
       this.clearSeatBuffer(room, seat);
       this.broadcastToRoom(room, ["removeKursi", room, seat]);
@@ -357,30 +355,6 @@ export class ChatServer {
       case "isInRoom": {
         const seatInfo = this.userToSeat.get(ws.idtarget);
         this.safeSend(ws, ["inRoomStatus", !!seatInfo]); break;
-      }
-
-      case "lockSeat": {
-        const [, room, seat] = data;
-        if (ws.roomname !== room || !ws.idtarget) return;
-        const seatMap = this.roomSeats.get(room);
-        const seatInfo = seatMap.get(seat);
-        if (seatInfo && seatInfo.namauser === ws.idtarget) {
-          this.lockSeat(room, seat, ws.idtarget);
-          this.safeSend(ws, ['seatLocked', room, seat]);
-        }
-        break;
-      }
-
-      case "unlockSeat": {
-        const [, room, seat] = data;
-        if (ws.roomname !== room || !ws.idtarget) return;
-        const seatMap = this.roomSeats.get(room);
-        const seatInfo = seatMap.get(seat);
-        if (seatInfo && seatInfo.namauser === ws.idtarget) {
-          this.unlockSeat(room, seat);
-          this.safeSend(ws, ['seatUnlocked', room, seat]);
-        }
-        break;
       }
 
       case "onDestroy": break;
@@ -470,7 +444,7 @@ export class ChatServer {
         const currentInfo = seatMap.get(seat) || createEmptySeat();
         if (currentInfo.locked && currentInfo.lockedBy !== ws.idtarget) { this.safeSend(ws, ['error', 'Kursi sedang digunakan oleh user lain']); return; }
         Object.assign(currentInfo, { noimageUrl, namauser, color, itembawah, itematas, vip: vip || 0, viptanda: viptanda || 0 });
-        if (namauser && namauser !== "") this.lockSeat(room, seat, namauser);
+        if (namauser && namauser !== "") this.lockSeat(room, seat, namauser); // otomatis lock
         seatMap.set(seat, currentInfo);
         if (!this.updateKursiBuffer.has(room)) this.updateKursiBuffer.set(room, new Map());
         this.updateKursiBuffer.get(room).set(seat, { ...currentInfo });
