@@ -419,7 +419,7 @@ export class ChatServer {
       if (ws.readyState === 1 && ws.roomname === newRoom && ws.idtarget) {
         this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
       }
-    }, 5000); // Delay 1 detik
+    }, 2000); // Delay 1 detik
     return true;
   }
 
@@ -876,3 +876,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
