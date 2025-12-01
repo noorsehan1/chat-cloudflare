@@ -330,76 +330,66 @@ export class ChatServer {
     return false;
   }
 
-  // INI YANG DIPERBAIKI - handleSetIdTarget2
-handleSetIdTarget2(ws, id, baru) {
-  if (!id) return;
+  handleSetIdTarget2(ws, id, baru) {
+    if (!id) return;
 
-  if (baru === true) {
-    // JOIN PERTAMA KALI (new user atau fresh login)
-    
-    // 1. Cleanup jika user masih ada di sistem (safety)
-    this.forceUserCleanup(id);
-    
-    // 2. Set ID user
-    ws.idtarget = id;
-    ws.roomname = undefined;
-    ws.numkursi = new Set();
-    
-    // 3. Reset profil di ws object (akan diisi nanti oleh client)
-    ws.noimageUrl = "";
-    ws.color = "";
-    ws.itembawah = 0;
-    ws.itematas = 0;
-    ws.vip = 0;
-    ws.viptanda = 0;
-    
-    // 4. Hapus profil dari cache (start fresh)
-    this.userProfiles.delete(id);
-    
-    // 5. Kirim joinroomawal agar client bisa pilih room
-    this.safeSend(ws, ["joinroomawal"]);
-    
-  } else {
-    // RECONNECT (user pernah join sebelumnya)
-    ws.idtarget = id;
-    
-    // Batalkan grace period
-    this.cancelGraceCleanup(id);
-    
-    const seatInfo = this.userToSeat.get(id);
-    
-    if (seatInfo && this.isUserStillInSeat(id, seatInfo.room, seatInfo.seat)) {
-      // User masih ada di kursi sebelumnya
-      const { room, seat } = seatInfo;
-      ws.roomname = room;
-      ws.numkursi = new Set([seat]);
+    if (baru === true) {
+      // LOGIN BARU / FIRST TIME
+      this.forceUserCleanup(id);
+      ws.idtarget = id;
+      ws.roomname = undefined;
+      ws.numkursi = new Set();
       
-      // Load profil dari cache
-      const userProfile = this.userProfiles.get(id);
-      if (userProfile) {
-        ws.noimageUrl = userProfile.noimageUrl;
-        ws.color = userProfile.color;
-        ws.itembawah = userProfile.itembawah;
-        ws.itematas = userProfile.itematas;
-        ws.vip = userProfile.vip;
-        ws.viptanda = userProfile.viptanda;
-      }
+      // Reset profile
+      ws.noimageUrl = "";
+      ws.color = "";
+      ws.itembawah = 0;
+      ws.itematas = 0;
+      ws.vip = 0;
+      ws.viptanda = 0;
       
-      // Kirim state room
-      this.sendAllStateTo(ws, room);
-      this.broadcastRoomUserCount(room);
-      this.vipManager.getAllVipBadges(ws, room);
-      this.safeSend(ws, ["currentNumber", this.currentNumber]);
+      // Hapus profile cache untuk fresh start
+      this.userProfiles.delete(id);
       
-      // Kirim rooMasuk untuk trigger updateKursi di client
-      this.safeSend(ws, ["rooMasuk", seat, room]);
+      this.safeSend(ws, ["joinroomawal"]);
       
     } else {
-      // Kursi sudah hilang atau user belum join room
-      this.safeSend(ws, ["needJoinRoom"]);
+      // RECONNECT
+      ws.idtarget = id;
+      
+      this.cancelGraceCleanup(id);
+      
+      const seatInfo = this.userToSeat.get(id);
+      
+      if (seatInfo && this.isUserStillInSeat(id, seatInfo.room, seatInfo.seat)) {
+        const { room, seat } = seatInfo;
+        ws.roomname = room;
+        ws.numkursi = new Set([seat]);
+        
+        // Load profile dari cache
+        const userProfile = this.userProfiles.get(id);
+        if (userProfile) {
+          ws.noimageUrl = userProfile.noimageUrl;
+          ws.color = userProfile.color;
+          ws.itembawah = userProfile.itembawah;
+          ws.itematas = userProfile.itematas;
+          ws.vip = userProfile.vip;
+          ws.viptanda = userProfile.viptanda;
+        }
+        
+        this.sendAllStateTo(ws, room);
+        this.broadcastRoomUserCount(room);
+        this.vipManager.getAllVipBadges(ws, room);
+        this.safeSend(ws, ["currentNumber", this.currentNumber]);
+        
+        // Kirim rooMasuk untuk trigger updateKursi di client
+        this.safeSend(ws, ["rooMasuk", seat, room]);
+        
+      } else {
+        this.safeSend(ws, ["needJoinRoom"]);
+      }
     }
   }
-}
 
   handleUpdateProfile(ws, data) {
     if (!ws.idtarget) return;
@@ -465,158 +455,146 @@ handleSetIdTarget2(ws, id, baru) {
     return seatData?.namauser === idtarget;
   }
   
-  // INI YANG DIPERBAIKI - handleJoinRoom
- async handleJoinRoom(ws, newRoom) {
-  if (!roomList.includes(newRoom) || !ws.idtarget) {
-    return false;
-  }
-
-  const lockKey = `join-${ws.idtarget}`;
-  
-  if (this.joinLocks.has(lockKey)) {
-    this.safeSend(ws, ["error", "Already processing join request"]);
-    return false;
-  }
-
-  this.joinLocks.set(lockKey, true);
-  
-  try {
-    // CEK: Apakah ini join pertama kali atau pindah room?
-    const currentSeatInfo = this.userToSeat.get(ws.idtarget);
-    
-    if (currentSeatInfo) {
-      // User sudah punya kursi di room LAIN (pindah room)
-      const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
-      
-      // Jika sudah di room yang sama, tidak perlu join lagi
-      if (currentRoom === newRoom) {
-        this.safeSend(ws, ["alreadyInRoom", newRoom]);
-        return false;
-      }
-      
-      // Cleanup dari room lama
-      this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
-    }
-    // Jika currentSeatInfo undefined, berarti ini join pertama kali
-    // Tidak perlu cleanup apa-apa
-
-    // Cari kursi untuk user
-    const foundSeat = await this.findAvailableSeat(newRoom, ws.idtarget);
-    if (!foundSeat) {
-      this.safeSend(ws, ["roomFull", newRoom]);
+  async handleJoinRoom(ws, newRoom) {
+    if (!roomList.includes(newRoom) || !ws.idtarget) {
       return false;
     }
 
-    // Update state user
-    ws.roomname = newRoom;
-    ws.numkursi = new Set([foundSeat]);
+    const lockKey = `join-${ws.idtarget}`;
     
-    // Simpan mapping user->seat
-    this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-
-    // Batalkan grace period jika ada
-    this.cancelGraceCleanup(ws.idtarget);
-
-    // Ambil profil user (untuk join pertama kali, profil mungkin belum ada)
-    let userProfile = this.userProfiles.get(ws.idtarget);
-    
-    // Jika profil belum ada, coba dari ws object
-    if (!userProfile) {
-      userProfile = {
-        noimageUrl: ws.noimageUrl || "",
-        color: ws.color || "",
-        itembawah: ws.itembawah || 0,
-        itematas: ws.itematas || 0,
-        vip: ws.vip || 0,
-        viptanda: ws.viptanda || 0
-      };
-      
-      // Simpan ke cache untuk next time
-      this.userProfiles.set(ws.idtarget, userProfile);
+    if (this.joinLocks.has(lockKey)) {
+      this.safeSend(ws, ["error", "Already processing join request"]);
+      return false;
     }
 
-    // Update kursi di server
-    const seatMap = this.roomSeats.get(newRoom);
-    const currentSeat = seatMap.get(foundSeat);
+    this.joinLocks.set(lockKey, true);
     
-    // Untuk join pertama kali, kursi harus kosong
-    // Tapi kita tetap cek untuk safety
-    if (currentSeat.namauser && currentSeat.namauser !== ws.idtarget) {
-      // Kursi sudah ditempati orang lain - ini seharusnya tidak terjadi
-      // Cari kursi lain
-      const alternativeSeat = await this.findAvailableSeat(newRoom, ws.idtarget, foundSeat + 1);
-      if (!alternativeSeat) {
+    try {
+      // Cek apakah user sudah punya kursi
+      const currentSeatInfo = this.userToSeat.get(ws.idtarget);
+      
+      if (currentSeatInfo) {
+        // User sudah punya kursi (bisa di room lain atau sama)
+        const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
+        
+        // Jika sudah di room yang sama, tidak perlu join lagi
+        if (currentRoom === newRoom) {
+          this.safeSend(ws, ["alreadyInRoom", newRoom]);
+          return false;
+        }
+        
+        // Jika pindah room, cleanup dulu dari room lama
+        this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
+      }
+      // Jika currentSeatInfo undefined, berarti FIRST TIME JOIN
+      // Tidak perlu cleanup apa-apa
+
+      // Cari kursi available
+      let foundSeat = await this.findAvailableSeat(newRoom, ws.idtarget);
+      if (!foundSeat) {
         this.safeSend(ws, ["roomFull", newRoom]);
         return false;
       }
-      foundSeat = alternativeSeat;
+
+      // Update state
+      ws.roomname = newRoom;
+      ws.numkursi = new Set([foundSeat]);
+      
+      this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+
+      this.cancelGraceCleanup(ws.idtarget);
+
+      // Ambil profile user
+      let userProfile = this.userProfiles.get(ws.idtarget);
+      
+      if (!userProfile) {
+        // FIRST TIME: profile belum ada, gunakan dari ws object
+        userProfile = {
+          noimageUrl: ws.noimageUrl || "",
+          color: ws.color || "",
+          itembawah: ws.itembawah || 0,
+          itematas: ws.itematas || 0,
+          vip: ws.vip || 0,
+          viptanda: ws.viptanda || 0
+        };
+        
+        // Simpan untuk next time
+        this.userProfiles.set(ws.idtarget, userProfile);
+      }
+
+      // Update kursi di server
+      const seatMap = this.roomSeats.get(newRoom);
+      const currentSeat = seatMap.get(foundSeat);
+      
+      // Safety check: kursi harus kosong untuk first time join
+      if (currentSeat.namauser && currentSeat.namauser !== ws.idtarget) {
+        // Kursi sudah ditempati orang lain - cari kursi lain
+        const alternativeSeat = await this.findAvailableSeat(newRoom, ws.idtarget, foundSeat + 1);
+        if (!alternativeSeat) {
+          this.safeSend(ws, ["roomFull", newRoom]);
+          return false;
+        }
+        foundSeat = alternativeSeat;
+      }
+
+      // Set data kursi
+      Object.assign(currentSeat, {
+        noimageUrl: userProfile.noimageUrl,
+        namauser: ws.idtarget,
+        color: userProfile.color,
+        itembawah: userProfile.itembawah,
+        itematas: userProfile.itematas,
+        vip: userProfile.vip,
+        viptanda: userProfile.viptanda,
+        lastPoint: null
+      });
+
+      // Buffer update
+      if (!this.updateKursiBuffer.has(newRoom))
+        this.updateKursiBuffer.set(newRoom, new Map());
+      this.updateKursiBuffer.get(newRoom).set(foundSeat, { ...currentSeat });
+
+      // Kirim response
+      this.sendAllStateTo(ws, newRoom);
+      this.vipManager.getAllVipBadges(ws, newRoom);
+      this.broadcastRoomUserCount(newRoom);
+      
+      // PENTING: Kirim rooMasuk untuk trigger updateKursi di client
+      this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+      this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
+
+      return true;
+    } finally {
+      this.joinLocks.delete(lockKey);
     }
-
-    // Update data kursi
-    Object.assign(currentSeat, {
-      noimageUrl: userProfile.noimageUrl,
-      namauser: ws.idtarget,
-      color: userProfile.color,
-      itembawah: userProfile.itembawah,
-      itematas: userProfile.itematas,
-      vip: userProfile.vip,
-      viptanda: userProfile.viptanda,
-      lastPoint: null // Reset last point untuk join baru
-    });
-
-    // Buffer untuk broadcast ke client lain
-    if (!this.updateKursiBuffer.has(newRoom))
-      this.updateKursiBuffer.set(newRoom, new Map());
-    this.updateKursiBuffer.get(newRoom).set(foundSeat, { ...currentSeat });
-
-    // Kirim semua state room ke user ini
-    this.sendAllStateTo(ws, newRoom);
-    
-    // Kirim VIP badges jika ada
-    this.vipManager.getAllVipBadges(ws, newRoom);
-    
-    // Update count room
-    this.broadcastRoomUserCount(newRoom);
-    
-    // Kirim event ke CLIENT: rooMasuk dengan seat number
-    // Client akan merespons dengan updateKursi
-    this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-    this.safeSend(ws, ["currentNumber", this.currentNumber]);
-
-    return true;
-  } finally {
-    this.joinLocks.delete(lockKey);
-  }
-}
-
-// Fungsi untuk mencari kursi yang available
-async findAvailableSeat(room, userId, startFrom = 1) {
-  const seatMap = this.roomSeats.get(room);
-  if (!seatMap) return null;
-
-  // Priority 1: Cek apakah user sudah punya kursi di room ini
-  // (untuk case reconnect atau duplicate join)
-  for (let i = 1; i <= this.MAX_SEATS; i++) {
-    const seatInfo = seatMap.get(i);
-    if (seatInfo && seatInfo.namauser === userId) {
-      return i;
-    }
   }
 
-  // Priority 2: Cari kursi kosong
-  for (let i = startFrom; i <= this.MAX_SEATS; i++) {
-    const seatInfo = seatMap.get(i);
-    if (seatInfo && !seatInfo.namauser) {
-      // Double check untuk menghindari race condition
-      if (!seatInfo.namauser) {
+  async findAvailableSeat(room, userId, startFrom = 1) {
+    const seatMap = this.roomSeats.get(room);
+    if (!seatMap) return null;
+
+    // Priority 1: Cek apakah user sudah punya kursi di room ini
+    for (let i = 1; i <= this.MAX_SEATS; i++) {
+      const seatInfo = seatMap.get(i);
+      if (seatInfo && seatInfo.namauser === userId) {
         return i;
       }
     }
+
+    // Priority 2: Cari kursi kosong
+    for (let i = startFrom; i <= this.MAX_SEATS; i++) {
+      const seatInfo = seatMap.get(i);
+      if (seatInfo && !seatInfo.namauser) {
+        // Double check untuk race condition
+        if (!seatInfo.namauser) {
+          return i;
+        }
+      }
+    }
+    
+    return null;
   }
-  
-  return null;
-}
 
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1 || !room) return;
@@ -956,6 +934,7 @@ async findAvailableSeat(room, userId, startFrom = 1) {
 
         seatMap.set(seat, currentInfo);
         
+        // Simpan profile
         this.userProfiles.set(namauser, {
           noimageUrl: noimageUrl,
           color: color,
@@ -965,6 +944,7 @@ async findAvailableSeat(room, userId, startFrom = 1) {
           viptanda: viptanda
         });
         
+        // Update ws object jika ini user yang sedang aktif
         if (ws.idtarget === namauser) {
           ws.noimageUrl = noimageUrl;
           ws.color = color;
@@ -1028,6 +1008,7 @@ async findAvailableSeat(room, userId, startFrom = 1) {
     ws.numkursi = new Set();
     ws.isManualDestroy = false;
 
+    // Initialize profile fields
     ws.noimageUrl = "";
     ws.color = "";
     ws.itembawah = 0;
@@ -1077,4 +1058,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
