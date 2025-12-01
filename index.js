@@ -256,33 +256,31 @@ export class ChatServer {
     return true;
   }
 
- handleSetIdTarget2(ws, id, baru) {
+handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
-    // Bersihkan seat / state lama yang terkait id
-    this.forceUserCleanup(id);
-
-    // Set idtarget baru ke ws
-    ws.idtarget = id;
-    ws.roomname = undefined;
-
-    // Kirim event ke client
     if (baru === true) {
+        // User benar-benar baru → bersihkan seat lama jika ada
+        this.forceUserCleanup(id);
+
+        ws.idtarget = id;
+        ws.roomname = undefined;
         this.safeSend(ws, ["joinroomawal"]);
     } else {
-        // Untuk reconnect, pastikan seat sebelumnya bisa direcover
-        // Cek apakah user sebelumnya punya seat
+        // User reconnect → jangan hapus seat lama
+        ws.idtarget = id;
+        ws.roomname = undefined;
+
         const prevSeatInfo = this.userToSeat.get(id);
         if (prevSeatInfo) {
-            // User sebelumnya punya seat, kembalikan state
             ws.roomname = prevSeatInfo.room;
             this.sendAllStateTo(ws, prevSeatInfo.room);
         } else {
-            // Tidak punya seat, kirim needJoinRoom
             this.safeSend(ws, ["needJoinRoom"]);
         }
     }
 }
+
 
 
   handleOnDestroy(ws, idtarget) {
@@ -527,3 +525,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
