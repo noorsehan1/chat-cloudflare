@@ -107,16 +107,49 @@ export class ChatServer {
       this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
       this.broadcastRoomUserCount(room);
     }
+
+    // remove mapping user -> seat
     this.userToSeat.delete(userId);
-    this.roomClients.get(room)?.delete([...this.roomClients.get(room)].find(c => c.idtarget === userId));
+
+    // safer removal: iterate set and delete any client objects with matching idtarget
+    try {
+      const set = this.roomClients.get(room);
+      if (set && set.size > 0) {
+        for (const c of Array.from(set)) {
+          try {
+            if (c && c.idtarget === userId) set.delete(c);
+          } catch (e) {
+            // ignore single-item errors
+          }
+        }
+      }
+    } catch (e) {
+      // defensive: ignore
+    }
   }
 
   forceUserCleanup(idtarget) {
     if (!idtarget) return;
     const seatInfo = this.userToSeat.get(idtarget);
-    if (seatInfo) this.cleanupUserFromSeat(seatInfo.room, seatInfo.seat, idtarget);
+    if (seatInfo) {
+      try { this.cleanupUserFromSeat(seatInfo.room, seatInfo.seat, idtarget); } catch (e) {}
+    }
+
+    // Ensure maps cleared
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
+
+    // also remove any existing clients with the same idtarget from roomClients (defensive)
+    try {
+      for (const [room, set] of this.roomClients.entries()) {
+        if (!set || set.size === 0) continue;
+        for (const c of Array.from(set)) {
+          try { if (c && c.idtarget === idtarget) set.delete(c); } catch (e) {}
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
   }
 
   fullRemoveById(idtarget) {
@@ -125,7 +158,7 @@ export class ChatServer {
     this.forceUserCleanup(idtarget);
     for (const c of Array.from(this.clients)) {
       if (c.idtarget === idtarget) {
-        if (c.readyState === 1) c.close(1000, "Session removed");
+        try { if (c.readyState === 1) c.close(1000, "Session removed"); } catch (e) {}
         this.clients.delete(c);
       }
     }
@@ -229,18 +262,37 @@ export class ChatServer {
   }
 
   handleJoinRoom(ws, newRoom) {
-    if (!roomList.includes(newRoom) || !ws.idtarget || ws.readyState !== 1) return false;
+    try {
+      console.log(`[CHAT-SERVER] handleJoinRoom attempt id=${ws.idtarget} conn=${ws._connId} room=${newRoom}`);
+    } catch (e) {}
+
+    if (!roomList.includes(newRoom) || !ws.idtarget || ws.readyState !== 1) {
+      try { console.log(`[CHAT-SERVER] handleJoinRoom rejected id=${ws.idtarget} room=${newRoom}`); } catch (e) {}
+      return false;
+    }
+
     const currentSeatInfo = this.userToSeat.get(ws.idtarget);
-    if (currentSeatInfo) this.cleanupUserFromSeat(currentSeatInfo.room, currentSeatInfo.seat, ws.idtarget);
+    if (currentSeatInfo) {
+      try {
+        this.cleanupUserFromSeat(currentSeatInfo.room, currentSeatInfo.seat, ws.idtarget);
+      } catch (e) {}
+    }
 
     const foundSeat = this.findEmptySeat(newRoom, ws);
-    if (!foundSeat) { this.safeSend(ws, ["roomFull", newRoom]); return false; }
+    if (!foundSeat) { 
+      this.safeSend(ws, ["roomFull", newRoom]); 
+      try { console.log(`[CHAT-SERVER] roomFull for id=${ws.idtarget} room=${newRoom}`); } catch (e) {}
+      return false; 
+    }
 
     this.lockSeat(newRoom, foundSeat, ws.idtarget); // otomatis lock
 
     ws.roomname = newRoom;
     this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-    this.roomClients.get(newRoom)?.add(ws);
+
+    // ensure set exists and add ws
+    if (!this.roomClients.has(newRoom)) this.roomClients.set(newRoom, new Set());
+    try { this.roomClients.get(newRoom).add(ws); } catch (e) {}
 
     this.safeSend(ws, ["numberKursiSaya", foundSeat]);
     this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
@@ -253,24 +305,48 @@ export class ChatServer {
     this.vipManager.getAllVipBadges(ws, newRoom);
     this.broadcastRoomUserCount(newRoom);
 
+    try { console.log(`[CHAT-SERVER] joinRoom success id=${ws.idtarget} room=${newRoom} seat=${foundSeat}`); } catch (e) {}
+
     return true;
   }
 
   handleSetIdTarget2(ws, id, baru) {
+    try { console.log(`[CHAT-SERVER] handleSetIdTarget2 conn=${ws._connId} id=${id} baru=${!!baru}`); } catch (e) {}
+
     if (!id) return;
+
+    // Ensure current ws present in clients (defensive)
+    try { this.clients.add(ws); } catch (e) {}
+
+    // Clean old user state for this id (remove seats, badges, counts)
     this.forceUserCleanup(id);
+
+    // Assign idtarget to current ws but avoid immediately clearing ws.roomname to reduce race conditions
     ws.idtarget = id;
-    ws.roomname = undefined;
-    if (baru === true) this.safeSend(ws, ["joinroomawal"]);
-    else this.safeSend(ws, ["needJoinRoom"]);
+    // do not set ws.roomname = undefined here; let join flow manage it
+
+    // Ensure roomClients map exists for all rooms (defensive)
+    for (const r of roomList) {
+      if (!this.roomClients.has(r)) this.roomClients.set(r, new Set());
+    }
+
+    // Small delay to allow cleanup broadcasts to propagate / internal state to stabilize
+    setTimeout(() => {
+      if (ws.readyState !== 1) return;
+      if (baru === true) {
+        try { this.safeSend(ws, ["joinroomawal"]); } catch (e) {}
+      } else {
+        try { this.safeSend(ws, ["needJoinRoom"]); } catch (e) {}
+      }
+    }, 60);
   }
 
   handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
     ws.isManualDestroy = true;
-    this.fullRemoveById(idtarget);
+    try { this.fullRemoveById(idtarget); } catch (e) {}
     this.clients.delete(ws);
-    if (ws.readyState === 1) ws.close(1000, "Manual destroy");
+    try { if (ws.readyState === 1) ws.close(1000, "Manual destroy"); } catch (e) {}
   }
 
   sendAllStateTo(ws, room) {
@@ -358,7 +434,10 @@ export class ChatServer {
       }
 
       case "onDestroy": break;
-      case "setIdTarget2": this.handleSetIdTarget2(ws, data[1], data[2]); break;
+      case "setIdTarget2": 
+        try { console.log(`[CHAT-SERVER] recv setIdTarget2 id=${data[1]} baru=${!!data[2]} conn=${ws._connId}`); } catch (e) {}
+        this.handleSetIdTarget2(ws, data[1], data[2]); 
+        break;
 
       case "setIdTarget": {
         const newId = data[1];
@@ -406,7 +485,10 @@ export class ChatServer {
         break;
       }
 
-      case "joinRoom": this.handleJoinRoom(ws, data[1]); break;
+      case "joinRoom": 
+        try { console.log(`[CHAT-SERVER] recv joinRoom from id=${ws.idtarget} conn=${ws._connId} room=${data[1]}`); } catch (e) {}
+        this.handleJoinRoom(ws, data[1]); 
+        break;
 
       case "chat": {
         const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
