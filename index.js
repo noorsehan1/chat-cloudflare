@@ -34,12 +34,12 @@ export class ChatServer {
     this.roomClients = new Map();
     this.updateKursiBuffer = new Map();
     this.chatMessageBuffer = new Map();
-
-    this.messageCounts = new Map(); // bisa tetap untuk statistik jika perlu
+    this.messageCounts = new Map();
 
     this._nextConnId = 1;
     this.currentNumber = 1;
     this.maxNumber = 6;
+    this.MAX_BUFFER = 500;
 
     for (const room of roomList) {
       const seatMap = new Map();
@@ -51,7 +51,6 @@ export class ChatServer {
     this.vipManager = new VipBadgeManager(this);
     this.lowcard = new LowCardGameManager(this);
 
-    // Interval utama
     this._tickTimer = setInterval(() => this.tick(), 15 * 60 * 1000);
     this._flushTimer = setInterval(() => { if (this.clients.size > 0) this.periodicFlush(); }, 100);
     this._cleanupTimer = setInterval(() => { if (this.clients.size > 0) this.aggressiveCleanup(); }, 30_000);
@@ -62,6 +61,7 @@ export class ChatServer {
     const seatMap = this.roomSeats.get(room);
     if (!seatMap || !seatMap.has(seatNumber)) return false;
     const seatInfo = seatMap.get(seatNumber);
+    if (seatInfo.locked && seatInfo.lockedBy !== userId) return false;
     seatInfo.locked = true;
     seatInfo.lockedBy = userId;
     return true;
@@ -108,7 +108,7 @@ export class ChatServer {
       this.broadcastRoomUserCount(room);
     }
     this.userToSeat.delete(userId);
-    this.roomClients.get(room)?.forEach(ws => { if (ws.idtarget === userId) this.roomClients.get(room)?.delete(ws); });
+    this.roomClients.get(room)?.delete([...this.roomClients.get(room)].find(c => c.idtarget === userId));
   }
 
   forceUserCleanup(idtarget) {
@@ -138,12 +138,10 @@ export class ChatServer {
 
   // ===== Send / Broadcast =====
   safeSend(ws, arr) {
-    if (ws && ws.readyState === 1) {
-      if (typeof ws.bufferedAmount === "number" && ws.bufferedAmount > 1_000_000) return false;
-      ws.send(JSON.stringify(arr));
-      return true;
-    }
-    return false;
+    if (!ws || ws.readyState !== 1) return false;
+    if (typeof ws.bufferedAmount === "number" && ws.bufferedAmount > 1_000_000) return false;
+    try { ws.send(JSON.stringify(arr)); return true; } 
+    catch (e) { if (ws.idtarget) this.handleOnDestroy(ws, ws.idtarget); return false; }
   }
 
   broadcastToRoom(room, msg) {
@@ -174,19 +172,25 @@ export class ChatServer {
   }
 
   flushChatBuffer() {
-    for (const [room, messages] of this.chatMessageBuffer) {
-      if (messages.length > 0 && roomList.includes(room)) {
-        for (const msg of messages) this.broadcastToRoom(room, msg);
-        this.chatMessageBuffer.set(room, []);
-      }
+    for (const [room, messages] of this.chatMessageBuffer.entries()) {
+      if (!roomList.includes(room)) continue;
+      if (!messages || messages.length === 0) continue;
+
+      const flushMessages = messages.slice(0, this.MAX_BUFFER);
+      for (const msg of flushMessages) this.broadcastToRoom(room, msg);
+      this.chatMessageBuffer.set(room, messages.slice(this.MAX_BUFFER));
     }
   }
 
   flushKursiUpdates() {
-    for (const [room, seatMapUpdates] of this.updateKursiBuffer) {
+    for (const [room, seatMapUpdates] of this.updateKursiBuffer.entries()) {
       if (!roomList.includes(room)) continue;
+      if (!seatMapUpdates || seatMapUpdates.size === 0) continue;
+
       const updates = [];
+      let count = 0;
       for (const [seat, info] of seatMapUpdates.entries()) {
+        if (count++ >= this.MAX_BUFFER) break;
         const { lastPoint, ...rest } = info;
         updates.push([seat, rest]);
       }
@@ -207,7 +211,6 @@ export class ChatServer {
     }
   }
 
-  // ===== Room / Seat Handling =====
   findEmptySeat(room, ws) {
     if (!ws.idtarget) return null;
     const seatMap = this.roomSeats.get(room);
@@ -227,17 +230,16 @@ export class ChatServer {
 
   handleJoinRoom(ws, newRoom) {
     if (!roomList.includes(newRoom) || !ws.idtarget || ws.readyState !== 1) return false;
-
     const currentSeatInfo = this.userToSeat.get(ws.idtarget);
     if (currentSeatInfo) this.cleanupUserFromSeat(currentSeatInfo.room, currentSeatInfo.seat, ws.idtarget);
 
     const foundSeat = this.findEmptySeat(newRoom, ws);
-    if (!foundSeat) {
-      this.safeSend(ws, ["roomFull", newRoom]);
-      return false;
+    if (!foundSeat) { this.safeSend(ws, ["roomFull", newRoom]); return false; }
+
+    if (!this.lockSeat(newRoom, foundSeat, ws.idtarget)) {
+      this.safeSend(ws, ['error', 'Gagal lock seat']); return false;
     }
 
-    this.lockSeat(newRoom, foundSeat, ws.idtarget);
     ws.roomname = newRoom;
     this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
     this.roomClients.get(newRoom)?.add(ws);
@@ -256,19 +258,18 @@ export class ChatServer {
     return true;
   }
 
-handleSetIdTarget2(ws, id, baru) {
-  if (!id) return;
-  this.forceUserCleanup(id);
-  ws.idtarget = id;
-  ws.roomname = undefined;
-  if (baru === true) this.safeSend(ws, ["joinroomawal"]);
-  else this.safeSend(ws, ["needJoinRoom"]);
-}
-
-
+  handleSetIdTarget2(ws, id, baru) {
+    if (!id) return;
+    this.forceUserCleanup(id);
+    ws.idtarget = id;
+    ws.roomname = undefined;
+    if (baru === true) this.safeSend(ws, ["joinroomawal"]);
+    else this.safeSend(ws, ["needJoinRoom"]);
+  }
 
   handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
+    ws.isManualDestroy = true;
     this.fullRemoveById(idtarget);
     this.clients.delete(ws);
     if (ws.readyState === 1) ws.close(1000, "Manual destroy");
@@ -319,7 +320,6 @@ handleSetIdTarget2(ws, id, baru) {
     this.userToSeat.delete(idtarget);
   }
 
-  // ===== WebSocket fetch =====
   async fetch(request) {
     const upgrade = request.headers.get("Upgrade") || "";
     if (upgrade.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
@@ -342,7 +342,6 @@ handleSetIdTarget2(ws, id, baru) {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // ===== Semua handleMessage cases lengkap =====
   handleMessage(ws, raw) {
     if (ws.readyState !== 1) return;
     let data; try { data = JSON.parse(raw); } catch (e) { return; }
@@ -509,5 +508,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
