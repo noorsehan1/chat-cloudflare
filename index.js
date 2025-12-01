@@ -484,92 +484,52 @@ export class ChatServer {
   }
 
   handleJoinRoom(ws, newRoom) {
-    if (!roomList.includes(newRoom) || !ws.idtarget || ws.readyState !== 1) {
-      return false;
-    }
-    
-    // Update last seen
-    this.updateUserLastSeen(ws.idtarget);
-
-    const currentSeatInfo = this.userToSeat.get(ws.idtarget);
-    
-    // Jika sudah di room ini, kirim ulang state saja
-    if (currentSeatInfo && currentSeatInfo.room === newRoom) {
-      this.safeSend(ws, ["numberKursiSaya", currentSeatInfo.seat]);
-      this.safeSend(ws, ["rooMasuk", currentSeatInfo.seat, newRoom]);
-      
-      setTimeout(() => {
-        if (ws.readyState === 1) {
-          this.sendAllStateTo(ws, newRoom);
-        }
-      }, 100);
-      return true;
-    }
-
-    // Cleanup dari seat sebelumnya jika ada
-    if (currentSeatInfo) {
-      this.cleanupUserFromSeat(currentSeatInfo.room, currentSeatInfo.seat, ws.idtarget);
-    }
-
-    // Cari kursi kosong dengan locking
-    const foundSeat = this.findEmptySeat(newRoom, ws);
-    if (!foundSeat) {
-      this.releaseSeatLock(newRoom, foundSeat);
-      this.safeSend(ws, ["roomFull", newRoom]);
-      return false;
-    }
-
-    try {
-      // Lock seat untuk user ini
-      if (!this.lockSeat(newRoom, foundSeat, ws.idtarget)) {
-        this.releaseSeatLock(newRoom, foundSeat);
-        this.safeSend(ws, ["error", "Kursi tidak tersedia"]);
-        return false;
-      }
-
-      // Update state
-      ws.roomname = newRoom;
-      this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-
-      // Update seat info
-      const seatMap = this.roomSeats.get(newRoom);
-      const seatInfo = seatMap.get(foundSeat);
-      if (seatInfo) {
-        seatInfo.namauser = ws.idtarget;
-        seatInfo.locked = true;
-        seatInfo.lockedBy = ws.idtarget;
-      }
-
-      // Kirim konfirmasi
-      this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-      this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-      this.safeSend(ws, ["currentNumber", this.currentNumber]);
-
-      // Release temporary lock
-      this.releaseSeatLock(newRoom, foundSeat);
-
-      // Kirim state room dengan delay
-      setTimeout(() => {
-        if (ws.readyState === 1 && ws.roomname === newRoom) {
-          this.sendAllStateTo(ws, newRoom);
-        }
-      }, 300);
-
-      // Kirim VIP badges
-      this.vipManager.getAllVipBadges(ws, newRoom);
-      
-      // Broadcast update count
-      this.broadcastRoomUserCount(newRoom);
-
-      return true;
-      
-    } catch (error) {
-      // Rollback jika error
-      this.releaseSeatLock(newRoom, foundSeat);
-      this.unlockSeat(newRoom, foundSeat);
-      return false;
-    }
+  if (!roomList.includes(newRoom) || !ws.idtarget || ws.readyState !== 1) {
+    return false;
   }
+
+  // Cari kursi kosong
+  const foundSeat = this.findEmptySeat(newRoom, ws);
+  if (!foundSeat) {
+    this.safeSend(ws, ["roomFull", newRoom]);
+    return false;
+  }
+
+  // Set room dan seat
+  ws.roomname = newRoom;
+  
+  // Update seat info
+  const seatMap = this.roomSeats.get(newRoom);
+  const seatInfo = seatMap.get(foundSeat);
+  if (seatInfo) {
+    seatInfo.namauser = ws.idtarget;
+    seatInfo.locked = true;
+    seatInfo.lockedBy = ws.idtarget;
+  }
+
+  // Simpan mapping user -> seat
+  this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+
+  // Kirim konfirmasi
+  this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+  this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+  this.safeSend(ws, ["currentNumber", this.currentNumber]);
+
+  // Kirim state room
+  setTimeout(() => {
+    if (ws.readyState === 1 && ws.roomname === newRoom) {
+      this.sendAllStateTo(ws, newRoom);
+    }
+  }, 300);
+
+  // Kirim VIP badges
+  this.vipManager.getAllVipBadges(ws, newRoom);
+  
+  // Broadcast update count
+  this.broadcastRoomUserCount(newRoom);
+
+  return true;
+}
 
   sendAllStateTo(ws, room) {
     if (ws.readyState !== 1 || ws.roomname !== room) return;
@@ -924,4 +884,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
