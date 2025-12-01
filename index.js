@@ -415,7 +415,7 @@ export class ChatServer {
       }
 
       // Cari kursi kosong dengan locking
-      const foundSeat = await this.findAndReserveSeat(newRoom, ws);
+      let foundSeat = await this.findAndReserveSeat(newRoom, ws);
       if (!foundSeat) {
         this.safeSend(ws, ["roomFull", newRoom]);
         return false;
@@ -444,8 +444,8 @@ export class ChatServer {
       this.cancelGraceCleanup(ws.idtarget);
 
       // Update kursi dengan informasi user
-      const seatMap = this.roomSeats.get(newRoom);
-      const currentSeat = seatMap.get(foundSeat);
+      const seatMap2 = this.roomSeats.get(newRoom);
+      const currentSeat = seatMap2.get(foundSeat);
       Object.assign(currentSeat, {
         noimageUrl: ws.noimageUrl || "",
         namauser: ws.idtarget,
@@ -467,7 +467,6 @@ export class ChatServer {
       this.broadcastRoomUserCount(newRoom);
       this.safeSend(ws, ["numberKursiSaya", foundSeat]);
       this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-      this.safeSend(ws, ["currentNumber", this.currentNumber]);
 
       return true;
     } finally {
@@ -786,9 +785,9 @@ export class ChatServer {
 
       case "joinRoom": 
         // Gunakan async wrapper untuk handleJoinRoom
-        (async () => {
-          await this.handleJoinRoom(ws, data[1]);
-        })();
+        this.handleJoinRoom(ws, data[1]).catch(() => {
+          // Tangkap error tanpa lakukan apa-apa
+        });
         break;
 
       case "chat": {
