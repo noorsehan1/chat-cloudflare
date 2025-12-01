@@ -27,6 +27,7 @@ export class ChatServer {
     this.clients = new Set();
     this.userToSeat = new Map();
     this.hasEverSetId = false;
+    this.joinLocks = new Map();
 
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
@@ -51,11 +52,9 @@ export class ChatServer {
 
     this._nextConnId = 1;
 
-    // Grace period untuk cleanup (30 detik)
-    this.gracePeriod = 30 * 1000; // 30 detik
-    this.graceTimers = new Map(); // Map untuk menyimpan timer grace period per user
+    this.gracePeriod = 30 * 1000;
+    this.graceTimers = new Map();
 
-    // PERTAHANKAN timer untuk currentNumber (penting)
     this.intervalMillis = 15 * 60 * 1000;
     this.currentNumber = 1;
     this.maxNumber = 6;
@@ -63,7 +62,6 @@ export class ChatServer {
       this.tick();
     }, this.intervalMillis);
 
-    // Timer untuk flushing tetap dipertahankan karena penting untuk performa
     this._flushTimer = setInterval(() => {
       if (this.clients.size > 0) this.periodicFlush();
     }, 16);
@@ -74,16 +72,44 @@ export class ChatServer {
     this.MAX_MESSAGES_PER_SECOND = 20;
   }
 
-  // Tambahkan grace period sebelum membersihkan user
+  getUserCurrentRoom(userId) {
+    for (const room of roomList) {
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) continue;
+      
+      for (const [seatNumber, seatInfo] of seatMap) {
+        if (seatInfo.namauser === userId) {
+          return { room, seat: seatNumber };
+        }
+      }
+    }
+    return null;
+  }
+
+  isUserAlreadyInRoom(userId) {
+    return this.getUserCurrentRoom(userId) !== null;
+  }
+
+  validateUserInRoom(ws, room) {
+    if (!ws.idtarget || !room) return false;
+    
+    const seatInfo = this.userToSeat.get(ws.idtarget);
+    if (!seatInfo || seatInfo.room !== room) {
+      return false;
+    }
+    
+    const seatMap = this.roomSeats.get(room);
+    const seatData = seatMap?.get(seatInfo.seat);
+    return seatData?.namauser === ws.idtarget;
+  }
+
   scheduleGraceCleanup(idtarget) {
     if (!idtarget) return;
     
-    // Hapus timer sebelumnya jika ada
     if (this.graceTimers.has(idtarget)) {
       clearTimeout(this.graceTimers.get(idtarget));
     }
     
-    // Set timer baru untuk grace period
     const timer = setTimeout(() => {
       this.forceUserCleanup(idtarget);
       this.graceTimers.delete(idtarget);
@@ -92,7 +118,6 @@ export class ChatServer {
     this.graceTimers.set(idtarget, timer);
   }
 
-  // Batalkan grace period jika user reconnect
   cancelGraceCleanup(idtarget) {
     if (!idtarget) return;
     
@@ -102,37 +127,14 @@ export class ChatServer {
     }
   }
 
-  // Fungsi untuk menentukan apakah perlu grace period berdasarkan kode close
-  shouldApplyGracePeriod(closeCode, reason) {
-    // Kode normal closure (1000-1001) atau kode yang menunjukkan intentional closure
+  shouldApplyGracePeriod(closeCode) {
     const normalClosureCodes = [1000, 1001, 1005];
+    const gracePeriodCodes = [1006, 1011, 1012, 1013, 1014, 4000, 4001];
     
-    // Jika ada alasan yang menunjukkan reconnect
-    if (reason && (
-      reason.toLowerCase().includes('reconnect') ||
-      reason.toLowerCase().includes('refresh') ||
-      reason.toLowerCase().includes('reload')
-    )) {
-      return false; // Tidak perlu grace period
-    }
-    
-    // Jika kode close adalah normal closure, tidak perlu grace period
     if (normalClosureCodes.includes(closeCode)) {
       return false;
     }
     
-    // Kode yang membutuhkan grace period (abnormal closure)
-    const gracePeriodCodes = [
-      1006, // Abnormal closure
-      1011, // Internal error
-      1012, // Service restart
-      1013, // Try again later
-      1014, // Bad gateway
-      4000, // Custom codes untuk timeout
-      4001  // Custom codes untuk network error
-    ];
-    
-    // Default: return true untuk kode selain normal closure
     return gracePeriodCodes.includes(closeCode) || closeCode >= 4000;
   }
 
@@ -150,9 +152,14 @@ export class ChatServer {
       this.clearSeatBuffer(room, seatNumber);
       this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
       this.broadcastRoomUserCount(room);
+      
+      const currentSeatInfo = this.userToSeat.get(userId);
+      if (currentSeatInfo && 
+          currentSeatInfo.room === room && 
+          currentSeatInfo.seat === seatNumber) {
+        this.userToSeat.delete(userId);
+      }
     }
-
-    this.userToSeat.delete(userId);
   }
 
   clearSeatBuffer(room, seatNumber) {
@@ -254,7 +261,6 @@ export class ChatServer {
         ws.send(JSON.stringify(arr));
         return true;
       } catch (error) {
-        // Kosongkan error, jangan lakukan apa-apa
         return false;
       }
     }
@@ -360,7 +366,6 @@ export class ChatServer {
     } else {
       ws.idtarget = id;
       
-      // Batalkan grace period karena user reconnect
       this.cancelGraceCleanup(id);
       
       const seatInfo = this.userToSeat.get(id);
@@ -391,36 +396,58 @@ export class ChatServer {
       return false;
     }
 
-    const currentSeatInfo = this.userToSeat.get(ws.idtarget);
-    if (currentSeatInfo) {
-      const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
-      this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
-    }
-
-    const foundSeat = this.findEmptySeat(newRoom, ws);
-    if (!foundSeat) {
-      this.safeSend(ws, ["roomFull", newRoom]);
+    const lockKey = `join-${ws.idtarget}`;
+    if (this.joinLocks.has(lockKey)) {
       return false;
     }
 
-    ws.roomname = newRoom;
-    ws.numkursi = new Set([foundSeat]);
+    this.joinLocks.set(lockKey, true);
     
-    this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-
-    // Batalkan grace period karena user aktif
-    this.cancelGraceCleanup(ws.idtarget);
-
-    this.sendAllStateTo(ws, newRoom);
-    this.vipManager.getAllVipBadges(ws, newRoom);
-    this.broadcastRoomUserCount(newRoom);
-    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-    setTimeout(() => {
-      if (ws.readyState === 1 && ws.roomname === newRoom && ws.idtarget) {
-        this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+    try {
+      const existingRoomInfo = this.getUserCurrentRoom(ws.idtarget);
+      if (existingRoomInfo && existingRoomInfo.room !== newRoom) {
+        this.cleanupUserFromSeat(existingRoomInfo.room, existingRoomInfo.seat, ws.idtarget);
       }
-    }, 2000); // Delay 1 detik
-    return true;
+
+      if (existingRoomInfo && existingRoomInfo.room === newRoom) {
+        ws.roomname = newRoom;
+        ws.numkursi = new Set([existingRoomInfo.seat]);
+        this.userToSeat.set(ws.idtarget, { room: newRoom, seat: existingRoomInfo.seat });
+        
+        this.sendAllStateTo(ws, newRoom);
+        this.vipManager.getAllVipBadges(ws, newRoom);
+        this.safeSend(ws, ["numberKursiSaya", existingRoomInfo.seat]);
+        return true;
+      }
+
+      const foundSeat = this.findEmptySeat(newRoom, ws);
+      if (!foundSeat) {
+        this.safeSend(ws, ["roomFull", newRoom]);
+        return false;
+      }
+
+      ws.roomname = newRoom;
+      ws.numkursi = new Set([foundSeat]);
+      
+      this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+
+      this.cancelGraceCleanup(ws.idtarget);
+
+      this.sendAllStateTo(ws, newRoom);
+      this.vipManager.getAllVipBadges(ws, newRoom);
+      this.broadcastRoomUserCount(newRoom);
+      this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+      
+      setTimeout(() => {
+        if (ws.readyState === 1 && ws.roomname === newRoom && ws.idtarget) {
+          this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+        }
+      }, 2000);
+      
+      return true;
+    } finally {
+      setTimeout(() => this.joinLocks.delete(lockKey), 1000);
+    }
   }
 
   findEmptySeat(room, ws) {
@@ -525,11 +552,9 @@ export class ChatServer {
   handleOnDestroy(ws, idtarget) {
     if (!idtarget) return;
     
-    // Jika manual destroy, langsung hapus
     if (ws.isManualDestroy) {
       this.fullRemoveById(idtarget);
     } else {
-      // Jika bukan manual destroy, schedule grace period
       this.scheduleGraceCleanup(idtarget);
     }
     
@@ -539,7 +564,7 @@ export class ChatServer {
       try {
         ws.close(1000, "Manual destroy");
       } catch (error) {
-        // Kosongkan error
+        // Kosong
       }
     }
   }
@@ -626,7 +651,6 @@ export class ChatServer {
         }
         ws.idtarget = newId;
 
-        // Batalkan grace period untuk ID baru
         this.cancelGraceCleanup(newId);
 
         const prevSeat = this.userToSeat.get(newId);
@@ -711,7 +735,7 @@ export class ChatServer {
       case "chat": {
         const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
         
-        if (ws.roomname !== roomname) {
+        if (!this.validateUserInRoom(ws, roomname)) {
           return;
         }
         
@@ -727,7 +751,7 @@ export class ChatServer {
       case "updatePoint": {
         const [, room, seat, x, y, fast] = data;
         
-        if (ws.roomname !== room) {
+        if (!this.validateUserInRoom(ws, room)) {
           return;
         }
         
@@ -743,7 +767,7 @@ export class ChatServer {
       case "removeKursiAndPoint": {
         const [, room, seat] = data;
         
-        if (ws.roomname !== room) {
+        if (!this.validateUserInRoom(ws, room)) {
           return;
         }
         
@@ -759,7 +783,7 @@ export class ChatServer {
       case "updateKursi": {
         const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
         
-        if (ws.roomname !== room) {
+        if (!this.validateUserInRoom(ws, room)) {
           return;
         }
         
@@ -785,7 +809,7 @@ export class ChatServer {
       case "gift": {
         const [, roomname, sender, receiver, giftName] = data;
         
-        if (ws.roomname !== roomname) {
+        if (!this.validateUserInRoom(ws, roomname)) {
           return;
         }
         
@@ -835,24 +859,21 @@ export class ChatServer {
       try {
         this.handleMessage(ws, ev.data);
       } catch (error) {
-        // Kosongkan error
+        // Kosong
       }
     });
 
     ws.addEventListener("error", (event) => {
-      // Kosongkan error handling, tidak perlu lakukan apa-apa
+      // Kosong
     });
 
     ws.addEventListener("close", (event) => {
       if (ws.idtarget && !ws.isManualDestroy) {
-        // Cek kode close untuk menentukan apakah perlu grace period
-        const shouldGracePeriod = this.shouldApplyGracePeriod(event.code, event.reason);
+        const shouldGracePeriod = this.shouldApplyGracePeriod(event.code);
         
         if (shouldGracePeriod) {
-          // Schedule grace period untuk user yang disconnect
           this.scheduleGraceCleanup(ws.idtarget);
         } else {
-          // Jika close normal/reconnect, langsung cleanup
           this.forceUserCleanup(ws.idtarget);
         }
       }
@@ -876,4 +897,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
