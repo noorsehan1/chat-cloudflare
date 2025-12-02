@@ -51,8 +51,9 @@ export class ChatServer {
 
     this._nextConnId = 1;
 
-    this.gracePeriod = 5 * 1000;
-    this.graceTimers = new Map();
+    // HAPUS SEMUA GRACE TIMER
+    // this.gracePeriod = 5 * 1000;
+    // this.graceTimers = new Map();
 
     this.intervalMillis = 15 * 60 * 1000;
     this.currentNumber = 1;
@@ -70,11 +71,11 @@ export class ChatServer {
     this.messageCounts = new Map();
     this.MAX_MESSAGES_PER_SECOND = 20;
 
-    // Lock untuk mencegah race condition saat join room
-    this.joinRoomLocks = new Map();
-    for (const room of roomList) {
-      this.joinRoomLocks.set(room, false);
-    }
+    // HAPUS SEMUA LOCK KURSI
+    // this.joinRoomLocks = new Map();
+    // for (const room of roomList) {
+    //   this.joinRoomLocks.set(room, false);
+    // }
 
     // Map terpisah untuk menandai kursi yang sedang ditempati (HANYA untuk tracking)
     this.seatOccupancy = new Map();
@@ -87,6 +88,8 @@ export class ChatServer {
     }
   }
 
+  // HAPUS SEMUA METHOD GRACE PERIOD
+  /*
   scheduleGraceCleanup(idtarget) {
     if (!idtarget) return;
     
@@ -132,6 +135,7 @@ export class ChatServer {
     
     return gracePeriodCodes.includes(closeCode) || closeCode >= 4000;
   }
+  */
 
   cleanupUserFromSeat(room, seatNumber, userId) {
     const seatMap = this.roomSeats.get(room);
@@ -179,7 +183,7 @@ export class ChatServer {
 
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
-    this.graceTimers.delete(idtarget);
+    // HAPUS: this.graceTimers.delete(idtarget);
   }
 
   fullRemoveById(idtarget) {
@@ -211,7 +215,7 @@ export class ChatServer {
 
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
-    this.graceTimers.delete(idtarget);
+    // HAPUS: this.graceTimers.delete(idtarget);
 
     for (const c of Array.from(this.clients)) {
       if (c && c.idtarget === idtarget) {
@@ -362,7 +366,7 @@ export class ChatServer {
     } else {
       ws.idtarget = id;
       
-      this.cancelGraceCleanup(id);
+      // HAPUS: this.cancelGraceCleanup(id);
       
       const seatInfo = this.userToSeat.get(id);
       
@@ -441,16 +445,15 @@ export class ChatServer {
       return true;
     }
 
-    // Gunakan lock untuk mencegah race condition
-    if (this.joinRoomLocks.get(newRoom)) {
-      // Tunggu sebentar jika room sedang diproses
-      await new Promise(resolve => setTimeout(resolve, 50));
-      return this.handleJoinRoom(ws, newRoom);
-    }
+    // HAPUS LOCK: Langsung proses tanpa lock
+    // if (this.joinRoomLocks.get(newRoom)) {
+    //   // Tunggu sebentar jika room sedang diproses
+    //   await new Promise(resolve => setTimeout(resolve, 50));
+    //   return this.handleJoinRoom(ws, newRoom);
+    // }
+    // this.joinRoomLocks.set(newRoom, true);
 
-    this.joinRoomLocks.set(newRoom, true);
-
-    try {
+    // try {
       if (currentSeatInfo) {
         const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
         
@@ -505,7 +508,7 @@ export class ChatServer {
       const occupancyMap = this.seatOccupancy.get(newRoom);
       occupancyMap.set(foundSeat, ws.idtarget);
 
-      this.cancelGraceCleanup(ws.idtarget);
+      // HAPUS: this.cancelGraceCleanup(ws.idtarget);
 
       this.sendAllStateTo(ws, newRoom);
       this.vipManager.getAllVipBadges(ws, newRoom);
@@ -519,10 +522,10 @@ export class ChatServer {
       }, 300);
       
       return true;
-    } finally {
-      // Lepaskan lock
-      this.joinRoomLocks.set(newRoom, false);
-    }
+    // } finally {
+      // HAPUS: Lepaskan lock
+      // this.joinRoomLocks.set(newRoom, false);
+    // }
   }
 
   findEmptySeat(room, ws) {
@@ -641,7 +644,9 @@ export class ChatServer {
     if (ws.isManualDestroy) {
       this.fullRemoveById(idtarget);
     } else {
-      this.scheduleGraceCleanup(idtarget);
+      // HAPUS GRACE PERIOD: Langsung cleanup
+      // this.scheduleGraceCleanup(idtarget);
+      this.forceUserCleanup(idtarget);
     }
     
     this.clients.delete(ws);
@@ -740,7 +745,7 @@ export class ChatServer {
         }
         ws.idtarget = newId;
 
-        this.cancelGraceCleanup(newId);
+        // HAPUS: this.cancelGraceCleanup(newId);
 
         const prevSeat = this.userToSeat.get(newId);
         if (prevSeat) {
@@ -958,13 +963,14 @@ export class ChatServer {
 
     ws.addEventListener("close", (event) => {
       if (ws.idtarget && !ws.isManualDestroy) {
-        const shouldGracePeriod = this.shouldApplyGracePeriod(event.code, event.reason);
-        
-        if (shouldGracePeriod) {
-          this.scheduleGraceCleanup(ws.idtarget);
-        } else {
-          this.forceUserCleanup(ws.idtarget);
-        }
+        // HAPUS GRACE PERIOD: Langsung cleanup
+        // const shouldGracePeriod = this.shouldApplyGracePeriod(event.code, event.reason);
+        // if (shouldGracePeriod) {
+        //   this.scheduleGraceCleanup(ws.idtarget);
+        // } else {
+        //   this.forceUserCleanup(ws.idtarget);
+        // }
+        this.forceUserCleanup(ws.idtarget);
       }
       this.clients.delete(ws);
     });
