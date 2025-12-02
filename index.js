@@ -925,9 +925,6 @@ export default {
     }
     return new Response("WebSocket endpoint", { status: 200 });
   }
-}; else {
-      // User sudah dibersihkan - perlu join room baru
-      this.userToSeat.delete(id); // Hapus dari mapping lama
-      this.safeSend(ws, ["needJoinRoom"]); JNGAN YANG LAINJNGAN TAMBAH KODE APAPAPUN FOKOS this.userToSeat.delete(id);
-      this.safeSend(ws, ["needJoinRoom"]);
+};
+
 
