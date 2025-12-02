@@ -77,6 +77,53 @@ export class ChatServer {
       }
       this.seatOccupancy.set(room, occupancyMap);
     }
+
+    // GRACE TIME IMPLEMENTATION
+    this.gracePeriod = 5000; // 10 detik grace time
+    this.disconnectedUsers = new Map(); // Menyimpan info user yang baru disconnect
+    this.pendingCleanupTimers = new Map(); // Menyimpan timer untuk cleanup
+
+    // Timer untuk membersihkan disconnectedUsers yang sudah expired
+    this._cleanupTimer = setInterval(() => {
+      this.cleanupExpiredDisconnections();
+    }, 5000);
+  }
+
+  // Hapus user dari disconnected list jika sudah melewati grace period
+  cleanupExpiredDisconnections() {
+    const now = Date.now();
+    for (const [userId, info] of this.disconnectedUsers.entries()) {
+      if (now - info.timestamp > this.gracePeriod) {
+        // Grace period sudah lewat, lakukan cleanup
+        this.executePendingCleanup(userId);
+      }
+    }
+  }
+
+  // Eksekusi cleanup setelah grace period
+  executePendingCleanup(userId) {
+    const pendingTimer = this.pendingCleanupTimers.get(userId);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      this.pendingCleanupTimers.delete(userId);
+    }
+
+    // Hanya cleanup jika user belum reconnect
+    if (!this.isUserStillConnected(userId)) {
+      this.forceUserCleanup(userId);
+    }
+    
+    this.disconnectedUsers.delete(userId);
+  }
+
+  // Cek apakah user masih terhubung
+  isUserStillConnected(idtarget) {
+    for (const c of this.clients) {
+      if (c.idtarget === idtarget && c.readyState === 1) {
+        return true;
+      }
+    }
+    return false;
   }
 
   cleanupUserFromSeat(room, seatNumber, userId) {
@@ -113,6 +160,14 @@ export class ChatServer {
   forceUserCleanup(idtarget) {
     if (!idtarget) return;
 
+    // Hapus dari pending cleanup jika ada
+    const pendingTimer = this.pendingCleanupTimers.get(idtarget);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      this.pendingCleanupTimers.delete(idtarget);
+    }
+    this.disconnectedUsers.delete(idtarget);
+
     for (const room of roomList) {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) continue;
@@ -129,6 +184,14 @@ export class ChatServer {
 
   fullRemoveById(idtarget) {
     if (!idtarget) return;
+
+    // Hapus dari pending cleanup jika ada
+    const pendingTimer = this.pendingCleanupTimers.get(idtarget);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      this.pendingCleanupTimers.delete(idtarget);
+    }
+    this.disconnectedUsers.delete(idtarget);
 
     this.vipManager.cleanupUserVipBadges(idtarget);
 
@@ -297,6 +360,18 @@ export class ChatServer {
   handleSetIdTarget2(ws, id, baru) {
     if (!id) return;
 
+    // Cek apakah user ada di disconnected list (baru saja disconnect)
+    const disconnectedInfo = this.disconnectedUsers.get(id);
+    if (disconnectedInfo && !baru) {
+      // User sedang dalam grace period, batalkan cleanup yang pending
+      const pendingTimer = this.pendingCleanupTimers.get(id);
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        this.pendingCleanupTimers.delete(id);
+      }
+      this.disconnectedUsers.delete(id);
+    }
+
     if (baru === true) {
       this.forceUserCleanup(id);
       ws.idtarget = id;
@@ -340,8 +415,50 @@ export class ChatServer {
           }, 100);
         } else {
           // User sudah tidak di seat lama
-          this.forceUserCleanup(id);
-          this.safeSend(ws, ["needJoinRoom"]);
+          // Cek apakah ini karena grace period belum selesai
+          if (disconnectedInfo) {
+            // User reconnect dalam grace period, kembalikan ke seat semula
+            const { room: oldRoom, seat: oldSeat } = disconnectedInfo;
+            const oldSeatMap = this.roomSeats.get(oldRoom);
+            const oldSeatData = oldSeatMap?.get(oldSeat);
+            
+            if (oldSeatData && oldSeatData.namauser === "") {
+              // Seat masih kosong, kembalikan user
+              ws.roomname = oldRoom;
+              ws.numkursi = new Set([oldSeat]);
+              
+              // Update seat data
+              Object.assign(oldSeatData, {
+                namauser: id,
+                // Data lainnya harus disimpan di userToSeat atau di seatInfo
+              });
+              
+              const occupancyMap = this.seatOccupancy.get(oldRoom);
+              if (occupancyMap) {
+                occupancyMap.set(oldSeat, id);
+              }
+              
+              this.sendAllStateTo(ws, oldRoom);
+              this.broadcastRoomUserCount(oldRoom);
+              this.vipManager.getAllVipBadges(ws, oldRoom);
+              this.safeSend(ws, ["currentNumber", this.currentNumber]);
+              this.safeSend(ws, ["rooMasuk", oldSeat, oldRoom]);
+              
+              // Update broadcast kursi
+              this.broadcastToRoom(oldRoom, ["updateKursi", oldRoom, oldSeat, 
+                oldSeatData.noimageUrl, id, oldSeatData.color, 
+                oldSeatData.itembawah, oldSeatData.itematas, 
+                oldSeatData.vip, oldSeatData.viptanda]);
+            } else {
+              // Seat sudah diambil orang lain
+              this.forceUserCleanup(id);
+              this.safeSend(ws, ["needJoinRoom"]);
+            }
+          } else {
+            // Bukan karena grace period, minta join room baru
+            this.forceUserCleanup(id);
+            this.safeSend(ws, ["needJoinRoom"]);
+          }
         }
       } else {
         // Tidak ada seatInfo sama sekali - user baru atau sudah lama dibersihkan
@@ -566,7 +683,7 @@ export class ChatServer {
     if (ws.isManualDestroy) {
       this.fullRemoveById(idtarget);
     } else {
-      // Langsung cleanup tanpa grace period
+      // Langsung cleanup tanpa grace period (karena ini manual destroy)
       this.forceUserCleanup(idtarget);
     }
     
@@ -882,8 +999,25 @@ export class ChatServer {
 
     ws.addEventListener("close", (event) => {
       if (ws.idtarget && !ws.isManualDestroy) {
-        // Langsung cleanup tanpa grace period
-        this.forceUserCleanup(ws.idtarget);
+        // Schedule cleanup setelah grace period
+        const userId = ws.idtarget;
+        const room = ws.roomname;
+        const seat = Array.from(ws.numkursi)[0];
+        
+        // Simpan info disconnected user
+        this.disconnectedUsers.set(userId, {
+          timestamp: Date.now(),
+          room: room,
+          seat: seat,
+          seatData: this.roomSeats.get(room)?.get(seat)
+        });
+        
+        // Schedule cleanup setelah grace period
+        const cleanupTimer = setTimeout(() => {
+          this.executePendingCleanup(userId);
+        }, this.gracePeriod);
+        
+        this.pendingCleanupTimers.set(userId, cleanupTimer);
       }
       this.clients.delete(ws);
     });
@@ -905,5 +1039,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
-
