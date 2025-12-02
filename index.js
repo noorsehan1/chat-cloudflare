@@ -384,11 +384,13 @@ handleSetIdTarget2(ws, id, baru) {
         this.vipManager.getAllVipBadges(ws, room);
         this.safeSend(ws, ["currentNumber", this.currentNumber]);
       } else {
-      this.forceUserCleanup(id);
+        // User sudah tidak di seat lama (dibersihkan saat grace period)
+        this.forceUserCleanup(id);
         this.safeSend(ws, ["needJoinRoom"]);
       }
     } else {
-     this.forceUserCleanup(id);
+      // Tidak ada seatInfo sama sekali - user baru atau sudah lama dibersihkan
+      this.forceUserCleanup(id); // Untuk pastikan clean state
       this.safeSend(ws, ["needJoinRoom"]);
     }
   }
@@ -928,3 +930,4 @@ export default {
       this.userToSeat.delete(id); // Hapus dari mapping lama
       this.safeSend(ws, ["needJoinRoom"]); JNGAN YANG LAINJNGAN TAMBAH KODE APAPAPUN FOKOS this.userToSeat.delete(id);
       this.safeSend(ws, ["needJoinRoom"]);
+
