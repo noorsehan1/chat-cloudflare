@@ -51,7 +51,7 @@ export class ChatServer {
 
     this._nextConnId = 1;
 
-    this.gracePeriod = 30 * 1000;
+    this.gracePeriod = 5 * 1000;
     this.graceTimers = new Map();
 
     this.intervalMillis = 15 * 60 * 1000;
@@ -851,4 +851,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
