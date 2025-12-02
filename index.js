@@ -453,7 +453,40 @@ export class ChatServer {
     try {
       if (currentSeatInfo) {
         const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
-        this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
+        
+        // JANGAN kirim removeKursi jika pindah ke room yang sama
+        if (currentRoom !== newRoom) {
+          // Bersihkan kursi sebelumnya TANPA menghapus ID dari userToSeat
+          const seatMap = this.roomSeats.get(currentRoom);
+          if (seatMap) {
+            const seatInfo = seatMap.get(currentSeat);
+            if (seatInfo && seatInfo.namauser === ws.idtarget) {
+              // Simpan data VIP dulu sebelum dibersihkan
+              const hadVip = seatInfo.viptanda > 0;
+              
+              // Reset kursi
+              Object.assign(seatInfo, createEmptySeat());
+              this.clearSeatBuffer(currentRoom, currentSeat);
+              
+              // KIRIM removeKursi hanya jika pindah ke room BERBEDA
+              this.broadcastToRoom(currentRoom, ["removeKursi", currentRoom, currentSeat]);
+              
+              // Update user count untuk room lama
+              this.broadcastRoomUserCount(currentRoom);
+              
+              // Jika ada VIP, hapus juga
+              if (hadVip) {
+                this.vipManager.removeVipBadge(currentRoom, currentSeat);
+              }
+            }
+          }
+          
+          // Bersihkan dari occupancy map hanya jika pindah room
+          const occupancyMap = this.seatOccupancy.get(currentRoom);
+          if (occupancyMap) {
+            occupancyMap.set(currentSeat, null);
+          }
+        }
       }
 
       const foundSeat = this.findEmptySeat(newRoom, ws);
@@ -465,6 +498,7 @@ export class ChatServer {
       ws.roomname = newRoom;
       ws.numkursi = new Set([foundSeat]);
       
+      // Update userToSeat dengan room dan seat baru
       this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
 
       // Update occupancy map
