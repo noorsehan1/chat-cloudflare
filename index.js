@@ -350,7 +350,6 @@ export class ChatServer {
         ws.numkursi = new Set([seat]);
         
         this.sendAllStateTo(ws, room);
-        this.broadcastRoomUserCount(room);
         this.vipManager.getAllVipBadges(ws, room);
         this.safeSend(ws, ["currentNumber", this.currentNumber]);
       } else {
@@ -379,8 +378,8 @@ export class ChatServer {
 
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       const seatInfo = seatMap.get(i);
-      
-      if (seatInfo && seatInfo.namauser === "") {
+      if (seatInfo && !seatInfo.namauser) {
+        // LANGSUNG PESAN SEAT dengan assign username
         seatInfo.namauser = ws.idtarget;
         seatMap.set(i, seatInfo);
         return i;
@@ -403,14 +402,6 @@ export class ChatServer {
     const foundSeat = this.findEmptySeat(newRoom, ws);
     if (!foundSeat) {
       this.safeSend(ws, ["roomFull", newRoom]);
-      
-      const seatMap = this.roomSeats.get(newRoom);
-      const seatInfo = seatMap.get(foundSeat);
-      if (seatInfo && seatInfo.namauser === ws.idtarget) {
-        seatInfo.namauser = "";
-        seatMap.set(foundSeat, seatInfo);
-      }
-      
       return false;
     }
 
@@ -430,14 +421,25 @@ export class ChatServer {
 
     this.sendAllStateTo(ws, newRoom);
     this.vipManager.getAllVipBadges(ws, newRoom);
-    this.broadcastRoomUserCount(newRoom);
+    
     this.safeSend(ws, ["numberKursiSaya", foundSeat]);
     
     setTimeout(() => {
       if (ws.readyState === 1 && ws.roomname === newRoom && ws.idtarget) {
-        this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+        const currentSeatInfo = seatMap.get(foundSeat);
+        if (currentSeatInfo && currentSeatInfo.namauser === ws.idtarget) {
+          if (!this.updateKursiBuffer.has(newRoom)) {
+            this.updateKursiBuffer.set(newRoom, new Map());
+          }
+          this.updateKursiBuffer.get(newRoom).set(foundSeat, { ...currentSeatInfo });
+          
+          this.broadcastRoomUserCount(newRoom);
+          
+          this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
+        }
       }
     }, 300);
+    
     return true;
   }
 
@@ -636,7 +638,6 @@ export class ChatServer {
         }
 
         this.hasEverSetId = true;
-        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
         break;
       }
 
