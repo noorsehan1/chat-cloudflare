@@ -438,16 +438,14 @@ export class ChatServer {
     const occupancyMap = this.seatOccupancy.get(newRoom);
     occupancyMap.set(foundSeat, ws.idtarget);
 
-  
+       this.sendAllStateTo(ws, newRoom);
+
     this.vipManager.getAllVipBadges(ws, newRoom);
     this.broadcastRoomUserCount(newRoom);
     this.safeSend(ws, ["numberKursiSaya", foundSeat]);
      this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-    setTimeout(() => {
      
-         this.sendAllStateTo(ws, newRoom);
-     
-    }, 1000);
+ 
     
     return true;
   }
@@ -907,4 +905,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
