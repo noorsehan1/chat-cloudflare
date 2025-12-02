@@ -379,17 +379,31 @@ export class ChatServer {
           ws.roomname = room;
           ws.numkursi = new Set([seat]);
           
+          // Update occupancy map juga
+          const occupancyMap = this.seatOccupancy.get(room);
+          if (occupancyMap) {
+            occupancyMap.set(seat, id);
+          }
+          
           this.sendAllStateTo(ws, room);
           this.broadcastRoomUserCount(room);
           this.vipManager.getAllVipBadges(ws, room);
           this.safeSend(ws, ["currentNumber", this.currentNumber]);
+          
+          // Kirim event rooMasuk juga untuk konsistensi
+          setTimeout(() => {
+            if (ws.readyState === 1 && ws.roomname === room && ws.idtarget) {
+              this.safeSend(ws, ["rooMasuk", seat, room]);
+            }
+          }, 100);
         } else {
           // User sudah tidak di seat lama (dibersihkan saat grace period)
+          this.forceUserCleanup(id);
           this.safeSend(ws, ["needJoinRoom"]);
         }
       } else {
         // Tidak ada seatInfo sama sekali - user baru atau sudah lama dibersihkan
-    
+        this.forceUserCleanup(id); // Untuk pastikan clean state
         this.safeSend(ws, ["needJoinRoom"]);
       }
     }
@@ -413,6 +427,20 @@ export class ChatServer {
       return false;
     }
 
+    // Skip jika sudah di room yang sama
+    const currentSeatInfo = this.userToSeat.get(ws.idtarget);
+    if (currentSeatInfo && currentSeatInfo.room === newRoom) {
+      // Sudah di room yang sama, cukup kirim state
+      ws.roomname = newRoom;
+      ws.numkursi = new Set([currentSeatInfo.seat]);
+      this.sendAllStateTo(ws, newRoom);
+      this.vipManager.getAllVipBadges(ws, newRoom);
+      this.broadcastRoomUserCount(newRoom);
+      this.safeSend(ws, ["numberKursiSaya", currentSeatInfo.seat]);
+      this.safeSend(ws, ["rooMasuk", currentSeatInfo.seat, newRoom]);
+      return true;
+    }
+
     // Gunakan lock untuk mencegah race condition
     if (this.joinRoomLocks.get(newRoom)) {
       // Tunggu sebentar jika room sedang diproses
@@ -423,7 +451,6 @@ export class ChatServer {
     this.joinRoomLocks.set(newRoom, true);
 
     try {
-      const currentSeatInfo = this.userToSeat.get(ws.idtarget);
       if (currentSeatInfo) {
         const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
         this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
@@ -440,8 +467,7 @@ export class ChatServer {
       
       this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
 
-      // HANYA TANDAI DI OCCUPANCY MAP SAJA
-      // TIDAK mengubah roomSeats sama sekali
+      // Update occupancy map
       const occupancyMap = this.seatOccupancy.get(newRoom);
       occupancyMap.set(foundSeat, ws.idtarget);
 
@@ -468,7 +494,7 @@ export class ChatServer {
   findEmptySeat(room, ws) {
     if (!ws.idtarget) return null;
     
-    // HANYA gunakan occupancy map untuk mencari kursi kosong
+    // Gunakan occupancy map untuk mencari kursi kosong
     const occupancyMap = this.seatOccupancy.get(room);
     if (!occupancyMap) return null;
 
