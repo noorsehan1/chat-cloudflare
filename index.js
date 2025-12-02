@@ -51,10 +51,6 @@ export class ChatServer {
 
     this._nextConnId = 1;
 
-    // HAPUS SEMUA GRACE TIMER
-    // this.gracePeriod = 5 * 1000;
-    // this.graceTimers = new Map();
-
     this.intervalMillis = 15 * 60 * 1000;
     this.currentNumber = 1;
     this.maxNumber = 6;
@@ -62,20 +58,15 @@ export class ChatServer {
       this.tick();
     }, this.intervalMillis);
 
+    // FLUSH TIMER 100ms
     this._flushTimer = setInterval(() => {
       if (this.clients.size > 0) this.periodicFlush();
-    }, 16);
+    }, 100);
 
     this.lowcard = new LowCardGameManager(this);
 
     this.messageCounts = new Map();
     this.MAX_MESSAGES_PER_SECOND = 20;
-
-    // HAPUS SEMUA LOCK KURSI
-    // this.joinRoomLocks = new Map();
-    // for (const room of roomList) {
-    //   this.joinRoomLocks.set(room, false);
-    // }
 
     // Map terpisah untuk menandai kursi yang sedang ditempati (HANYA untuk tracking)
     this.seatOccupancy = new Map();
@@ -87,55 +78,6 @@ export class ChatServer {
       this.seatOccupancy.set(room, occupancyMap);
     }
   }
-
-  // HAPUS SEMUA METHOD GRACE PERIOD
-  /*
-  scheduleGraceCleanup(idtarget) {
-    if (!idtarget) return;
-    
-    if (this.graceTimers.has(idtarget)) {
-      clearTimeout(this.graceTimers.get(idtarget));
-    }
-    
-    const timer = setTimeout(() => {
-      this.forceUserCleanup(idtarget);
-      this.graceTimers.delete(idtarget);
-    }, this.gracePeriod);
-    
-    this.graceTimers.set(idtarget, timer);
-  }
-
-  cancelGraceCleanup(idtarget) {
-    if (!idtarget) return;
-    
-    if (this.graceTimers.has(idtarget)) {
-      clearTimeout(this.graceTimers.get(idtarget));
-      this.graceTimers.delete(idtarget);
-    }
-  }
-
-  shouldApplyGracePeriod(closeCode, reason) {
-    const normalClosureCodes = [1000, 1001, 1005];
-    
-    if (reason && (
-      reason.toLowerCase().includes('reconnect') ||
-      reason.toLowerCase().includes('refresh') ||
-      reason.toLowerCase().includes('reload')
-    )) {
-      return false;
-    }
-    
-    if (normalClosureCodes.includes(closeCode)) {
-      return false;
-    }
-    
-    const gracePeriodCodes = [
-      1006, 1011, 1012, 1013, 1014, 4000, 4001
-    ];
-    
-    return gracePeriodCodes.includes(closeCode) || closeCode >= 4000;
-  }
-  */
 
   cleanupUserFromSeat(room, seatNumber, userId) {
     const seatMap = this.roomSeats.get(room);
@@ -183,7 +125,6 @@ export class ChatServer {
 
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
-    // HAPUS: this.graceTimers.delete(idtarget);
   }
 
   fullRemoveById(idtarget) {
@@ -215,7 +156,6 @@ export class ChatServer {
 
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
-    // HAPUS: this.graceTimers.delete(idtarget);
 
     for (const c of Array.from(this.clients)) {
       if (c && c.idtarget === idtarget) {
@@ -366,8 +306,6 @@ export class ChatServer {
     } else {
       ws.idtarget = id;
       
-      // HAPUS: this.cancelGraceCleanup(id);
-      
       const seatInfo = this.userToSeat.get(id);
       
       if (seatInfo) {
@@ -401,7 +339,7 @@ export class ChatServer {
             }
           }, 100);
         } else {
-          // User sudah tidak di seat lama (dibersihkan saat grace period)
+          // User sudah tidak di seat lama
           this.forceUserCleanup(id);
           this.safeSend(ws, ["needJoinRoom"]);
         }
@@ -445,87 +383,73 @@ export class ChatServer {
       return true;
     }
 
-    // HAPUS LOCK: Langsung proses tanpa lock
-    // if (this.joinRoomLocks.get(newRoom)) {
-    //   // Tunggu sebentar jika room sedang diproses
-    //   await new Promise(resolve => setTimeout(resolve, 50));
-    //   return this.handleJoinRoom(ws, newRoom);
-    // }
-    // this.joinRoomLocks.set(newRoom, true);
-
-    // try {
-      if (currentSeatInfo) {
-        const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
-        
-        // JANGAN kirim removeKursi jika pindah ke room yang sama
-        if (currentRoom !== newRoom) {
-          // Bersihkan kursi sebelumnya TANPA menghapus ID dari userToSeat
-          const seatMap = this.roomSeats.get(currentRoom);
-          if (seatMap) {
-            const seatInfo = seatMap.get(currentSeat);
-            if (seatInfo && seatInfo.namauser === ws.idtarget) {
-              // Simpan data VIP dulu sebelum dibersihkan
-              const hadVip = seatInfo.viptanda > 0;
-              
-              // Reset kursi
-              Object.assign(seatInfo, createEmptySeat());
-              this.clearSeatBuffer(currentRoom, currentSeat);
-              
-              // KIRIM removeKursi hanya jika pindah ke room BERBEDA
-              this.broadcastToRoom(currentRoom, ["removeKursi", currentRoom, currentSeat]);
-              
-              // Update user count untuk room lama
-              this.broadcastRoomUserCount(currentRoom);
-              
-              // Jika ada VIP, hapus juga
-              if (hadVip) {
-                this.vipManager.removeVipBadge(currentRoom, currentSeat);
-              }
+    // Proses tanpa lock
+    if (currentSeatInfo) {
+      const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
+      
+      // JANGAN kirim removeKursi jika pindah ke room yang sama
+      if (currentRoom !== newRoom) {
+        // Bersihkan kursi sebelumnya TANPA menghapus ID dari userToSeat
+        const seatMap = this.roomSeats.get(currentRoom);
+        if (seatMap) {
+          const seatInfo = seatMap.get(currentSeat);
+          if (seatInfo && seatInfo.namauser === ws.idtarget) {
+            // Simpan data VIP dulu sebelum dibersihkan
+            const hadVip = seatInfo.viptanda > 0;
+            
+            // Reset kursi
+            Object.assign(seatInfo, createEmptySeat());
+            this.clearSeatBuffer(currentRoom, currentSeat);
+            
+            // KIRIM removeKursi hanya jika pindah ke room BERBEDA
+            this.broadcastToRoom(currentRoom, ["removeKursi", currentRoom, currentSeat]);
+            
+            // Update user count untuk room lama
+            this.broadcastRoomUserCount(currentRoom);
+            
+            // Jika ada VIP, hapus juga
+            if (hadVip) {
+              this.vipManager.removeVipBadge(currentRoom, currentSeat);
             }
           }
-          
-          // Bersihkan dari occupancy map hanya jika pindah room
-          const occupancyMap = this.seatOccupancy.get(currentRoom);
-          if (occupancyMap) {
-            occupancyMap.set(currentSeat, null);
-          }
+        }
+        
+        // Bersihkan dari occupancy map hanya jika pindah room
+        const occupancyMap = this.seatOccupancy.get(currentRoom);
+        if (occupancyMap) {
+          occupancyMap.set(currentSeat, null);
         }
       }
+    }
 
-      const foundSeat = this.findEmptySeat(newRoom, ws);
-      if (!foundSeat) {
-        this.safeSend(ws, ["roomFull", newRoom]);
-        return false;
+    const foundSeat = this.findEmptySeat(newRoom, ws);
+    if (!foundSeat) {
+      this.safeSend(ws, ["roomFull", newRoom]);
+      return false;
+    }
+
+    ws.roomname = newRoom;
+    ws.numkursi = new Set([foundSeat]);
+    
+    // Update userToSeat dengan room dan seat baru
+    this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
+
+    // Update occupancy map
+    const occupancyMap = this.seatOccupancy.get(newRoom);
+    occupancyMap.set(foundSeat, ws.idtarget);
+
+    this.sendAllStateTo(ws, newRoom);
+    this.vipManager.getAllVipBadges(ws, newRoom);
+    this.broadcastRoomUserCount(newRoom);
+    this.safeSend(ws, ["numberKursiSaya", foundSeat]);
+    
+    setTimeout(() => {
+      if (ws.readyState === 1 && ws.roomname === newRoom && ws.idtarget) {
+        this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
       }
-
-      ws.roomname = newRoom;
-      ws.numkursi = new Set([foundSeat]);
-      
-      // Update userToSeat dengan room dan seat baru
-      this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-
-      // Update occupancy map
-      const occupancyMap = this.seatOccupancy.get(newRoom);
-      occupancyMap.set(foundSeat, ws.idtarget);
-
-      // HAPUS: this.cancelGraceCleanup(ws.idtarget);
-
-      this.sendAllStateTo(ws, newRoom);
-      this.vipManager.getAllVipBadges(ws, newRoom);
-      this.broadcastRoomUserCount(newRoom);
-      this.safeSend(ws, ["numberKursiSaya", foundSeat]);
-      
-      setTimeout(() => {
-        if (ws.readyState === 1 && ws.roomname === newRoom && ws.idtarget) {
-          this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
-        }
-      }, 300);
-      
-      return true;
-    // } finally {
-      // HAPUS: Lepaskan lock
-      // this.joinRoomLocks.set(newRoom, false);
-    // }
+    }, 300);
+    
+    return true;
   }
 
   findEmptySeat(room, ws) {
@@ -644,8 +568,7 @@ export class ChatServer {
     if (ws.isManualDestroy) {
       this.fullRemoveById(idtarget);
     } else {
-      // HAPUS GRACE PERIOD: Langsung cleanup
-      // this.scheduleGraceCleanup(idtarget);
+      // Langsung cleanup tanpa grace period
       this.forceUserCleanup(idtarget);
     }
     
@@ -744,8 +667,6 @@ export class ChatServer {
           this.forceUserCleanup(ws.idtarget);
         }
         ws.idtarget = newId;
-
-        // HAPUS: this.cancelGraceCleanup(newId);
 
         const prevSeat = this.userToSeat.get(newId);
         if (prevSeat) {
@@ -963,13 +884,7 @@ export class ChatServer {
 
     ws.addEventListener("close", (event) => {
       if (ws.idtarget && !ws.isManualDestroy) {
-        // HAPUS GRACE PERIOD: Langsung cleanup
-        // const shouldGracePeriod = this.shouldApplyGracePeriod(event.code, event.reason);
-        // if (shouldGracePeriod) {
-        //   this.scheduleGraceCleanup(ws.idtarget);
-        // } else {
-        //   this.forceUserCleanup(ws.idtarget);
-        // }
+        // Langsung cleanup tanpa grace period
         this.forceUserCleanup(ws.idtarget);
       }
       this.clients.delete(ws);
