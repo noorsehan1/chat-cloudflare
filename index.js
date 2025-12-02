@@ -75,6 +75,16 @@ export class ChatServer {
     for (const room of roomList) {
       this.joinRoomLocks.set(room, false);
     }
+
+    // Map terpisah untuk menandai kursi yang sedang ditempati
+    this.seatOccupancy = new Map();
+    for (const room of roomList) {
+      const occupancyMap = new Map();
+      for (let i = 1; i <= this.MAX_SEATS; i++) {
+        occupancyMap.set(i, null); // null berarti kursi kosong
+      }
+      this.seatOccupancy.set(room, occupancyMap);
+    }
   }
 
   scheduleGraceCleanup(idtarget) {
@@ -139,6 +149,12 @@ export class ChatServer {
       this.broadcastRoomUserCount(room);
     }
 
+    // Juga bersihkan dari occupancy map
+    const occupancyMap = this.seatOccupancy.get(room);
+    if (occupancyMap && occupancyMap.get(seatNumber) === userId) {
+      occupancyMap.set(seatNumber, null);
+    }
+
     this.userToSeat.delete(userId);
   }
 
@@ -157,6 +173,16 @@ export class ChatServer {
       for (const [seatNumber, seatInfo] of seatMap) {
         if (seatInfo.namauser === idtarget) {
           this.cleanupUserFromSeat(room, seatNumber, idtarget);
+        }
+      }
+      
+      // Bersihkan juga dari occupancy map
+      const occupancyMap = this.seatOccupancy.get(room);
+      if (occupancyMap) {
+        for (const [seatNumber, occupant] of occupancyMap) {
+          if (occupant === idtarget) {
+            occupancyMap.set(seatNumber, null);
+          }
         }
       }
     }
@@ -183,6 +209,16 @@ export class ChatServer {
         }
       }
       this.broadcastRoomUserCount(room);
+      
+      // Bersihkan dari occupancy map
+      const occupancyMap = this.seatOccupancy.get(room);
+      if (occupancyMap) {
+        for (const [seatNumber, occupant] of occupancyMap) {
+          if (occupant === idtarget) {
+            occupancyMap.set(seatNumber, null);
+          }
+        }
+      }
     }
 
     for (const [room, messages] of this.chatMessageBuffer.entries()) {
@@ -366,6 +402,13 @@ export class ChatServer {
   }
 
   isUserStillInSeat(idtarget, room, seat) {
+    // Cek di occupancy map terlebih dahulu
+    const occupancyMap = this.seatOccupancy.get(room);
+    if (occupancyMap && occupancyMap.get(seat) === idtarget) {
+      return true;
+    }
+    
+    // Juga cek di seat map biasa
     const seatMap = this.roomSeats.get(room);
     const seatData = seatMap?.get(seat);
     return seatData?.namauser === idtarget;
@@ -398,50 +441,19 @@ export class ChatServer {
         return false;
       }
 
-      // Pastikan seat benar-benar kosong sebelum ditempati
-      const seatMap = this.roomSeats.get(newRoom);
-      const seatInfo = seatMap.get(foundSeat);
-      
-      if (seatInfo.namauser && seatInfo.namauser !== ws.idtarget) {
-        // Kursi sudah ditempati oleh user lain, cari kursi lain
-        let alternativeSeat = null;
-        for (let i = 1; i <= this.MAX_SEATS; i++) {
-          const k = seatMap.get(i);
-          if (!k.namauser) {
-            alternativeSeat = i;
-            break;
-          }
-        }
-        
-        if (!alternativeSeat) {
-          this.safeSend(ws, ["roomFull", newRoom]);
-          return false;
-        }
-        
-        foundSeat = alternativeSeat;
-      }
-
       ws.roomname = newRoom;
       ws.numkursi = new Set([foundSeat]);
       
       this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
 
-      // Update kursi dengan data minimal
-      const seatUpdateInfo = seatMap.get(foundSeat);
-      Object.assign(seatUpdateInfo, {
-        noimageUrl: "",
-        namauser: ws.idtarget,
-        color: "",
-        itembawah: 0,
-        itematas: 0,
-        vip: 0,
-        viptanda: 0,
-        lastPoint: null
-      });
-
-      // Broadcast hanya update kursi tanpa data lengkap
+      // Tandai kursi di occupancy map (TIDAK mengubah seat map asli)
+      const occupancyMap = this.seatOccupancy.get(newRoom);
+      occupancyMap.set(foundSeat, ws.idtarget);
 
       this.cancelGraceCleanup(ws.idtarget);
+
+      // Kirim pesan khusus untuk client bahwa kursi sudah ditempati
+      this.safeSend(ws, ["kursiOccupied", newRoom, foundSeat, ws.idtarget]);
 
       this.sendAllStateTo(ws, newRoom);
       this.vipManager.getAllVipBadges(ws, newRoom);
@@ -466,28 +478,46 @@ export class ChatServer {
     const seatMap = this.roomSeats.get(room);
     if (!seatMap) return null;
 
-    // Cek apakah user sudah punya kursi di room ini
-    for (let i = 1; i <= this.MAX_SEATS; i++) {
-      const seatInfo = seatMap.get(i);
-      if (seatInfo && seatInfo.namauser === ws.idtarget) {
-        return i;
+    // Cek apakah user sudah punya kursi di room ini (di occupancy map)
+    const occupancyMap = this.seatOccupancy.get(room);
+    if (occupancyMap) {
+      for (let i = 1; i <= this.MAX_SEATS; i++) {
+        if (occupancyMap.get(i) === ws.idtarget) {
+          return i;
+        }
       }
     }
 
     // Cari kursi kosong yang belum ditempati oleh user online
     for (let i = 1; i <= this.MAX_SEATS; i++) {
-      const k = seatMap.get(i);
-      if (k && !k.namauser) {
-        // Verifikasi bahwa tidak ada user lain yang online di kursi ini
-        let isOccupiedByOnlineUser = false;
+      // Cek di occupancy map apakah kursi kosong
+      const isOccupiedInMap = occupancyMap?.get(i) !== null;
+      
+      // Cek di seat map apakah kursi kosong
+      const seatInfo = seatMap.get(i);
+      const isOccupiedInSeat = seatInfo?.namauser !== "";
+      
+      // Jika kursi kosong di kedua map
+      if (!isOccupiedInMap && !isOccupiedInSeat) {
+        return i;
+      }
+      
+      // Jika kursi hanya terisi di occupancy map tapi tidak di seat map
+      // (kemungkinan user sebelumnya crash/gone)
+      if (isOccupiedInMap && !isOccupiedInSeat) {
+        // Verifikasi apakah occupant masih online
+        const occupant = occupancyMap.get(i);
+        let occupantOnline = false;
         for (const client of this.clients) {
-          if (client.idtarget === k.namauser && client.readyState === 1) {
-            isOccupiedByOnlineUser = true;
+          if (client.idtarget === occupant && client.readyState === 1) {
+            occupantOnline = true;
             break;
           }
         }
         
-        if (!isOccupiedByOnlineUser) {
+        if (!occupantOnline) {
+          // Bersihkan kursi yang ditinggalkan
+          occupancyMap.set(i, null);
           return i;
         }
       }
@@ -511,10 +541,15 @@ export class ChatServer {
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
       const info = seatMap.get(seat);
       if (!info) continue;
-      if (info.namauser) {
+      
+      // Cek apakah kursi ditempati (di occupancy map)
+      const occupancyMap = this.seatOccupancy.get(room);
+      const isOccupied = occupancyMap?.get(seat) !== null;
+      
+      if (info.namauser || isOccupied) {
         allKursiMeta[seat] = {
           noimageUrl: info.noimageUrl,
-          namauser: info.namauser,
+          namauser: info.namauser || occupancyMap?.get(seat) || "",
           color: info.color,
           itembawah: info.itembawah,
           itematas: info.itematas,
@@ -568,6 +603,12 @@ export class ChatServer {
       this.clearSeatBuffer(room, seat);
       this.broadcastToRoom(room, ["removeKursi", room, seat]);
       this.broadcastRoomUserCount(room);
+    }
+
+    // Juga bersihkan dari occupancy map
+    const occupancyMap = this.seatOccupancy.get(room);
+    if (occupancyMap && occupancyMap.get(seat) === idtarget) {
+      occupancyMap.set(seat, null);
     }
 
     this.userToSeat.delete(idtarget);
@@ -825,30 +866,6 @@ export class ChatServer {
           viptanda: viptanda || 0
         });
 
-        seatMap.set(seat, currentInfo);
-        if (!this.updateKursiBuffer.has(room))
-          this.updateKursiBuffer.set(room, new Map());
-        this.updateKursiBuffer.get(room).set(seat, { ...currentInfo });
-        this.broadcastRoomUserCount(room);
-        break;
-      }
-
-      // Message baru untuk update kursi basic (hanya untuk join room)
-      case "updateKursiBasic": {
-        const [, room, seat, namauser] = data;
-        
-        if (ws.roomname !== room) {
-          return;
-        }
-        
-        if (!roomList.includes(room)) return;
-
-        const seatMap = this.roomSeats.get(room);
-        const currentInfo = seatMap.get(seat) || createEmptySeat();
-        
-        // Hanya update namauser, biarkan field lainnya tetap
-        currentInfo.namauser = namauser;
-        
         seatMap.set(seat, currentInfo);
         if (!this.updateKursiBuffer.has(room))
           this.updateKursiBuffer.set(room, new Map());
