@@ -430,16 +430,7 @@ export class ChatServer {
     const occupancyMap = this.seatOccupancy.get(room);
     occupancyMap.set(seat, ws.idtarget);
     
-    Object.assign(seatInfo, {
-      namauser: ws.idtarget,
-      noimageUrl: `https://api.dicebear.com/7.x/avataaars/svg?seed=${ws.idtarget}`,
-      color: "#000000",
-      itembawah: 0,
-      itematas: 0,
-      vip: 0,
-      viptanda: 0,
-      lastPoint: null
-    });
+    
     
     this.userToSeat.set(ws.idtarget, { room, seat });
     ws.roomname = room;
@@ -936,3 +927,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
