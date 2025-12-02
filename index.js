@@ -394,7 +394,7 @@ export class ChatServer {
       this.broadcastRoomUserCount(room);
       this.vipManager.getAllVipBadges(ws, room);
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
-      this.safeSend(ws, ["rooMasuk", seat, room]);
+    
     } else {
       this.forceUserCleanup(id);
       this.safeSend(ws, ["needJoinRoom"]);
@@ -927,4 +927,5 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
