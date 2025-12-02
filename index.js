@@ -588,8 +588,11 @@ export class ChatServer {
         break;
       }
 
-      case "onDestroy": 
-        break;
+      case "onDestroy": {
+  const idtarget = ws.idtarget;
+  this.handleOnDestroy(ws, idtarget);
+  break;
+}
         
       case "setIdTarget2": 
         this.handleSetIdTarget2(ws, data[1], data[2]); 
@@ -848,3 +851,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
