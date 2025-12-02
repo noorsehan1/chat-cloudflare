@@ -78,7 +78,7 @@ export class ChatServer {
     this.RETRY_DELAY = 50;
   }
 
-  // Atomic seat operation: coba claim seat dengan verifikasi
+  // Atomic seat operation: coba claim seat dengan hanya set namauser
   tryClaimSeatAtomic(room, seatNumber, userId) {
     const seatArray = this.roomSeats.get(room);
     if (!seatArray || seatNumber < 1 || seatNumber > this.MAX_SEATS) {
@@ -89,6 +89,7 @@ export class ChatServer {
     
     // Atomic check: hanya claim jika seat benar-benar kosong
     if (!seat.namauser || seat.namauser === "") {
+      // HANYA SET nama user, biarkan data lainnya kosong
       seat.namauser = userId;
       seat.lastPoint = null;
       return true;
@@ -397,6 +398,8 @@ export class ChatServer {
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       if (!seatArray[i].namauser || seatArray[i].namauser === "") {
         if (this.tryClaimSeatAtomic(room, i, userId)) {
+          // KURSI SUDAH DICLAIM, TAPI DATA MASIH KOSONG
+          // Ini sesuai permintaan: biarkan data kursi kosong
           return i;
         }
       }
@@ -411,7 +414,7 @@ export class ChatServer {
     return null;
   }
 
-  // Atomic update user state
+  // Atomic update user state - HANYA update mapping, TIDAK isi data kursi
   atomicUpdateUserToRoom(ws, room, seat) {
     // Update semua state sekaligus secara atomic
     ws.roomname = room;
@@ -424,15 +427,13 @@ export class ChatServer {
       timestamp: Date.now() 
     });
 
-    // Inisialisasi seat di roomSeats jika belum ada user
+    // TIDAK mengisi data kursi di sini - biarkan kosong
+    // Data akan diisi nanti melalui event "updateKursi" terpisah
     const seatArray = this.roomSeats.get(room);
     if (seatArray && seatArray[seat]) {
       const currentSeat = seatArray[seat];
-      // Only update if empty or belongs to same user
-      if (!currentSeat.namauser || currentSeat.namauser === ws.idtarget) {
-        currentSeat.namauser = ws.idtarget;
-        currentSeat.lastPoint = null;
-      }
+      // Hanya pastikan namauser sudah diset (sudah dilakukan di tryClaimSeatAtomic)
+      // Data lainnya tetap kosong
     }
   }
 
@@ -517,12 +518,35 @@ export class ChatServer {
         return false;
       }
 
-      // Update state dengan atomic operation
+      // Update state dengan atomic operation - HANYA mapping, TIDAK isi data
       this.atomicUpdateUserToRoom(ws, newRoom, foundSeat);
 
       this.cancelGraceCleanup(ws.idtarget);
 
-      // Send semua data setelah state konsisten
+      // KIRIM KURSI KOSONG KE CLIENT LAIN
+      // Ini akan membuat kursi tampil kosong di client lain
+      const seatArray = this.roomSeats.get(newRoom);
+      if (seatArray && seatArray[foundSeat]) {
+        const seatData = seatArray[foundSeat];
+        // Broadcast kursi dengan hanya nama user, data lainnya kosong
+        const updateData = {
+          noimageUrl: "",
+          namauser: seatData.namauser, // Hanya nama user
+          color: "",
+          itembawah: 0,
+          itematas: 0,
+          vip: 0,
+          viptanda: 0
+        };
+        
+        // Masukkan ke buffer untuk broadcast
+        if (!this.updateKursiBuffer.has(newRoom)) {
+          this.updateKursiBuffer.set(newRoom, new Map());
+        }
+        this.updateKursiBuffer.get(newRoom).set(foundSeat, updateData);
+      }
+
+      // Send semua data ke user yang join
       this.sendAllStateTo(ws, newRoom);
       this.vipManager.getAllVipBadges(ws, newRoom);
       this.broadcastRoomUserCount(newRoom);
@@ -563,7 +587,7 @@ export class ChatServer {
       const info = seatArray[seat];
       if (!info) continue;
       
-      // Jika kursi ada namauser, kirim data
+      // Jika kursi ada namauser, kirim data (walaupun mungkin kosong)
       if (info.namauser) {
         allKursiMeta[seat] = {
           noimageUrl: info.noimageUrl,
@@ -874,6 +898,12 @@ export class ChatServer {
         if (!seatArray || seat < 1 || seat > this.MAX_SEATS) return;
         
         const currentInfo = seatArray[seat];
+        
+        // VERIFIKASI: hanya update jika user yang sesuai
+        if (currentInfo.namauser !== namauser && currentInfo.namauser !== "") {
+          // Jika ada user lain di seat ini, reject update
+          return;
+        }
         
         Object.assign(currentInfo, {
           noimageUrl, namauser, color, itembawah, itematas,
