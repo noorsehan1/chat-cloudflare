@@ -143,10 +143,7 @@ export class ChatServer {
         this.vipManager.removeVipBadge(room, seatNumber);
       }
       
-      // HANYA reset namauser, biarkan data lain tetap
-      seatInfo.namauser = "";
-      // Jangan reset semua: Object.assign(seatInfo, createEmptySeat());
-      
+      Object.assign(seatInfo, createEmptySeat());
       this.clearSeatBuffer(room, seatNumber);
       this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
       this.broadcastRoomUserCount(room);
@@ -286,7 +283,7 @@ export class ChatServer {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) continue;
       for (const info of seatMap.values()) {
-        if (info.namauser && info.namauser !== "") cnt[room]++;
+        if (info.namauser) cnt[room]++;
       }
     }
     return cnt;
@@ -353,102 +350,60 @@ export class ChatServer {
     return false;
   }
 
-  handleSetIdTarget2(ws, id, baru) {
-    if (!id) return;
+handleSetIdTarget2(ws, id, baru) {
+  if (!id) return;
 
-    if (baru === true) {
-      this.forceUserCleanup(id);
-      ws.idtarget = id;
-      ws.roomname = undefined;
-      ws.numkursi = new Set();
-      this.safeSend(ws, ["joinroomawal"]);
-    } else {
-      ws.idtarget = id;
+  if (baru === true) {
+    this.forceUserCleanup(id);
+    ws.idtarget = id;
+    ws.roomname = undefined;
+    ws.numkursi = new Set();
+    this.safeSend(ws, ["joinroomawal"]);
+  } else {
+    ws.idtarget = id;
+    
+    this.cancelGraceCleanup(id);
+    
+    const seatInfo = this.userToSeat.get(id);
+    
+    if (seatInfo) {
+      const { room, seat } = seatInfo;
       
-      this.cancelGraceCleanup(id);
+      // Cek apakah user masih di seat yang lama
+      const seatMap = this.roomSeats.get(room);
+      const seatData = seatMap?.get(seat);
+      const isStillInSeat = seatData?.namauser === id;
       
-      // Cari user di semua room berdasarkan occupancy map
-      let foundRoom = null;
-      let foundSeat = null;
-      
-      for (const room of roomList) {
-        const occupancyMap = this.seatOccupancy.get(room);
-        if (!occupancyMap) continue;
+      if (isStillInSeat) {
+        // User masih di seat yang sama - reconnect normal
+        ws.roomname = room;
+        ws.numkursi = new Set([seat]);
         
-        for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-          if (occupancyMap.get(seat) === id) {
-            foundRoom = room;
-            foundSeat = seat;
-            break;
-          }
-        }
-        if (foundRoom) break;
-      }
-      
-      if (foundRoom && foundSeat) {
-        // USER MASIH ADA DI OCCUPANCY MAP
-        ws.roomname = foundRoom;
-        ws.numkursi = new Set([foundSeat]);
-        this.userToSeat.set(id, { room: foundRoom, seat: foundSeat });
-        
-        // Sync roomSeats jika diperlukan
-        const seatMap = this.roomSeats.get(foundRoom);
-        const seatData = seatMap?.get(foundSeat);
-        
-        if (seatData) {
-          // Jika roomSeats tidak memiliki user ini, update
-          if (seatData.namauser !== id) {
-            seatData.namauser = id;
-            // Kirim update ke semua client
-            this.broadcastToRoom(foundRoom, ["updateKursi", foundRoom, foundSeat,
-              seatData.noimageUrl || "", id, seatData.color || "",
-              seatData.itembawah || 0, seatData.itematas || 0,
-              seatData.vip || 0, seatData.viptanda || 0
-            ]);
-          }
-        }
-        
-        this.sendAllStateTo(ws, foundRoom);
-        this.broadcastRoomUserCount(foundRoom);
-        this.vipManager.getAllVipBadges(ws, foundRoom);
+        this.sendAllStateTo(ws, room);
+        this.broadcastRoomUserCount(room);
+        this.vipManager.getAllVipBadges(ws, room);
         this.safeSend(ws, ["currentNumber", this.currentNumber]);
-        this.safeSend(ws, ["rooMasuk", foundSeat, foundRoom]);
       } else {
-        // USER TIDAK DITEMUKAN - KIRIM needJoinRoom
-        // Bersihkan data lama jika ada
-        const oldSeatInfo = this.userToSeat.get(id);
-        if (oldSeatInfo) {
-          const { room: oldRoom, seat: oldSeat } = oldSeatInfo;
-          // Reset kursi di roomSeats jika masih ada data user
-          const seatMap = this.roomSeats.get(oldRoom);
-          const seatData = seatMap?.get(oldSeat);
-          if (seatData && seatData.namauser === id) {
-            seatData.namauser = "";
-            this.broadcastToRoom(oldRoom, ["removeKursi", oldRoom, oldSeat]);
-          }
-        }
-        
-        // Hapus dari mapping
-        this.userToSeat.delete(id);
-        
-        // Kirim needJoinRoom dengan delay
-        setTimeout(() => {
-          if (ws.readyState === 1 && ws.idtarget === id) {
-            this.safeSend(ws, ["needJoinRoom"]);
-          }
-        }, 100);
+      this.forceUserCleanup(id);
+        this.safeSend(ws, ["needJoinRoom"]);
       }
+    } else {
+     this.forceUserCleanup(id);
+      this.safeSend(ws, ["needJoinRoom"]);
     }
   }
-
+}
   isUserStillInSeat(idtarget, room, seat) {
-    // Cek di occupancy map
+    // Cek di occupancy map terlebih dahulu untuk tracking
     const occupancyMap = this.seatOccupancy.get(room);
     if (occupancyMap && occupancyMap.get(seat) === idtarget) {
       return true;
     }
     
-    return false;
+    // Juga cek di seat map biasa
+    const seatMap = this.roomSeats.get(room);
+    const seatData = seatMap?.get(seat);
+    return seatData?.namauser === idtarget;
   }
   
   async handleJoinRoom(ws, newRoom) {
@@ -469,40 +424,10 @@ export class ChatServer {
       const currentSeatInfo = this.userToSeat.get(ws.idtarget);
       if (currentSeatInfo) {
         const { room: currentRoom, seat: currentSeat } = currentSeatInfo;
-        // Cleanup hanya jika pindah room
-        if (currentRoom !== newRoom) {
-          this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
-        }
+        this.cleanupUserFromSeat(currentRoom, currentSeat, ws.idtarget);
       }
 
-      // Cari kursi yang tersedia
-      let foundSeat = null;
-      const occupancyMap = this.seatOccupancy.get(newRoom);
-      const seatMap = this.roomSeats.get(newRoom);
-      
-      if (!occupancyMap || !seatMap) {
-        this.safeSend(ws, ["roomFull", newRoom]);
-        return false;
-      }
-      
-      // Prioritas 1: Cari kursi yang sudah ditempati user ini
-      for (let i = 1; i <= this.MAX_SEATS; i++) {
-        if (occupancyMap.get(i) === ws.idtarget) {
-          foundSeat = i;
-          break;
-        }
-      }
-      
-      // Prioritas 2: Cari kursi kosong
-      if (!foundSeat) {
-        for (let i = 1; i <= this.MAX_SEATS; i++) {
-          if (occupancyMap.get(i) === null) {
-            foundSeat = i;
-            break;
-          }
-        }
-      }
-      
+      const foundSeat = this.findEmptySeat(newRoom, ws);
       if (!foundSeat) {
         this.safeSend(ws, ["roomFull", newRoom]);
         return false;
@@ -511,36 +436,15 @@ export class ChatServer {
       ws.roomname = newRoom;
       ws.numkursi = new Set([foundSeat]);
       
-      // Update mappings
       this.userToSeat.set(ws.idtarget, { room: newRoom, seat: foundSeat });
-      
-      // Update occupancy map
+
+      // HANYA TANDAI DI OCCUPANCY MAP SAJA
+      // TIDAK mengubah roomSeats sama sekali
+      const occupancyMap = this.seatOccupancy.get(newRoom);
       occupancyMap.set(foundSeat, ws.idtarget);
-      
-      // Update roomSeats (PENTING!)
-      const seatInfo = seatMap.get(foundSeat);
-      if (seatInfo) {
-        // Reset dan set data user
-        Object.assign(seatInfo, {
-          noimageUrl: "",
-          namauser: ws.idtarget,
-          color: "",
-          itembawah: 0,
-          itematas: 0,
-          vip: 0,
-          viptanda: 0,
-          lastPoint: null
-        });
-        
-        // Kirim update kursi ke semua client
-        this.broadcastToRoom(newRoom, ["updateKursi", newRoom, foundSeat,
-          "", ws.idtarget, "", 0, 0, 0, 0
-        ]);
-      }
 
       this.cancelGraceCleanup(ws.idtarget);
 
-      // Kirim state ke client
       this.sendAllStateTo(ws, newRoom);
       this.vipManager.getAllVipBadges(ws, newRoom);
       this.broadcastRoomUserCount(newRoom);
@@ -550,7 +454,7 @@ export class ChatServer {
         if (ws.readyState === 1 && ws.roomname === newRoom && ws.idtarget) {
           this.safeSend(ws, ["rooMasuk", foundSeat, newRoom]);
         }
-      }, 100);
+      }, 300);
       
       return true;
     } finally {
@@ -562,17 +466,18 @@ export class ChatServer {
   findEmptySeat(room, ws) {
     if (!ws.idtarget) return null;
     
+    // HANYA gunakan occupancy map untuk mencari kursi kosong
     const occupancyMap = this.seatOccupancy.get(room);
     if (!occupancyMap) return null;
 
-    // Cek apakah user sudah punya kursi di room ini
+    // Cek apakah user sudah punya kursi di room ini (di occupancy map)
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       if (occupancyMap.get(i) === ws.idtarget) {
         return i;
       }
     }
 
-    // Cari kursi kosong
+    // Cari kursi kosong di occupancy map
     for (let i = 1; i <= this.MAX_SEATS; i++) {
       if (occupancyMap.get(i) === null) {
         return i;
@@ -594,11 +499,13 @@ export class ChatServer {
     const allKursiMeta = {};
     const lastPointsData = [];
 
+    // AMBIL DATA NORMAL DARI roomSeats MAP
     for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
       const info = seatMap.get(seat);
       if (!info) continue;
       
-      if (info.namauser && info.namauser !== "") {
+      // Jika kursi ada namauser di roomSeats, kirim data
+      if (info.namauser) {
         allKursiMeta[seat] = {
           noimageUrl: info.noimageUrl,
           namauser: info.namauser,
@@ -657,6 +564,7 @@ export class ChatServer {
       this.broadcastRoomUserCount(room);
     }
 
+    // Juga bersihkan dari occupancy map
     const occupancyMap = this.seatOccupancy.get(room);
     if (occupancyMap && occupancyMap.get(seat) === idtarget) {
       occupancyMap.set(seat, null);
@@ -1015,4 +923,8 @@ export default {
     }
     return new Response("WebSocket endpoint", { status: 200 });
   }
-};
+}; else {
+      // User sudah dibersihkan - perlu join room baru
+      this.userToSeat.delete(id); // Hapus dari mapping lama
+      this.safeSend(ws, ["needJoinRoom"]); JNGAN YANG LAINJNGAN TAMBAH KODE APAPAPUN FOKOS this.userToSeat.delete(id);
+      this.safeSend(ws, ["needJoinRoom"]);
