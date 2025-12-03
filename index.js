@@ -397,6 +397,7 @@ export class ChatServer {
     
     } else {
       this.forceUserCleanup(id);
+         
       this.safeSend(ws, ["needJoinRoom"]);
     }
   }
@@ -682,28 +683,7 @@ export class ChatServer {
         this.handleSetIdTarget2(ws, data[1], data[2]); 
         break;
 
-      case "setIdTarget": {
-        const newId = data[1];
-        if (ws.idtarget && ws.idtarget !== newId) {
-          this.forceUserCleanup(ws.idtarget);
-        }
-        ws.idtarget = newId;
-
-        const prevSeat = this.userToSeat.get(newId);
-        if (prevSeat) {
-          ws.roomname = prevSeat.room;
-          ws.numkursi = new Set([prevSeat.seat]);
-          this.sendAllStateTo(ws, prevSeat.room);
-        } else {
-          if (this.hasEverSetId) {
-            this.safeSend(ws, ["needJoinRoom"]);
-          }
-        }
-
-        this.hasEverSetId = true;
-        if (ws.roomname) this.broadcastRoomUserCount(ws.roomname);
-        break;
-      }
+     
 
       case "sendnotif": {
         const [, idtarget, noimageUrl, username, deskripsi] = data;
@@ -927,5 +907,6 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
