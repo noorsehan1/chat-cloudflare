@@ -105,24 +105,31 @@ export class ChatServer {
     this.userLastActive.set(userId, Date.now());
   }
 
-  // ✅ Dapatkan chat yang terjadi SELAMA user disconnect
-  getChatsDuringDisconnect(userId, room) {
+  // ✅ Dapatkan semua message (chat + gift) yang terjadi SELAMA user disconnect
+  getMessagesDuringDisconnect(userId, room) {
     const lastActiveTime = this.userLastActive.get(userId) || 0;
     const roomBuffer = this.chatMessageBuffer.get(room) || [];
-    const chatsDuringDisconnect = [];
+    const messagesDuringDisconnect = [];
 
-    // Loop semua chat di buffer
-    for (const chat of roomBuffer) {
-      // chat[7] adalah timestamp yang kita tambah
-      const chatTime = chat[7] || 0;
+    for (const message of roomBuffer) {
+      const messageType = message[0];
+      let messageTime = 0;
       
-      // Jika chat terjadi SETELAH user terakhir aktif
-      if (chatTime > lastActiveTime) {
-        chatsDuringDisconnect.push(chat);
+      if (messageType === "chat") {
+        messageTime = message[7] || 0; // chat timestamp di index 7
+      } else if (messageType === "gift") {
+        messageTime = message[5] || 0; // gift timestamp di index 5
+      } else {
+        continue;
+      }
+      
+      // Jika message terjadi SETELAH user terakhir aktif
+      if (messageTime > lastActiveTime) {
+        messagesDuringDisconnect.push(message);
       }
     }
 
-    return chatsDuringDisconnect;
+    return messagesDuringDisconnect;
   }
 
   _cleanupOldBuffers() {
@@ -498,15 +505,41 @@ export class ChatServer {
       
       this.roomClients.get(room)?.add(ws);
       
-      // ✅ KIRIM CHAT YANG TERJADI SELAMA DISCONNECT
-      const chatsDuringDisconnect = this.getChatsDuringDisconnect(id, room);
+      // ✅ AMBIL SEMUA MESSAGE SELAMA DISCONNECT (chat + gift)
+      const messagesDuringDisconnect = this.getMessagesDuringDisconnect(id, room);
       
-      // Loop dan kirim semua chat selama disconnect
-      for (const chat of chatsDuringDisconnect) {
-        this.safeSend(ws, chat);
+      // ✅ LOOP SEMUA MESSAGE
+      for (const messageData of messagesDuringDisconnect) {
+        const messageType = messageData[0];
+        
+        if (messageType === "chat") {
+          // ✅ KIRIM CHAT EVENT
+          const chatEvent = [
+            "chat", 
+            messageData[1], // room
+            messageData[2], // noImageURL  
+            messageData[3], // username
+            messageData[4], // message
+            messageData[5], // usernameColor
+            messageData[6]  // chatTextColor
+          ];
+          this.safeSend(ws, chatEvent);
+          
+        } else if (messageType === "gift") {
+          // ✅ KIRIM GIFT EVENT
+          const giftEvent = [
+            "gift", 
+            messageData[1], // room
+            messageData[2], // sender
+            messageData[3], // receiver
+            messageData[4], // giftName
+            messageData[5]  // timestamp
+          ];
+          this.safeSend(ws, giftEvent);
+        }
       }
       
-      // Update waktu aktif user SEKARANG (setelah reconnect)
+      // Update waktu aktif user SEKARANG
       this.updateUserLastActive(id);
       
       this.sendAllStateTo(ws, room);
@@ -665,9 +698,6 @@ export class ChatServer {
     if (lastPointsData.length > 0) {
       this.safeSend(ws, ["allPointsList", room, lastPointsData]);
     }
-
-    // ✅ TIDAK PERLU kirim chat di sini (sudah dikirim di handleSetIdTarget2)
-    // User akan dapat chat saat reconnect, bukan di sini
 
     const counts = this.getJumlahRoom();
     const count = counts[room] || 0;
@@ -921,21 +951,27 @@ export class ChatServer {
         }
         
         // ✅ TAMBAH TIMESTAMP di index 7
+        const timestamp = Date.now();
         const messageData = [
           "chat", roomname, noImageURL, username, 
           message,
           usernameColor, chatTextColor,
-          Date.now() // ✅ TIMESTAMP di index 7
+          timestamp // ✅ TIMESTAMP di index 7
         ];
         
         roomBuffer.push(messageData);
         
-        // Broadcast ke semua user online di room
+        // ✅ BROADCAST KE SEMUA USER LAIN DI ROOM
+        // TAPI JANGAN KIRIM KE PENGIRIM SENDIRI
         const clientSet = this.roomClients.get(roomname);
         if (clientSet) {
           for (const c of clientSet) {
+            // ✅ KIRIM KE SEMUA KECUALI PENGIRIM
             if (c.readyState === 1 && c.idtarget !== username) {
-              this.safeSend(c, messageData);
+              this.safeSend(c, [
+                "chat", roomname, noImageURL, username, 
+                message, usernameColor, chatTextColor
+              ]);
             }
           }
         }
@@ -1009,6 +1045,11 @@ export class ChatServer {
         }
         
         if (!roomList.includes(roomname)) return;
+
+        // ✅ UPDATE waktu aktif PENGIRIM (sender)
+        this.updateUserLastActive(sender);
+        
+        // Simpan ke buffer
         if (!this.chatMessageBuffer.has(roomname))
           this.chatMessageBuffer.set(roomname, []);
         const buffer = this.chatMessageBuffer.get(roomname);
@@ -1019,15 +1060,28 @@ export class ChatServer {
           buffer.splice(0, toRemove);
         }
         
-        // ✅ TAMBAH TIMESTAMP untuk gift juga
-        buffer.push(["gift", roomname, sender, receiver, giftName, Date.now(), Date.now()]);
+        // ✅ TIMESTAMP di index 5
+        const timestamp = Date.now();
+        const giftData = ["gift", roomname, sender, receiver, giftName, timestamp];
+        buffer.push(giftData);
+        
+        // ✅ BROADCAST GIFT KE SEMUA USER DI ROOM
+        const clientSet = this.roomClients.get(roomname);
+        if (clientSet) {
+          for (const c of clientSet) {
+            if (c.readyState === 1) {
+              this.safeSend(c, giftData);
+            }
+          }
+        }
+        
         break;
       }
 
-    case "gameLowCardStart":
-    case "gameLowCardJoin":
-    case "gameLowCardNumber":
-    case "gameLowCardEnd":
+      case "gameLowCardStart":
+      case "gameLowCardJoin":
+      case "gameLowCardNumber":
+      case "gameLowCardEnd":
         if (ws.roomname === "LowCard") {
             this.lowcard.handleEvent(ws, data);
         }
