@@ -837,15 +837,16 @@ export class ChatServer {
         break;
       }
 
-      case "gameLowCardStart":
-      case "gameLowCardJoin":
-      case "gameLowCardNumber":
-      case "gameLowCardEnd":
-        if (ws.roomname === "LowCard") {
-          setTimeout(() => this.lowcard.handleEvent(ws, data), 0);
-        }
-        break;
-
+    case "gameLowCardStart":
+case "gameLowCardJoin":
+case "gameLowCardNumber":
+case "gameLowCardEnd":
+    if (ws.roomname === "LowCard") {
+        // HAPUS setTimeout, PANGGIL LANGSUNG!
+        this.lowcard.handleEvent(ws, data);
+    }
+    break;
+        
       default: 
         break;
     }
@@ -907,6 +908,7 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
 
 
 
