@@ -89,10 +89,8 @@ export class ChatServer {
     this.gracePeriod = 5000;
     this.disconnectedTimers = new Map();
 
-    this._bufferCleanupTimer = setInterval(() => {
-      this._cleanupOldBuffers();
-    }, 60000);
-    this._timers.push(this._bufferCleanupTimer);
+    // ❌ HAPUS: buffer cleanup timer tidak perlu
+    // Buffer chat 20 pesan sudah self-cleaning
 
     this.roomClients = new Map();
     for (const room of roomList) {
@@ -132,25 +130,8 @@ export class ChatServer {
     return messagesDuringDisconnect;
   }
 
-  _cleanupOldBuffers() {
-    const now = Date.now();
-    const twoMinutesAgo = Math.floor((now - 120000) / 1000);
-    
-    // Cleanup rate limit
-    for (const [key, stats] of this.messageCounts.entries()) {
-      if (stats.window < twoMinutesAgo) {
-        this.messageCounts.delete(key);
-      }
-    }
-    
-    // Cleanup userLastActive (> 1 jam)
-    const oneHourAgo = now - (60 * 60 * 1000);
-    for (const [userId, timestamp] of this.userLastActive.entries()) {
-      if (timestamp < oneHourAgo) {
-        this.userLastActive.delete(userId);
-      }
-    }
-  }
+  // ❌ HAPUS: _cleanupOldBuffers tidak perlu karena buffer sudah self-cleaning
+  // Rate limit data bisa dibersihkan secara manual jika diperlukan
 
   _cleanupTimers() {
     for (const timer of this._timers) {
