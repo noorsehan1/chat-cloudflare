@@ -28,6 +28,12 @@ export class ChatServer {
     this.userToSeat = new Map();
     this.hasEverSetId = false;
 
+    // ✅ Buffer 20 pesan per room
+    this.MAX_CHAT_HISTORY = 20;
+
+    // ✅ Simpan waktu terakhir user aktif
+    this.userLastActive = new Map(); // userId -> timestamp
+
     this.MAX_SEATS = 35;
     this.roomSeats = new Map();
 
@@ -51,7 +57,6 @@ export class ChatServer {
 
     this._nextConnId = 1;
 
-    // ✅ OPTIMASI: Simpan timer references
     this._timers = [];
 
     this.intervalMillis = 15 * 60 * 1000;
@@ -84,38 +89,62 @@ export class ChatServer {
     this.gracePeriod = 5000;
     this.disconnectedTimers = new Map();
 
-    // ✅ OPTIMASI: Buffer cleanup timer
     this._bufferCleanupTimer = setInterval(() => {
       this._cleanupOldBuffers();
     }, 60000);
     this._timers.push(this._bufferCleanupTimer);
 
-    // ✅ OPTIMASI: roomClients untuk broadcast cepat
     this.roomClients = new Map();
     for (const room of roomList) {
       this.roomClients.set(room, new Set());
     }
   }
 
-  // ✅ OPTIMASI: Cleanup buffer yang terlalu besar
-  _cleanupOldBuffers() {
-    for (const [room, messages] of this.chatMessageBuffer.entries()) {
-      if (messages.length > 500) {
-        this.chatMessageBuffer.set(room, messages.slice(-200));
+  // ✅ Update waktu aktif user
+  updateUserLastActive(userId) {
+    this.userLastActive.set(userId, Date.now());
+  }
+
+  // ✅ Dapatkan chat yang terjadi SELAMA user disconnect
+  getChatsDuringDisconnect(userId, room) {
+    const lastActiveTime = this.userLastActive.get(userId) || 0;
+    const roomBuffer = this.chatMessageBuffer.get(room) || [];
+    const chatsDuringDisconnect = [];
+
+    // Loop semua chat di buffer
+    for (const chat of roomBuffer) {
+      // chat[7] adalah timestamp yang kita tambah
+      const chatTime = chat[7] || 0;
+      
+      // Jika chat terjadi SETELAH user terakhir aktif
+      if (chatTime > lastActiveTime) {
+        chatsDuringDisconnect.push(chat);
       }
     }
 
-    // Cleanup old rate limit data (> 2 menit)
+    return chatsDuringDisconnect;
+  }
+
+  _cleanupOldBuffers() {
     const now = Date.now();
     const twoMinutesAgo = Math.floor((now - 120000) / 1000);
+    
+    // Cleanup rate limit
     for (const [key, stats] of this.messageCounts.entries()) {
       if (stats.window < twoMinutesAgo) {
         this.messageCounts.delete(key);
       }
     }
+    
+    // Cleanup userLastActive (> 1 jam)
+    const oneHourAgo = now - (60 * 60 * 1000);
+    for (const [userId, timestamp] of this.userLastActive.entries()) {
+      if (timestamp < oneHourAgo) {
+        this.userLastActive.delete(userId);
+      }
+    }
   }
 
-  // ✅ OPTIMASI: Cleanup semua timer
   _cleanupTimers() {
     for (const timer of this._timers) {
       clearInterval(timer);
@@ -182,7 +211,6 @@ export class ChatServer {
         this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
         this.broadcastRoomUserCount(room);
         
-        // ✅ OPTIMASI: Remove user dari roomClients
         const clientSet = this.roomClients.get(room);
         if (clientSet) {
           for (const client of clientSet) {
@@ -224,7 +252,6 @@ export class ChatServer {
       occupancyMap.set(seat, null);
     }
     
-    // ✅ OPTIMASI: Remove dari roomClients
     const clientSet = this.roomClients.get(room);
     if (clientSet) {
       clientSet.delete(ws);
@@ -261,6 +288,7 @@ export class ChatServer {
 
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
+    this.userLastActive.delete(idtarget);
   }
 
   fullRemoveById(idtarget) {
@@ -294,6 +322,7 @@ export class ChatServer {
 
     this.userToSeat.delete(idtarget);
     this.messageCounts.delete(idtarget);
+    this.userLastActive.delete(idtarget);
 
     for (const c of Array.from(this.clients)) {
       if (c && c.idtarget === idtarget) {
@@ -302,7 +331,6 @@ export class ChatServer {
         }
         this.clients.delete(c);
         
-        // ✅ OPTIMASI: Remove dari semua roomClients
         for (const clientSet of this.roomClients.values()) {
           clientSet.delete(c);
         }
@@ -350,7 +378,6 @@ export class ChatServer {
     return false;
   }
 
-  // ✅ OPTIMASI: Broadcast cepat dengan roomClients
   broadcastToRoom(room, msg) {
     if (!room || !roomList.includes(room)) {
       return 0;
@@ -368,7 +395,6 @@ export class ChatServer {
     return sentCount;
   }
 
-  // ✅ PERBAIKAN: Kembali ke perhitungan jumlah seperti kode awal
   getJumlahRoom() {
     const cnt = Object.fromEntries(roomList.map(r => [r, 0]));
     for (const room of roomList) {
@@ -470,8 +496,18 @@ export class ChatServer {
       ws.roomname = room;
       ws.numkursi = new Set([seat]);
       
-      // ✅ OPTIMASI: Tambah ke roomClients
       this.roomClients.get(room)?.add(ws);
+      
+      // ✅ KIRIM CHAT YANG TERJADI SELAMA DISCONNECT
+      const chatsDuringDisconnect = this.getChatsDuringDisconnect(id, room);
+      
+      // Loop dan kirim semua chat selama disconnect
+      for (const chat of chatsDuringDisconnect) {
+        this.safeSend(ws, chat);
+      }
+      
+      // Update waktu aktif user SEKARANG (setelah reconnect)
+      this.updateUserLastActive(id);
       
       this.sendAllStateTo(ws, room);
       this.broadcastRoomUserCount(room);
@@ -522,8 +558,10 @@ export class ChatServer {
     ws.roomname = room;
     ws.numkursi = new Set([seat]);
     
-    // ✅ OPTIMASI: Tambah ke roomClients
     this.roomClients.get(room)?.add(ws);
+    
+    // Update waktu aktif saat join room
+    this.updateUserLastActive(ws.idtarget);
     
     this.sendAllStateTo(ws, room);
     this.broadcastRoomUserCount(room);
@@ -628,6 +666,9 @@ export class ChatServer {
       this.safeSend(ws, ["allPointsList", room, lastPointsData]);
     }
 
+    // ✅ TIDAK PERLU kirim chat di sini (sudah dikirim di handleSetIdTarget2)
+    // User akan dapat chat saat reconnect, bukan di sini
+
     const counts = this.getJumlahRoom();
     const count = counts[room] || 0;
     this.safeSend(ws, ["roomUserCount", room, count]);
@@ -683,7 +724,6 @@ export class ChatServer {
     
     this.cancelCleanup(idtarget);
     
-    // ✅ OPTIMASI: Remove dari roomClients
     for (const clientSet of this.roomClients.values()) {
       clientSet.delete(ws);
     }
@@ -864,13 +904,42 @@ export class ChatServer {
         
         if (!roomList.includes(roomname)) return;
 
-        if (!this.chatMessageBuffer.has(roomname))
+        // ✅ UPDATE waktu aktif PENGIRIM
+        this.updateUserLastActive(username);
+        
+        // Simpan ke buffer room (maks 20 pesan)
+        if (!this.chatMessageBuffer.has(roomname)) {
           this.chatMessageBuffer.set(roomname, []);
-        const buffer = this.chatMessageBuffer.get(roomname);
-        if (buffer.length > 500) {
-          buffer.shift();
         }
-        buffer.push(["chat", roomname, noImageURL, username, message, usernameColor, chatTextColor]);
+        
+        const roomBuffer = this.chatMessageBuffer.get(roomname);
+        
+        // Batasi 20 pesan untuk room buffer
+        if (roomBuffer.length >= this.MAX_CHAT_HISTORY) {
+          const toRemove = roomBuffer.length - (this.MAX_CHAT_HISTORY - 1);
+          roomBuffer.splice(0, toRemove);
+        }
+        
+        // ✅ TAMBAH TIMESTAMP di index 7
+        const messageData = [
+          "chat", roomname, noImageURL, username, 
+          message,
+          usernameColor, chatTextColor,
+          Date.now() // ✅ TIMESTAMP di index 7
+        ];
+        
+        roomBuffer.push(messageData);
+        
+        // Broadcast ke semua user online di room
+        const clientSet = this.roomClients.get(roomname);
+        if (clientSet) {
+          for (const c of clientSet) {
+            if (c.readyState === 1 && c.idtarget !== username) {
+              this.safeSend(c, messageData);
+            }
+          }
+        }
+        
         break;
       }
 
@@ -943,10 +1012,15 @@ export class ChatServer {
         if (!this.chatMessageBuffer.has(roomname))
           this.chatMessageBuffer.set(roomname, []);
         const buffer = this.chatMessageBuffer.get(roomname);
-        if (buffer.length > 500) {
-          buffer.shift();
+        
+        // Batasi 20 pesan untuk gift juga
+        if (buffer.length >= this.MAX_CHAT_HISTORY) {
+          const toRemove = buffer.length - (this.MAX_CHAT_HISTORY - 1);
+          buffer.splice(0, toRemove);
         }
-        buffer.push(["gift", roomname, sender, receiver, giftName, Date.now()]);
+        
+        // ✅ TAMBAH TIMESTAMP untuk gift juga
+        buffer.push(["gift", roomname, sender, receiver, giftName, Date.now(), Date.now()]);
         break;
       }
 
@@ -1002,7 +1076,6 @@ export class ChatServer {
         this.scheduleCleanup(ws.idtarget);
       }
       
-      // ✅ OPTIMASI: Remove dari roomClients
       for (const clientSet of this.roomClients.values()) {
         clientSet.delete(ws);
       }
