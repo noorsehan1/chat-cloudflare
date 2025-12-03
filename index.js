@@ -92,11 +92,8 @@ export class ChatServer {
 
     // ✅ OPTIMASI: roomClients untuk broadcast cepat
     this.roomClients = new Map();
-    // ✅ OPTIMASI: Cache user count per room
-    this.roomUserCount = new Map();
     for (const room of roomList) {
       this.roomClients.set(room, new Set());
-      this.roomUserCount.set(room, 0);
     }
   }
 
@@ -185,10 +182,6 @@ export class ChatServer {
         this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
         this.broadcastRoomUserCount(room);
         
-        // ✅ OPTIMASI: Update cached count
-        const currentCount = this.roomUserCount.get(room) || 0;
-        this.roomUserCount.set(room, Math.max(0, currentCount - 1));
-        
         // ✅ OPTIMASI: Remove user dari roomClients
         const clientSet = this.roomClients.get(room);
         if (clientSet) {
@@ -236,10 +229,6 @@ export class ChatServer {
     if (clientSet) {
       clientSet.delete(ws);
     }
-    
-    // ✅ OPTIMASI: Update cached count
-    const currentCount = this.roomUserCount.get(room) || 0;
-    this.roomUserCount.set(room, Math.max(0, currentCount - 1));
     
     this.vipManager.cleanupUserVipBadges(ws.idtarget);
     
@@ -379,18 +368,23 @@ export class ChatServer {
     return sentCount;
   }
 
-  // ✅ OPTIMASI: getJumlahRoom dengan cache
+  // ✅ PERBAIKAN: Kembali ke perhitungan jumlah seperti kode awal
   getJumlahRoom() {
-    const cnt = {};
+    const cnt = Object.fromEntries(roomList.map(r => [r, 0]));
     for (const room of roomList) {
-      cnt[room] = this.roomUserCount.get(room) || 0;
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) continue;
+      for (const info of seatMap.values()) {
+        if (info.namauser) cnt[room]++;
+      }
     }
     return cnt;
   }
 
   broadcastRoomUserCount(room) {
     if (!room || !roomList.includes(room)) return;
-    const count = this.roomUserCount.get(room) || 0;
+    const counts = this.getJumlahRoom();
+    const count = counts[room] || 0;
     this.broadcastToRoom(room, ["roomUserCount", room, count]);
   }
 
@@ -531,10 +525,6 @@ export class ChatServer {
     // ✅ OPTIMASI: Tambah ke roomClients
     this.roomClients.get(room)?.add(ws);
     
-    // ✅ OPTIMASI: Update cached count
-    const currentCount = this.roomUserCount.get(room) || 0;
-    this.roomUserCount.set(room, currentCount + 1);
-    
     this.sendAllStateTo(ws, room);
     this.broadcastRoomUserCount(room);
     this.safeSend(ws, ["rooMasuk", seat, room]);
@@ -638,7 +628,8 @@ export class ChatServer {
       this.safeSend(ws, ["allPointsList", room, lastPointsData]);
     }
 
-    const count = this.roomUserCount.get(room) || 0;
+    const counts = this.getJumlahRoom();
+    const count = counts[room] || 0;
     this.safeSend(ws, ["roomUserCount", room, count]);
   }
 
@@ -665,10 +656,6 @@ export class ChatServer {
       this.clearSeatBuffer(room, seat);
       this.broadcastToRoom(room, ["removeKursi", room, seat]);
       this.broadcastRoomUserCount(room);
-      
-      // ✅ OPTIMASI: Update cached count
-      const currentCount = this.roomUserCount.get(room) || 0;
-      this.roomUserCount.set(room, Math.max(0, currentCount - 1));
     }
 
     const occupancyMap = this.seatOccupancy.get(room);
@@ -916,10 +903,6 @@ export class ChatServer {
         this.clearSeatBuffer(room, seat);
         this.broadcastToRoom(room, ["removeKursi", room, seat]);
         this.broadcastRoomUserCount(room);
-        
-        // ✅ OPTIMASI: Update cached count
-        const currentCount = this.roomUserCount.get(room) || 0;
-        this.roomUserCount.set(room, Math.max(0, currentCount - 1));
         break;
       }
 
@@ -935,11 +918,8 @@ export class ChatServer {
         const seatMap = this.roomSeats.get(room);
         const currentInfo = seatMap.get(seat) || createEmptySeat();
         
-        const oldUser = currentInfo.namauser;
-        const newUser = namauser || "";
-        
         Object.assign(currentInfo, {
-          noimageUrl, namauser: newUser, color, itembawah, itematas,
+          noimageUrl, namauser, color, itembawah, itematas,
           vip: vip || 0,
           viptanda: viptanda || 0
         });
@@ -948,18 +928,6 @@ export class ChatServer {
         if (!this.updateKursiBuffer.has(room))
           this.updateKursiBuffer.set(room, new Map());
         this.updateKursiBuffer.get(room).set(seat, { ...currentInfo });
-        
-        // ✅ OPTIMASI: Update cached count
-        if (!oldUser && newUser) {
-          // User baru join
-          const currentCount = this.roomUserCount.get(room) || 0;
-          this.roomUserCount.set(room, currentCount + 1);
-        } else if (oldUser && !newUser) {
-          // User keluar
-          const currentCount = this.roomUserCount.get(room) || 0;
-          this.roomUserCount.set(room, Math.max(0, currentCount - 1));
-        }
-        
         this.broadcastRoomUserCount(room);
         break;
       }
