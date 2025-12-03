@@ -110,7 +110,6 @@ export class ChatServer {
   _performCleanup() {
     const now = Date.now();
     
-    // Cleanup dead clients dari roomClients
     for (const [room, clientSet] of this.roomClients) {
       const deadClients = [];
       for (const client of clientSet) {
@@ -123,7 +122,6 @@ export class ChatServer {
       }
     }
     
-    // Cleanup old rate limit data
     if (now - this._metrics.lastCleanup > 60000) {
       for (const [key, bucket] of this.messageCounts.entries()) {
         if (now - bucket.lastRefill > 120000) {
@@ -133,7 +131,6 @@ export class ChatServer {
       this._metrics.lastCleanup = now;
     }
     
-    // Cleanup old disconnected timers
     for (const [userId, timer] of this.disconnectedTimers.entries()) {
       const connections = this.userConnections.get(userId);
       if (connections && connections.size > 0) {
@@ -142,7 +139,6 @@ export class ChatServer {
       }
     }
     
-    // Cleanup large buffers
     for (const [room, messages] of this.chatMessageBuffer.entries()) {
       if (messages.length > this.MAX_BUFFER_SIZE) {
         this.chatMessageBuffer.set(room, messages.slice(-150));
@@ -212,6 +208,17 @@ export class ChatServer {
         
         this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
         this.broadcastRoomUserCount(room);
+        
+        // Hapus user connections dari roomClients
+        const connections = this.userConnections.get(userId);
+        if (connections) {
+          const clientSet = this.roomClients.get(room);
+          if (clientSet) {
+            for (const conn of connections) {
+              clientSet.delete(conn);
+            }
+          }
+        }
       }
     }
 
@@ -614,8 +621,11 @@ export class ChatServer {
     ws.roomname = room;
     ws.numkursi = new Set([seat]);
     
+    // ✅ PERBAIKAN: TAMBAH KE roomClients
     const clientSet = this.roomClients.get(room);
-    if (clientSet) clientSet.add(ws);
+    if (clientSet) {
+      clientSet.add(ws);
+    }
     
     this.safeSend(ws, ["rooMasuk", seat, room]);
     this.safeSend(ws, ["currentNumber", this.currentNumber]);
@@ -672,7 +682,15 @@ export class ChatServer {
     
     const seats = this.roomSeats.get(room);
     
-    
+    Object.assign(seats[seat], {
+      noimageUrl: "",
+      namauser: userId,
+      color: "#000000",
+      itembawah: 0,
+      itematas: 0,
+      vip: 0,
+      viptanda: 0
+    });
     
     const occupancy = this.roomOccupancy.get(room);
     occupancy[seat] = userId;
@@ -684,8 +702,11 @@ export class ChatServer {
     ws.roomname = room;
     ws.numkursi = new Set([seat]);
     
+    // ✅ PERBAIKAN: TAMBAH KE roomClients
     const clientSet = this.roomClients.get(room);
-    if (clientSet) clientSet.add(ws);
+    if (clientSet) {
+      clientSet.add(ws);
+    }
     
     this.safeSend(ws, ["rooMasuk", seat, room]);
     this.safeSend(ws, ["currentNumber", this.currentNumber]);
