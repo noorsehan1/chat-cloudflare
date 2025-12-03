@@ -123,7 +123,7 @@ export class ChatServer {
         continue;
       }
       
-      // Jika message terjadi SETELAH user terakhir aktif
+      // ✅ Jika message terjadi SETELAH user terakhir aktif
       if (messageTime > lastActiveTime) {
         messagesDuringDisconnect.push(message);
       }
@@ -539,7 +539,7 @@ export class ChatServer {
         }
       }
       
-      // Update waktu aktif user SEKARANG
+      // Update waktu aktif user SEKARANG (setelah reconnect)
       this.updateUserLastActive(id);
       
       this.sendAllStateTo(ws, room);
@@ -1126,10 +1126,17 @@ export class ChatServer {
     });
 
     ws.addEventListener("close", (event) => {
-      if (ws.idtarget && !ws.isManualDestroy) {
-        this.scheduleCleanup(ws.idtarget);
+      // ✅ TIMER DISCONNECT MULAI DI SINI!
+      if (ws.idtarget) {
+        // ✅ UPDATE userLastActive SAAT DISCONNECT
+        this.updateUserLastActive(ws.idtarget);
+        
+        if (!ws.isManualDestroy) {
+          this.scheduleCleanup(ws.idtarget); // ⏰ Timer 5 detik dimulai
+        }
       }
       
+      // Remove dari roomClients
       for (const clientSet of this.roomClients.values()) {
         clientSet.delete(ws);
       }
