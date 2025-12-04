@@ -65,10 +65,6 @@ export class ChatServer {
 
     this.lowcard = new LowCardGameManager(this);
 
-    // ❌ HAPUS RATE LIMIT VARIABLES
-    // this.messageCounts = new Map();
-    // this.MAX_MESSAGES_PER_SECOND = 20;
-
     this.seatOccupancy = new Map();
     for (const room of roomList) {
       const occupancyMap = new Map();
@@ -155,7 +151,12 @@ export class ChatServer {
         
         const clientSet = this.roomClients.get(room);
         if (clientSet) {
-          clientSet.delete(userId);
+          for (const client of clientSet) {
+            if (client.idtarget === userId) {
+              clientSet.delete(client);
+              break;
+            }
+          }
         }
       }
     }
@@ -200,6 +201,9 @@ export class ChatServer {
     ws.roomname = undefined;
     ws.numkursi = new Set();
     this.userToSeat.delete(ws.idtarget);
+    
+    // ✅ BROADCAST USER COUNT SETELAH CLEANUP
+    this.broadcastRoomUserCount(room);
   }
 
   clearSeatBuffer(room, seatNumber) {
@@ -225,7 +229,6 @@ export class ChatServer {
     }
 
     this.userToSeat.delete(idtarget);
-    // ❌ HAPUS: this.messageCounts.delete(idtarget);
   }
 
   fullRemoveById(idtarget) {
@@ -250,7 +253,6 @@ export class ChatServer {
     }
 
     this.userToSeat.delete(idtarget);
-    // ❌ HAPUS: this.messageCounts.delete(idtarget);
 
     for (const c of Array.from(this.clients)) {
       if (c && c.idtarget === idtarget) {
@@ -265,13 +267,6 @@ export class ChatServer {
       }
     }
   }
-
-  // ❌ HAPUS METODE checkRateLimit SELURUHNYA
-  /*
-  checkRateLimit(ws, messageType) {
-    // ... semua kode dihapus
-  }
-  */
 
   safeSend(ws, arr) {
     if (ws && ws.readyState === 1) {
@@ -424,6 +419,7 @@ export class ChatServer {
     
     this.cancelCleanup(ws.idtarget);
     
+    // ✅ CLEANUP DARI ROOM LAMA SEBELUM JOIN ROOM BARU
     if (ws.roomname && ws.roomname !== room) {
       this.cleanupFromRoom(ws, ws.roomname);
     }
@@ -452,6 +448,7 @@ export class ChatServer {
     this.sendAllStateTo(ws, room);
     this.broadcastRoomUserCount(room);
     this.safeSend(ws, ["rooMasuk", seat, room]);
+    this.safeSend(ws, ["currentNumber", this.currentNumber]);
     
     return true;
   }
@@ -601,7 +598,6 @@ export class ChatServer {
         this.cleanupUserFromSeat(room, seat, idtarget, true);
       }
       this.userToSeat.delete(idtarget);
-      // ❌ HAPUS: this.messageCounts.delete(idtarget);
     }
     
     this.cancelCleanup(idtarget);
@@ -676,9 +672,6 @@ export class ChatServer {
     if (!Array.isArray(data) || data.length === 0) return;
 
     const evt = data[0];
-    
-    // ❌ HAPUS RATE LIMIT CHECK:
-    // if (!this.checkRateLimit(ws, evt)) return;
 
     switch (evt) {
       case "vipbadge":
