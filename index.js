@@ -798,41 +798,39 @@ export class ChatServer {
         break;
 
       case "chat": {
-        const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
-        
-        if (ws.roomname !== roomname) {
-          return;
-        }
-        
-        if (ws.idtarget !== username) {
-          return;
-        }
-        
-        if (!roomList.includes(roomname)) return;
+  const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
+  
+  if (ws.roomname !== roomname) {
+    return;
+  }
+  
+  if (ws.idtarget !== username) {
+    return;
+  }
+  
+  if (!roomList.includes(roomname)) return;
 
-        const clientSet = this.roomClients.get(roomname);
-        if (!clientSet) return;
-        
-        for (const c of clientSet) {
-          if (c.readyState === 1 && c.roomname === roomname) {
-            if (c === ws || c.idtarget === username) {
-              continue;
-            }
-            
-            this.safeSend(c, [
-              "chat", 
-              roomname, 
-              noImageURL, 
-              username, 
-              message, 
-              usernameColor, 
-              chatTextColor
-            ]);
-          }
-        }
-        
-        break;
-      }
+  const clientSet = this.roomClients.get(roomname);
+  if (!clientSet) return;
+  
+  // ✅ KIRIM KE SEMUA USER DI ROOM TERMASUK PENGIRIM SENDIRI
+  for (const c of clientSet) {
+    if (c.readyState === 1 && c.roomname === roomname) {
+      // ✅ HAPUS SKIP PENGIRIM - biarkan user lihat chat sendiri
+      this.safeSend(c, [
+        "chat", 
+        roomname, 
+        noImageURL, 
+        username, 
+        message, 
+        usernameColor, 
+        chatTextColor
+      ]);
+    }
+  }
+  
+  break;
+}
 
       case "updatePoint": {
         const [, room, seat, x, y, fast] = data;
@@ -995,3 +993,4 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
+
