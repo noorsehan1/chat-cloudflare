@@ -65,8 +65,9 @@ export class ChatServer {
 
     this.lowcard = new LowCardGameManager(this);
 
-    this.messageCounts = new Map();
-    this.MAX_MESSAGES_PER_SECOND = 20;
+    // ❌ HAPUS RATE LIMIT VARIABLES
+    // this.messageCounts = new Map();
+    // this.MAX_MESSAGES_PER_SECOND = 20;
 
     this.seatOccupancy = new Map();
     for (const room of roomList) {
@@ -224,7 +225,7 @@ export class ChatServer {
     }
 
     this.userToSeat.delete(idtarget);
-    this.messageCounts.delete(idtarget);
+    // ❌ HAPUS: this.messageCounts.delete(idtarget);
   }
 
   fullRemoveById(idtarget) {
@@ -249,7 +250,7 @@ export class ChatServer {
     }
 
     this.userToSeat.delete(idtarget);
-    this.messageCounts.delete(idtarget);
+    // ❌ HAPUS: this.messageCounts.delete(idtarget);
 
     for (const c of Array.from(this.clients)) {
       if (c && c.idtarget === idtarget) {
@@ -265,32 +266,12 @@ export class ChatServer {
     }
   }
 
+  // ❌ HAPUS METODE checkRateLimit SELURUHNYA
+  /*
   checkRateLimit(ws, messageType) {
-    const now = Date.now();
-    const key = ws.idtarget || ws._connId || 'anonymous';
-    const windowStart = Math.floor(now / 1000);
-
-    if (!this.messageCounts.has(key)) {
-      this.messageCounts.set(key, { count: 0, window: windowStart });
-    }
-
-    const stats = this.messageCounts.get(key);
-    if (stats.window !== windowStart) {
-      stats.count = 0;
-      stats.window = windowStart;
-    }
-
-    let limit = this.MAX_MESSAGES_PER_SECOND;
-    if (messageType === "chat") limit = 50;
-    if (messageType === "updatePoint") limit = 100;
-
-    stats.count += 1;
-    if (stats.count > limit) {
-      this.safeSend(ws, ['error', 'Rate limit exceeded']);
-      return false;
-    }
-    return true;
+    // ... semua kode dihapus
   }
+  */
 
   safeSend(ws, arr) {
     if (ws && ws.readyState === 1) {
@@ -471,7 +452,6 @@ export class ChatServer {
     this.sendAllStateTo(ws, room);
     this.broadcastRoomUserCount(room);
     this.safeSend(ws, ["rooMasuk", seat, room]);
-    this.safeSend(ws, ["currentNumber", this.currentNumber]);
     
     return true;
   }
@@ -621,7 +601,7 @@ export class ChatServer {
         this.cleanupUserFromSeat(room, seat, idtarget, true);
       }
       this.userToSeat.delete(idtarget);
-      this.messageCounts.delete(idtarget);
+      // ❌ HAPUS: this.messageCounts.delete(idtarget);
     }
     
     this.cancelCleanup(idtarget);
@@ -696,7 +676,9 @@ export class ChatServer {
     if (!Array.isArray(data) || data.length === 0) return;
 
     const evt = data[0];
-    if (!this.checkRateLimit(ws, evt)) return;
+    
+    // ❌ HAPUS RATE LIMIT CHECK:
+    // if (!this.checkRateLimit(ws, evt)) return;
 
     switch (evt) {
       case "vipbadge":
@@ -798,39 +780,37 @@ export class ChatServer {
         break;
 
       case "chat": {
-  const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
-  
-  if (ws.roomname !== roomname) {
-    return;
-  }
-  
-  if (ws.idtarget !== username) {
-    return;
-  }
-  
-  if (!roomList.includes(roomname)) return;
+        const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
+        
+        if (ws.roomname !== roomname) {
+          return;
+        }
+        
+        if (ws.idtarget !== username) {
+          return;
+        }
+        
+        if (!roomList.includes(roomname)) return;
 
-  const clientSet = this.roomClients.get(roomname);
-  if (!clientSet) return;
-  
-  // ✅ KIRIM KE SEMUA USER DI ROOM TERMASUK PENGIRIM SENDIRI
-  for (const c of clientSet) {
-    if (c.readyState === 1 && c.roomname === roomname) {
-      // ✅ HAPUS SKIP PENGIRIM - biarkan user lihat chat sendiri
-      this.safeSend(c, [
-        "chat", 
-        roomname, 
-        noImageURL, 
-        username, 
-        message, 
-        usernameColor, 
-        chatTextColor
-      ]);
-    }
-  }
-  
-  break;
-}
+        const clientSet = this.roomClients.get(roomname);
+        if (!clientSet) return;
+        
+        for (const c of clientSet) {
+          if (c.readyState === 1 && c.roomname === roomname) {
+            this.safeSend(c, [
+              "chat", 
+              roomname, 
+              noImageURL, 
+              username, 
+              message, 
+              usernameColor, 
+              chatTextColor
+            ]);
+          }
+        }
+        
+        break;
+      }
 
       case "updatePoint": {
         const [, room, seat, x, y, fast] = data;
@@ -993,4 +973,3 @@ export default {
     return new Response("WebSocket endpoint", { status: 200 });
   }
 };
-
