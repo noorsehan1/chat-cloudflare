@@ -154,11 +154,7 @@ export class ChatServer {
         
         const clientSet = this.roomClients.get(room);
         if (clientSet) {
-          for (const client of clientSet) {
-            if (client.idtarget === userId) {
-              clientSet.delete(client);
-            }
-          }
+          clientSet.delete(userId);
         }
       }
     }
@@ -314,11 +310,13 @@ export class ChatServer {
       return 0;
     }
     
-    let sentCount = 0;
     const clientSet = this.roomClients.get(room);
-    if (clientSet) {
-      for (const c of clientSet) {
-        if (c.readyState === 1 && this.safeSend(c, msg)) {
+    if (!clientSet) return 0;
+    
+    let sentCount = 0;
+    for (const c of clientSet) {
+      if (c.readyState === 1 && c.roomname === room) {
+        if (this.safeSend(c, msg)) {
           sentCount++;
         }
       }
@@ -343,10 +341,6 @@ export class ChatServer {
     const counts = this.getJumlahRoom();
     const count = counts[room] || 0;
     this.broadcastToRoom(room, ["roomUserCount", room, count]);
-  }
-
-  flushChatBuffer() {
-    // Tidak perlu flush karena tidak ada buffer chat
   }
 
   flushKursiUpdates() {
@@ -415,9 +409,10 @@ export class ChatServer {
       ws.roomname = room;
       ws.numkursi = new Set([seat]);
       
-      this.roomClients.get(room)?.add(ws);
-      
-      // ❌ TIDAK ADA RESTORE CHAT HISTORY
+      const clientSet = this.roomClients.get(room);
+      if (clientSet) {
+        clientSet.add(ws);
+      }
       
       this.sendAllStateTo(ws, room);
       this.broadcastRoomUserCount(room);
@@ -468,7 +463,10 @@ export class ChatServer {
     ws.roomname = room;
     ws.numkursi = new Set([seat]);
     
-    this.roomClients.get(room)?.add(ws);
+    const clientSet = this.roomClients.get(room);
+    if (clientSet) {
+      clientSet.add(ws);
+    }
     
     this.sendAllStateTo(ws, room);
     this.broadcastRoomUserCount(room);
@@ -806,20 +804,30 @@ export class ChatServer {
           return;
         }
         
+        if (ws.idtarget !== username) {
+          return;
+        }
+        
         if (!roomList.includes(roomname)) return;
 
-        // ❌ TIDAK ADA BUFFER CHAT
-        // Langsung broadcast ke semua kecuali pengirim
-        
         const clientSet = this.roomClients.get(roomname);
-        if (clientSet) {
-          for (const c of clientSet) {
-            if (c.readyState === 1 && c.idtarget !== username) {
-              this.safeSend(c, [
-                "chat", roomname, noImageURL, username, 
-                message, usernameColor, chatTextColor
-              ]);
+        if (!clientSet) return;
+        
+        for (const c of clientSet) {
+          if (c.readyState === 1 && c.roomname === roomname) {
+            if (c === ws || c.idtarget === username) {
+              continue;
             }
+            
+            this.safeSend(c, [
+              "chat", 
+              roomname, 
+              noImageURL, 
+              username, 
+              message, 
+              usernameColor, 
+              chatTextColor
+            ]);
           }
         }
         
@@ -891,6 +899,10 @@ export class ChatServer {
           return;
         }
         
+        if (ws.idtarget !== sender) {
+          return;
+        }
+        
         if (!roomList.includes(roomname)) return;
 
         const giftData = ["gift", roomname, sender, receiver, giftName];
@@ -898,7 +910,7 @@ export class ChatServer {
         const clientSet = this.roomClients.get(roomname);
         if (clientSet) {
           for (const c of clientSet) {
-            if (c.readyState === 1) {
+            if (c.readyState === 1 && c.roomname === roomname) {
               this.safeSend(c, giftData);
             }
           }
@@ -959,7 +971,6 @@ export class ChatServer {
         this.scheduleCleanup(ws.idtarget);
       }
       
-      // Remove dari roomClients
       for (const clientSet of this.roomClients.values()) {
         clientSet.delete(ws);
       }
