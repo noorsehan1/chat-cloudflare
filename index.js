@@ -6,9 +6,6 @@ const roomList = [
   "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
 ];
 
-// Daftar ruangan yang dapat bermain game LowCard
-const gameRooms = ["LowCard", "HINDI"]; // Tambahkan HINDI ke daftar game rooms
-
 class LockManager {
   constructor() {
     this.locks = new Map();
@@ -74,12 +71,8 @@ export class ChatServer {
     // Buffers
     this.updateKursiBuffer = new Map();
 
-    // Game managers - buat instance untuk setiap game room
-    this.lowcardGames = new Map();
-    gameRooms.forEach(room => {
-      this.lowcardGames.set(room, new LowCardGameManager(this, room));
-    });
-    
+    // Game managers
+    this.lowcard = new LowCardGameManager(this);
     this.vipManager = new VipBadgeManager(this);
 
     // Disconnection management
@@ -251,14 +244,6 @@ export class ChatServer {
       // Remove VIP badge if exists
       if (seatInfo.viptanda > 0) {
         await this.vipManager.removeVipBadge(room, seatNumber);
-      }
-
-      // Leave game if in game room
-      if (gameRooms.includes(room)) {
-        const gameManager = this.lowcardGames.get(room);
-        if (gameManager) {
-          await gameManager.leaveGame(userId, seatNumber);
-        }
       }
 
       if (immediate) {
@@ -444,14 +429,6 @@ export class ChatServer {
       // Send VIP badges
       await this.vipManager.getAllVipBadges(ws, room);
       
-      // Send game state if in game room
-      if (gameRooms.includes(room)) {
-        const gameManager = this.lowcardGames.get(room);
-        if (gameManager) {
-          await gameManager.sendGameStateTo(ws);
-        }
-      }
-      
       return true;
     });
   }
@@ -607,14 +584,6 @@ export class ChatServer {
         await this.vipManager.getAllVipBadges(ws, room);
         this.safeSend(ws, ["currentNumber", this.currentNumber]);
         
-        // Send game state if in game room
-        if (gameRooms.includes(room)) {
-          const gameManager = this.lowcardGames.get(room);
-          if (gameManager) {
-            await gameManager.sendGameStateTo(ws);
-          }
-        }
-        
       } else {
         // Cannot reconnect - need to join room
         await this.forceUserCleanup(id);
@@ -684,14 +653,6 @@ export class ChatServer {
             Object.assign(info, createEmptySeat());
             this.clearSeatBuffer(room, seatNumber);
             this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
-            
-            // Leave game if in game room
-            if (gameRooms.includes(room)) {
-              const gameManager = this.lowcardGames.get(room);
-              if (gameManager) {
-                await gameManager.leaveGame(idtarget, seatNumber);
-              }
-            }
           }
         }
         
@@ -975,18 +936,16 @@ export class ChatServer {
           break;
         }
 
-        case "gameLowCardStart":
-        case "gameLowCardJoin":
-        case "gameLowCardNumber":
-        case "gameLowCardEnd":
-          // Handle game events for all game rooms
-          if (ws.roomname && gameRooms.includes(ws.roomname)) {
-            const gameManager = this.lowcardGames.get(ws.roomname);
-            if (gameManager) {
-              await gameManager.handleEvent(ws, data);
-            }
-          }
-          break;
+        // Di dalam bagian game handlers di handleMessage method:
+case "gameLowCardStart":
+case "gameLowCardJoin":
+case "gameLowCardNumber":
+case "gameLowCardEnd":
+  // Perubahan: Menambahkan HINDI room ke dalam game LowCard
+  if (ws.roomname === "LowCard" || ws.roomname === "HINDI") {
+    await this.lowcard.handleEvent(ws, data);
+  }
+  break;
           
         default: 
           // Ignore unknown events
