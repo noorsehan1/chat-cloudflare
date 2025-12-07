@@ -576,73 +576,106 @@ export class ChatServer {
   }
 
   // ============ ROOM MANAGEMENT ============
-  async handleJoinRoom(ws, room) {
-    if (!ws || !ws.idtarget) {
-      this.safeSend(ws, ["error", "User ID not set"]);
-      return false;
-    }
-    
-    if (!roomList.includes(room)) {
-      this.safeSend(ws, ["error", "Invalid room"]);
-      return false;
-    }
-    
-    try {
-      return await this.withLock(`join-${ws.idtarget}`, async () => {
-        this.cancelCleanup(ws.idtarget);
-        
-        // Cleanup from previous room
-        if (ws.roomname && ws.roomname !== room) {
-          await this.cleanupFromRoom(ws, ws.roomname);
-        }
-        
-        // Find empty seat
-        const seat = await this.findEmptySeat(room, ws);
-        if (!seat) {
-          this.safeSend(ws, ["roomFull", room]);
-          return false;
-        }
-        
-        // Update seat occupancy
-        const occupancyMap = this.seatOccupancy.get(room);
-        if (occupancyMap) {
-          occupancyMap.set(seat, ws.idtarget);
-        }
-        
-        // Update user tracking
-        this.userToSeat.set(ws.idtarget, { room, seat });
-        ws.roomname = room;
-        ws.numkursi = new Set([seat]);
-        
-        // Add to room clients
-        const clientSet = this.roomClients.get(room);
-        if (clientSet) clientSet.add(ws);
-        
-        // Send room state to user
-        this.sendAllStateTo(ws, room);
-        this.broadcastRoomUserCount(room);
-        
-        // Send join confirmation
-        this.safeSend(ws, ["rooMasuk", seat, room]);
-        this.safeSend(ws, ["currentNumber", this.currentNumber]);
-        
-        // Send VIP badges
-        if (this.vipManager) {
-          try {
-            await this.vipManager.getAllVipBadges(ws, room);
-          } catch (vipError) {
-            console.error(`[ChatServer] Error getting VIP badges:`, vipError);
+ async handleJoinRoom(ws, room) {
+  if (!ws || !ws.idtarget) {
+    this.safeSend(ws, ["error", "User ID not set"]);
+    return false;
+  }
+  
+  if (!roomList.includes(room)) {
+    this.safeSend(ws, ["error", "Invalid room"]);
+    return false;
+  }
+  
+  try {
+    return await this.withLock(`join-${ws.idtarget}`, async () => {
+      this.cancelCleanup(ws.idtarget);
+      
+      // Cleanup from previous room
+      if (ws.roomname && ws.roomname !== room) {
+        await this.cleanupFromRoom(ws, ws.roomname);
+      }
+      
+      // Find empty seat
+      const seat = await this.findEmptySeat(room, ws);
+      if (!seat) {
+        this.safeSend(ws, ["roomFull", room]);
+        return false;
+      }
+      
+      // **PERUBAHAN: Hanya update occupancy, TIDAK update seat data**
+      const occupancyMap = this.seatOccupancy.get(room);
+      if (occupancyMap) {
+        occupancyMap.set(seat, ws.idtarget);
+      }
+      
+      // **PERUBAHAN: Jangan langsung mengisi seat dengan data user**
+      // Seat tetap dalam keadaan kosong (createEmptySeat)
+      
+      // Update user tracking
+      this.userToSeat.set(ws.idtarget, { room, seat });
+      ws.roomname = room;
+      ws.numkursi = new Set([seat]);
+      
+      // Add to room clients
+      const clientSet = this.roomClients.get(room);
+      if (clientSet) clientSet.add(ws);
+      
+      // **PERUBAHAN: Tidak perlu sendAllStateTo karena seat kosong**
+      // this.sendAllStateTo(ws, room);
+      
+      // Kirim state awal ruangan (kursi-kursi lain yang sudah terisi)
+      const seatMap = this.roomSeats.get(room);
+      if (seatMap) {
+        const allKursiMeta = {};
+        for (let i = 1; i <= this.MAX_SEATS; i++) {
+          const info = seatMap.get(i);
+          if (info && info.namauser) {
+            allKursiMeta[i] = {
+              noimageUrl: info.noimageUrl,
+              namauser: info.namauser,
+              color: info.color,
+              itembawah: info.itembawah,
+              itematas: info.itematas,
+              vip: info.vip,
+              viptanda: info.viptanda
+            };
           }
         }
         
-        return true;
-      });
-    } catch (error) {
-      console.error(`[ChatServer] Error in handleJoinRoom:`, error);
-      this.safeSend(ws, ["error", "Failed to join room"]);
-      return false;
-    }
+        if (Object.keys(allKursiMeta).length > 0) {
+          this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
+        }
+      }
+      
+      // Broadcast updated user count
+      this.broadcastRoomUserCount(room);
+      
+      // **PERUBAHAN PENTING: Kirim info bahwa seat KOSONG**
+      // Kirim empty seat state ke client
+      this.safeSend(ws, ["emptySeatAssigned", seat, room]);
+      
+      // Kirim konfirmasi join
+      this.safeSend(ws, ["rooMasuk", seat, room]);
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
+      
+      // Send VIP badges
+      if (this.vipManager) {
+        try {
+          await this.vipManager.getAllVipBadges(ws, room);
+        } catch (vipError) {
+          console.error(`[ChatServer] Error getting VIP badges:`, vipError);
+        }
+      }
+      
+      return true;
+    });
+  } catch (error) {
+    console.error(`[ChatServer] Error in handleJoinRoom:`, error);
+    this.safeSend(ws, ["error", "Failed to join room"]);
+    return false;
   }
+}
 
   getJumlahRoom() {
     try {
@@ -1364,3 +1397,4 @@ export default {
     }
   }
 };
+
