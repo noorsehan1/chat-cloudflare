@@ -622,7 +622,7 @@ export class ChatServer {
       if (clientSet) clientSet.add(ws);
       
       // **PERUBAHAN: Tidak perlu sendAllStateTo karena seat kosong**
-      // this.sendAllStateTo(ws, room);
+       this.sendAllStateTo(ws, room);
       
       // Kirim state awal ruangan (kursi-kursi lain yang sudah terisi)
       const seatMap = this.roomSeats.get(room);
@@ -1397,4 +1397,5 @@ export default {
     }
   }
 };
+
 
