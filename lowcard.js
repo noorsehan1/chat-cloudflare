@@ -55,22 +55,27 @@ export class LowCardGameManager {
     return Math.floor(Math.random() * 25) + 1;
   }
 
-  getRandomNumber() {
-    // Random number 1-12 (default, untuk backward compatibility)
+  // **MODIFIKASI: Fungsi untuk mendapatkan angka bot berdasarkan round**
+  getBotNumberByRound(round, isBot = true) {
+    // Jika bukan bot atau round 1-3, random normal 1-12
+    if (!isBot || round <= 3) {
+      return Math.floor(Math.random() * 12) + 1;
+    }
+    
+    // **RONDE 4 DAN 5: BOT DAPATKAN ANGKA BESAR (8-12)**
+    if (round === 4 || round === 5) {
+      // Angka besar: 8, 9, 10, 11, 12
+      const highNumbers = [3,8, 9, 10, 11, 12];
+      return highNumbers[Math.floor(Math.random() * highNumbers.length)];
+    }
+    
+    // Fallback untuk round lainnya
     return Math.floor(Math.random() * 12) + 1;
   }
 
-  // MODIFIKASI: Metode baru untuk mendapatkan angka berdasarkan round
-  getRandomNumberByRound(round) {
-    // Untuk round 1-3: angka random 1-12 (normal)
-    // Untuk round 4-5: angka random cenderung besar (7-12)
-    if (round >= 4) {
-      // Random angka besar 7-12
-      return Math.floor(Math.random() * 6) + 7;
-    } else {
-      // Random angka normal 1-12
-      return Math.floor(Math.random() * 12) + 1;
-    }
+  // **Fungsi untuk player (non-bot)**
+  getRandomNumber() {
+    return Math.floor(Math.random() * 12) + 1;
   }
 
   startGame(ws, bet) {
@@ -82,7 +87,7 @@ export class LowCardGameManager {
 
     const game = {
       room,
-      players: new Map(), // menyimpan info player: {id, name}
+      players: new Map(), // menyimpan info player: {id, name, isBot}
       botPlayers: new Map(), // untuk tracking bot: botId -> botName
       registrationOpen: true,
       round: 1,
@@ -104,7 +109,8 @@ export class LowCardGameManager {
     // Host auto join
     game.players.set(ws.idtarget, { 
       id: ws.idtarget, 
-      name: ws.username || ws.idtarget 
+      name: ws.username || ws.idtarget,
+      isBot: false
     });
 
     this.activeGames.set(room, game);
@@ -163,7 +169,6 @@ export class LowCardGameManager {
     game.countdownTimers.push(interval);
   }
 
-  // **MODIFIKASI: TAMBAH 4 BOT MOZ DENGAN NAMA YANG BENAR**
   addFourMozBots(room) {
     const game = this.getGame(room);
     if (!game) return;
@@ -257,9 +262,8 @@ export class LowCardGameManager {
                 return;
               }
               
-              // **BOT INPUT: (number berdasarkan round, tanda random C1-C4)**
-              // MODIFIKASI: Gunakan getRandomNumberByRound untuk angka berdasarkan round
-              const botNumber = this.getRandomNumberByRound(game.round); // Random berdasarkan round
+              // **MODIFIKASI: Gunakan getBotNumberByRound untuk angka bot**
+              const botNumber = this.getBotNumberByRound(game.round, true); // true = isBot
               const tanda = this.getRandomCardTanda(); // Random C1-C4
               
               // Simpan data
@@ -339,10 +343,9 @@ export class LowCardGameManager {
               return;
             }
             
-            // **BOT INPUT: (number berdasarkan round, tanda random C1-C4)**
-            // MODIFIKASI: Gunakan getRandomNumberByRound untuk angka berdasarkan round
-            const botNumber = this.getRandomNumberByRound(game.round); // Random berdasarkan round
-            const tanda = this.getRandomCardTanda(); // Random C1-C4
+            // **MODIFIKASI: Gunakan getBotNumberByRound untuk angka bot**
+            const botNumber = this.getBotNumberByRound(game.round, true);
+            const tanda = this.getRandomCardTanda();
             
             game.numbers.set(botId, botNumber);
             game.tanda.set(botId, tanda);
@@ -378,7 +381,8 @@ export class LowCardGameManager {
 
     game.players.set(ws.idtarget, { 
       id: ws.idtarget, 
-      name: ws.username || ws.idtarget 
+      name: ws.username || ws.idtarget,
+      isBot: false
     });
 
     this.chatServer.broadcastToRoom(room, [
@@ -400,15 +404,6 @@ export class LowCardGameManager {
       this.chatServer.safeSend(ws, ["gameLowCardError", "Invalid number"]);
       return;
     }
-
-    // MODIFIKASI OPSIONAL: Validasi untuk pemain manusia di round 4-5
-    // Uncomment kode di bawah jika ingin mencegah pemain mengirim angka kecil di round 4-5
-    /*
-    if (game.round >= 4 && n < 7) {
-      this.chatServer.safeSend(ws, ["gameLowCardError", "Round 4-5: Number must be 7-12"]);
-      return;
-    }
-    */
 
     game.numbers.set(ws.idtarget, n);
     game.tanda.set(ws.idtarget, tanda);
@@ -443,10 +438,9 @@ export class LowCardGameManager {
               return;
             }
             
-            // **BOT INPUT: (number berdasarkan round, tanda random C1-C4)**
-            // MODIFIKASI: Gunakan getRandomNumberByRound untuk angka berdasarkan round
-            const botNumber = this.getRandomNumberByRound(game.round); // Random berdasarkan round
-            const tanda = this.getRandomCardTanda(); // Random C1-C4
+            // **MODIFIKASI: Gunakan getBotNumberByRound untuk angka bot**
+            const botNumber = this.getBotNumberByRound(game.round, true);
+            const tanda = this.getRandomCardTanda();
             
             game.numbers.set(botId, botNumber);
             game.tanda.set(botId, tanda);
