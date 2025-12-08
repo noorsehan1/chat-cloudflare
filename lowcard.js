@@ -57,16 +57,25 @@ export class LowCardGameManager {
 
   // **MODIFIKASI: Fungsi untuk mendapatkan angka BOT berdasarkan round**
   getBotNumberByRound(round) {
-    // Round 1-3: BOT random 1-12
-    if (round <= 3) {
+    // Round 1-2: BOT random 1-12 (normal, distribusi merata)
+    if (round <= 2) {
       return Math.floor(Math.random() * 12) + 1;
     }
     
-    // **RONDE 4 DAN 5: BOT DAPATKAN ANGKA BESAR (8-12)**
-    if (round === 3 || round === 4) {
-      // Angka besar: 8, 9, 10, 11, 12
-      const highNumbers = [2,5,8, 9, 10, 11, 12];
-      return highNumbers[Math.floor(Math.random() * highNumbers.length)];
+    // **ROUND 3 DAN SETERUSNYA: 70% chance angka besar (7-12), 30% chance angka kecil (1-6)**
+    if (round >= 3) {
+      // 70% chance untuk mendapatkan angka besar
+      const isGetHighNumber = Math.random() < 0.7;
+      
+      if (isGetHighNumber) {
+        // Angka besar: 7, 8, 9, 10, 11, 12
+        const bigNumbers = [8, 9, 10, 11, 12];
+        return bigNumbers[Math.floor(Math.random() * bigNumbers.length)];
+      } else {
+        // 30% chance untuk mendapatkan angka kecil
+        const smallNumbers = [1, 2, 3, 4, 5, 6,7];
+        return smallNumbers[Math.floor(Math.random() * smallNumbers.length)];
+      }
     }
     
     // Fallback untuk round lainnya
@@ -76,9 +85,16 @@ export class LowCardGameManager {
   startGame(ws, bet) {
     const room = ws.roomname;
     if (!room) return;
-    if (this.activeGames.has(room)) return; // game sudah berjalan
+    if (this.activeGames.has(room)) {
+      this.chatServer.safeSend(ws, ["gameLowCardError", "Game already running in this room"]);
+      return;
+    }
 
     const betAmount = parseInt(bet, 10) || 0;
+    if (betAmount <= 0) {
+      this.chatServer.safeSend(ws, ["gameLowCardError", "Invalid bet amount"]);
+      return;
+    }
 
     const game = {
       room,
@@ -255,7 +271,7 @@ export class LowCardGameManager {
                 return;
               }
               
-              // **MODIFIKASI: BOT dapat angka berdasarkan round (besar di round 4-5)**
+              // **MODIFIKASI: BOT dapat angka berdasarkan round**
               const botNumber = this.getBotNumberByRound(game.round);
               const tanda = this.getRandomCardTanda();
               
@@ -336,7 +352,7 @@ export class LowCardGameManager {
               return;
             }
             
-            // **MODIFIKASI: BOT dapat angka berdasarkan round (besar di round 4-5)**
+            // **MODIFIKASI: Round 1 -> angka normal (1-12)**
             const botNumber = this.getBotNumberByRound(game.round);
             const tanda = this.getRandomCardTanda();
             
@@ -369,8 +385,14 @@ export class LowCardGameManager {
   joinGame(ws) {
     const room = ws.roomname;
     const game = this.getGame(room);
-    if (!game || !game.registrationOpen) return;
-    if (game.players.has(ws.idtarget)) return;
+    if (!game || !game.registrationOpen) {
+      this.chatServer.safeSend(ws, ["gameLowCardError", "Registration closed or no game"]);
+      return;
+    }
+    if (game.players.has(ws.idtarget)) {
+      this.chatServer.safeSend(ws, ["gameLowCardError", "Already joined"]);
+      return;
+    }
 
     game.players.set(ws.idtarget, { 
       id: ws.idtarget, 
@@ -387,13 +409,29 @@ export class LowCardGameManager {
   submitNumber(ws, number, tanda = "") {
     const room = ws.roomname;
     const game = this.getGame(room);
-    if (!game || game.registrationOpen) return;
-    if (!game.players.has(ws.idtarget) || game.eliminated.has(ws.idtarget)) return;
-    if (game.numbers.has(ws.idtarget)) return;
+    if (!game) {
+      this.chatServer.safeSend(ws, ["gameLowCardError", "No active game"]);
+      return;
+    }
+    
+    if (game.registrationOpen) {
+      this.chatServer.safeSend(ws, ["gameLowCardError", "Registration still open"]);
+      return;
+    }
+    
+    if (!game.players.has(ws.idtarget) || game.eliminated.has(ws.idtarget)) {
+      this.chatServer.safeSend(ws, ["gameLowCardError", "Not in game or eliminated"]);
+      return;
+    }
+    
+    if (game.numbers.has(ws.idtarget)) {
+      this.chatServer.safeSend(ws, ["gameLowCardError", "Already submitted number"]);
+      return;
+    }
 
     const n = parseInt(number, 10);
     if (isNaN(n) || n < 1 || n > 12) {
-      this.chatServer.safeSend(ws, ["gameLowCardError", "Invalid number"]);
+      this.chatServer.safeSend(ws, ["gameLowCardError", "Invalid number (1-12)"]);
       return;
     }
 
@@ -430,7 +468,7 @@ export class LowCardGameManager {
               return;
             }
             
-            // **MODIFIKASI: BOT dapat angka berdasarkan round (besar di round 4-5)**
+            // **MODIFIKASI: Round 1 -> angka normal (1-12)**
             const botNumber = this.getBotNumberByRound(game.round);
             const tanda = this.getRandomCardTanda();
             
@@ -568,6 +606,6 @@ export class LowCardGameManager {
     this.clearAllTimers(game);
     this.clearBotTimers(room);
     this.activeGames.delete(room);
+    this.bots.delete(room); // Pastikan hapus dari map bots juga
   }
 }
-
