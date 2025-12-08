@@ -72,7 +72,8 @@ export class LowCardGameManager {
       drawTime: 30,
       hostId: ws.idtarget,
       hostName: ws.username || ws.idtarget,
-      useBots: false
+      useBots: false,
+      botDrawTriggered: false // flag untuk memastikan bot sudah draw di awal
     };
 
     // Host auto join
@@ -169,6 +170,9 @@ export class LowCardGameManager {
     if (!game) return;
     this.clearAllTimers(game);
     this.clearBotTimers(room);
+    
+    // Reset bot draw flag setiap round baru
+    game.botDrawTriggered = false;
 
     let timeLeft = game.drawTime;
     const timesToNotify = [20, 10, 0];
@@ -189,9 +193,10 @@ export class LowCardGameManager {
         }
       }
 
-      // Bot auto draw dengan delay random
-      if (game.useBots) {
-        this.triggerBotDraws(room, timeLeft);
+      // Bot auto draw di awal (saat waktu masih 29 detik)
+      if (game.useBots && !game.botDrawTriggered && timeLeft === 29) {
+        this.triggerAllBotDraws(room);
+        game.botDrawTriggered = true;
       }
 
       timeLeft--;
@@ -201,7 +206,7 @@ export class LowCardGameManager {
     game.countdownTimers.push(interval);
   }
 
-  triggerBotDraws(room, timeLeft) {
+  triggerAllBotDraws(room) {
     const game = this.getGame(room);
     if (!game) return;
     
@@ -211,41 +216,39 @@ export class LowCardGameManager {
     
     const botPlayers = activePlayers.filter(id => id.startsWith('BOT_'));
     
-    botPlayers.forEach(botId => {
-      // Random delay antara 1-20 detik sebelum waktu habis
-      const delay = Math.floor(Math.random() * 19) + 1;
-      
-      if (timeLeft === delay) {
-        const timer = setTimeout(() => {
-          if (!this.activeGames.has(room) || 
-              game.eliminated.has(botId) || 
-              game.numbers.has(botId)) {
-            return;
-          }
-          
-          // Random number 1-12
-          const botNumber = Math.floor(Math.random() * 12) + 1;
-          
-          // Random tanda C1-C4
-          const tanda = this.getRandomCardTanda();
-          
-          // Simulasikan bot draw menggunakan event yang sama
-          game.numbers.set(botId, botNumber);
-          this.chatServer.broadcastToRoom(room, [
-            "gameLowCardPlayerDraw",
-            botId,
-            botNumber,
-            tanda
-          ]);
-          
-          // Check if all have drawn
-          if (game.numbers.size === game.players.size - game.eliminated.size) {
-            this.evaluateRound(room);
-          }
-        }, 0);
+    if (botPlayers.length === 0) return;
+    
+    // Trigger semua bot untuk draw dengan delay bertahap
+    botPlayers.forEach((botId, index) => {
+      const timer = setTimeout(() => {
+        if (!this.activeGames.has(room) || 
+            game.eliminated.has(botId) || 
+            game.numbers.has(botId)) {
+          return;
+        }
         
-        this.bots.get(room)?.push(timer);
-      }
+        // Random number 1-12
+        const botNumber = Math.floor(Math.random() * 12) + 1;
+        
+        // Random tanda C1-C4
+        const tanda = this.getRandomCardTanda();
+        
+        // Simulasikan bot draw menggunakan event yang sama
+        game.numbers.set(botId, botNumber);
+        this.chatServer.broadcastToRoom(room, [
+          "gameLowCardPlayerDraw",
+          botId,
+          botNumber,
+          tanda
+        ]);
+        
+        // Check if all have drawn
+        if (game.numbers.size === game.players.size - game.eliminated.size) {
+          this.evaluateRound(room);
+        }
+      }, index * 1000); // Delay 1 detik antar bot untuk efek bertahap
+      
+      this.bots.get(room)?.push(timer);
     });
   }
 
