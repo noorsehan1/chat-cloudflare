@@ -55,6 +55,11 @@ export class LowCardGameManager {
     return Math.floor(Math.random() * 25) + 1;
   }
 
+  getRandomNumber() {
+    // Random number 1-12
+    return Math.floor(Math.random() * 12) + 1;
+  }
+
   startGame(ws, bet) {
     const room = ws.roomname;
     if (!room) return;
@@ -64,11 +69,12 @@ export class LowCardGameManager {
 
     const game = {
       room,
-      players: new Map(),
-      botPlayers: new Map(), // untuk tracking bot
+      players: new Map(), // menyimpan info player: {id, name}
+      botPlayers: new Map(), // untuk tracking bot: botId -> botName
       registrationOpen: true,
       round: 1,
-      numbers: new Map(),
+      numbers: new Map(), // menyimpan angka yang sudah di-submit: playerId -> number
+      tanda: new Map(), // menyimpan tanda yang sudah di-submit: playerId -> tanda
       eliminated: new Set(),
       winner: null,
       betAmount,
@@ -83,7 +89,10 @@ export class LowCardGameManager {
     };
 
     // Host auto join
-    game.players.set(ws.idtarget, { id: ws.idtarget });
+    game.players.set(ws.idtarget, { 
+      id: ws.idtarget, 
+      name: ws.username || ws.idtarget 
+    });
 
     this.activeGames.set(room, game);
 
@@ -121,10 +130,10 @@ export class LowCardGameManager {
         if (timeLeft === 0) {
           this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
           
-          // **LOGIKA BARU: HANYA TAMBAH BOT JIKA HANYA HOST SAJA**
+          // **LOGIKA: HANYA TAMBAH BOT JIKA HANYA HOST SAJA**
           if (game.players.size === 1) {
             // Hanya host yang join, tambah 4 bot moz
-            this.addFourMozBotsSilent(room);
+            this.addFourMozBots(room);
           }
           
           this.closeRegistration(room);
@@ -141,8 +150,8 @@ export class LowCardGameManager {
     game.countdownTimers.push(interval);
   }
 
-  // **MODIFIKASI: HANYA DIPANGGIL JIKA HANYA HOST SAJA**
-  addFourMozBotsSilent(room) {
+  // **MODIFIKASI: TAMBAH 4 BOT MOZ DENGAN NAMA YANG BENAR**
+  addFourMozBots(room) {
     const game = this.getGame(room);
     if (!game) return;
     
@@ -154,9 +163,9 @@ export class LowCardGameManager {
     
     for (let i = 0; i < 4; i++) {
       const botId = `BOT_MOZ_${room}_${i}`;
-      const botName = mozNames[i]; // Gunakan nama moz 1, moz 2, moz 3, moz 4
+      const botName = mozNames[i];
       
-      // Simulasi bot join TANPA BROADCAST
+      // Simulasi bot join
       game.players.set(botId, { 
         id: botId, 
         name: botName, 
@@ -167,8 +176,12 @@ export class LowCardGameManager {
       // Generate waktu random untuk bot draw
       game.botDrawTimes.set(botId, this.getRandomDrawTime());
       
-      // **TIDAK ADA BROADCAST BOT JOIN**
-      // Hanya tambah ke sistem, tidak kirim pesan ke room
+      // **BROADCAST BOT JOIN (seperti kode awal)**
+      this.chatServer.broadcastToRoom(room, [
+        "gameLowCardJoin",
+        botName,
+        game.betAmount
+      ]);
     }
   }
 
@@ -231,17 +244,22 @@ export class LowCardGameManager {
                 return;
               }
               
-              // Random number 1-12
-              const botNumber = Math.floor(Math.random() * 12) + 1;
+              // **BOT INPUT: (number random 1-12, tanda random C1-C4)**
+              const botNumber = this.getRandomNumber(); // Random 1-12
+              const tanda = this.getRandomCardTanda(); // Random C1-C4
               
-              // Random tanda C1-C4
-              const tanda = this.getRandomCardTanda();
-              
-              // Simulasikan bot draw menggunakan event yang sama
+              // Simpan data
               game.numbers.set(botId, botNumber);
+              game.tanda.set(botId, tanda);
+              
+              // Dapatkan nama bot dari game.players
+              const botPlayer = game.players.get(botId);
+              const botName = botPlayer ? botPlayer.name : botId;
+              
+              // Broadcast dengan format yang benar
               this.chatServer.broadcastToRoom(room, [
                 "gameLowCardPlayerDraw",
-                botId,
+                botName,
                 botNumber,
                 tanda
               ]);
@@ -250,7 +268,7 @@ export class LowCardGameManager {
               if (game.numbers.size === game.players.size - game.eliminated.size) {
                 this.evaluateRound(room);
               }
-            }, 0); // Tanpa delay tambahan, sudah diatur oleh timeLeft
+            }, 0);
             
             this.bots.get(room)?.push(timer);
           }
@@ -272,7 +290,7 @@ export class LowCardGameManager {
     
     // **LOGIKA BARU: CEK JUMLAH PEMAIN MINIMAL**
     if (playerCount < 2) {
-      // Hanya host saja dan tidak ada bot (karena tidak ada user lain join)
+      // Hanya host saja (tidak ada user lain join dan tidak ada bot)
       const hostSocket = Array.from(this.chatServer.clients)
         .find(ws => ws.idtarget === game.hostId);
       if (hostSocket) {
@@ -287,17 +305,16 @@ export class LowCardGameManager {
 
     game.registrationOpen = false;
 
-    const playersList = Array.from(game.players.keys());
+    const playersList = Array.from(game.players.values()).map(p => p.name || p.id);
 
     this.chatServer.broadcastToRoom(room, ["gameLowCardClosed", playersList]);
     this.chatServer.broadcastToRoom(room, ["gameLowCardPlayersInGame", playersList, game.betAmount]);
     this.chatServer.broadcastToRoom(room, ["gameLowCardNextRound", 1]);
 
-    // MODIFIKASI: Untuk round pertama dengan bot, schedule bot draw dengan waktu random
+    // Schedule bot draw untuk round pertama
     if (game.useBots && game.round === 1) {
       game.botAlreadyDrawInFirstRound = true;
       
-      // Schedule bot draw dengan waktu random untuk bot
       Array.from(game.botPlayers.keys()).forEach(botId => {
         const drawTime = game.botDrawTimes.get(botId);
         if (drawTime) {
@@ -308,26 +325,27 @@ export class LowCardGameManager {
               return;
             }
             
-            // Random number 1-12
-            const botNumber = Math.floor(Math.random() * 12) + 1;
+            // **BOT INPUT: (number random 1-12, tanda random C1-C4)**
+            const botNumber = this.getRandomNumber(); // Random 1-12
+            const tanda = this.getRandomCardTanda(); // Random C1-C4
             
-            // Random tanda C1-C4
-            const tanda = this.getRandomCardTanda();
-            
-            // Simulasikan bot draw menggunakan event yang sama
             game.numbers.set(botId, botNumber);
+            game.tanda.set(botId, tanda);
+            
+            const botPlayer = game.players.get(botId);
+            const botName = botPlayer ? botPlayer.name : botId;
+            
             this.chatServer.broadcastToRoom(room, [
               "gameLowCardPlayerDraw",
-              botId,
+              botName,
               botNumber,
               tanda
             ]);
             
-            // Check if all have drawn
             if (game.numbers.size === game.players.size - game.eliminated.size) {
               this.evaluateRound(room);
             }
-          }, drawTime * 1000); // Konversi detik ke milidetik
+          }, drawTime * 1000);
           
           this.bots.get(room)?.push(timer);
         }
@@ -343,7 +361,10 @@ export class LowCardGameManager {
     if (!game || !game.registrationOpen) return;
     if (game.players.has(ws.idtarget)) return;
 
-    game.players.set(ws.idtarget, { id: ws.idtarget, name: ws.username || ws.idtarget });
+    game.players.set(ws.idtarget, { 
+      id: ws.idtarget, 
+      name: ws.username || ws.idtarget 
+    });
 
     this.chatServer.broadcastToRoom(room, [
       "gameLowCardJoin",
@@ -366,16 +387,26 @@ export class LowCardGameManager {
     }
 
     game.numbers.set(ws.idtarget, n);
-    this.chatServer.broadcastToRoom(room, ["gameLowCardPlayerDraw", ws.idtarget, n, tanda]);
+    game.tanda.set(ws.idtarget, tanda);
+    
+    const player = game.players.get(ws.idtarget);
+    const playerName = player ? player.name : ws.idtarget;
+    
+    this.chatServer.broadcastToRoom(room, [
+      "gameLowCardPlayerDraw",
+      playerName,
+      n,
+      tanda
+    ]);
 
-    // MODIFIKASI: Untuk round pertama dengan bot, pastikan semua bot sudah draw sebelum evaluate
+    // Cek jika semua sudah draw
     if (game.numbers.size === game.players.size - game.eliminated.size) {
       this.evaluateRound(room);
     } else if (game.round === 1 && game.useBots && !game.botAlreadyDrawInFirstRound) {
-      // Jika ini round pertama dan bot belum draw, schedule bot draw dengan waktu random
+      // Jika round pertama dan bot belum draw, schedule bot draw dengan waktu random
       game.botAlreadyDrawInFirstRound = true;
       
-      // Schedule draw untuk bot
+      // Schedule draw untuk 4 bot moz
       Array.from(game.botPlayers.keys()).forEach(botId => {
         if (!game.eliminated.has(botId) && !game.numbers.has(botId)) {
           const drawTime = this.getRandomDrawTime();
@@ -388,13 +419,19 @@ export class LowCardGameManager {
               return;
             }
             
-            const botNumber = Math.floor(Math.random() * 12) + 1;
-            const tanda = this.getRandomCardTanda();
+            // **BOT INPUT: (number random 1-12, tanda random C1-C4)**
+            const botNumber = this.getRandomNumber(); // Random 1-12
+            const tanda = this.getRandomCardTanda(); // Random C1-C4
             
             game.numbers.set(botId, botNumber);
+            game.tanda.set(botId, tanda);
+            
+            const botPlayer = game.players.get(botId);
+            const botName = botPlayer ? botPlayer.name : botId;
+            
             this.chatServer.broadcastToRoom(room, [
               "gameLowCardPlayerDraw",
-              botId,
+              botName,
               botNumber,
               tanda
             ]);
@@ -416,7 +453,7 @@ export class LowCardGameManager {
     this.clearAllTimers(game);
     this.clearBotTimers(room);
 
-    const { numbers, players, eliminated, round, betAmount } = game;
+    const { numbers, tanda, players, eliminated, round, betAmount } = game;
     const entries = Array.from(numbers.entries());
 
     // --- Eliminasi otomatis yang tidak submit ---
@@ -435,9 +472,11 @@ export class LowCardGameManager {
     if (entries.length === 1 && noSubmit.length === activePlayers.length - 1) {
       // hanya 1 orang yang draw → langsung pemenang
       const winnerId = entries[0][0];
+      const winnerPlayer = players.get(winnerId);
+      const winnerName = winnerPlayer ? winnerPlayer.name : winnerId;
       const totalCoin = betAmount * players.size;
       game.winner = winnerId;
-      this.chatServer.broadcastToRoom(room, ["gameLowCardWinner", winnerId, totalCoin]);
+      this.chatServer.broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
       this.activeGames.delete(room);
       this.clearBotTimers(room);
       return;
@@ -458,27 +497,49 @@ export class LowCardGameManager {
 
     if (remaining.length === 1) {
       const winnerId = remaining[0];
+      const winnerPlayer = players.get(winnerId);
+      const winnerName = winnerPlayer ? winnerPlayer.name : winnerId;
       const totalCoin = betAmount * players.size;
       game.winner = winnerId;
-      this.chatServer.broadcastToRoom(room, ["gameLowCardWinner", winnerId, totalCoin]);
+      this.chatServer.broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
       this.activeGames.delete(room);
       this.clearBotTimers(room);
       return;
     }
 
-    const numbersArr = entries.map(([id, n]) => `${id}:${n}`);
+    // Format numbers array dengan format: "nama:angka(tanda)"
+    const numbersArr = entries.map(([id, n]) => {
+      const player = players.get(id);
+      const playerName = player ? player.name : id;
+      const playerTanda = tanda.get(id) || "";
+      return `${playerName}:${n}(${playerTanda})`;
+    });
+    
+    // Format losers dengan nama
+    const loserNames = losers.concat(noSubmit).map(id => {
+      const player = players.get(id);
+      return player ? player.name : id;
+    });
+    
+    // Format remaining dengan nama
+    const remainingNames = remaining.map(id => {
+      const player = players.get(id);
+      return player ? player.name : id;
+    });
+
     this.chatServer.broadcastToRoom(room, [
       "gameLowCardRoundResult",
       round,
       numbersArr,
-      losers.concat(noSubmit), // kalah karena angka rendah + tidak draw
-      remaining
+      loserNames,
+      remainingNames
     ]);
 
     numbers.clear();
+    tanda.clear();
     game.round++;
     
-    // MODIFIKASI: Reset flag bot draw untuk round pertama
+    // Reset flag bot draw untuk round pertama
     if (game.round > 1) {
       game.botAlreadyDrawInFirstRound = false;
     }
@@ -490,7 +551,9 @@ export class LowCardGameManager {
   endGame(room) {
     const game = this.getGame(room);
     if (!game) return;
-    this.chatServer.broadcastToRoom(room, ["gameLowCardEnd", Array.from(game.players.keys())]);
+    
+    const playersList = Array.from(game.players.values()).map(p => p.name || p.id);
+    this.chatServer.broadcastToRoom(room, ["gameLowCardEnd", playersList]);
     this.clearAllTimers(game);
     this.clearBotTimers(room);
     this.activeGames.delete(room);
