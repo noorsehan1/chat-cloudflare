@@ -60,7 +60,7 @@ export class LowCardGameManager {
     const game = {
       room,
       players: new Map(),
-      botPlayers: new Map(),
+      botPlayers: new Map(), // untuk tracking bot
       registrationOpen: true,
       round: 1,
       numbers: new Map(),
@@ -73,7 +73,8 @@ export class LowCardGameManager {
       hostId: ws.idtarget,
       hostName: ws.username || ws.idtarget,
       useBots: false,
-      botDrawTriggered: false
+      botDrawTriggered: false, // flag untuk memastikan bot sudah draw di awal
+      botAlreadyDrawInFirstRound: false // flag khusus untuk round pertama
     };
 
     // Host auto join
@@ -138,7 +139,7 @@ export class LowCardGameManager {
     const game = this.getGame(room);
     if (!game) return;
     
-    const neededBots = 4 - (game.players.size - 1);
+    const neededBots = 4 - (game.players.size - 1); // -1 untuk host yang sudah ada
     if (neededBots <= 0) return;
     
     game.useBots = true;
@@ -148,6 +149,7 @@ export class LowCardGameManager {
       const botId = `BOT_${room}_${i}`;
       const botName = `Bot${i+1}`;
       
+      // Simulasi bot join
       game.players.set(botId, { 
         id: botId, 
         name: botName, 
@@ -155,6 +157,7 @@ export class LowCardGameManager {
       });
       game.botPlayers.set(botId, botName);
       
+      // Broadcast bot join
       this.chatServer.broadcastToRoom(room, [
         "gameLowCardJoin",
         botName,
@@ -169,6 +172,7 @@ export class LowCardGameManager {
     this.clearAllTimers(game);
     this.clearBotTimers(room);
     
+    // Reset bot draw flag untuk round baru
     game.botDrawTriggered = false;
 
     let timeLeft = game.drawTime;
@@ -190,6 +194,7 @@ export class LowCardGameManager {
         }
       }
 
+      // Bot auto draw di awal (saat waktu masih 29 detik)
       if (game.useBots && !game.botDrawTriggered && timeLeft === 29) {
         this.triggerAllBotDraws(room);
         game.botDrawTriggered = true;
@@ -214,6 +219,7 @@ export class LowCardGameManager {
     
     if (botPlayers.length === 0) return;
     
+    // Trigger semua bot untuk draw dengan delay bertahap
     botPlayers.forEach((botId, index) => {
       const timer = setTimeout(() => {
         if (!this.activeGames.has(room) || 
@@ -222,9 +228,13 @@ export class LowCardGameManager {
           return;
         }
         
+        // Random number 1-12
         const botNumber = Math.floor(Math.random() * 12) + 1;
+        
+        // Random tanda C1-C4
         const tanda = this.getRandomCardTanda();
         
+        // Simulasikan bot draw menggunakan event yang sama
         game.numbers.set(botId, botNumber);
         this.chatServer.broadcastToRoom(room, [
           "gameLowCardPlayerDraw",
@@ -233,30 +243,17 @@ export class LowCardGameManager {
           tanda
         ]);
         
+        // Check if all have drawn
         if (game.numbers.size === game.players.size - game.eliminated.size) {
           this.evaluateRound(room);
         }
-      }, index * 1000);
+      }, index * 1000); // Delay 1 detik antar bot untuk efek bertahap
       
       this.bots.get(room)?.push(timer);
     });
   }
 
-  joinGame(ws) {
-    const room = ws.roomname;
-    const game = this.getGame(room);
-    if (!game || !game.registrationOpen) return;
-    if (game.players.has(ws.idtarget)) return;
-
-    game.players.set(ws.idtarget, { id: ws.idtarget, name: ws.username || ws.idtarget });
-
-    this.chatServer.broadcastToRoom(room, [
-      "gameLowCardJoin",
-      ws.username || ws.idtarget,
-      game.betAmount
-    ]);
-  }
-
+  // MODIFIKASI: Tambahkan trigger bot draw saat close registration untuk round pertama
   closeRegistration(room) {
     const game = this.getGame(room);
     if (!game) return;
@@ -287,9 +284,22 @@ export class LowCardGameManager {
     this.chatServer.broadcastToRoom(room, ["gameLowCardPlayersInGame", playersList, game.betAmount]);
     this.chatServer.broadcastToRoom(room, ["gameLowCardNextRound", 1]);
 
+    // MODIFIKASI PENTING: Jika menggunakan bot, langsung trigger draw untuk round pertama
+    if (game.useBots && game.round === 1) {
+      // Set flag untuk mencegah double draw
+      game.botAlreadyDrawInFirstRound = true;
+      
+      // Trigger bot draw setelah delay kecil untuk memastikan UI siap
+      setTimeout(() => {
+        this.triggerAllBotDraws(room);
+        game.botDrawTriggered = true;
+      }, 1000);
+    }
+
     this.startDrawCountdown(room);
   }
 
+  // MODIFIKASI: Tambahkan penanganan khusus untuk round pertama
   submitNumber(ws, number, tanda = "") {
     const room = ws.roomname;
     const game = this.getGame(room);
@@ -306,8 +316,16 @@ export class LowCardGameManager {
     game.numbers.set(ws.idtarget, n);
     this.chatServer.broadcastToRoom(room, ["gameLowCardPlayerDraw", ws.idtarget, n, tanda]);
 
+    // MODIFIKASI: Untuk round pertama dengan bot, pastikan semua bot sudah draw sebelum evaluate
     if (game.numbers.size === game.players.size - game.eliminated.size) {
       this.evaluateRound(room);
+    } else if (game.round === 1 && game.useBots && !game.botAlreadyDrawInFirstRound) {
+      // Jika ini round pertama dan bot belum draw, trigger bot draw sekarang
+      setTimeout(() => {
+        this.triggerAllBotDraws(room);
+        game.botDrawTriggered = true;
+        game.botAlreadyDrawInFirstRound = true;
+      }, 500);
     }
   }
 
@@ -320,6 +338,7 @@ export class LowCardGameManager {
     const { numbers, players, eliminated, round, betAmount } = game;
     const entries = Array.from(numbers.entries());
 
+    // --- Eliminasi otomatis yang tidak submit ---
     const submittedIds = new Set(numbers.keys());
     const activePlayers = Array.from(players.keys()).filter(id => !eliminated.has(id));
     const noSubmit = activePlayers.filter(id => !submittedIds.has(id));
@@ -333,6 +352,7 @@ export class LowCardGameManager {
     }
 
     if (entries.length === 1 && noSubmit.length === activePlayers.length - 1) {
+      // hanya 1 orang yang draw → langsung pemenang
       const winnerId = entries[0][0];
       const totalCoin = betAmount * players.size;
       game.winner = winnerId;
@@ -352,6 +372,7 @@ export class LowCardGameManager {
       losers.forEach(id => eliminated.add(id));
     }
 
+    // sisa pemain
     const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
 
     if (remaining.length === 1) {
@@ -369,12 +390,18 @@ export class LowCardGameManager {
       "gameLowCardRoundResult",
       round,
       numbersArr,
-      losers.concat(noSubmit),
+      losers.concat(noSubmit), // kalah karena angka rendah + tidak draw
       remaining
     ]);
 
     numbers.clear();
     game.round++;
+    
+    // MODIFIKASI: Reset flag bot draw untuk round pertama
+    if (game.round > 1) {
+      game.botAlreadyDrawInFirstRound = false;
+    }
+    
     this.chatServer.broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
     this.startDrawCountdown(room);
   }
