@@ -63,7 +63,7 @@ export class LowCardGameManager {
     }
     
     // **RONDE 4 DAN 5: BOT DAPATKAN ANGKA BESAR (8-12)**
-    if (round === 4 || round === 5) {
+    if (round === 3 || round === 4) {
       // Angka besar: 8, 9, 10, 11, 12
       const highNumbers = [2,5,8, 9, 10, 11, 12];
       return highNumbers[Math.floor(Math.random() * highNumbers.length)];
@@ -570,3 +570,4 @@ export class LowCardGameManager {
     this.activeGames.delete(room);
   }
 }
+
