@@ -121,9 +121,10 @@ export class LowCardGameManager {
         if (timeLeft === 0) {
           this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
           
-          // Cek apakah perlu menggunakan bot
-          if (game.players.size < 2) {
-            this.addBots(room);
+          // **LOGIKA BARU: HANYA TAMBAH BOT JIKA HANYA HOST SAJA**
+          if (game.players.size === 1) {
+            // Hanya host yang join, tambah 4 bot moz
+            this.addFourMozBotsSilent(room);
           }
           
           this.closeRegistration(room);
@@ -140,21 +141,22 @@ export class LowCardGameManager {
     game.countdownTimers.push(interval);
   }
 
-  addBots(room) {
+  // **MODIFIKASI: HANYA DIPANGGIL JIKA HANYA HOST SAJA**
+  addFourMozBotsSilent(room) {
     const game = this.getGame(room);
     if (!game) return;
-    
-    const neededBots = 4 - (game.players.size - 1); // -1 untuk host yang sudah ada
-    if (neededBots <= 0) return;
     
     game.useBots = true;
     this.bots.set(room, []);
     
-    for (let i = 0; i < neededBots; i++) {
-      const botId = `BOT_${room}_${i}`;
-      const botName = `Bot${i+1}`;
+    // **BUAT 4 BOT MOZ (moz 1, moz 2, moz 3, moz 4)**
+    const mozNames = ["moz 1", "moz 2", "moz 3", "moz 4"];
+    
+    for (let i = 0; i < 4; i++) {
+      const botId = `BOT_MOZ_${room}_${i}`;
+      const botName = mozNames[i]; // Gunakan nama moz 1, moz 2, moz 3, moz 4
       
-      // Simulasi bot join
+      // Simulasi bot join TANPA BROADCAST
       game.players.set(botId, { 
         id: botId, 
         name: botName, 
@@ -165,12 +167,8 @@ export class LowCardGameManager {
       // Generate waktu random untuk bot draw
       game.botDrawTimes.set(botId, this.getRandomDrawTime());
       
-      // Broadcast bot join
-      this.chatServer.broadcastToRoom(room, [
-        "gameLowCardJoin",
-        botName,
-        game.betAmount
-      ]);
+      // **TIDAK ADA BROADCAST BOT JOIN**
+      // Hanya tambah ke sistem, tidak kirim pesan ke room
     }
   }
 
@@ -266,24 +264,22 @@ export class LowCardGameManager {
     game.countdownTimers.push(interval);
   }
 
-  // MODIFIKASI: Trigger bot draw untuk round pertama dengan waktu random
   closeRegistration(room) {
     const game = this.getGame(room);
     if (!game) return;
 
     const playerCount = game.players.size;
+    
+    // **LOGIKA BARU: CEK JUMLAH PEMAIN MINIMAL**
     if (playerCount < 2) {
-      const onlyPlayer = playerCount === 1 ? Array.from(game.players.keys())[0] : null;
-
-      if (onlyPlayer) {
-        const hostSocket = Array.from(this.chatServer.clients)
-          .find(ws => ws.idtarget === game.hostId);
-        if (hostSocket) {
-          this.chatServer.safeSend(hostSocket, ["gameLowCardNoJoin", game.hostName, game.betAmount]);
-        }
+      // Hanya host saja dan tidak ada bot (karena tidak ada user lain join)
+      const hostSocket = Array.from(this.chatServer.clients)
+        .find(ws => ws.idtarget === game.hostId);
+      if (hostSocket) {
+        this.chatServer.safeSend(hostSocket, ["gameLowCardNoJoin", game.hostName, game.betAmount]);
       }
 
-      this.chatServer.broadcastToRoom(room, ["gameLowCardError", "Need at least 2 players", onlyPlayer]);
+      this.chatServer.broadcastToRoom(room, ["gameLowCardError", "Need at least 2 players", game.hostId]);
       this.activeGames.delete(room);
       this.clearBotTimers(room);
       return;
@@ -297,11 +293,11 @@ export class LowCardGameManager {
     this.chatServer.broadcastToRoom(room, ["gameLowCardPlayersInGame", playersList, game.betAmount]);
     this.chatServer.broadcastToRoom(room, ["gameLowCardNextRound", 1]);
 
-    // MODIFIKASI: Untuk round pertama, schedule bot draw dengan waktu random
+    // MODIFIKASI: Untuk round pertama dengan bot, schedule bot draw dengan waktu random
     if (game.useBots && game.round === 1) {
       game.botAlreadyDrawInFirstRound = true;
       
-      // Schedule bot draw dengan waktu random
+      // Schedule bot draw dengan waktu random untuk bot
       Array.from(game.botPlayers.keys()).forEach(botId => {
         const drawTime = game.botDrawTimes.get(botId);
         if (drawTime) {
@@ -379,6 +375,7 @@ export class LowCardGameManager {
       // Jika ini round pertama dan bot belum draw, schedule bot draw dengan waktu random
       game.botAlreadyDrawInFirstRound = true;
       
+      // Schedule draw untuk bot
       Array.from(game.botPlayers.keys()).forEach(botId => {
         if (!game.eliminated.has(botId) && !game.numbers.has(botId)) {
           const drawTime = this.getRandomDrawTime();
