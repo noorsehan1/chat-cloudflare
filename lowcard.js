@@ -45,6 +45,11 @@ export class LowCardGameManager {
     return this.activeGames.get(room);
   }
 
+  getRandomCardTanda() {
+    const tandaOptions = ["C1", "C2", "C3", "C4"];
+    return tandaOptions[Math.floor(Math.random() * tandaOptions.length)];
+  }
+
   startGame(ws, bet) {
     const room = ws.roomname;
     if (!room) return;
@@ -143,7 +148,11 @@ export class LowCardGameManager {
       const botName = `Bot${i+1}`;
       
       // Simulasi bot join
-      game.players.set(botId, { id: botId, name: botName, isBot: true });
+      game.players.set(botId, { 
+        id: botId, 
+        name: botName, 
+        isBot: true 
+      });
       game.botPlayers.set(botId, botName);
       
       // Broadcast bot join
@@ -203,8 +212,8 @@ export class LowCardGameManager {
     const botPlayers = activePlayers.filter(id => id.startsWith('BOT_'));
     
     botPlayers.forEach(botId => {
-      // Random delay antara 1-15 detik sebelum waktu habis
-      const delay = Math.floor(Math.random() * 14) + 1;
+      // Random delay antara 1-20 detik sebelum waktu habis
+      const delay = Math.floor(Math.random() * 19) + 1;
       
       if (timeLeft === delay) {
         const timer = setTimeout(() => {
@@ -214,8 +223,11 @@ export class LowCardGameManager {
             return;
           }
           
+          // Random number 1-12
           const botNumber = Math.floor(Math.random() * 12) + 1;
-          const tanda = "🤖"; // tanda untuk bot
+          
+          // Random tanda C1-C4
+          const tanda = this.getRandomCardTanda();
           
           // Simulasikan bot draw menggunakan event yang sama
           game.numbers.set(botId, botNumber);
