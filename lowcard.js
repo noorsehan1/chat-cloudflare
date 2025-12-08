@@ -56,8 +56,21 @@ export class LowCardGameManager {
   }
 
   getRandomNumber() {
-    // Random number 1-12
+    // Random number 1-12 (default, untuk backward compatibility)
     return Math.floor(Math.random() * 12) + 1;
+  }
+
+  // MODIFIKASI: Metode baru untuk mendapatkan angka berdasarkan round
+  getRandomNumberByRound(round) {
+    // Untuk round 1-3: angka random 1-12 (normal)
+    // Untuk round 4-5: angka random cenderung besar (7-12)
+    if (round >= 4) {
+      // Random angka besar 7-12
+      return Math.floor(Math.random() * 6) + 7;
+    } else {
+      // Random angka normal 1-12
+      return Math.floor(Math.random() * 12) + 1;
+    }
   }
 
   startGame(ws, bet) {
@@ -244,8 +257,9 @@ export class LowCardGameManager {
                 return;
               }
               
-              // **BOT INPUT: (number random 1-12, tanda random C1-C4)**
-              const botNumber = this.getRandomNumber(); // Random 1-12
+              // **BOT INPUT: (number berdasarkan round, tanda random C1-C4)**
+              // MODIFIKASI: Gunakan getRandomNumberByRound untuk angka berdasarkan round
+              const botNumber = this.getRandomNumberByRound(game.round); // Random berdasarkan round
               const tanda = this.getRandomCardTanda(); // Random C1-C4
               
               // Simpan data
@@ -325,8 +339,9 @@ export class LowCardGameManager {
               return;
             }
             
-            // **BOT INPUT: (number random 1-12, tanda random C1-C4)**
-            const botNumber = this.getRandomNumber(); // Random 1-12
+            // **BOT INPUT: (number berdasarkan round, tanda random C1-C4)**
+            // MODIFIKASI: Gunakan getRandomNumberByRound untuk angka berdasarkan round
+            const botNumber = this.getRandomNumberByRound(game.round); // Random berdasarkan round
             const tanda = this.getRandomCardTanda(); // Random C1-C4
             
             game.numbers.set(botId, botNumber);
@@ -386,6 +401,15 @@ export class LowCardGameManager {
       return;
     }
 
+    // MODIFIKASI OPSIONAL: Validasi untuk pemain manusia di round 4-5
+    // Uncomment kode di bawah jika ingin mencegah pemain mengirim angka kecil di round 4-5
+    /*
+    if (game.round >= 4 && n < 7) {
+      this.chatServer.safeSend(ws, ["gameLowCardError", "Round 4-5: Number must be 7-12"]);
+      return;
+    }
+    */
+
     game.numbers.set(ws.idtarget, n);
     game.tanda.set(ws.idtarget, tanda);
     
@@ -419,8 +443,9 @@ export class LowCardGameManager {
               return;
             }
             
-            // **BOT INPUT: (number random 1-12, tanda random C1-C4)**
-            const botNumber = this.getRandomNumber(); // Random 1-12
+            // **BOT INPUT: (number berdasarkan round, tanda random C1-C4)**
+            // MODIFIKASI: Gunakan getRandomNumberByRound untuk angka berdasarkan round
+            const botNumber = this.getRandomNumberByRound(game.round); // Random berdasarkan round
             const tanda = this.getRandomCardTanda(); // Random C1-C4
             
             game.numbers.set(botId, botNumber);
