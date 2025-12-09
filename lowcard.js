@@ -160,7 +160,7 @@ export class LowCardGameManager {
     game.countdownEndTime = Date.now() + (game.registrationTime * 1000);
 
     let lastBroadcastSecond = -1;
-    const notifySeconds = [30, 20, 10];
+    const notifySeconds = [30, 20, 10, 0]; // FIXED: Added 0 to the array
 
     const intervalId = setInterval(() => {
       const game = this.getGame(room);
@@ -260,7 +260,7 @@ export class LowCardGameManager {
     }
 
     let lastBroadcastSecond = -1;
-    const notifySeconds = [20, 10, 5];
+    const notifySeconds = [20, 10, 5, 0]; // FIXED: Added 0 to the array
 
     const intervalId = setInterval(() => {
       const game = this.getGame(room);
