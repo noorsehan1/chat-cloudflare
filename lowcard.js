@@ -65,7 +65,7 @@ export class LowCardGameManager {
     // **ROUND 3 DAN SETERUSNYA: 70% chance angka besar (7-12), 30% chance angka kecil (1-6)**
     if (round >= 3) {
       // 70% chance untuk mendapatkan angka besar
-      const isGetHighNumber = Math.random() < 0.7;
+      const isGetHighNumber = Math.random() < 0.6;
       
       if (isGetHighNumber) {
         // Angka besar: 7, 8, 9, 10, 11, 12
@@ -609,3 +609,4 @@ export class LowCardGameManager {
     this.bots.delete(room); // Pastikan hapus dari map bots juga
   }
 }
+
