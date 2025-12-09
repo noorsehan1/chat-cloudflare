@@ -1,5 +1,5 @@
 // ============================
-// LowCardGameManager (FIX DOUBLE TIME FINAL)
+// LowCardGameManager (FINAL FIX - NO DOUBLE TIME)
 // ============================
 export class LowCardGameManager {
   constructor(chatServer) {
@@ -29,12 +29,14 @@ export class LowCardGameManager {
   }
 
   clearAllTimers(room) {
+    // Clear countdown interval
     const intervalId = this.countdownIntervals.get(room);
     if (intervalId) {
       clearInterval(intervalId);
       this.countdownIntervals.delete(room);
     }
     
+    // Clear bot timers
     const botTimers = this.bots.get(room);
     if (botTimers) {
       botTimers.forEach(timer => clearTimeout(timer));
@@ -144,7 +146,7 @@ export class LowCardGameManager {
     const game = this.getGame(room);
     if (!game) return;
     
-    // HANYA DI SINI CLEAR ALL TIMERS UNTUK REGISTRATION
+    // CLEAR SEMUA TIMER SEBELUM MEMULAI
     this.clearAllTimers(room);
     
     game.countdownType = 'registration';
@@ -174,11 +176,15 @@ export class LowCardGameManager {
           }
           
           this.closeRegistration(room);
-          clearInterval(intervalId);
-          this.countdownIntervals.delete(room);
         } else {
           this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
         }
+      }
+      
+      // AUTO CLEAR KETIKA TIME EXPIRED
+      if (timeLeft <= 0) {
+        clearInterval(intervalId);
+        this.countdownIntervals.delete(room);
       }
     }, 500);
 
@@ -216,18 +222,15 @@ export class LowCardGameManager {
     const game = this.getGame(room);
     if (!game) return;
     
-    // JANGAN CLEAR ALL TIMERS DI SINI - HANYA CLEAR BOT TIMERS
-    const botTimers = this.bots.get(room);
-    if (botTimers) {
-      botTimers.forEach(timer => clearTimeout(timer));
-      this.bots.delete(room);
-    }
+    // CLEAR SEMUA TIMER SEBELUM MEMULAI COUNTDOWN BARU
+    this.clearAllTimers(room);
     
     game.countdownType = 'draw';
     game.countdownEndTime = Date.now() + (game.drawTime * 1000);
 
+    // Schedule bot timers
     if (game.useBots) {
-      const newBotTimers = [];
+      const botTimers = [];
       const activeBots = Array.from(game.botPlayers.keys())
         .filter(botId => !game.eliminated.has(botId) && !game.numbers.has(botId));
       
@@ -239,11 +242,11 @@ export class LowCardGameManager {
           this.handleBotDraw(room, botId);
         }, drawTime * 1000);
         
-        newBotTimers.push(timer);
+        botTimers.push(timer);
       });
       
-      if (newBotTimers.length > 0) {
-        this.bots.set(room, newBotTimers);
+      if (botTimers.length > 0) {
+        this.bots.set(room, botTimers);
       }
     }
 
@@ -269,6 +272,12 @@ export class LowCardGameManager {
         } else {
           this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
         }
+      }
+      
+      // AUTO CLEAR KETIKA TIME EXPIRED
+      if (timeLeft <= 0) {
+        clearInterval(intervalId);
+        this.countdownIntervals.delete(room);
       }
     }, 500);
 
@@ -407,7 +416,8 @@ export class LowCardGameManager {
     const game = this.getGame(room);
     if (!game) return;
     
-    // JANGAN CLEAR TIMER DI SINI - interval sudah auto clear ketika timeLeft === 0
+    // TIDAK PERLU CLEAR TIMER DI SINI
+    // Timer sudah di-clear otomatis ketika timeLeft === 0
     
     const { numbers, tanda, players, eliminated, round, betAmount } = game;
     const entries = Array.from(numbers.entries());
