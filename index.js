@@ -398,6 +398,34 @@ export class ChatServer {
     }
   }
 
+  // ============ NEW: REAL-TIME ROOM COUNT UPDATER ============
+  updateRoomCount(room) {
+    try {
+      if (!room || !roomList.includes(room)) return 0;
+      
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) return 0;
+      
+      // Hitung user yang aktif di room
+      let count = 0;
+      for (let i = 1; i <= this.MAX_SEATS; i++) {
+        const info = seatMap.get(i);
+        if (info && info.namauser && info.namauser !== "") {
+          count++;
+        }
+      }
+      
+      // Update cache dan broadcast
+      this.invalidateRoomCache(room);
+      this.broadcastRoomUserCount(room);
+      
+      return count;
+    } catch (error) {
+      console.error(`[ChatServer] Error in updateRoomCount:`, error);
+      return 0;
+    }
+  }
+
   // ============ OPTIMIZED CONSISTENCY CHECK ============
   async checkSeatConsistency() {
     try {
@@ -641,7 +669,7 @@ export class ChatServer {
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
           
           // Update user count with cache invalidation
-          this.invalidateRoomCache(room);
+          this.updateRoomCount(room);
         }
 
         if (immediate) {
@@ -702,7 +730,7 @@ export class ChatServer {
         this.userToSeat.delete(ws.idtarget);
         
         // Broadcast updated user count
-        this.broadcastRoomUserCount(room);
+        this.updateRoomCount(room);
       });
     } catch (error) {
       console.error(`[ChatServer] Error in cleanupFromRoom:`, error);
@@ -909,7 +937,9 @@ export class ChatServer {
         
         // Send state updates
         this.sendAllStateTo(ws, room);
-        this.broadcastRoomUserCount(room);
+        
+        // PERBAIKAN: Update jumlah room SEBELUM broadcast
+        this.updateRoomCount(room);
         
         // Send join confirmation
         this.safeSend(ws, ["rooMasuk", seat, room]);
@@ -951,12 +981,14 @@ export class ChatServer {
         if (!seatMap) continue;
         
         // Count users in room
+        let roomCount = 0;
         for (let i = 1; i <= this.MAX_SEATS; i++) {
           const info = seatMap.get(i);
           if (info && info.namauser && info.namauser !== "") {
-            counts[room]++;
+            roomCount++;
           }
         }
+        counts[room] = roomCount;
       }
       
       // Update cache
@@ -1035,9 +1067,26 @@ export class ChatServer {
     try {
       if (!room || !roomList.includes(room)) return;
       
-      const counts = this.getJumlahRoom();
-      const count = counts[room] || 0;
+      // Hitung jumlah user yang aktif di room
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) return;
+      
+      let count = 0;
+      for (let i = 1; i <= this.MAX_SEATS; i++) {
+        const info = seatMap.get(i);
+        if (info && info.namauser && info.namauser !== "") {
+          count++;
+        }
+      }
+      
+      // PERBAIKAN: Simpan ke cache
+      if (this.roomCountsCache) {
+        this.roomCountsCache[room] = count;
+      }
+      
+      // Broadcast ke semua user di room
       this.broadcastToRoom(room, ["roomUserCount", room, count]);
+      
     } catch (error) {
       console.error(`[ChatServer] Error in broadcastRoomUserCount:`, error);
     }
@@ -1155,7 +1204,7 @@ export class ChatServer {
               userConnections.add(ws);
               
               this.sendAllStateTo(ws, room);
-              this.broadcastRoomUserCount(room);
+              this.updateRoomCount(room);
               
               this.safeSend(ws, ["rooMasuk", seat, room]);
               this.safeSend(ws, ["currentNumber", this.currentNumber]);
@@ -1401,7 +1450,7 @@ export class ChatServer {
             }
           }
           
-          this.broadcastRoomUserCount(room);
+          this.updateRoomCount(room);
         }
 
         this.userToSeat.delete(idtarget);
@@ -1702,7 +1751,12 @@ export class ChatServer {
           }
 
           case "joinRoom": 
-            await this.handleJoinRoom(ws, data[1]);
+            const success = await this.handleJoinRoom(ws, data[1]);
+            
+            // PERBAIKAN: Jika join berhasil, update jumlah room
+            if (success && ws.roomname) {
+              this.updateRoomCount(ws.roomname);
+            }
             break;
 
           case "chat": {
@@ -1761,7 +1815,10 @@ export class ChatServer {
             await this.updateSeatAtomic(room, seat, () => createEmptySeat());
             this.clearSeatBuffer(room, seat);
             this.broadcastToRoom(room, ["removeKursi", room, seat]);
-            this.broadcastRoomUserCount(room);
+            
+            // PERBAIKAN: Update jumlah room setelah remove
+            this.updateRoomCount(room);
+            
             break;
           }
 
@@ -1782,13 +1839,29 @@ export class ChatServer {
               lastUpdated: Date.now()
             }));
             
-            // Update user tracking
+            // PERBAIKAN: Update user tracking DAN jumlah room
             if (namauser === ws.idtarget) {
               this.userToSeat.set(namauser, { room, seat });
               this.userCurrentRoom.set(namauser, room);
             }
             
-            this.broadcastRoomUserCount(room);
+            // PERBAIKAN PENTING: Update jumlah room REAL-TIME
+            this.updateRoomCount(room);
+            
+            // Juga broadcast kursi update ke room
+            this.broadcastToRoom(room, [
+              "updateKursiResponse", 
+              room, 
+              seat, 
+              noimageUrl, 
+              namauser, 
+              color, 
+              itembawah, 
+              itematas, 
+              vip, 
+              viptanda
+            ]);
+            
             break;
           }
 
@@ -1802,6 +1875,21 @@ export class ChatServer {
             const giftData = ["gift", roomname, sender, receiver, giftName, timestamp];
             
             this.broadcastToRoom(roomname, giftData);
+            break;
+          }
+
+          case "leaveRoom": {
+            const room = ws.roomname;
+            if (!room || !roomList.includes(room)) return;
+            
+            // Cleanup dari room
+            await this.cleanupFromRoom(ws, room);
+            
+            // Update jumlah room
+            this.updateRoomCount(room);
+            
+            // Kirim konfirmasi ke user
+            this.safeSend(ws, ["roomLeft", room]);
             break;
           }
 
