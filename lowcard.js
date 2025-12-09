@@ -1,11 +1,12 @@
 // ============================
-// LowCardGameManager (Sinkron ChatServer, Multi-room)
+// LowCardGameManager (Optimized Version)
 // ============================
 export class LowCardGameManager {
   constructor(chatServer) {
     this.chatServer = chatServer;
     this.activeGames = new Map(); // key: room, value: game state
     this.bots = new Map(); // key: room, value: array of bot timers
+    this.countdownIntervals = new Map(); // key: room, value: intervalId (SIMPAN interval ID saja)
   }
 
   handleEvent(ws, data) {
@@ -26,17 +27,18 @@ export class LowCardGameManager {
     }
   }
 
-  clearAllTimers(game) {
-    if (game?.countdownTimers) {
-      game.countdownTimers.forEach(clearInterval);
-      game.countdownTimers = [];
+  clearAllTimers(room) {
+    // Hapus interval countdown
+    const intervalId = this.countdownIntervals.get(room);
+    if (intervalId) {
+      clearInterval(intervalId);
+      this.countdownIntervals.delete(room);
     }
-  }
-
-  clearBotTimers(room) {
+    
+    // Hapus timer bot
     const botTimers = this.bots.get(room);
     if (botTimers) {
-      botTimers.forEach(clearTimeout);
+      botTimers.forEach(timer => clearTimeout(timer));
       this.bots.delete(room);
     }
   }
@@ -51,40 +53,34 @@ export class LowCardGameManager {
   }
 
   getRandomDrawTime() {
-    // Random waktu antara 1-25 detik (agar tidak terlalu mepet ke TIME UP)
-    return Math.floor(Math.random() * 25) + 1;
+    // Random waktu antara 3-25 detik (kurangi kemungkinan mepet TIME UP)
+    return Math.floor(Math.random() * 23) + 3;
   }
 
-  // **MODIFIKASI: Fungsi untuk mendapatkan angka BOT berdasarkan round**
   getBotNumberByRound(round) {
-    // Round 1-2: BOT random 1-12 (normal, distribusi merata)
     if (round <= 2) {
       return Math.floor(Math.random() * 12) + 1;
     }
     
-    // **ROUND 3 DAN SETERUSNYA: 70% chance angka besar (7-12), 30% chance angka kecil (1-6)**
     if (round >= 3) {
-      // 70% chance untuk mendapatkan angka besar
       const isGetHighNumber = Math.random() < 0.6;
       
       if (isGetHighNumber) {
-        // Angka besar: 7, 8, 9, 10, 11, 12
         const bigNumbers = [8, 9, 10, 11, 12];
         return bigNumbers[Math.floor(Math.random() * bigNumbers.length)];
       } else {
-        // 30% chance untuk mendapatkan angka kecil
-        const smallNumbers = [1, 2, 3, 4, 5, 6,7];
+        const smallNumbers = [1, 2, 3, 4, 5, 6, 7];
         return smallNumbers[Math.floor(Math.random() * smallNumbers.length)];
       }
     }
     
-    // Fallback untuk round lainnya
     return Math.floor(Math.random() * 12) + 1;
   }
 
   startGame(ws, bet) {
     const room = ws.roomname;
     if (!room) return;
+    
     if (this.activeGames.has(room)) {
       this.chatServer.safeSend(ws, ["gameLowCardError", "Game already running in this room"]);
       return;
@@ -98,23 +94,25 @@ export class LowCardGameManager {
 
     const game = {
       room,
-      players: new Map(), // menyimpan info player: {id, name}
-      botPlayers: new Map(), // untuk tracking bot: botId -> botName
+      players: new Map(),
+      botPlayers: new Map(),
       registrationOpen: true,
       round: 1,
-      numbers: new Map(), // menyimpan angka yang sudah di-submit: playerId -> number
-      tanda: new Map(), // menyimpan tanda yang sudah di-submit: playerId -> tanda
+      numbers: new Map(),
+      tanda: new Map(),
       eliminated: new Set(),
       winner: null,
       betAmount,
-      countdownTimers: [],
       registrationTime: 40,
       drawTime: 30,
       hostId: ws.idtarget,
       hostName: ws.username || ws.idtarget,
       useBots: false,
-      botDrawTimes: new Map(), // menyimpan waktu draw masing-masing bot
-      botAlreadyDrawInFirstRound: false // flag khusus untuk round pertama
+      botDrawTimes: new Map(),
+      botAlreadyDrawInFirstRound: false,
+      // **OPTIMASI: Simpan timestamp untuk tracking countdown**
+      countdownEndTime: null,
+      countdownType: null // 'registration' atau 'draw'
     };
 
     // Host auto join
@@ -144,39 +142,51 @@ export class LowCardGameManager {
   startRegistrationCountdown(room) {
     const game = this.getGame(room);
     if (!game) return;
-    this.clearAllTimers(game);
+    
+    this.clearAllTimers(room);
+    game.countdownType = 'registration';
+    game.countdownEndTime = Date.now() + (game.registrationTime * 1000);
 
-    let timeLeft = game.registrationTime;
-    const timesToNotify = [30, 20, 10, 0];
+    let lastBroadcastSecond = -1;
+    const notifySeconds = [30, 20, 10, 5, 3, 2, 1, 0];
 
-    const interval = setInterval(() => {
-      if (!this.activeGames.has(room)) {
-        clearInterval(interval);
+    const intervalId = setInterval(() => {
+      const game = this.getGame(room);
+      if (!game) {
+        clearInterval(intervalId);
+        this.countdownIntervals.delete(room);
         return;
       }
 
-      if (timesToNotify.includes(timeLeft)) {
+      const timeLeft = Math.max(0, Math.ceil((game.countdownEndTime - Date.now()) / 1000));
+      
+      // **OPTIMASI: Hanya broadcast pada detik tertentu**
+      if (notifySeconds.includes(timeLeft) && timeLeft !== lastBroadcastSecond) {
+        lastBroadcastSecond = timeLeft;
+        
         if (timeLeft === 0) {
           this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
           
-          // **LOGIKA: HANYA TAMBAH BOT JIKA HANYA HOST SAJA**
           if (game.players.size === 1) {
-            // Hanya host yang join, tambah 4 bot moz
             this.addFourMozBots(room);
           }
           
           this.closeRegistration(room);
-          clearInterval(interval);
+          clearInterval(intervalId);
+          this.countdownIntervals.delete(room);
         } else {
           this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
         }
       }
+      
+      // Jika waktu habis, bersihkan interval
+      if (timeLeft <= 0) {
+        clearInterval(intervalId);
+        this.countdownIntervals.delete(room);
+      }
+    }, 500); // **OPTIMASI: Check setiap 500ms, bukan 1000ms**
 
-      timeLeft--;
-      if (timeLeft < 0) clearInterval(interval);
-    }, 1000);
-
-    game.countdownTimers.push(interval);
+    this.countdownIntervals.set(room, intervalId);
   }
 
   addFourMozBots(room) {
@@ -186,24 +196,19 @@ export class LowCardGameManager {
     game.useBots = true;
     this.bots.set(room, []);
     
-    // **BUAT 4 BOT MOZ (moz 1, moz 2, moz 3, moz 4)**
     const mozNames = ["moz 1", "moz 2", "moz 3", "moz 4"];
     
     for (let i = 0; i < 4; i++) {
       const botId = `BOT_MOZ_${room}_${i}`;
       const botName = mozNames[i];
       
-      // Simulasi bot join
       game.players.set(botId, { 
         id: botId, 
         name: botName 
       });
       game.botPlayers.set(botId, botName);
-      
-      // Generate waktu random untuk bot draw
       game.botDrawTimes.set(botId, this.getRandomDrawTime());
       
-      // **BROADCAST BOT JOIN (seperti kode awal)**
       this.chatServer.broadcastToRoom(room, [
         "gameLowCardJoin",
         botName,
@@ -215,98 +220,99 @@ export class LowCardGameManager {
   startDrawCountdown(room) {
     const game = this.getGame(room);
     if (!game) return;
-    this.clearAllTimers(game);
-    this.clearBotTimers(room);
     
-    // Reset timer bot untuk round baru
-    if (game.useBots && game.round > 1) {
+    this.clearAllTimers(room);
+    game.countdownType = 'draw';
+    game.countdownEndTime = Date.now() + (game.drawTime * 1000);
+
+    // Reset dan schedule timer bot
+    if (game.useBots) {
       game.botDrawTimes.clear();
-      Array.from(game.botPlayers.keys()).forEach(botId => {
-        if (!game.eliminated.has(botId)) {
-          game.botDrawTimes.set(botId, this.getRandomDrawTime());
-        }
+      
+      // **OPTIMASI: Schedule semua bot sekaligus di awal**
+      const botTimers = [];
+      const activeBots = Array.from(game.botPlayers.keys())
+        .filter(botId => !game.eliminated.has(botId) && !game.numbers.has(botId));
+      
+      activeBots.forEach(botId => {
+        const drawTime = this.getRandomDrawTime();
+        game.botDrawTimes.set(botId, drawTime);
+        
+        const timer = setTimeout(() => {
+          this.handleBotDraw(room, botId);
+        }, drawTime * 1000);
+        
+        botTimers.push(timer);
       });
+      
+      if (botTimers.length > 0) {
+        this.bots.set(room, botTimers);
+      }
     }
 
-    let timeLeft = game.drawTime;
-    const timesToNotify = [20, 10, 0];
-    
-    // Map untuk melacak bot yang sudah dijadwalkan
-    const scheduledBots = new Set();
+    let lastBroadcastSecond = -1;
+    const notifySeconds = [20, 10, 5, 3, 2, 1, 0];
 
-    const interval = setInterval(() => {
-      if (!this.activeGames.has(room)) {
-        clearInterval(interval);
+    const intervalId = setInterval(() => {
+      const game = this.getGame(room);
+      if (!game) {
+        clearInterval(intervalId);
+        this.countdownIntervals.delete(room);
         return;
       }
 
-      if (timesToNotify.includes(timeLeft)) {
+      const timeLeft = Math.max(0, Math.ceil((game.countdownEndTime - Date.now()) / 1000));
+      
+      // **OPTIMASI: Hanya broadcast pada detik tertentu**
+      if (notifySeconds.includes(timeLeft) && timeLeft !== lastBroadcastSecond) {
+        lastBroadcastSecond = timeLeft;
+        
         if (timeLeft === 0) {
           this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
           this.evaluateRound(room);
-          clearInterval(interval);
+          clearInterval(intervalId);
+          this.countdownIntervals.delete(room);
         } else {
           this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
         }
       }
-
-      // Cek apakah ada bot yang harus draw pada waktu ini
-      if (game.useBots) {
-        const activeBots = Array.from(game.botPlayers.keys()).filter(botId => 
-          !game.eliminated.has(botId) && 
-          !game.numbers.has(botId) &&
-          !scheduledBots.has(botId)
-        );
-        
-        activeBots.forEach(botId => {
-          const drawTime = game.botDrawTimes.get(botId);
-          // Bot draw jika waktu tersisa sama dengan waktu draw yang ditentukan
-          if (drawTime && timeLeft === (game.drawTime - drawTime)) {
-            scheduledBots.add(botId);
-            
-            const timer = setTimeout(() => {
-              if (!this.activeGames.has(room) || 
-                  game.eliminated.has(botId) || 
-                  game.numbers.has(botId)) {
-                return;
-              }
-              
-              // **MODIFIKASI: BOT dapat angka berdasarkan round**
-              const botNumber = this.getBotNumberByRound(game.round);
-              const tanda = this.getRandomCardTanda();
-              
-              // Simpan data
-              game.numbers.set(botId, botNumber);
-              game.tanda.set(botId, tanda);
-              
-              // Dapatkan nama bot dari game.players
-              const botPlayer = game.players.get(botId);
-              const botName = botPlayer ? botPlayer.name : botId;
-              
-              // Broadcast dengan format yang benar
-              this.chatServer.broadcastToRoom(room, [
-                "gameLowCardPlayerDraw",
-                botName,
-                botNumber,
-                tanda
-              ]);
-              
-              // Check if all have drawn
-              if (game.numbers.size === game.players.size - game.eliminated.size) {
-                this.evaluateRound(room);
-              }
-            }, 0);
-            
-            this.bots.get(room)?.push(timer);
-          }
-        });
+      
+      // Jika waktu habis, bersihkan interval
+      if (timeLeft <= 0) {
+        clearInterval(intervalId);
+        this.countdownIntervals.delete(room);
       }
+    }, 500); // **OPTIMASI: Check setiap 500ms**
 
-      timeLeft--;
-      if (timeLeft < 0) clearInterval(interval);
-    }, 1000);
+    this.countdownIntervals.set(room, intervalId);
+  }
 
-    game.countdownTimers.push(interval);
+  handleBotDraw(room, botId) {
+    const game = this.getGame(room);
+    if (!game || game.eliminated.has(botId) || game.numbers.has(botId)) {
+      return;
+    }
+    
+    const botNumber = this.getBotNumberByRound(game.round);
+    const tanda = this.getRandomCardTanda();
+    
+    game.numbers.set(botId, botNumber);
+    game.tanda.set(botId, tanda);
+    
+    const botPlayer = game.players.get(botId);
+    const botName = botPlayer ? botPlayer.name : botId;
+    
+    this.chatServer.broadcastToRoom(room, [
+      "gameLowCardPlayerDraw",
+      botName,
+      botNumber,
+      tanda
+    ]);
+    
+    // Cek jika semua sudah draw
+    if (game.numbers.size === game.players.size - game.eliminated.size) {
+      this.evaluateRound(room);
+    }
   }
 
   closeRegistration(room) {
@@ -315,9 +321,7 @@ export class LowCardGameManager {
 
     const playerCount = game.players.size;
     
-    // **LOGIKA BARU: CEK JUMLAH PEMAIN MINIMAL**
     if (playerCount < 2) {
-      // Hanya host saja (tidak ada user lain join dan tidak ada bot)
       const hostSocket = Array.from(this.chatServer.clients)
         .find(ws => ws.idtarget === game.hostId);
       if (hostSocket) {
@@ -326,7 +330,7 @@ export class LowCardGameManager {
 
       this.chatServer.broadcastToRoom(room, ["gameLowCardError", "Need at least 2 players", game.hostId]);
       this.activeGames.delete(room);
-      this.clearBotTimers(room);
+      this.clearAllTimers(room);
       return;
     }
 
@@ -342,41 +346,21 @@ export class LowCardGameManager {
     if (game.useBots && game.round === 1) {
       game.botAlreadyDrawInFirstRound = true;
       
+      const botTimers = [];
       Array.from(game.botPlayers.keys()).forEach(botId => {
         const drawTime = game.botDrawTimes.get(botId);
         if (drawTime) {
           const timer = setTimeout(() => {
-            if (!this.activeGames.has(room) || 
-                game.eliminated.has(botId) || 
-                game.numbers.has(botId)) {
-              return;
-            }
-            
-            // **MODIFIKASI: Round 1 -> angka normal (1-12)**
-            const botNumber = this.getBotNumberByRound(game.round);
-            const tanda = this.getRandomCardTanda();
-            
-            game.numbers.set(botId, botNumber);
-            game.tanda.set(botId, tanda);
-            
-            const botPlayer = game.players.get(botId);
-            const botName = botPlayer ? botPlayer.name : botId;
-            
-            this.chatServer.broadcastToRoom(room, [
-              "gameLowCardPlayerDraw",
-              botName,
-              botNumber,
-              tanda
-            ]);
-            
-            if (game.numbers.size === game.players.size - game.eliminated.size) {
-              this.evaluateRound(room);
-            }
+            this.handleBotDraw(room, botId);
           }, drawTime * 1000);
           
-          this.bots.get(room)?.push(timer);
+          botTimers.push(timer);
         }
       });
+      
+      if (botTimers.length > 0) {
+        this.bots.set(room, botTimers);
+      }
     }
 
     this.startDrawCountdown(room);
@@ -452,60 +436,40 @@ export class LowCardGameManager {
     if (game.numbers.size === game.players.size - game.eliminated.size) {
       this.evaluateRound(room);
     } else if (game.round === 1 && game.useBots && !game.botAlreadyDrawInFirstRound) {
-      // Jika round pertama dan bot belum draw, schedule bot draw dengan waktu random
+      // Schedule bot draw jika round pertama
       game.botAlreadyDrawInFirstRound = true;
       
-      // Schedule draw untuk 4 bot moz
+      const botTimers = [];
       Array.from(game.botPlayers.keys()).forEach(botId => {
         if (!game.eliminated.has(botId) && !game.numbers.has(botId)) {
           const drawTime = this.getRandomDrawTime();
           game.botDrawTimes.set(botId, drawTime);
           
           const timer = setTimeout(() => {
-            if (!this.activeGames.has(room) || 
-                game.eliminated.has(botId) || 
-                game.numbers.has(botId)) {
-              return;
-            }
-            
-            // **MODIFIKASI: Round 1 -> angka normal (1-12)**
-            const botNumber = this.getBotNumberByRound(game.round);
-            const tanda = this.getRandomCardTanda();
-            
-            game.numbers.set(botId, botNumber);
-            game.tanda.set(botId, tanda);
-            
-            const botPlayer = game.players.get(botId);
-            const botName = botPlayer ? botPlayer.name : botId;
-            
-            this.chatServer.broadcastToRoom(room, [
-              "gameLowCardPlayerDraw",
-              botName,
-              botNumber,
-              tanda
-            ]);
-            
-            if (game.numbers.size === game.players.size - game.eliminated.size) {
-              this.evaluateRound(room);
-            }
+            this.handleBotDraw(room, botId);
           }, drawTime * 1000);
           
-          this.bots.get(room)?.push(timer);
+          botTimers.push(timer);
         }
       });
+      
+      if (botTimers.length > 0) {
+        const existingTimers = this.bots.get(room) || [];
+        this.bots.set(room, [...existingTimers, ...botTimers]);
+      }
     }
   }
 
   evaluateRound(room) {
     const game = this.getGame(room);
     if (!game) return;
-    this.clearAllTimers(game);
-    this.clearBotTimers(room);
+    
+    this.clearAllTimers(room);
 
     const { numbers, tanda, players, eliminated, round, betAmount } = game;
     const entries = Array.from(numbers.entries());
 
-    // --- Eliminasi otomatis yang tidak submit ---
+    // Eliminasi otomatis yang tidak submit
     const submittedIds = new Set(numbers.keys());
     const activePlayers = Array.from(players.keys()).filter(id => !eliminated.has(id));
     const noSubmit = activePlayers.filter(id => !submittedIds.has(id));
@@ -514,12 +478,10 @@ export class LowCardGameManager {
     if (entries.length === 0) {
       this.chatServer.broadcastToRoom(room, ["gameLowCardError", "No numbers drawn this round"]);
       this.activeGames.delete(room);
-      this.clearBotTimers(room);
       return;
     }
 
     if (entries.length === 1 && noSubmit.length === activePlayers.length - 1) {
-      // hanya 1 orang yang draw → langsung pemenang
       const winnerId = entries[0][0];
       const winnerPlayer = players.get(winnerId);
       const winnerName = winnerPlayer ? winnerPlayer.name : winnerId;
@@ -527,7 +489,6 @@ export class LowCardGameManager {
       game.winner = winnerId;
       this.chatServer.broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
       this.activeGames.delete(room);
-      this.clearBotTimers(room);
       return;
     }
 
@@ -541,7 +502,6 @@ export class LowCardGameManager {
       losers.forEach(id => eliminated.add(id));
     }
 
-    // sisa pemain
     const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
 
     if (remaining.length === 1) {
@@ -552,11 +512,10 @@ export class LowCardGameManager {
       game.winner = winnerId;
       this.chatServer.broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
       this.activeGames.delete(room);
-      this.clearBotTimers(room);
       return;
     }
 
-    // Format numbers array dengan format: "nama:angka(tanda)"
+    // Format numbers array
     const numbersArr = entries.map(([id, n]) => {
       const player = players.get(id);
       const playerName = player ? player.name : id;
@@ -564,13 +523,11 @@ export class LowCardGameManager {
       return `${playerName}:${n}(${playerTanda})`;
     });
     
-    // Format losers dengan nama
     const loserNames = losers.concat(noSubmit).map(id => {
       const player = players.get(id);
       return player ? player.name : id;
     });
     
-    // Format remaining dengan nama
     const remainingNames = remaining.map(id => {
       const player = players.get(id);
       return player ? player.name : id;
@@ -588,7 +545,6 @@ export class LowCardGameManager {
     tanda.clear();
     game.round++;
     
-    // Reset flag bot draw untuk round pertama
     if (game.round > 1) {
       game.botAlreadyDrawInFirstRound = false;
     }
@@ -603,10 +559,7 @@ export class LowCardGameManager {
     
     const playersList = Array.from(game.players.values()).map(p => p.name || p.id);
     this.chatServer.broadcastToRoom(room, ["gameLowCardEnd", playersList]);
-    this.clearAllTimers(game);
-    this.clearBotTimers(room);
+    this.clearAllTimers(room);
     this.activeGames.delete(room);
-    this.bots.delete(room); // Pastikan hapus dari map bots juga
   }
 }
-
