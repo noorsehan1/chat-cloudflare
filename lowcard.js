@@ -1,13 +1,10 @@
 // ============================
-// LowCardGameManager (FINAL FIX - NO DOUBLE TIME)
+// LowCardGameManager (Clean Version - No Double Time)
 // ============================
 export class LowCardGameManager {
   constructor(chatServer) {
     this.chatServer = chatServer;
-    this.activeGames = new Map();
-    this.bots = new Map();
-    this.countdownIntervals = new Map();
-    this.gameStats = new Map();
+    this.activeGames = new Map(); // key: room, value: game state
   }
 
   handleEvent(ws, data) {
@@ -28,19 +25,13 @@ export class LowCardGameManager {
     }
   }
 
-  clearAllTimers(room) {
-    // Clear countdown interval
-    const intervalId = this.countdownIntervals.get(room);
-    if (intervalId) {
-      clearInterval(intervalId);
-      this.countdownIntervals.delete(room);
-    }
-    
-    // Clear bot timers
-    const botTimers = this.bots.get(room);
-    if (botTimers) {
-      botTimers.forEach(timer => clearTimeout(timer));
-      this.bots.delete(room);
+  clearAllTimers(game) {
+    if (game?.countdownTimers) {
+      game.countdownTimers.forEach(timer => {
+        if (timer.interval) clearInterval(timer.interval);
+        if (timer.timeout) clearTimeout(timer.timeout);
+      });
+      game.countdownTimers = [];
     }
   }
 
@@ -103,27 +94,17 @@ export class LowCardGameManager {
       eliminated: new Set(),
       winner: null,
       betAmount,
+      countdownTimers: [],
       registrationTime: 40,
       drawTime: 30,
       hostId: ws.idtarget,
       hostName: ws.username || ws.idtarget,
-      useBots: false,
-      botDrawTimes: new Map(),
-      botAlreadyDrawInFirstRound: false,
-      countdownEndTime: null,
-      countdownType: null
+      useBots: false
     };
 
     game.players.set(ws.idtarget, { 
       id: ws.idtarget, 
       name: ws.username || ws.idtarget 
-    });
-
-    this.gameStats.set(room, {
-      startTime: Date.now(),
-      totalPlayers: 0,
-      roundsPlayed: 0,
-      totalBets: 0
     });
 
     this.activeGames.set(room, game);
@@ -146,28 +127,18 @@ export class LowCardGameManager {
     const game = this.getGame(room);
     if (!game) return;
     
-    // CLEAR SEMUA TIMER SEBELUM MEMULAI
-    this.clearAllTimers(room);
-    
-    game.countdownType = 'registration';
-    game.countdownEndTime = Date.now() + (game.registrationTime * 1000);
+    this.clearAllTimers(game);
 
-    let lastBroadcastSecond = -1;
-    const notifySeconds = [30, 20, 10, 0];
+    let timeLeft = game.registrationTime;
+    const timesToNotify = [30, 20, 10, 0];
 
-    const intervalId = setInterval(() => {
-      const game = this.getGame(room);
-      if (!game) {
-        clearInterval(intervalId);
-        this.countdownIntervals.delete(room);
+    const interval = setInterval(() => {
+      if (!this.activeGames.has(room)) {
+        clearInterval(interval);
         return;
       }
 
-      const timeLeft = Math.max(0, Math.ceil((game.countdownEndTime - Date.now()) / 1000));
-      
-      if (notifySeconds.includes(timeLeft) && timeLeft !== lastBroadcastSecond) {
-        lastBroadcastSecond = timeLeft;
-        
+      if (timesToNotify.includes(timeLeft)) {
         if (timeLeft === 0) {
           this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
           
@@ -176,19 +147,17 @@ export class LowCardGameManager {
           }
           
           this.closeRegistration(room);
+          clearInterval(interval);
         } else {
           this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
         }
       }
-      
-      // AUTO CLEAR KETIKA TIME EXPIRED
-      if (timeLeft <= 0) {
-        clearInterval(intervalId);
-        this.countdownIntervals.delete(room);
-      }
-    }, 500);
 
-    this.countdownIntervals.set(room, intervalId);
+      timeLeft--;
+      if (timeLeft < 0) clearInterval(interval);
+    }, 1000);
+
+    game.countdownTimers.push({ interval });
   }
 
   addFourMozBots(room) {
@@ -208,7 +177,6 @@ export class LowCardGameManager {
         name: botName 
       });
       game.botPlayers.set(botId, botName);
-      game.botDrawTimes.set(botId, this.getRandomDrawTime());
       
       this.chatServer.broadcastToRoom(room, [
         "gameLowCardJoin",
@@ -222,66 +190,48 @@ export class LowCardGameManager {
     const game = this.getGame(room);
     if (!game) return;
     
-    // CLEAR SEMUA TIMER SEBELUM MEMULAI COUNTDOWN BARU
-    this.clearAllTimers(room);
-    
-    game.countdownType = 'draw';
-    game.countdownEndTime = Date.now() + (game.drawTime * 1000);
+    this.clearAllTimers(game);
 
-    // Schedule bot timers
+    let timeLeft = game.drawTime;
+    const timesToNotify = [20, 10, 5, 0];
+
+    const interval = setInterval(() => {
+      if (!this.activeGames.has(room)) {
+        clearInterval(interval);
+        return;
+      }
+
+      if (timesToNotify.includes(timeLeft)) {
+        if (timeLeft === 0) {
+          this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
+          this.evaluateRound(room);
+          clearInterval(interval);
+        } else {
+          this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
+        }
+      }
+
+      timeLeft--;
+      if (timeLeft < 0) clearInterval(interval);
+    }, 1000);
+
+    game.countdownTimers.push({ interval });
+
+    // Schedule bot draws
     if (game.useBots) {
-      const botTimers = [];
       const activeBots = Array.from(game.botPlayers.keys())
         .filter(botId => !game.eliminated.has(botId) && !game.numbers.has(botId));
       
       activeBots.forEach(botId => {
         const drawTime = this.getRandomDrawTime();
-        game.botDrawTimes.set(botId, drawTime);
         
-        const timer = setTimeout(() => {
+        const timeout = setTimeout(() => {
           this.handleBotDraw(room, botId);
         }, drawTime * 1000);
         
-        botTimers.push(timer);
+        game.countdownTimers.push({ timeout });
       });
-      
-      if (botTimers.length > 0) {
-        this.bots.set(room, botTimers);
-      }
     }
-
-    let lastBroadcastSecond = -1;
-    const notifySeconds = [20, 10, 5, 0];
-
-    const intervalId = setInterval(() => {
-      const game = this.getGame(room);
-      if (!game) {
-        clearInterval(intervalId);
-        this.countdownIntervals.delete(room);
-        return;
-      }
-
-      const timeLeft = Math.max(0, Math.ceil((game.countdownEndTime - Date.now()) / 1000));
-      
-      if (notifySeconds.includes(timeLeft) && timeLeft !== lastBroadcastSecond) {
-        lastBroadcastSecond = timeLeft;
-        
-        if (timeLeft === 0) {
-          this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
-          this.evaluateRound(room);
-        } else {
-          this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
-        }
-      }
-      
-      // AUTO CLEAR KETIKA TIME EXPIRED
-      if (timeLeft <= 0) {
-        clearInterval(intervalId);
-        this.countdownIntervals.delete(room);
-      }
-    }, 500);
-
-    this.countdownIntervals.set(room, intervalId);
   }
 
   handleBotDraw(room, botId) {
@@ -311,36 +261,6 @@ export class LowCardGameManager {
     }
   }
 
-  closeRegistration(room) {
-    const game = this.getGame(room);
-    if (!game) return;
-
-    const playerCount = game.players.size;
-    
-    if (playerCount < 2) {
-      const hostSocket = Array.from(this.chatServer.clients)
-        .find(ws => ws.idtarget === game.hostId);
-      if (hostSocket) {
-        this.chatServer.safeSend(hostSocket, ["gameLowCardNoJoin", game.hostName, game.betAmount]);
-      }
-
-      this.chatServer.broadcastToRoom(room, ["gameLowCardError", "Need at least 2 players", game.hostId]);
-      this.activeGames.delete(room);
-      this.clearAllTimers(room);
-      return;
-    }
-
-    game.registrationOpen = false;
-
-    const playersList = Array.from(game.players.values()).map(p => p.name || p.id);
-
-    this.chatServer.broadcastToRoom(room, ["gameLowCardClosed", playersList]);
-    this.chatServer.broadcastToRoom(room, ["gameLowCardPlayersInGame", playersList, game.betAmount]);
-    this.chatServer.broadcastToRoom(room, ["gameLowCardNextRound", 1]);
-
-    this.startDrawCountdown(room);
-  }
-
   joinGame(ws) {
     const room = ws.roomname;
     const game = this.getGame(room);
@@ -363,6 +283,35 @@ export class LowCardGameManager {
       ws.username || ws.idtarget,
       game.betAmount
     ]);
+  }
+
+  closeRegistration(room) {
+    const game = this.getGame(room);
+    if (!game) return;
+
+    const playerCount = game.players.size;
+    
+    if (playerCount < 2) {
+      const hostSocket = Array.from(this.chatServer.clients)
+        .find(ws => ws.idtarget === game.hostId);
+      if (hostSocket) {
+        this.chatServer.safeSend(hostSocket, ["gameLowCardNoJoin", game.hostName, game.betAmount]);
+      }
+
+      this.chatServer.broadcastToRoom(room, ["gameLowCardError", "Need at least 2 players", game.hostId]);
+      this.activeGames.delete(room);
+      return;
+    }
+
+    game.registrationOpen = false;
+
+    const playersList = Array.from(game.players.values()).map(p => p.name || p.id);
+
+    this.chatServer.broadcastToRoom(room, ["gameLowCardClosed", playersList]);
+    this.chatServer.broadcastToRoom(room, ["gameLowCardPlayersInGame", playersList, game.betAmount]);
+    this.chatServer.broadcastToRoom(room, ["gameLowCardNextRound", 1]);
+
+    this.startDrawCountdown(room);
   }
 
   submitNumber(ws, number, tanda = "") {
@@ -416,9 +365,8 @@ export class LowCardGameManager {
     const game = this.getGame(room);
     if (!game) return;
     
-    // TIDAK PERLU CLEAR TIMER DI SINI
-    // Timer sudah di-clear otomatis ketika timeLeft === 0
-    
+    this.clearAllTimers(game);
+
     const { numbers, tanda, players, eliminated, round, betAmount } = game;
     const entries = Array.from(numbers.entries());
 
@@ -430,7 +378,6 @@ export class LowCardGameManager {
     if (entries.length === 0) {
       this.chatServer.broadcastToRoom(room, ["gameLowCardError", "No numbers drawn this round"]);
       this.activeGames.delete(room);
-      this.clearAllTimers(room);
       return;
     }
 
@@ -442,7 +389,6 @@ export class LowCardGameManager {
       game.winner = winnerId;
       this.chatServer.broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
       this.activeGames.delete(room);
-      this.clearAllTimers(room);
       return;
     }
 
@@ -466,7 +412,6 @@ export class LowCardGameManager {
       game.winner = winnerId;
       this.chatServer.broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
       this.activeGames.delete(room);
-      this.clearAllTimers(room);
       return;
     }
 
@@ -498,7 +443,6 @@ export class LowCardGameManager {
     numbers.clear();
     tanda.clear();
     game.round++;
-    game.botAlreadyDrawInFirstRound = false;
     
     this.chatServer.broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
     this.startDrawCountdown(room);
@@ -510,22 +454,7 @@ export class LowCardGameManager {
     
     const playersList = Array.from(game.players.values()).map(p => p.name || p.id);
     this.chatServer.broadcastToRoom(room, ["gameLowCardEnd", playersList]);
-    this.clearAllTimers(room);
+    this.clearAllTimers(game);
     this.activeGames.delete(room);
-    this.gameStats.delete(room);
-  }
-
-  getGameStats(room) {
-    return this.gameStats.get(room);
-  }
-
-  cleanupAllGames() {
-    for (const room of this.activeGames.keys()) {
-      this.clearAllTimers(room);
-    }
-    this.activeGames.clear();
-    this.bots.clear();
-    this.countdownIntervals.clear();
-    this.gameStats.clear();
   }
 }
