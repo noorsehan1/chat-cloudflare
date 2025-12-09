@@ -160,7 +160,7 @@ export class LowCardGameManager {
     game.countdownEndTime = Date.now() + (game.registrationTime * 1000);
 
     let lastBroadcastSecond = -1;
-    const notifySeconds = [30, 20, 10, 5, 4, 3, 2, 1, 0];
+    const notifySeconds = [30, 20, 10, 0]; // Only these seconds
 
     const intervalId = setInterval(() => {
       const game = this.getGame(room);
@@ -197,7 +197,7 @@ export class LowCardGameManager {
         clearInterval(intervalId);
         this.countdownIntervals.delete(room);
       }
-    }, 100); // Reduced to 100ms for more accurate timing
+    }, 500);
 
     this.countdownIntervals.set(room, intervalId);
   }
@@ -233,19 +233,15 @@ export class LowCardGameManager {
     const game = this.getGame(room);
     if (!game) return;
     
-    // Only clear bot timers, not the interval (it's already cleared in evaluateRound)
-    const botTimers = this.bots.get(room);
-    if (botTimers) {
-      botTimers.forEach(timer => clearTimeout(timer));
-      this.bots.delete(room);
-    }
+    // Clear existing timers
+    this.clearAllTimers(room);
     
     game.countdownType = 'draw';
     game.countdownEndTime = Date.now() + (game.drawTime * 1000);
 
     // Schedule bot timers
     if (game.useBots) {
-      const newBotTimers = [];
+      const botTimers = [];
       const activeBots = Array.from(game.botPlayers.keys())
         .filter(botId => !game.eliminated.has(botId) && !game.numbers.has(botId));
       
@@ -257,16 +253,16 @@ export class LowCardGameManager {
           this.handleBotDraw(room, botId);
         }, drawTime * 1000);
         
-        newBotTimers.push(timer);
+        botTimers.push(timer);
       });
       
-      if (newBotTimers.length > 0) {
-        this.bots.set(room, newBotTimers);
+      if (botTimers.length > 0) {
+        this.bots.set(room, botTimers);
       }
     }
 
     let lastBroadcastSecond = -1;
-    const notifySeconds = [20, 10, 5, 4, 3, 2, 1, 0];
+    const notifySeconds = [20, 10, 5, 0]; // Only these seconds
 
     const intervalId = setInterval(() => {
       const game = this.getGame(room);
@@ -295,7 +291,7 @@ export class LowCardGameManager {
         clearInterval(intervalId);
         this.countdownIntervals.delete(room);
       }
-    }, 100); // Reduced to 100ms for more accurate timing
+    }, 500);
 
     this.countdownIntervals.set(room, intervalId);
   }
@@ -434,7 +430,7 @@ export class LowCardGameManager {
     const game = this.getGame(room);
     if (!game) return;
     
-    // Only clear the interval, not all timers
+    // Clear interval only (bot timers will be cleared in startDrawCountdown)
     const intervalId = this.countdownIntervals.get(room);
     if (intervalId) {
       clearInterval(intervalId);
