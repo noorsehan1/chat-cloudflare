@@ -1206,7 +1206,7 @@ export class ChatServer {
               this.sendAllStateTo(ws, room);
               this.updateRoomCount(room);
               
-              this.safeSend(ws, ["rooMasuk", seat, room]);
+              //this.safeSend(ws, ["rooMasuk", seat, room]);
               this.safeSend(ws, ["currentNumber", this.currentNumber]);
               
               if (this.vipManager) {
@@ -2036,3 +2036,4 @@ export default {
     }
   }
 };
+
