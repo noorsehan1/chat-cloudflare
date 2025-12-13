@@ -69,60 +69,67 @@ export class LowCardGameManager {
   }
 
   startGame(ws, bet) {
-    const room = ws.roomname;
-    if (!room) return;
-    
-    if (this.activeGames.has(room)) {
-      this.chatServer.safeSend(ws, ["gameLowCardError", "Game already running in this room"]);
-      return;
-    }
-
-    const betAmount = parseInt(bet, 10) || 0;
-    if (betAmount <= 0) {
-      this.chatServer.safeSend(ws, ["gameLowCardError", "Invalid bet amount"]);
-      return;
-    }
-
-    const game = {
-      room,
-      players: new Map(),
-      botPlayers: new Map(),
-      registrationOpen: true,
-      round: 1,
-      numbers: new Map(),
-      tanda: new Map(),
-      eliminated: new Set(),
-      winner: null,
-      betAmount,
-      countdownTimers: [],
-      registrationTime: 40,
-      drawTime: 30,
-      hostId: ws.idtarget,
-      hostName: ws.username || ws.idtarget,
-      useBots: false
-    };
-
-    game.players.set(ws.idtarget, { 
-      id: ws.idtarget, 
-      name: ws.username || ws.idtarget 
-    });
-
-    this.activeGames.set(room, game);
-
-    this.chatServer.broadcastToRoom(room, [
-      "gameLowCardStart",
-      game.betAmount
-    ]);
-
-    this.chatServer.safeSend(ws, [
-      "gameLowCardStartSuccess",
-      game.hostName,
-      game.betAmount
-    ]);
-
-    this.startRegistrationCountdown(room);
+  const room = ws.roomname;
+  if (!room) return;
+  
+  if (this.activeGames.has(room)) {
+    this.chatServer.safeSend(ws, ["gameLowCardError", "Game already running in this room"]);
+    return;
   }
 
+  const betAmount = parseInt(bet, 10) || 0;
+  
+  // MODIFIED: Allow bet 0 OR bet >= 100
+  if (betAmount < 0) {
+    this.chatServer.safeSend(ws, ["gameLowCardError", "Invalid bet amount"]);
+    return;
+  }
+  
+  // MODIFIED: Check if bet is valid (0 or >= 100)
+  if (betAmount !== 0 && betAmount < 100) {
+    this.chatServer.safeSend(ws, ["gameLowCardError", "Bet must be 0 or at least 100"]);
+    return;
+  }
+
+  const game = {
+    room,
+    players: new Map(),
+    botPlayers: new Map(),
+    registrationOpen: true,
+    round: 1,
+    numbers: new Map(),
+    tanda: new Map(),
+    eliminated: new Set(),
+    winner: null,
+    betAmount,
+    countdownTimers: [],
+    registrationTime: 40,
+    drawTime: 30,
+    hostId: ws.idtarget,
+    hostName: ws.username || ws.idtarget,
+    useBots: false
+  };
+
+  game.players.set(ws.idtarget, { 
+    id: ws.idtarget, 
+    name: ws.username || ws.idtarget 
+  });
+
+  this.activeGames.set(room, game);
+
+  this.chatServer.broadcastToRoom(room, [
+    "gameLowCardStart",
+    game.betAmount
+  ]);
+
+  this.chatServer.safeSend(ws, [
+    "gameLowCardStartSuccess",
+    game.hostName,
+    game.betAmount
+  ]);
+
+  this.startRegistrationCountdown(room);
+}
   startRegistrationCountdown(room) {
     const game = this.getGame(room);
     if (!game) return;
@@ -458,3 +465,4 @@ export class LowCardGameManager {
     this.activeGames.delete(room);
   }
 }
+
