@@ -1714,7 +1714,7 @@ export class ChatServer {
           case "gameLowCardJoin":
           case "gameLowCardNumber":
           case "gameLowCardEnd":
-            if (ws.roomname === "LowCard" || ws.roomname === "HINDI") {
+            if (ws.roomname === "LowCard 1" || ws.roomname === "LowCard 2") {
               if (this.lowcard) {
                 await this.lowcard.handleEvent(ws, data);
               } else {
@@ -1846,4 +1846,5 @@ export default {
     }
   }
 };
+
 
