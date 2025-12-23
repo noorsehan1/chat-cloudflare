@@ -8,7 +8,12 @@ export class VipBadgeManager {
     const evt = data[0];
     switch (evt) {
       case "vipbadge":
-        this.sendVipBadge(ws, data[1], data[2], data[3], data[4]);
+        // Support both old (5 params) and new (6 params) versions
+        if (data.length === 6) {
+          this.sendVipBadge(ws, data[1], data[2], data[3], data[4], data[5]);
+        } else {
+          this.sendVipBadge(ws, data[1], data[2], data[3], data[4], null);
+        }
         break;
       case "removeVipBadge":
         this.removeVipBadge(ws, data[1], data[2]);
@@ -19,7 +24,7 @@ export class VipBadgeManager {
     }
   }
 
-  sendVipBadge(ws, room, seat, numbadge, colortext) {
+  sendVipBadge(ws, room, seat, numbadge, colortext, bingkai = null) {
     try {
       if (!room || seat < 1 || seat > 35) return false;
 
@@ -56,6 +61,7 @@ export class VipBadgeManager {
       this.vipBadges.get(room).set(seat, {
         badgeCount: badgeString,
         color: colortext,
+        bingkai: bingkai || null, // Store bingkai parameter
         updateAt: Date.now()
       });
 
@@ -65,6 +71,7 @@ export class VipBadgeManager {
         seat,
         badgeString,
         colortext,
+        bingkai || null, // Include bingkai in broadcast
         Date.now()
       ];
 
@@ -116,6 +123,7 @@ export class VipBadgeManager {
             seat,
             badgeCount: vipData.badgeCount,
             color: vipData.color,
+            bingkai: vipData.bingkai || null, // Include bingkai in response
             updateAt: vipData.updateAt
           });
         }
@@ -193,6 +201,38 @@ export class VipBadgeManager {
       return cleanedCount;
     } catch (error) {
       return 0;
+    }
+  }
+
+  // New method to update bingkai only
+  updateBingkai(ws, room, seat, bingkai) {
+    try {
+      if (!room || seat < 1 || seat > 35) return false;
+
+      const roomData = this.vipBadges.get(room);
+      if (!roomData) return false;
+
+      const vipData = roomData.get(seat);
+      if (!vipData) return false;
+
+      // Update bingkai
+      vipData.bingkai = bingkai || null;
+      vipData.updateAt = Date.now();
+
+      // Broadcast update
+      const updateMessage = [
+        "updateBingkai",
+        room,
+        seat,
+        bingkai || null,
+        Date.now()
+      ];
+
+      this.chatServer.broadcastToRoom(room, updateMessage);
+
+      return true;
+    } catch (error) {
+      return false;
     }
   }
 }
