@@ -2,7 +2,7 @@ import { LowCardGameManager } from "./lowcard.js";
 import { VipBadgeManager } from "./vipbadge.js";
 
 const roomList = [
-  "LowCard 1", "LowCard 2", "General","Philippines","HINDI", "Indonesia", "MEPHISTOPHELES", "Chhichhore", "Chill Zone", "Catch Up", "Casual Vibes", "Lounge Talk",
+  "LowCard 1", "LowCard 2", "General", "Philippines", "HINDI", "Indonesia", "Birthday Party", "Heart Lovers","MEPHISTOPHELES", "Chhichhore", "Chill Zone", "Lounge Talk",
   "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
 ];
 
@@ -1846,6 +1846,7 @@ export default {
     }
   }
 };
+
 
 
 
