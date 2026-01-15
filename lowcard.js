@@ -103,7 +103,7 @@ export class LowCardGameManager {
     winner: null,
     betAmount,
     countdownTimers: [],
-    registrationTime: 20,
+    registrationTime: 25,
     drawTime: 30,
     hostId: ws.idtarget,
     hostName: ws.username || ws.idtarget,
@@ -465,5 +465,6 @@ export class LowCardGameManager {
     this.activeGames.delete(room);
   }
 }
+
 
 
