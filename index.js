@@ -782,7 +782,7 @@ export class ChatServer {
     }
   }
 
-  async handleJoinRoom(ws, room) {
+ async handleJoinRoom(ws, room) {
     if (!ws || !ws.idtarget) {
       this.safeSend(ws, ["error", "User ID not set"]);
       return false;
@@ -832,19 +832,16 @@ export class ChatServer {
           userConnections.add(ws);
         });
         
-        this.sendAllStateTo(ws, room);
-        this.updateRoomCount(room);
-        
+        // Kirim rooMasuk dan currentNumber TANPA delay
         this.safeSend(ws, ["rooMasuk", seat, room]);
         this.safeSend(ws, ["currentNumber", this.currentNumber]);
         
-        if (this.vipManager) {
-          try {
-            await this.vipManager.getAllVipBadges(ws, room);
-          } catch {
-            // Ignore VIP errors
-          }
-        }
+        
+        
+        // HANYA bagian ini yang dapat delay 600ms
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        this.sendAllStateTo(ws, room);
+        this.updateRoomCount(room);
         
         return true;
       });
@@ -1846,6 +1843,7 @@ export default {
     }
   }
 };
+
 
 
 
