@@ -103,7 +103,7 @@ export class LowCardGameManager {
     winner: null,
     betAmount,
     countdownTimers: [],
-    registrationTime: 40,
+    registrationTime: 20,
     drawTime: 30,
     hostId: ws.idtarget,
     hostName: ws.username || ws.idtarget,
@@ -137,7 +137,7 @@ export class LowCardGameManager {
     this.clearAllTimers(game);
 
     let timeLeft = game.registrationTime;
-    const timesToNotify = [30, 20, 10, 0];
+    const timesToNotify = [ 20, 10, 5, 0];
 
     const interval = setInterval(() => {
       if (!this.activeGames.has(room)) {
@@ -465,4 +465,5 @@ export class LowCardGameManager {
     this.activeGames.delete(room);
   }
 }
+
 
