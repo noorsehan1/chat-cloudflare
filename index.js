@@ -714,6 +714,37 @@ export class ChatServer {
     }
   }
 
+  async savePointWithRetry(room, seat, x, y, fast) {
+    try {
+      await this.updateSeatAtomic(room, seat, (currentSeat) => {
+        currentSeat.lastPoint = { 
+          x: x || 0, 
+          y: y || 0, 
+          fast: fast || false,
+          timestamp: Date.now()
+        };
+        return currentSeat;
+      });
+      return true;
+    } catch (error) {
+      // Retry sekali
+      try {
+        await this.updateSeatAtomic(room, seat, (currentSeat) => {
+          currentSeat.lastPoint = { 
+            x: x || 0, 
+            y: y || 0, 
+            fast: fast || false,
+            timestamp: Date.now()
+          };
+          return currentSeat;
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
+
   async findEmptySeat(room, ws) {
     if (!room || !ws || !ws.idtarget) return null;
     
@@ -782,7 +813,7 @@ export class ChatServer {
     }
   }
 
- async handleJoinRoom(ws, room) {
+  async handleJoinRoom(ws, room) {
     if (!ws || !ws.idtarget) {
       this.safeSend(ws, ["error", "User ID not set"]);
       return false;
@@ -832,14 +863,12 @@ export class ChatServer {
           userConnections.add(ws);
         });
         
-        // Kirim rooMasuk dan currentNumber TANPA delay
+        // Kirim rooMasuk tanpa delay
         this.safeSend(ws, ["rooMasuk", seat, room]);
-        this.safeSend(ws, ["currentNumber", this.currentNumber]);
         
-        
-        
-        // HANYA bagian ini yang dapat delay 600ms
+        // Delay kecil untuk memastikan client siap
         await new Promise(resolve => setTimeout(resolve, 1000));
+        
         this.sendAllStateTo(ws, room);
         this.updateRoomCount(room);
         
@@ -992,9 +1021,9 @@ export class ChatServer {
         if (info.lastPoint) {
           lastPointsData.push({
             seat: seat,
-            x: info.lastPoint.x,
-            y: info.lastPoint.y,
-            fast: info.lastPoint.fast
+            x: info.lastPoint.x || 0,
+            y: info.lastPoint.y || 0,
+            fast: info.lastPoint.fast || false
           });
         }
       }
@@ -1004,8 +1033,9 @@ export class ChatServer {
       }
 
       if (lastPointsData.length > 0) {
-        for (let i = 0; i < lastPointsData.length; i += 10) {
-          const batch = lastPointsData.slice(i, i + 10);
+        // Kirim dalam batch lebih kecil untuk reliability
+        for (let i = 0; i < lastPointsData.length; i += 5) {
+          const batch = lastPointsData.slice(i, i + 5);
           this.safeSend(ws, ["allPointsList", room, batch]);
         }
       }
@@ -1013,6 +1043,9 @@ export class ChatServer {
       const counts = this.getJumlahRoom();
       const count = counts[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
+      
+      // Kirim currentNumber juga
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
     } catch {
       // Ignore state sending errors
     }
@@ -1068,10 +1101,19 @@ export class ChatServer {
               }
               userConnections.add(ws);
               
+              // Kirim semua state termasuk point
               this.sendAllStateTo(ws, room);
-              this.updateRoomCount(room);
               
-              this.safeSend(ws, ["currentNumber", this.currentNumber]);
+              // Kirim point dari kursi ini secara khusus
+              if (seatData.lastPoint) {
+                this.safeSend(ws, ["pointUpdated", room, seat, 
+                  seatData.lastPoint.x, 
+                  seatData.lastPoint.y, 
+                  seatData.lastPoint.fast
+                ]);
+              }
+              
+              this.updateRoomCount(room);
               
               if (this.vipManager) {
                 try {
@@ -1623,12 +1665,14 @@ export class ChatServer {
             
             if (ws.roomname !== room || !roomList.includes(room)) return;
             
-            await this.updateSeatAtomic(room, seat, (currentSeat) => {
-              currentSeat.lastPoint = { x, y, fast, timestamp: Date.now() };
-              return currentSeat;
-            });
+            // Simpan dengan retry
+            await this.savePointWithRetry(room, seat, x, y, fast);
             
+            // Broadcast ke semua di room termasuk diri sendiri
             this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
+            
+            // Pastikan juga dikirim ke client pengirim
+            this.safeSend(ws, ["pointUpdated", room, seat, x, y, fast]);
             break;
           }
 
@@ -1843,10 +1887,3 @@ export default {
     }
   }
 };
-
-
-
-
-
-
-
