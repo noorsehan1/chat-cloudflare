@@ -368,7 +368,7 @@ export class ChatServer {
         } catch {
           // Ignore flush errors
         }
-      }, 100);
+      }, 50);
 
       this._consistencyTimer = setInterval(() => {
         try {
@@ -1887,3 +1887,4 @@ export default {
     }
   }
 };
+
