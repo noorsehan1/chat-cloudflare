@@ -83,7 +83,7 @@ class DebouncedCleanupManager {
 class LockManager {
   constructor() {
     this.locks = new Map();
-    this.lockTimeout = 3000;
+    this.lockTimeout = 1000; // ✅ Kurangi dari 3000 ke 1000ms
   }
 
   async acquire(resourceId) {
@@ -94,14 +94,14 @@ class LockManager {
       return () => this.release(resourceId);
     }
     
-    let waitTime = 10;
+    let waitTime = 5; // ✅ Kurangi dari 10 ke 5ms
     while (this.locks.has(resourceId)) {
       if (Date.now() - startTime > this.lockTimeout) {
         this.locks.delete(resourceId);
         throw new Error(`Timeout waiting for lock on ${resourceId}`);
       }
       await new Promise(resolve => setTimeout(resolve, waitTime));
-      waitTime = Math.min(waitTime * 1.5, 50);
+      waitTime = Math.min(waitTime * 1.5, 20); // ✅ Kurangi max dari 50 ke 20ms
     }
     
     this.locks.set(resourceId, true);
@@ -147,7 +147,7 @@ export class ChatServer {
       this.roomSeats = new Map();
       this.seatOccupancy = new Map();
       this.updateKursiBuffer = new Map();
-      this.bufferSizeLimit = 100;
+      this.bufferSizeLimit = 50; // ✅ Kurangi dari 100 ke 50
       this.userConnections = new Map();
 
       try {
@@ -162,10 +162,10 @@ export class ChatServer {
         this.vipManager = null;
       }
 
-      this.gracePeriod = 5000;
+      this.gracePeriod = 3000; // ✅ Kurangi dari 5000 ke 3000ms
       this.disconnectedTimers = new Map();
-      this.debouncedCleanup = new DebouncedCleanupManager(this, 2000);
-      this.cleanupQueue = new QueueManager(3);
+      this.debouncedCleanup = new DebouncedCleanupManager(this, 1500); // ✅ Kurangi dari 2000 ke 1500ms
+      this.cleanupQueue = new QueueManager(5); // ✅ Naikkan concurrency dari 3 ke 5
       this.currentNumber = 1;
       this.maxNumber = 6;
       this.intervalMillis = 15 * 60 * 1000;
@@ -180,7 +180,7 @@ export class ChatServer {
 
       this.startTimers();
       this.roomCountsCache = new Map();
-      this.cacheValidDuration = 5000;
+      this.cacheValidDuration = 2000; // ✅ Kurangi dari 5000 ke 2000ms
       this.lastCacheUpdate = 0;
 
     } catch (error) {
@@ -201,9 +201,9 @@ export class ChatServer {
       this._timers = [];
       this.lowcard = null;
       this.vipManager = null;
-      this.gracePeriod = 5000;
-      this.debouncedCleanup = new DebouncedCleanupManager(this);
-      this.cleanupQueue = new QueueManager(3);
+      this.gracePeriod = 3000;
+      this.debouncedCleanup = new DebouncedCleanupManager(this, 1500);
+      this.cleanupQueue = new QueueManager(5);
       this.createDefaultRoom();
     }
   }
@@ -274,13 +274,6 @@ export class ChatServer {
         if (conn && conn.readyState === 1 && !conn._isDuplicate) {
           return true;
         }
-      }
-    }
-    
-    for (const client of this.clients) {
-      if (client && client.idtarget === userId && 
-          client.readyState === 1 && !client._isDuplicate) {
-        return true;
       }
     }
     
@@ -368,7 +361,7 @@ export class ChatServer {
         } catch {
           // Ignore flush errors
         }
-      }, 50);
+      }, 100); // ✅ Naikkan dari 50 ke 100ms untuk kurangi CPU load
 
       this._consistencyTimer = setInterval(() => {
         try {
@@ -378,7 +371,7 @@ export class ChatServer {
         } catch {
           // Ignore consistency errors
         }
-      }, 60000);
+      }, 120000); // ✅ Naikkan dari 60000 ke 120000ms (2 menit)
 
       this._connectionCleanupTimer = setInterval(() => {
         try {
@@ -388,7 +381,7 @@ export class ChatServer {
         } catch {
           // Ignore cleanup errors
         }
-      }, 15000);
+      }, 30000); // ✅ Naikkan dari 15000 ke 30000ms
 
       this._timers = [this._tickTimer, this._flushTimer, this._consistencyTimer, this._connectionCleanupTimer];
       
@@ -506,7 +499,7 @@ export class ChatServer {
     }
   }
 
-  async withLock(resourceId, operation, timeout = 3000) {
+  async withLock(resourceId, operation, timeout = 1000) { // ✅ Kurangi timeout dari 3000 ke 1000ms
     const release = await this.lockManager.acquire(resourceId);
     try {
       const startTime = Date.now();
@@ -866,8 +859,8 @@ export class ChatServer {
         // Kirim rooMasuk tanpa delay
         this.safeSend(ws, ["rooMasuk", seat, room]);
         
-        // Delay kecil untuk memastikan client siap
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // ✅ KURANGI DELAY dari 1000ms ke 10ms
+        await new Promise(resolve => setTimeout(resolve, 10));
         
         this.sendAllStateTo(ws, room);
         this.updateRoomCount(room);
@@ -921,7 +914,7 @@ export class ChatServer {
     try {
       if (!ws || ws.readyState !== 1 || ws._isDuplicate) return false;
       
-      if (ws.bufferedAmount > 1000000) {
+      if (ws.bufferedAmount > 500000) { // ✅ Kurangi dari 1000000 ke 500000
         return false;
       }
       
@@ -1034,8 +1027,8 @@ export class ChatServer {
 
       if (lastPointsData.length > 0) {
         // Kirim dalam batch lebih kecil untuk reliability
-        for (let i = 0; i < lastPointsData.length; i += 5) {
-          const batch = lastPointsData.slice(i, i + 5);
+        for (let i = 0; i < lastPointsData.length; i += 10) { // ✅ Naikkan dari 5 ke 10
+          const batch = lastPointsData.slice(i, i + 10);
           this.safeSend(ws, ["allPointsList", room, batch]);
         }
       }
@@ -1162,7 +1155,7 @@ export class ChatServer {
         }
       }
       
-      const batchSize = 5;
+      const batchSize = 10; // ✅ Naikkan dari 5 ke 10
       for (let i = 0; i < duplicateUsers.length; i += batchSize) {
         const batch = duplicateUsers.slice(i, i + batchSize);
         await Promise.allSettled(
@@ -1822,34 +1815,34 @@ export class ChatServer {
           this.scheduleCleanup(ws.idtarget);
         }
         
-        setTimeout(() => {
-          try {
-            if (ws.idtarget) {
-              const userConnections = this.userConnections.get(ws.idtarget);
-              if (userConnections) {
-                userConnections.delete(ws);
-                if (userConnections.size === 0) {
-                  this.userConnections.delete(ws.idtarget);
-                }
+        // ✅ HAPUS setTimeout, langsung cleanup
+        try {
+          if (ws.idtarget) {
+            const userConnections = this.userConnections.get(ws.idtarget);
+            if (userConnections) {
+              userConnections.delete(ws);
+              if (userConnections.size === 0) {
+                this.userConnections.delete(ws.idtarget);
               }
             }
-            
-            if (this.roomClients) {
-              for (const [room, clientArray] of this.roomClients) {
-                if (clientArray) {
-                  const index = clientArray.indexOf(ws);
-                  if (index > -1) {
-                    clientArray.splice(index, 1);
-                  }
-                }
-              }
-            }
-            
-            this.clients.delete(ws);
-          } catch {
-            // Ignore cleanup errors
           }
-        }, 0);
+          
+          if (this.roomClients) {
+            for (const [room, clientArray] of this.roomClients) {
+              if (clientArray) {
+                const index = clientArray.indexOf(ws);
+                if (index > -1) {
+                  clientArray.splice(index, 1);
+                }
+              }
+            }
+          }
+          
+          this.clients.delete(ws);
+        } catch {
+          // Fallback cleanup
+          this.clients.delete(ws);
+        }
       });
 
       return new Response(null, { status: 101, webSocket: client });
@@ -1887,4 +1880,3 @@ export default {
     }
   }
 };
-
