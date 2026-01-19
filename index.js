@@ -455,7 +455,7 @@ export class ChatServer {
         } catch {
           // Ignore flush errors
         }
-      }, 50); // Increased responsiveness
+      }, 50);
 
       this._consistencyTimer = setInterval(() => {
         try {
@@ -958,7 +958,8 @@ export class ChatServer {
         // Send rooMasuk immediately
         this.safeSend(ws, ["rooMasuk", seat, room]);
         
-       await new Promise(resolve => setTimeout(resolve, 1000));
+        // NO DELAY - send state immediately
+        await new Promise(resolve => setTimeout(resolve, 1000));
         
         this.sendAllStateTo(ws, room);
         this.updateRoomCount(room);
@@ -1092,40 +1093,43 @@ export class ChatServer {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) return;
 
-      // Send kursi data in single batch
-      const kursiBatch = [];
-      const pointsBatch = [];
+      // Send kursi data in the OLD format (backward compatible)
+      const allKursiMeta = {};
+      const lastPointsData = [];
 
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         if (!info || !info.namauser || info.namauser === "") continue;
         
-        kursiBatch.push([seat, {
-          n: info.noimageUrl,       // shortened
-          u: info.namauser,         // shortened
-          c: info.color,            // shortened
-          b: info.itembawah,        // shortened
-          a: info.itematas,         // shortened
-          v: info.vip,              // shortened
-          vt: info.viptanda         // shortened
-        }]);
+        // Format sesuai dengan yang diharapkan client lama
+        allKursiMeta[seat] = {
+          noimageUrl: info.noimageUrl,
+          namauser: info.namauser,
+          color: info.color,
+          itembawah: info.itembawah,
+          itematas: info.itematas,
+          vip: info.vip,
+          viptanda: info.viptanda
+        };
 
         if (info.lastPoint) {
-          pointsBatch.push({
-            s: seat,
+          lastPointsData.push({
+            seat: seat,
             x: info.lastPoint.x || 0,
             y: info.lastPoint.y || 0,
-            f: info.lastPoint.fast || false
+            fast: info.lastPoint.fast || false
           });
         }
       }
 
-      if (kursiBatch.length > 0) {
-        this.safeSend(ws, ["allUpdateKursiBatch", room, kursiBatch]);
+      if (Object.keys(allKursiMeta).length > 0) {
+        // Gunakan format yang sama dengan yang lama
+        this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
       }
 
-      if (pointsBatch.length > 0) {
-        this.safeSend(ws, ["allPointsBatch", room, pointsBatch]);
+      if (lastPointsData.length > 0) {
+        // Kirim semua points dalam satu batch (tidak dipecah-pecah)
+        this.safeSend(ws, ["allPointsList", room, lastPointsData]);
       }
 
       const counts = this.getJumlahRoom();
@@ -1134,7 +1138,8 @@ export class ChatServer {
       
       // Send currentNumber
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
-    } catch {
+    } catch (error) {
+      console.error("Error in sendAllStateTo:", error);
       // Ignore state sending errors
     }
   }
@@ -1759,14 +1764,7 @@ export class ChatServer {
             // Save point asynchronously (non-blocking)
             this.savePointWithRetry(room, seat, x, y, fast).catch(() => {});
             
-            // OPTION 1: Buffer points for batching
-            const roomBuffer = this._pointBuffer.get(room);
-            if (roomBuffer) {
-              roomBuffer.push({ s: seat, x, y, f: fast });
-              this.schedulePointFlush(room);
-            }
-            
-            // OPTION 2: Direct broadcast (lower latency)
+            // Broadcast langsung
             this.broadcastPointDirect(room, seat, x, y, fast);
             
             break;
