@@ -6,8 +6,47 @@ const roomList = [
   "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
 ];
 
+class PromiseLockManager {
+  constructor() {
+    this.locks = new Map();
+    this.queue = new Map();
+  }
+
+  async acquire(resourceId) {
+    if (!this.locks.has(resourceId)) {
+      this.locks.set(resourceId, true);
+      return () => this.release(resourceId);
+    }
+
+    if (!this.queue.has(resourceId)) {
+      this.queue.set(resourceId, []);
+    }
+
+    return new Promise((resolve) => {
+      this.queue.get(resourceId).push(resolve);
+    }).then(() => () => this.release(resourceId));
+  }
+
+  release(resourceId) {
+    const queue = this.queue.get(resourceId);
+    if (queue && queue.length > 0) {
+      const nextResolve = queue.shift();
+      nextResolve();
+      if (queue.length === 0) {
+        this.queue.delete(resourceId);
+      }
+    } else {
+      this.locks.delete(resourceId);
+    }
+  }
+
+  hasLock(resourceId) {
+    return this.locks.has(resourceId);
+  }
+}
+
 class QueueManager {
-  constructor(concurrency = 3) {
+  constructor(concurrency = 5) {
     this.queue = [];
     this.active = 0;
     this.concurrency = concurrency;
@@ -41,7 +80,7 @@ class QueueManager {
 }
 
 class DebouncedCleanupManager {
-  constructor(server, interval = 2000) {
+  constructor(server, interval = 1500) {
     this.server = server;
     this.interval = interval;
     this.pendingCleanups = new Set();
@@ -80,43 +119,6 @@ class DebouncedCleanupManager {
   }
 }
 
-class LockManager {
-  constructor() {
-    this.locks = new Map();
-    this.lockTimeout = 1000; // ✅ Kurangi dari 3000 ke 1000ms
-  }
-
-  async acquire(resourceId) {
-    const startTime = Date.now();
-    
-    if (!this.locks.has(resourceId)) {
-      this.locks.set(resourceId, true);
-      return () => this.release(resourceId);
-    }
-    
-    let waitTime = 5; // ✅ Kurangi dari 10 ke 5ms
-    while (this.locks.has(resourceId)) {
-      if (Date.now() - startTime > this.lockTimeout) {
-        this.locks.delete(resourceId);
-        throw new Error(`Timeout waiting for lock on ${resourceId}`);
-      }
-      await new Promise(resolve => setTimeout(resolve, waitTime));
-      waitTime = Math.min(waitTime * 1.5, 20); // ✅ Kurangi max dari 50 ke 20ms
-    }
-    
-    this.locks.set(resourceId, true);
-    return () => this.release(resourceId);
-  }
-
-  release(resourceId) {
-    this.locks.delete(resourceId);
-  }
-
-  hasLock(resourceId) {
-    return this.locks.has(resourceId);
-  }
-}
-
 function createEmptySeat() {
   return {
     noimageUrl: "",
@@ -137,7 +139,7 @@ export class ChatServer {
       this.state = state;
       this.env = env;
 
-      this.lockManager = new LockManager();
+      this.lockManager = new PromiseLockManager();
       this.cleanupInProgress = new Set();
       this.clients = new Set();
       this.userToSeat = new Map();
@@ -147,8 +149,14 @@ export class ChatServer {
       this.roomSeats = new Map();
       this.seatOccupancy = new Map();
       this.updateKursiBuffer = new Map();
-      this.bufferSizeLimit = 50; // ✅ Kurangi dari 100 ke 50
+      this.bufferSizeLimit = 50;
       this.userConnections = new Map();
+
+      // Point optimization buffers
+      this._pointBuffer = new Map();
+      this._pointFlushTimer = null;
+      this._pointFlushDelay = 16; // ~60fps
+      this._hasBufferedUpdates = false;
 
       try {
         this.lowcard = new LowCardGameManager(this);
@@ -162,10 +170,10 @@ export class ChatServer {
         this.vipManager = null;
       }
 
-      this.gracePeriod = 3000; // ✅ Kurangi dari 5000 ke 3000ms
+      this.gracePeriod = 3000;
       this.disconnectedTimers = new Map();
-      this.debouncedCleanup = new DebouncedCleanupManager(this, 1500); // ✅ Kurangi dari 2000 ke 1500ms
-      this.cleanupQueue = new QueueManager(5); // ✅ Naikkan concurrency dari 3 ke 5
+      this.debouncedCleanup = new DebouncedCleanupManager(this, 1500);
+      this.cleanupQueue = new QueueManager(5);
       this.currentNumber = 1;
       this.maxNumber = 6;
       this.intervalMillis = 15 * 60 * 1000;
@@ -180,8 +188,13 @@ export class ChatServer {
 
       this.startTimers();
       this.roomCountsCache = new Map();
-      this.cacheValidDuration = 2000; // ✅ Kurangi dari 5000 ke 2000ms
+      this.cacheValidDuration = 2000;
       this.lastCacheUpdate = 0;
+
+      // Initialize point buffers for each room
+      for (const room of roomList) {
+        this._pointBuffer.set(room, []);
+      }
 
     } catch (error) {
       this.clients = new Set();
@@ -193,7 +206,7 @@ export class ChatServer {
       this.updateKursiBuffer = new Map();
       this.userConnections = new Map();
       this.disconnectedTimers = new Map();
-      this.lockManager = new LockManager();
+      this.lockManager = new PromiseLockManager();
       this.cleanupInProgress = new Set();
       this.MAX_SEATS = 35;
       this.currentNumber = 1;
@@ -204,7 +217,84 @@ export class ChatServer {
       this.gracePeriod = 3000;
       this.debouncedCleanup = new DebouncedCleanupManager(this, 1500);
       this.cleanupQueue = new QueueManager(5);
+      
+      // Point optimization buffers
+      this._pointBuffer = new Map();
+      this._pointFlushTimer = null;
+      this._pointFlushDelay = 16;
+      this._hasBufferedUpdates = false;
+      
       this.createDefaultRoom();
+    }
+  }
+
+  schedulePointFlush(room) {
+    if (this._pointFlushTimer) return;
+    
+    this._pointFlushTimer = setTimeout(() => {
+      this._pointFlushTimer = null;
+      this.flushBufferedPoints();
+    }, this._pointFlushDelay);
+  }
+
+  flushBufferedPoints() {
+    for (const [room, points] of this._pointBuffer) {
+      if (points.length > 0) {
+        const batch = points.splice(0, points.length);
+        if (batch.length > 0) {
+          this.broadcastPointsBatch(room, batch);
+        }
+      }
+    }
+  }
+
+  broadcastPointsBatch(room, batch) {
+    try {
+      if (!room || !roomList.includes(room)) return;
+      
+      const clientArray = this.roomClients.get(room);
+      if (!clientArray || clientArray.length === 0) return;
+      
+      // Create message once
+      const message = JSON.stringify(["pointsBatch", room, batch]);
+      
+      for (let i = 0; i < clientArray.length; i++) {
+        const client = clientArray[i];
+        if (client && client.readyState === 1 && client.roomname === room) {
+          try {
+            client.send(message);
+          } catch {
+            // Ignore send errors
+          }
+        }
+      }
+    } catch {
+      // Ignore broadcast errors
+    }
+  }
+
+  broadcastPointDirect(room, seat, x, y, fast) {
+    try {
+      if (!room || !roomList.includes(room)) return;
+      
+      const clientArray = this.roomClients.get(room);
+      if (!clientArray || clientArray.length === 0) return;
+      
+      // Create message once for all clients
+      const message = JSON.stringify(["pointUpdated", room, seat, x, y, fast]);
+      
+      for (let i = 0; i < clientArray.length; i++) {
+        const client = clientArray[i];
+        if (client && client.readyState === 1 && client.roomname === room) {
+          try {
+            client.send(message);
+          } catch {
+            // Ignore send errors
+          }
+        }
+      }
+    } catch {
+      // Ignore broadcast errors
     }
   }
 
@@ -316,6 +406,7 @@ export class ChatServer {
       this.seatOccupancy.set(room, occupancyMap);
       this.roomClients.set(room, []);
       this.updateKursiBuffer.set(room, new Map());
+      this._pointBuffer.set(room, []);
     } catch {
       // Ignore room creation errors
     }
@@ -337,6 +428,7 @@ export class ChatServer {
         this.seatOccupancy.set(room, occupancyMap);
         this.roomClients.set(room, []);
         this.updateKursiBuffer.set(room, new Map());
+        this._pointBuffer.set(room, []);
       } catch {
         // Ignore room initialization errors
       }
@@ -357,11 +449,13 @@ export class ChatServer {
 
       this._flushTimer = setInterval(() => {
         try {
-          if (this.clients.size > 0) this.periodicFlush();
+          if (this.clients.size > 0) {
+            this.periodicFlush();
+          }
         } catch {
           // Ignore flush errors
         }
-      }, 100); // ✅ Naikkan dari 50 ke 100ms untuk kurangi CPU load
+      }, 50); // Increased responsiveness
 
       this._consistencyTimer = setInterval(() => {
         try {
@@ -371,7 +465,7 @@ export class ChatServer {
         } catch {
           // Ignore consistency errors
         }
-      }, 120000); // ✅ Naikkan dari 60000 ke 120000ms (2 menit)
+      }, 120000);
 
       this._connectionCleanupTimer = setInterval(() => {
         try {
@@ -381,7 +475,7 @@ export class ChatServer {
         } catch {
           // Ignore cleanup errors
         }
-      }, 30000); // ✅ Naikkan dari 15000 ke 30000ms
+      }, 30000);
 
       this._timers = [this._tickTimer, this._flushTimer, this._consistencyTimer, this._connectionCleanupTimer];
       
@@ -433,6 +527,11 @@ export class ChatServer {
 
       if (this.cleanupQueue) {
         this.cleanupQueue.clear();
+      }
+
+      if (this._pointFlushTimer) {
+        clearTimeout(this._pointFlushTimer);
+        this._pointFlushTimer = null;
       }
     } catch {
       // Ignore cleanup errors
@@ -499,7 +598,7 @@ export class ChatServer {
     }
   }
 
-  async withLock(resourceId, operation, timeout = 1000) { // ✅ Kurangi timeout dari 3000 ke 1000ms
+  async withLock(resourceId, operation, timeout = 1000) {
     const release = await this.lockManager.acquire(resourceId);
     try {
       const startTime = Date.now();
@@ -720,7 +819,7 @@ export class ChatServer {
       });
       return true;
     } catch (error) {
-      // Retry sekali
+      // Retry once
       try {
         await this.updateSeatAtomic(room, seat, (currentSeat) => {
           currentSeat.lastPoint = { 
@@ -856,11 +955,10 @@ export class ChatServer {
           userConnections.add(ws);
         });
         
-        // Kirim rooMasuk tanpa delay
+        // Send rooMasuk immediately
         this.safeSend(ws, ["rooMasuk", seat, room]);
         
-        // ✅ KURANGI DELAY dari 1000ms ke 10ms
-        await new Promise(resolve => setTimeout(resolve, 10));
+       await new Promise(resolve => setTimeout(resolve, 1000));
         
         this.sendAllStateTo(ws, room);
         this.updateRoomCount(room);
@@ -914,7 +1012,7 @@ export class ChatServer {
     try {
       if (!ws || ws.readyState !== 1 || ws._isDuplicate) return false;
       
-      if (ws.bufferedAmount > 500000) { // ✅ Kurangi dari 1000000 ke 500000
+      if (ws.bufferedAmount > 500000) {
         return false;
       }
       
@@ -994,50 +1092,47 @@ export class ChatServer {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) return;
 
-      const allKursiMeta = {};
-      const lastPointsData = [];
+      // Send kursi data in single batch
+      const kursiBatch = [];
+      const pointsBatch = [];
 
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         if (!info || !info.namauser || info.namauser === "") continue;
         
-        allKursiMeta[seat] = {
-          noimageUrl: info.noimageUrl,
-          namauser: info.namauser,
-          color: info.color,
-          itembawah: info.itembawah,
-          itematas: info.itematas,
-          vip: info.vip,
-          viptanda: info.viptanda
-        };
+        kursiBatch.push([seat, {
+          n: info.noimageUrl,       // shortened
+          u: info.namauser,         // shortened
+          c: info.color,            // shortened
+          b: info.itembawah,        // shortened
+          a: info.itematas,         // shortened
+          v: info.vip,              // shortened
+          vt: info.viptanda         // shortened
+        }]);
 
         if (info.lastPoint) {
-          lastPointsData.push({
-            seat: seat,
+          pointsBatch.push({
+            s: seat,
             x: info.lastPoint.x || 0,
             y: info.lastPoint.y || 0,
-            fast: info.lastPoint.fast || false
+            f: info.lastPoint.fast || false
           });
         }
       }
 
-      if (Object.keys(allKursiMeta).length > 0) {
-        this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
+      if (kursiBatch.length > 0) {
+        this.safeSend(ws, ["allUpdateKursiBatch", room, kursiBatch]);
       }
 
-      if (lastPointsData.length > 0) {
-        // Kirim dalam batch lebih kecil untuk reliability
-        for (let i = 0; i < lastPointsData.length; i += 10) { // ✅ Naikkan dari 5 ke 10
-          const batch = lastPointsData.slice(i, i + 10);
-          this.safeSend(ws, ["allPointsList", room, batch]);
-        }
+      if (pointsBatch.length > 0) {
+        this.safeSend(ws, ["allPointsBatch", room, pointsBatch]);
       }
 
       const counts = this.getJumlahRoom();
       const count = counts[room] || 0;
       this.safeSend(ws, ["roomUserCount", room, count]);
       
-      // Kirim currentNumber juga
+      // Send currentNumber
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
     } catch {
       // Ignore state sending errors
@@ -1094,10 +1189,10 @@ export class ChatServer {
               }
               userConnections.add(ws);
               
-              // Kirim semua state termasuk point
+              // Send all state including points
               this.sendAllStateTo(ws, room);
               
-              // Kirim point dari kursi ini secara khusus
+              // Send point from this seat specifically
               if (seatData.lastPoint) {
                 this.safeSend(ws, ["pointUpdated", room, seat, 
                   seatData.lastPoint.x, 
@@ -1155,7 +1250,7 @@ export class ChatServer {
         }
       }
       
-      const batchSize = 10; // ✅ Naikkan dari 5 ke 10
+      const batchSize = 10;
       for (let i = 0; i < duplicateUsers.length; i += batchSize) {
         const batch = duplicateUsers.slice(i, i + batchSize);
         await Promise.allSettled(
@@ -1445,6 +1540,9 @@ export class ChatServer {
   periodicFlush() {
     try {
       this.flushKursiUpdates();
+      
+      // Also flush any buffered points
+      this.flushBufferedPoints();
     } catch {
       // Ignore periodic flush errors
     }
@@ -1658,14 +1756,19 @@ export class ChatServer {
             
             if (ws.roomname !== room || !roomList.includes(room)) return;
             
-            // Simpan dengan retry
-            await this.savePointWithRetry(room, seat, x, y, fast);
+            // Save point asynchronously (non-blocking)
+            this.savePointWithRetry(room, seat, x, y, fast).catch(() => {});
             
-            // Broadcast ke semua di room termasuk diri sendiri
-            this.broadcastToRoom(room, ["pointUpdated", room, seat, x, y, fast]);
+            // OPTION 1: Buffer points for batching
+            const roomBuffer = this._pointBuffer.get(room);
+            if (roomBuffer) {
+              roomBuffer.push({ s: seat, x, y, f: fast });
+              this.schedulePointFlush(room);
+            }
             
-            // Pastikan juga dikirim ke client pengirim
-            this.safeSend(ws, ["pointUpdated", room, seat, x, y, fast]);
+            // OPTION 2: Direct broadcast (lower latency)
+            this.broadcastPointDirect(room, seat, x, y, fast);
+            
             break;
           }
 
@@ -1815,7 +1918,7 @@ export class ChatServer {
           this.scheduleCleanup(ws.idtarget);
         }
         
-        // ✅ HAPUS setTimeout, langsung cleanup
+        // Immediate cleanup
         try {
           if (ws.idtarget) {
             const userConnections = this.userConnections.get(ws.idtarget);
