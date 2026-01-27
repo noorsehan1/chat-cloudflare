@@ -1,5 +1,4 @@
 import { LowCardGameManager } from "./lowcard.js";
-import { VipBadgeManager } from "./vipbadge.js";
 
 const roomList = [
   "LowCard 1", "LowCard 2", "General", "Pakistan", "Philippines", "HINDI", "Indonesia", "Birthday Party", "Heart Lovers","MEPHISTOPHELES", "Chhichhore", "Lounge Talk",
@@ -163,14 +162,8 @@ export class ChatServer {
       } catch {
         this.lowcard = null;
       }
-      
-      try {
-        this.vipManager = new VipBadgeManager(this);
-      } catch {
-        this.vipManager = null;
-      }
 
-      this.gracePeriod = 3000;
+      this.gracePeriod = 5000;
       this.disconnectedTimers = new Map();
       this.debouncedCleanup = new DebouncedCleanupManager(this, 1500);
       this.cleanupQueue = new QueueManager(5);
@@ -216,8 +209,7 @@ export class ChatServer {
       this._nextConnId = 1;
       this._timers = [];
       this.lowcard = null;
-      this.vipManager = null;
-      this.gracePeriod = 3000;
+      this.gracePeriod = 5000;
       this.debouncedCleanup = new DebouncedCleanupManager(this, 1500);
       this.cleanupQueue = new QueueManager(5);
       
@@ -907,15 +899,6 @@ export class ChatServer {
             }
           }
         }
-
-        // Cleanup VIP badges jika ada
-        if (this.vipManager) {
-          try {
-            await this.vipManager.cleanupUserVipBadges(userId);
-          } catch {
-            // Ignore VIP cleanup errors
-          }
-        }
       });
 
     } catch (error) {
@@ -934,14 +917,6 @@ export class ChatServer {
 
         const seatInfo = seatMap.get(seatNumber);
         if (!seatInfo || seatInfo.namauser !== userId) return;
-
-        if (seatInfo.viptanda > 0 && this.vipManager) {
-          try {
-            await this.vipManager.removeVipBadge(room, seatNumber);
-          } catch {
-            // Ignore VIP removal errors
-          }
-        }
 
         if (immediate) {
           Object.assign(seatInfo, createEmptySeat());
@@ -980,15 +955,6 @@ export class ChatServer {
         
         // Hapus tracking
         this.userCurrentRoom.delete(ws.idtarget);
-        
-        // Cleanup VIP
-        if (this.vipManager) {
-          try {
-            await this.vipManager.cleanupUserVipBadges(ws.idtarget);
-          } catch {
-            // Ignore VIP cleanup errors
-          }
-        }
         
         // Reset WebSocket properties
         ws.roomname = undefined;
@@ -1454,14 +1420,6 @@ export class ChatServer {
               
               this.updateRoomCount(room);
               
-              if (this.vipManager) {
-                try {
-                  await this.vipManager.getAllVipBadges(ws, room);
-                } catch {
-                  // Ignore VIP errors
-                }
-              }
-              
               return;
             }
           }
@@ -1640,14 +1598,6 @@ export class ChatServer {
     try {
       await this.withLock(`full-remove-${idtarget}`, async () => {
         this.cancelCleanup(idtarget);
-        
-        if (this.vipManager) {
-          try {
-            await this.vipManager.cleanupUserVipBadges(idtarget);
-          } catch {
-            // Ignore VIP cleanup errors
-          }
-        }
         
         const currentRoom = this.userCurrentRoom.get(idtarget);
         const roomsToClean = currentRoom ? [currentRoom] : roomList;
@@ -1848,16 +1798,6 @@ export class ChatServer {
 
       try {
         switch (evt) {
-          case "vipbadge":
-          case "removeVipBadge":
-          case "getAllVipBadges":
-            if (this.vipManager) {
-              await this.vipManager.handleEvent(ws, data);
-            } else {
-              this.safeSend(ws, ["error", "VIP system not available"]);
-            }
-            break;
-
           case "isInRoom": {
             const idtarget = ws.idtarget;
             if (!idtarget) {
