@@ -118,6 +118,44 @@ class DebouncedCleanupManager {
   }
 }
 
+// Rate Limiter untuk mencegah abuse
+class RateLimiter {
+  constructor(windowMs = 60000, maxRequests = 100) {
+    this.windowMs = windowMs;
+    this.maxRequests = maxRequests;
+    this.requests = new Map();
+    setInterval(() => this.cleanup(), windowMs);
+  }
+
+  check(userId) {
+    const now = Date.now();
+    const userRequests = this.requests.get(userId) || [];
+    
+    // Clean old requests
+    const recentRequests = userRequests.filter(time => now - time < this.windowMs);
+    
+    if (recentRequests.length >= this.maxRequests) {
+      return false;
+    }
+    
+    recentRequests.push(now);
+    this.requests.set(userId, recentRequests);
+    return true;
+  }
+
+  cleanup() {
+    const now = Date.now();
+    for (const [userId, requests] of this.requests) {
+      const recentRequests = requests.filter(time => now - time < this.windowMs);
+      if (recentRequests.length === 0) {
+        this.requests.delete(userId);
+      } else {
+        this.requests.set(userId, recentRequests);
+      }
+    }
+  }
+}
+
 function createEmptySeat() {
   return {
     noimageUrl: "",
@@ -157,6 +195,21 @@ export class ChatServer {
       this._pointFlushDelay = 16; // ~60fps
       this._hasBufferedUpdates = false;
 
+      // Rate limiting
+      this.rateLimiter = new RateLimiter(60000, 100); // 100 requests per minute
+      this.connectionRateLimiter = new RateLimiter(10000, 5); // 5 connections per 10 seconds
+      
+      // Connection tracking
+      this.connectionAttempts = new Map();
+      this.maxConnectionAttempts = 10;
+      this.connectionBanTime = 30000; // 30 seconds ban
+      
+      // Safe mode
+      this.safeMode = false;
+      this.loadThreshold = 0.9; // 90% load
+      this.lastLoadCheck = 0;
+      this.loadCheckInterval = 5000;
+
       try {
         this.lowcard = new LowCardGameManager(this);
       } catch {
@@ -193,6 +246,7 @@ export class ChatServer {
       }
 
     } catch (error) {
+      console.error("ChatServer constructor error:", error);
       this.clients = new Set();
       this.userToSeat = new Map();
       this.userCurrentRoom = new Map();
@@ -212,6 +266,13 @@ export class ChatServer {
       this.gracePeriod = 5000;
       this.debouncedCleanup = new DebouncedCleanupManager(this, 1500);
       this.cleanupQueue = new QueueManager(5);
+      
+      // Rate limiting
+      this.rateLimiter = new RateLimiter(60000, 100);
+      this.connectionRateLimiter = new RateLimiter(10000, 5);
+      this.connectionAttempts = new Map();
+      this.safeMode = false;
+      this.loadThreshold = 0.9;
       
       // Point optimization buffers
       this._pointBuffer = new Map();
@@ -260,6 +321,80 @@ export class ChatServer {
         clientArray.splice(index, 1);
       }
     }
+  }
+
+  // PERBAIKAN: Enhanced lock dengan timeout protection
+  async withLock(resourceId, operation, timeout = 2000) {
+    const release = await this.lockManager.acquire(resourceId);
+    
+    let timeoutId;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error(`Lock timeout for ${resourceId}`));
+      }, timeout);
+    });
+    
+    try {
+      const result = await Promise.race([
+        operation(),
+        timeoutPromise
+      ]);
+      
+      clearTimeout(timeoutId);
+      return result;
+    } catch (error) {
+      console.error(`Lock operation failed for ${resourceId}:`, error);
+      throw error;
+    } finally {
+      try {
+        clearTimeout(timeoutId);
+        release();
+      } catch {
+        // Ignore release errors
+      }
+    }
+  }
+
+  // PERBAIKAN: Safe mode management
+  checkAndEnableSafeMode() {
+    const now = Date.now();
+    if (now - this.lastLoadCheck < this.loadCheckInterval) {
+      return;
+    }
+    
+    this.lastLoadCheck = now;
+    const load = this.getServerLoad();
+    
+    if (load > this.loadThreshold && !this.safeMode) {
+      this.enableSafeMode();
+    } else if (load < 0.7 && this.safeMode) {
+      this.disableSafeMode();
+    }
+  }
+
+  enableSafeMode() {
+    if (this.safeMode) return;
+    
+    console.log("⚠️ Entering safe mode due to high load");
+    this.safeMode = true;
+    
+    // Reduce concurrency in safe mode
+    this.cleanupQueue.concurrency = 2;
+    this._pointFlushDelay = 100; // Slow down point updates
+    
+    // Schedule auto-exit
+    setTimeout(() => {
+      if (this.getServerLoad() < 0.7) {
+        this.disableSafeMode();
+      }
+    }, 60000);
+  }
+
+  disableSafeMode() {
+    console.log("✅ Exiting safe mode");
+    this.safeMode = false;
+    this.cleanupQueue.concurrency = 5;
+    this._pointFlushDelay = 16;
   }
 
   schedulePointFlush(room) {
@@ -439,11 +574,13 @@ export class ChatServer {
       // Cek apakah ini duplicate connection
       if (conn._isDuplicate) continue;
       
+      // Cek apakah connection sedang closing
+      if (conn._isClosing) continue;
+      
       // Cek timestamp connection
       if (conn._connectionTime) {
         const connectionAge = Date.now() - conn._connectionTime;
         // Jika connection terlalu tua (lebih dari 24 jam), mungkin ada masalah
-        // Tapi untuk sekarang kita anggap masih valid
         if (connectionAge > 24 * 60 * 60 * 1000) {
           continue; // Connection terlalu tua, mungkin stuck
         }
@@ -459,6 +596,16 @@ export class ChatServer {
 
   async executeGracePeriodCleanup(userId) {
     if (!userId || this.cleanupInProgress.has(userId)) return;
+    
+    // Check safe mode
+    this.checkAndEnableSafeMode();
+    if (this.safeMode) {
+      // Delay cleanup in safe mode
+      setTimeout(() => {
+        this.executeGracePeriodCleanup(userId);
+      }, 2000);
+      return;
+    }
     
     // Use queue untuk menghindari overload
     try {
@@ -584,6 +731,15 @@ export class ChatServer {
           // Ignore memory cleanup errors
         }
       }, 60000); // Setiap 60 detik
+      
+      // Timer untuk check safe mode
+      this._safeModeTimer = setInterval(() => {
+        try {
+          this.checkAndEnableSafeMode();
+        } catch {
+          // Ignore safe mode check errors
+        }
+      }, 10000); // Setiap 10 detik
 
       this._timers = [
         this._tickTimer, 
@@ -591,7 +747,8 @@ export class ChatServer {
         this._consistencyTimer, 
         this._connectionCleanupTimer, 
         this._stuckCleanupTimer,
-        this._memoryCleanupTimer
+        this._memoryCleanupTimer,
+        this._safeModeTimer
       ];
       
     } catch {
@@ -810,23 +967,6 @@ export class ChatServer {
     }
   }
 
-  async withLock(resourceId, operation, timeout = 1000) {
-    const release = await this.lockManager.acquire(resourceId);
-    try {
-      const startTime = Date.now();
-      const result = await operation();
-      const duration = Date.now() - startTime;
-      
-      return result;
-    } finally {
-      try {
-        release();
-      } catch {
-        // Ignore release errors
-      }
-    }
-  }
-
   async forceUserCleanup(userId) {
     if (!userId || this.cleanupInProgress.has(userId)) return;
     
@@ -871,7 +1011,7 @@ export class ChatServer {
           // Cek apakah ada connection yang valid
           let hasValidConnection = false;
           for (const conn of remainingConnections) {
-            if (conn && conn.readyState === 1 && !conn._isDuplicate) {
+            if (conn && conn.readyState === 1 && !conn._isDuplicate && !conn._isClosing) {
               hasValidConnection = true;
               break;
             }
@@ -1101,7 +1241,7 @@ export class ChatServer {
           let isOccupantOnline = false;
           for (const client of this.clients) {
             if (client && client.idtarget === occupiedBy && 
-                client.readyState === 1 && !client._isDuplicate) {
+                client.readyState === 1 && !client._isDuplicate && !client._isClosing) {
               isOccupantOnline = true;
               break;
             }
@@ -1134,53 +1274,65 @@ export class ChatServer {
       return false;
     }
     
+    // Rate limiting check
+    if (!this.rateLimiter.check(ws.idtarget)) {
+      this.safeSend(ws, ["error", "Too many requests"]);
+      return false;
+    }
+    
     try {
-      return await this.withLock(`join-room-${room}-${ws.idtarget}`, async () => {
-        // CANCEL CLEANUP DI AWAL - sangat penting!
-        this.cancelCleanup(ws.idtarget);
-        
-        const previousRoom = this.userCurrentRoom.get(ws.idtarget);
-        if (previousRoom && previousRoom !== room) {
-          await this.cleanupFromRoom(ws, previousRoom);
-        }
-        
-        const seat = await this.findEmptySeat(room, ws);
-        if (!seat) {
-          this.safeSend(ws, ["roomFull", room]);
-          return false;
-        }
-        
-        await this.withLock(`seat-assign-${room}-${seat}`, async () => {
-          const occupancyMap = this.seatOccupancy.get(room);
-          if (occupancyMap) {
-            occupancyMap.set(seat, ws.idtarget);
+      return await Promise.race([
+        this.withLock(`join-room-${room}-${ws.idtarget}`, async () => {
+          // CANCEL CLEANUP DI AWAL - sangat penting!
+          this.cancelCleanup(ws.idtarget);
+          
+          const previousRoom = this.userCurrentRoom.get(ws.idtarget);
+          if (previousRoom && previousRoom !== room) {
+            await this.cleanupFromRoom(ws, previousRoom);
           }
           
-          this.userToSeat.set(ws.idtarget, { room, seat });
-          this.userCurrentRoom.set(ws.idtarget, room);
-          ws.roomname = room;
-          ws.numkursi = new Set([seat]);
-          
-          const clientArray = this.roomClients.get(room);
-          if (clientArray && !clientArray.includes(ws)) {
-            clientArray.push(ws);
+          const seat = await this.findEmptySeat(room, ws);
+          if (!seat) {
+            this.safeSend(ws, ["roomFull", room]);
+            return false;
           }
           
-          this._addUserConnection(ws.idtarget, ws);
-        });
-        
-        // Send rooMasuk immediately
-        this.safeSend(ws, ["rooMasuk", seat, room]);
-        
-        // NO DELAY - send state immediately
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        this.sendAllStateTo(ws, room);
-        this.updateRoomCount(room);
-        
-        return true;
-      });
-    } catch {
+          await this.withLock(`seat-assign-${room}-${seat}`, async () => {
+            const occupancyMap = this.seatOccupancy.get(room);
+            if (occupancyMap) {
+              occupancyMap.set(seat, ws.idtarget);
+            }
+            
+            this.userToSeat.set(ws.idtarget, { room, seat });
+            this.userCurrentRoom.set(ws.idtarget, room);
+            ws.roomname = room;
+            ws.numkursi = new Set([seat]);
+            
+            const clientArray = this.roomClients.get(room);
+            if (clientArray && !clientArray.includes(ws)) {
+              clientArray.push(ws);
+            }
+            
+            this._addUserConnection(ws.idtarget, ws);
+          });
+          
+          // Send rooMasuk immediately
+          this.safeSend(ws, ["rooMasuk", seat, room]);
+          
+          // NO DELAY - send state immediately
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+          this.sendAllStateTo(ws, room);
+          this.updateRoomCount(room);
+          
+          return true;
+        }),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Join room timeout')), 5000)
+        )
+      ]);
+    } catch (error) {
+      console.error(`Join room error for ${ws.idtarget}:`, error);
       this.safeSend(ws, ["error", "Failed to join room"]);
       return false;
     }
@@ -1225,7 +1377,7 @@ export class ChatServer {
 
   safeSend(ws, arr) {
     try {
-      if (!ws || ws.readyState !== 1 || ws._isDuplicate) return false;
+      if (!ws || ws.readyState !== 1 || ws._isDuplicate || ws._isClosing) return false;
       
       if (ws.bufferedAmount > 500000) {
         return false;
@@ -1254,7 +1406,8 @@ export class ChatServer {
       
       for (let i = 0; i < clientArray.length; i++) {
         const client = clientArray[i];
-        if (client && client.readyState === 1 && client.roomname === room && !client._isDuplicate) {
+        if (client && client.readyState === 1 && client.roomname === room && 
+            !client._isDuplicate && !client._isClosing) {
           if (client.idtarget && sentToUsers.has(client.idtarget)) {
             continue;
           }
@@ -1302,7 +1455,8 @@ export class ChatServer {
 
   sendAllStateTo(ws, room) {
     try {
-      if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room || ws._isDuplicate) return;
+      if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room || 
+          ws._isDuplicate || ws._isClosing) return;
       
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) return;
@@ -1447,7 +1601,7 @@ export class ChatServer {
       const userConnectionCount = new Map();
       
       for (const client of this.clients) {
-        if (client && client.idtarget && client.readyState === 1) {
+        if (client && client.idtarget && client.readyState === 1 && !client._isClosing) {
           const count = userConnectionCount.get(client.idtarget) || 0;
           userConnectionCount.set(client.idtarget, count + 1);
         }
@@ -1480,7 +1634,7 @@ export class ChatServer {
         const allConnections = [];
         
         for (const client of this.clients) {
-          if (client && client.idtarget === userId && client.readyState === 1) {
+          if (client && client.idtarget === userId && client.readyState === 1 && !client._isClosing) {
             allConnections.push({
               client,
               connectionTime: client._connectionTime || 0,
@@ -1497,6 +1651,7 @@ export class ChatServer {
         
         for (const { client } of connectionsToClose) {
           client._isDuplicate = true;
+          client._isClosing = true;
           
           try {
             if (client.readyState === 1) {
@@ -1662,7 +1817,8 @@ export class ChatServer {
       const seenUsers = new Set();
       
       for (const client of this.clients) {
-        if (client && client.idtarget && client.readyState === 1 && !client._isDuplicate) {
+        if (client && client.idtarget && client.readyState === 1 && 
+            !client._isDuplicate && !client._isClosing) {
           if (!seenUsers.has(client.idtarget)) {
             users.push(client.idtarget);
             seenUsers.add(client.idtarget);
@@ -1683,7 +1839,8 @@ export class ChatServer {
       if (clientArray) {
         for (let i = 0; i < clientArray.length; i++) {
           const client = clientArray[i];
-          if (client && client.idtarget && client.readyState === 1 && !client._isDuplicate) {
+          if (client && client.idtarget && client.readyState === 1 && 
+              !client._isDuplicate && !client._isClosing) {
             if (!seenUsers.has(client.idtarget)) {
               users.push(client.idtarget);
               seenUsers.add(client.idtarget);
@@ -1749,7 +1906,8 @@ export class ChatServer {
       const notifiedUsers = new Set();
       
       for (const client of this.clients) {
-        if (client && client.readyState === 1 && client.roomname && !client._isDuplicate) {
+        if (client && client.readyState === 1 && client.roomname && 
+            !client._isDuplicate && !client._isClosing) {
           if (!notifiedUsers.has(client.idtarget)) {
             clientsToNotify.push(client);
             notifiedUsers.add(client.idtarget);
@@ -1765,8 +1923,71 @@ export class ChatServer {
     }
   }
 
+  // PERBAIKAN: Enhanced WebSocket cleanup
+  async safeWebSocketCleanup(ws) {
+    if (!ws) return;
+    
+    const userId = ws.idtarget;
+    const room = ws.roomname;
+    
+    try {
+      // Mark as closing to prevent race conditions
+      ws._isClosing = true;
+      
+      // Remove from tracking maps
+      this.clients.delete(ws);
+      
+      if (userId) {
+        this._removeUserConnection(userId, ws);
+        
+        // Cancel cleanup timer
+        this.cancelCleanup(userId);
+        
+        // Only schedule cleanup if not manual destroy and not duplicate
+        if (!ws.isManualDestroy && !ws._isDuplicate) {
+          // Gunakan debounced cleanup untuk menghindari race condition
+          this.debouncedCleanup.schedule(userId);
+        }
+      }
+      
+      if (room) {
+        this._removeFromRoomClients(ws, room);
+      }
+      
+      // Cleanup WebSocket references
+      try {
+        if (ws.readyState === 1) {
+          ws.close(1000, "Normal closure");
+        }
+      } catch {
+        // Ignore close errors
+      }
+      
+      // Clear references
+      setTimeout(() => {
+        ws.roomname = null;
+        ws.idtarget = null;
+        ws.numkursi = null;
+      }, 1000);
+      
+    } catch (error) {
+      console.error("WebSocket cleanup error:", error);
+      // Force cleanup
+      this.clients.delete(ws);
+      if (userId) {
+        this.cancelCleanup(userId);
+      }
+    }
+  }
+
   async handleMessage(ws, raw) {
-    if (!ws || ws.readyState !== 1 || ws._isDuplicate) return;
+    if (!ws || ws.readyState !== 1 || ws._isDuplicate || ws._isClosing) return;
+
+    // Check rate limiting
+    if (ws.idtarget && !this.rateLimiter.check(ws.idtarget)) {
+      this.safeSend(ws, ["error", "Too many requests"]);
+      return;
+    }
 
     try {
       if (raw.length > 50000) {
@@ -1826,7 +2047,8 @@ export class ChatServer {
             
             let sent = false;
             for (const client of this.clients) {
-              if (client && client.idtarget === idtarget && client.readyState === 1 && !client._isDuplicate) {
+              if (client && client.idtarget === idtarget && client.readyState === 1 && 
+                  !client._isDuplicate && !client._isClosing) {
                 if (this.safeSend(client, notif)) {
                   sent = true;
                   break;
@@ -1844,7 +2066,8 @@ export class ChatServer {
             this.safeSend(ws, out);
             
             for (const client of this.clients) {
-              if (client && client.idtarget === idt && client.readyState === 1 && !client._isDuplicate) {
+              if (client && client.idtarget === idt && client.readyState === 1 && 
+                  !client._isDuplicate && !client._isClosing) {
                 if (this.safeSend(client, out)) {
                   break;
                 }
@@ -1861,7 +2084,7 @@ export class ChatServer {
             const connections = this.userConnections.get(username);
             if (connections && connections.size > 0) {
               for (const conn of connections) {
-                if (conn.readyState === 1 && !conn._isDuplicate) {
+                if (conn.readyState === 1 && !conn._isDuplicate && !conn._isClosing) {
                   isOnline = true;
                   break;
                 }
@@ -1913,7 +2136,7 @@ export class ChatServer {
             if (userConnections && userConnections.size > 0) {
               let earliestConnection = null;
               for (const conn of userConnections) {
-                if (conn.readyState === 1) {
+                if (conn.readyState === 1 && !conn._isClosing) {
                   if (!earliestConnection || 
                       (conn._connectionTime || 0) < (earliestConnection._connectionTime || 0)) {
                     earliestConnection = conn;
@@ -2039,13 +2262,14 @@ export class ChatServer {
           default: 
             break;
         }
-      } catch {
+      } catch (error) {
+        console.error(`Error handling message ${evt}:`, error);
         if (ws.readyState === 1) {
           this.safeSend(ws, ["error", "Server error"]);
         }
       }
-    } catch {
-      // Ignore message handling errors
+    } catch (error) {
+      console.error("General message handling error:", error);
     }
   }
 
@@ -2069,6 +2293,7 @@ export class ChatServer {
       ws.isManualDestroy = false;
       ws.errorCount = 0;
       ws._isDuplicate = false;
+      ws._isClosing = false;
       ws._connectionTime = Date.now();
 
       this.clients.add(ws);
@@ -2076,47 +2301,29 @@ export class ChatServer {
       ws.addEventListener("message", (ev) => {
         try {
           Promise.resolve().then(() => {
-            this.handleMessage(ws, ev.data).catch(() => {
-              // Ignore async errors
+            this.handleMessage(ws, ev.data).catch((error) => {
+              console.error("Async message handling error:", error);
             });
           });
-        } catch {
-          // Ignore sync errors
+        } catch (error) {
+          console.error("Sync message handling error:", error);
         }
       });
 
-      ws.addEventListener("error", () => {
-        // Ignore WebSocket errors
+      ws.addEventListener("error", (error) => {
+        console.error("WebSocket error:", error);
       });
 
       ws.addEventListener("close", (event) => {
-        const userId = ws.idtarget;
-        
-        // Cleanup tracking terlebih dahulu
-        if (userId) {
-          this._removeUserConnection(userId, ws);
-          
-          if (ws.roomname) {
-            this._removeFromRoomClients(ws, ws.roomname);
-          }
-        }
-        
-        // Schedule cleanup hanya jika bukan manual destroy atau duplicate
-        if (userId && !ws.isManualDestroy && !ws._isDuplicate) {
-          this.scheduleCleanup(userId);
-        }
-        
-        // Cleanup WebSocket object
-        this.clients.delete(ws);
-        
-        // Clear references untuk membantu GC
-        ws.roomname = null;
-        ws.idtarget = null;
-        ws.numkursi = null;
+        // Gunakan safe cleanup
+        Promise.resolve().then(() => {
+          this.safeWebSocketCleanup(ws);
+        });
       });
 
       return new Response(null, { status: 101, webSocket: client });
-    } catch {
+    } catch (error) {
+      console.error("Fetch error:", error);
       return new Response("Internal server error", { status: 500 });
     }
   }
@@ -2145,7 +2352,8 @@ export default {
         status: 200,
         headers: { "content-type": "text/plain" }
       });
-    } catch {
+    } catch (error) {
+      console.error("Default fetch error:", error);
       return new Response("Server error", { status: 500 });
     }
   }
