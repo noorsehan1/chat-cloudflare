@@ -1,7 +1,7 @@
 import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
-  "LowCard 1", "LowCard 2", "Gacor", "General", "Pakistan", "Philippines", "HINDI", "Indonesia", "Birthday Party", "Heart Lovers","Cat lovers", "Lounge Talk",
+  "LowCard 1", "LowCard 2", "Gacor", "General", "Pakistan", "Philippines", "India", "Indonesia", "Birthday Party", "Heart Lovers","Cat lovers", "Lounge Talk",
   "Easy Talk", "Friendly Corner", "The Hangout", "Relax & Chat", "Just Chillin", "The Chatter Room"
 ];
 
@@ -2358,5 +2358,6 @@ export default {
     }
   }
 };
+
 
 
