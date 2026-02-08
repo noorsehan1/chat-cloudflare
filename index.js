@@ -78,46 +78,6 @@ class QueueManager {
   }
 }
 
-class DebouncedCleanupManager {
-  constructor(server, interval = 1500) {
-    this.server = server;
-    this.interval = interval;
-    this.pendingCleanups = new Set();
-    this.timer = null;
-    this.start();
-  }
-
-  start() {
-    if (this.timer) return;
-    this.timer = setInterval(() => this.processCleanups(), this.interval);
-  }
-
-  stop() {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-  }
-
-  schedule(userId) {
-    if (!userId) return;
-    this.pendingCleanups.add(userId);
-  }
-
-  async processCleanups() {
-    if (this.pendingCleanups.size === 0) return;
-    const usersToCleanup = Array.from(this.pendingCleanups);
-    this.pendingCleanups.clear();
-    const batchSize = 5;
-    for (let i = 0; i < usersToCleanup.length; i += batchSize) {
-      const batch = usersToCleanup.slice(i, i + batchSize);
-      await Promise.allSettled(
-        batch.map(userId => this.server.executeGracePeriodCleanup(userId))
-      );
-    }
-  }
-}
-
 // Rate Limiter untuk mencegah abuse
 class RateLimiter {
   constructor(windowMs = 60000, maxRequests = 100) {
@@ -216,9 +176,8 @@ export class ChatServer {
         this.lowcard = null;
       }
 
-      this.gracePeriod = 5000;
+      this.gracePeriod = 5000; // 5 detik
       this.disconnectedTimers = new Map();
-      this.debouncedCleanup = new DebouncedCleanupManager(this, 1500);
       this.cleanupQueue = new QueueManager(5);
       this.currentNumber = 1;
       this.maxNumber = 6;
@@ -245,6 +204,9 @@ export class ChatServer {
         this._pointBuffer.set(room, []);
       }
 
+      // Grace period validation timer
+      this._gracePeriodValidationTimer = null;
+
     } catch (error) {
       console.error("ChatServer constructor error:", error);
       this.clients = new Set();
@@ -264,7 +226,6 @@ export class ChatServer {
       this._timers = [];
       this.lowcard = null;
       this.gracePeriod = 5000;
-      this.debouncedCleanup = new DebouncedCleanupManager(this, 1500);
       this.cleanupQueue = new QueueManager(5);
       
       // Rate limiting
@@ -477,7 +438,7 @@ export class ChatServer {
       // Cancel timer yang ada
       this.cancelCleanup(userId);
       
-      // Buat timer baru
+      // PERBAIKAN: Simpan waktu scheduled untuk validation
       const timerId = setTimeout(async () => {
         try {
           // Hapus dari timer map
@@ -501,7 +462,9 @@ export class ChatServer {
         }
       }, this.gracePeriod);
       
-      // Simpan timer
+      // Simpan timer dengan metadata
+      timerId._scheduledTime = Date.now();
+      timerId._userId = userId;
       this.disconnectedTimers.set(userId, timerId);
       
     } catch (error) {
@@ -538,11 +501,6 @@ export class ChatServer {
       if (timer) {
         clearTimeout(timer);
         this.disconnectedTimers.delete(userId);
-      }
-      
-      // Hapus dari pending cleanups jika ada
-      if (this.debouncedCleanup && this.debouncedCleanup.pendingCleanups) {
-        this.debouncedCleanup.pendingCleanups.delete(userId);
       }
       
       // Hapus dari cleanupInProgress
@@ -607,22 +565,20 @@ export class ChatServer {
       return;
     }
     
-    // Use queue untuk menghindari overload
+    // PERBAIKAN: Langsung execute tanpa queue delay
+    this.cleanupInProgress.add(userId);
     try {
-      return await this.cleanupQueue.add(async () => {
-        await this.withLock(`user-cleanup-${userId}`, async () => {
-          const isStillConnected = await this.isUserStillConnected(userId);
-          
-          if (isStillConnected) {
-            this.cancelCleanup(userId);
-            return;
-          }
-          
+      await this.withLock(`user-cleanup-${userId}`, async () => {
+        const isStillConnected = await this.isUserStillConnected(userId);
+        
+        if (!isStillConnected) {
           await this.forceUserCleanup(userId);
-        });
+        }
       });
     } catch (error) {
-      console.error(`Execute grace period cleanup error for ${userId}:`, error);
+      console.error(`Execute cleanup error for ${userId}:`, error);
+    } finally {
+      this.cleanupInProgress.delete(userId);
     }
   }
 
@@ -741,6 +697,15 @@ export class ChatServer {
         }
       }, 10000); // Setiap 10 detik
 
+      // PERBAIKAN: Timer untuk validasi grace period
+      this._gracePeriodValidationTimer = setInterval(() => {
+        try {
+          this._validateGracePeriodTimers();
+        } catch {
+          // Ignore validation errors
+        }
+      }, 1000); // Cek setiap detik
+
       this._timers = [
         this._tickTimer, 
         this._flushTimer, 
@@ -748,11 +713,35 @@ export class ChatServer {
         this._connectionCleanupTimer, 
         this._stuckCleanupTimer,
         this._memoryCleanupTimer,
-        this._safeModeTimer
+        this._safeModeTimer,
+        this._gracePeriodValidationTimer
       ];
       
     } catch {
       this._timers = [];
+    }
+  }
+
+  // PERBAIKAN: Method untuk validasi grace period timer
+  _validateGracePeriodTimers() {
+    try {
+      const now = Date.now();
+      const maxGracePeriod = this.gracePeriod + 1000; // 5 detik + 1 detik toleransi
+      
+      for (const [userId, timer] of this.disconnectedTimers) {
+        if (timer && timer._scheduledTime) {
+          const elapsed = now - timer._scheduledTime;
+          if (elapsed > maxGracePeriod) {
+            console.warn(`Timer for ${userId} exceeded grace period: ${elapsed}ms`);
+            // Force cleanup sekarang
+            clearTimeout(timer);
+            this.disconnectedTimers.delete(userId);
+            this.executeGracePeriodCleanup(userId);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Grace period validation error:', error);
     }
   }
 
@@ -886,10 +875,6 @@ export class ChatServer {
         this.disconnectedTimers.clear();
       }
 
-      if (this.debouncedCleanup) {
-        this.debouncedCleanup.stop();
-      }
-
       if (this.cleanupQueue) {
         this.cleanupQueue.clear();
       }
@@ -897,6 +882,12 @@ export class ChatServer {
       if (this._pointFlushTimer) {
         clearTimeout(this._pointFlushTimer);
         this._pointFlushTimer = null;
+      }
+      
+      // Cleanup grace period validation timer
+      if (this._gracePeriodValidationTimer) {
+        clearInterval(this._gracePeriodValidationTimer);
+        this._gracePeriodValidationTimer = null;
       }
     } catch {
       // Ignore cleanup errors
@@ -1923,7 +1914,7 @@ export class ChatServer {
     }
   }
 
-  // PERBAIKAN: Enhanced WebSocket cleanup
+  // PERBAIKAN: Enhanced WebSocket cleanup - tanpa debounced cleanup
   async safeWebSocketCleanup(ws) {
     if (!ws) return;
     
@@ -1940,13 +1931,12 @@ export class ChatServer {
       if (userId) {
         this._removeUserConnection(userId, ws);
         
-        // Cancel cleanup timer
+        // Cancel semua cleanup timer yang ada
         this.cancelCleanup(userId);
         
-        // Only schedule cleanup if not manual destroy and not duplicate
+        // PERBAIKAN: Langsung schedule cleanup dengan grace period 5 detik
         if (!ws.isManualDestroy && !ws._isDuplicate) {
-          // Gunakan debounced cleanup untuk menghindari race condition
-          this.debouncedCleanup.schedule(userId);
+          this.scheduleCleanup(userId);
         }
       }
       
@@ -2358,6 +2348,3 @@ export default {
     }
   }
 };
-
-
-
