@@ -1153,36 +1153,32 @@ export class ChatServer {
   }
 
   async savePointWithRetry(room, seat, x, y, fast) {
-    try {
-      await this.updateSeatAtomic(room, seat, (currentSeat) => {
-        currentSeat.lastPoint = { 
-          x: x || 0, 
-          y: y || 0, 
-          fast: fast || false,
-          timestamp: Date.now()
-        };
-        return currentSeat;
-      });
-      return true;
-    } catch (error) {
-      // Retry once
-      try {
-        await this.updateSeatAtomic(room, seat, (currentSeat) => {
-          currentSeat.lastPoint = { 
-            x: x || 0, 
-            y: y || 0, 
-            fast: fast || false,
-            timestamp: Date.now()
-          };
-          return currentSeat;
-        });
-        return true;
-      } catch {
-        return false;
-      }
+  try {
+    const xNum = typeof x === 'number' ? x : parseFloat(x);
+    const yNum = typeof y === 'number' ? y : parseFloat(y);
+    
+    if (isNaN(xNum) || isNaN(yNum)) {
+      return false;
     }
+    
+    const updatedSeat = await this.updateSeatAtomic(room, seat, (currentSeat) => {
+      currentSeat.lastPoint = { 
+        x: xNum, 
+        y: yNum, 
+        fast: fast || false,
+        timestamp: Date.now()
+      };
+      return currentSeat;
+    });
+    
+    this.broadcastPointDirect(room, seat, xNum, yNum, fast);
+    return !!updatedSeat;
+  } catch {
+    this.broadcastPointDirect(room, seat, x, y, fast);
+    return false;
   }
-
+}
+  
   async findEmptySeat(room, ws) {
     if (!room || !ws || !ws.idtarget) return null;
     
@@ -1444,23 +1440,24 @@ export class ChatServer {
     }
   }
 
-  sendAllStateTo(ws, room) {
-    try {
-      if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room || 
-          ws._isDuplicate || ws._isClosing) return;
+sendAllStateTo(ws, room) {
+  try {
+    if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room || 
+        ws._isDuplicate || ws._isClosing) return;
+    
+    const seatMap = this.roomSeats.get(room);
+    if (!seatMap) return;
+
+    // Send kursi data in the OLD format (backward compatible)
+    const allKursiMeta = {};
+    const lastPointsData = [];
+
+    // PERBAIKAN: Loop SEMUA kursi 1-35, bukan hanya yang terisi
+    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+      const info = seatMap.get(seat);
       
-      const seatMap = this.roomSeats.get(room);
-      if (!seatMap) return;
-
-      // Send kursi data in the OLD format (backward compatible)
-      const allKursiMeta = {};
-      const lastPointsData = [];
-
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const info = seatMap.get(seat);
-        if (!info || !info.namauser || info.namauser === "") continue;
-        
-        // Format sesuai dengan yang diharapkan client lama
+      // Data kursi - tetap kirim format lama (hanya kursi terisi)
+      if (info && info.namauser && info.namauser !== "") {
         allKursiMeta[seat] = {
           noimageUrl: info.noimageUrl,
           namauser: info.namauser,
@@ -1470,38 +1467,37 @@ export class ChatServer {
           vip: info.vip,
           viptanda: info.viptanda
         };
-
-        if (info.lastPoint) {
-          lastPointsData.push({
-            seat: seat,
-            x: info.lastPoint.x || 0,
-            y: info.lastPoint.y || 0,
-            fast: info.lastPoint.fast || false
-          });
-        }
       }
 
-      if (Object.keys(allKursiMeta).length > 0) {
-        // Gunakan format yang sama dengan yang lama
-        this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
+      // PERBAIKAN: Ambil POINT dari SEMUA kursi, TERMASUK yang kosong!
+      if (info && info.lastPoint) {
+        lastPointsData.push({
+          seat: seat,
+          x: info.lastPoint.x || 0,
+          y: info.lastPoint.y || 0,
+          fast: info.lastPoint.fast || false
+        });
       }
-
-      if (lastPointsData.length > 0) {
-        // Kirim semua points dalam satu batch (tidak dipecah-pecah)
-        this.safeSend(ws, ["allPointsList", room, lastPointsData]);
-      }
-
-      const counts = this.getJumlahRoom();
-      const count = counts[room] || 0;
-      this.safeSend(ws, ["roomUserCount", room, count]);
-      
-      // Send currentNumber
-      this.safeSend(ws, ["currentNumber", this.currentNumber]);
-    } catch (error) {
-      console.error("Error in sendAllStateTo:", error);
-      // Ignore state sending errors
     }
+
+    if (Object.keys(allKursiMeta).length > 0) {
+      this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
+    }
+
+    // PERBAIKAN: Kirim SEMUA points yang ditemukan
+    if (lastPointsData.length > 0) {
+      this.safeSend(ws, ["allPointsList", room, lastPointsData]);
+    }
+
+    const counts = this.getJumlahRoom();
+    const count = counts[room] || 0;
+    this.safeSend(ws, ["roomUserCount", room, count]);
+    
+    this.safeSend(ws, ["currentNumber", this.currentNumber]);
+  } catch (error) {
+    console.error("Error in sendAllStateTo:", error);
   }
+}
 
   async handleSetIdTarget2(ws, id, baru) {
     if (!id || !ws) return;
@@ -2348,3 +2344,4 @@ export default {
     }
   }
 };
+
