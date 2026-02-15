@@ -382,11 +382,18 @@ export class ChatServer {
     try {
       if (!room || !roomList.includes(room)) return;
       
+      // VALIDASI: Filter batch untuk memastikan hanya seat 1-35
+      const validBatch = batch.filter(point => {
+        return point && point.seat >= 1 && point.seat <= this.MAX_SEATS;
+      });
+      
+      if (validBatch.length === 0) return;
+      
       const clientArray = this.roomClients.get(room);
       if (!clientArray || clientArray.length === 0) return;
       
       // Create message once
-      const message = JSON.stringify(["pointsBatch", room, batch]);
+      const message = JSON.stringify(["pointsBatch", room, validBatch]);
       
       for (let i = 0; i < clientArray.length; i++) {
         const client = clientArray[i];
@@ -406,6 +413,12 @@ export class ChatServer {
   broadcastPointDirect(room, seat, x, y, fast) {
     try {
       if (!room || !roomList.includes(room)) return;
+      
+      // VALIDASI: seat harus antara 1-35
+      if (seat < 1 || seat > this.MAX_SEATS) {
+        console.error(`[broadcastPointDirect] Invalid seat number: ${seat}`);
+        return;
+      }
       
       const clientArray = this.roomClients.get(room);
       if (!clientArray || clientArray.length === 0) return;
@@ -930,7 +943,7 @@ export class ChatServer {
       const seatMap = this.roomSeats.get(room);
       const occupancyMap = this.seatOccupancy.get(room);
       
-      if (!seatMap || !occupancyMap) return [];
+      if (!seatMap || !occupancyMap) return 0;
 
       let inconsistencies = 0;
       
@@ -1041,6 +1054,12 @@ export class ChatServer {
 
   async cleanupUserFromSeat(room, seatNumber, userId, immediate = true) {
     try {
+      // VALIDASI: seatNumber harus antara 1-35
+      if (seatNumber < 1 || seatNumber > this.MAX_SEATS) {
+        console.error(`[cleanupUserFromSeat] Invalid seat number: ${seatNumber}`);
+        return;
+      }
+      
       await this.withLock(`seat-${room}-${seatNumber}`, async () => {
         const seatMap = this.roomSeats.get(room);
         const occupancyMap = this.seatOccupancy.get(room);
@@ -1102,6 +1121,11 @@ export class ChatServer {
 
   clearSeatBuffer(room, seatNumber) {
     try {
+      // VALIDASI: seatNumber harus antara 1-35
+      if (seatNumber < 1 || seatNumber > this.MAX_SEATS) {
+        return;
+      }
+      
       const roomMap = this.updateKursiBuffer.get(room);
       if (roomMap) roomMap.delete(seatNumber);
     } catch {
@@ -1111,6 +1135,12 @@ export class ChatServer {
 
   async updateSeatAtomic(room, seatNumber, updateFn) {
     try {
+      // VALIDASI: seatNumber harus antara 1-35
+      if (seatNumber < 1 || seatNumber > this.MAX_SEATS) {
+        console.error(`[updateSeatAtomic] Invalid seat number: ${seatNumber}`);
+        return null;
+      }
+      
       return await this.withLock(`seat-update-${room}-${seatNumber}`, () => {
         const seatMap = this.roomSeats.get(room);
         const occupancyMap = this.seatOccupancy.get(room);
@@ -1153,31 +1183,85 @@ export class ChatServer {
   }
 
   async savePointWithRetry(room, seat, x, y, fast) {
-  try {
-    const xNum = typeof x === 'number' ? x : parseFloat(x);
-    const yNum = typeof y === 'number' ? y : parseFloat(y);
-    
-    if (isNaN(xNum) || isNaN(yNum)) {
+    try {
+      // VALIDASI: seat harus antara 1-35
+      if (seat < 1 || seat > this.MAX_SEATS) {
+        console.error(`[savePointWithRetry] Invalid seat number: ${seat}`);
+        return false;
+      }
+      
+      const xNum = typeof x === 'number' ? x : parseFloat(x);
+      const yNum = typeof y === 'number' ? y : parseFloat(y);
+      
+      if (isNaN(xNum) || isNaN(yNum)) {
+        return false;
+      }
+      
+      const updatedSeat = await this.updateSeatAtomic(room, seat, (currentSeat) => {
+        currentSeat.lastPoint = { 
+          x: xNum, 
+          y: yNum, 
+          fast: fast || false,
+          timestamp: Date.now()
+        };
+        return currentSeat;
+      });
+      
+      this.broadcastPointDirect(room, seat, xNum, yNum, fast);
+      return !!updatedSeat;
+    } catch {
+      this.broadcastPointDirect(room, seat, x, y, fast);
       return false;
     }
-    
-    const updatedSeat = await this.updateSeatAtomic(room, seat, (currentSeat) => {
-      currentSeat.lastPoint = { 
-        x: xNum, 
-        y: yNum, 
-        fast: fast || false,
-        timestamp: Date.now()
-      };
-      return currentSeat;
-    });
-    
-    this.broadcastPointDirect(room, seat, xNum, yNum, fast);
-    return !!updatedSeat;
-  } catch {
-    this.broadcastPointDirect(room, seat, x, y, fast);
-    return false;
   }
-}
+  
+  async ensureSeatsData(room) {
+    try {
+      const seatMap = this.roomSeats.get(room);
+      const occupancyMap = this.seatOccupancy.get(room);
+      
+      if (!seatMap || !occupancyMap) {
+        console.error(`[ensureSeatsData] Room ${room} data not found`);
+        return;
+      }
+      
+      // VALIDASI: Pastikan semua seat 1-35 memiliki data
+      let needsFix = false;
+      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        const seatData = seatMap.get(seat);
+        const occupancyData = occupancyMap.get(seat);
+        
+        // Cek apakah seatData ada
+        if (!seatData) {
+          console.log(`[ensureSeatsData] Seat ${seat} in ${room} has no data, creating...`);
+          seatMap.set(seat, createEmptySeat());
+          needsFix = true;
+        }
+        
+        // Cek konsistensi antara seatMap dan occupancyMap
+        if (seatData && seatData.namauser && seatData.namauser !== "") {
+          if (occupancyData !== seatData.namauser) {
+            console.log(`[ensureSeatsData] Fixing inconsistency for seat ${seat} in ${room}`);
+            occupancyMap.set(seat, seatData.namauser);
+            needsFix = true;
+          }
+        } else {
+          if (occupancyData !== null) {
+            console.log(`[ensureSeatsData] Fixing occupancy for empty seat ${seat} in ${room}`);
+            occupancyMap.set(seat, null);
+            needsFix = true;
+          }
+        }
+      }
+      
+      if (needsFix) {
+        console.log(`[ensureSeatsData] Fixed data for room ${room}`);
+      }
+      
+    } catch (error) {
+      console.error(`[ensureSeatsData] Error for room ${room}:`, error);
+    }
+  }
   
   async findEmptySeat(room, ws) {
     if (!room || !ws || !ws.idtarget) return null;
@@ -1273,16 +1357,24 @@ export class ChatServer {
           // CANCEL CLEANUP DI AWAL - sangat penting!
           this.cancelCleanup(ws.idtarget);
           
+          // VALIDASI 1: Pastikan data kursi untuk seat 1-35 tersedia
+          await this.ensureSeatsData(room);
+          
           const previousRoom = this.userCurrentRoom.get(ws.idtarget);
           if (previousRoom && previousRoom !== room) {
             await this.cleanupFromRoom(ws, previousRoom);
           }
           
           const seat = await this.findEmptySeat(room, ws);
-          if (!seat) {
+          
+          // VALIDASI 2: seat harus antara 1-35, bukan 0 atau null
+          if (!seat || seat < 1 || seat > this.MAX_SEATS) {
+            console.log(`[handleJoinRoom] No valid seat found for ${ws.idtarget} in ${room}`);
             this.safeSend(ws, ["roomFull", room]);
             return false;
           }
+          
+          console.log(`[handleJoinRoom] Assigning seat ${seat} to ${ws.idtarget} in ${room}`);
           
           await this.withLock(`seat-assign-${room}-${seat}`, async () => {
             const occupancyMap = this.seatOccupancy.get(room);
@@ -1306,10 +1398,11 @@ export class ChatServer {
           // Send rooMasuk immediately
           this.safeSend(ws, ["rooMasuk", seat, room]);
           
-          // NO DELAY - send state immediately
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          // Send state
+          setTimeout(() => {
+            this.sendAllStateTo(ws, room);
+          }, 100);
           
-          this.sendAllStateTo(ws, room);
           this.updateRoomCount(room);
           
           return true;
@@ -1440,64 +1533,64 @@ export class ChatServer {
     }
   }
 
-sendAllStateTo(ws, room) {
-  try {
-    if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room || 
-        ws._isDuplicate || ws._isClosing) return;
-    
-    const seatMap = this.roomSeats.get(room);
-    if (!seatMap) return;
-
-    // Send kursi data in the OLD format (backward compatible)
-    const allKursiMeta = {};
-    const lastPointsData = [];
-
-    // PERBAIKAN: Loop SEMUA kursi 1-35, bukan hanya yang terisi
-    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-      const info = seatMap.get(seat);
+  sendAllStateTo(ws, room) {
+    try {
+      if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room || 
+          ws._isDuplicate || ws._isClosing) return;
       
-      // Data kursi - tetap kirim format lama (hanya kursi terisi)
-      if (info && info.namauser && info.namauser !== "") {
-        allKursiMeta[seat] = {
-          noimageUrl: info.noimageUrl,
-          namauser: info.namauser,
-          color: info.color,
-          itembawah: info.itembawah,
-          itematas: info.itematas,
-          vip: info.vip,
-          viptanda: info.viptanda
-        };
+      const seatMap = this.roomSeats.get(room);
+      if (!seatMap) return;
+
+      // Send kursi data
+      const allKursiMeta = {};
+      const lastPointsData = [];
+
+      // Loop SEMUA kursi 1-35
+      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        const info = seatMap.get(seat);
+        
+        // Data kursi - hanya kursi terisi
+        if (info && info.namauser && info.namauser !== "") {
+          allKursiMeta[seat] = {
+            noimageUrl: info.noimageUrl,
+            namauser: info.namauser,
+            color: info.color,
+            itembawah: info.itembawah,
+            itematas: info.itematas,
+            vip: info.vip,
+            viptanda: info.viptanda
+          };
+        }
+
+        // Ambil POINT dari SEMUA kursi (TERMASUK yang kosong)
+        if (info && info.lastPoint) {
+          lastPointsData.push({
+            seat: seat,
+            x: info.lastPoint.x || 0,
+            y: info.lastPoint.y || 0,
+            fast: info.lastPoint.fast || false
+          });
+        }
       }
 
-      // PERBAIKAN: Ambil POINT dari SEMUA kursi, TERMASUK yang kosong!
-      if (info && info.lastPoint) {
-        lastPointsData.push({
-          seat: seat,
-          x: info.lastPoint.x || 0,
-          y: info.lastPoint.y || 0,
-          fast: info.lastPoint.fast || false
-        });
+      if (Object.keys(allKursiMeta).length > 0) {
+        this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
       }
-    }
 
-    if (Object.keys(allKursiMeta).length > 0) {
-      this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
-    }
+      // Kirim SEMUA points yang ditemukan
+      if (lastPointsData.length > 0) {
+        this.safeSend(ws, ["allPointsList", room, lastPointsData]);
+      }
 
-    // PERBAIKAN: Kirim SEMUA points yang ditemukan
-    if (lastPointsData.length > 0) {
-      this.safeSend(ws, ["allPointsList", room, lastPointsData]);
+      const counts = this.getJumlahRoom();
+      const count = counts[room] || 0;
+      this.safeSend(ws, ["roomUserCount", room, count]);
+      
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
+    } catch (error) {
+      console.error("Error in sendAllStateTo:", error);
     }
-
-    const counts = this.getJumlahRoom();
-    const count = counts[room] || 0;
-    this.safeSend(ws, ["roomUserCount", room, count]);
-    
-    this.safeSend(ws, ["currentNumber", this.currentNumber]);
-  } catch (error) {
-    console.error("Error in sendAllStateTo:", error);
   }
-}
 
   async handleSetIdTarget2(ws, id, baru) {
     if (!id || !ws) return;
@@ -1526,6 +1619,15 @@ sendAllStateTo(ws, room) {
         
         if (seatInfo) {
           const { room, seat } = seatInfo;
+          
+          // VALIDASI: seat harus antara 1-35
+          if (seat < 1 || seat > this.MAX_SEATS) {
+            console.log(`[handleSetIdTarget2] Invalid seat ${seat} for ${id}, cleaning up`);
+            this.userToSeat.delete(id);
+            this.userCurrentRoom.delete(id);
+            this.safeSend(ws, ["needJoinRoom"]);
+            return;
+          }
           
           const seatMap = this.roomSeats.get(room);
           const occupancyMap = this.seatOccupancy.get(room);
@@ -1584,7 +1686,6 @@ sendAllStateTo(ws, room) {
 
   async cleanupDuplicateConnections() {
     try {
-      const now = Date.now();
       const userConnectionCount = new Map();
       
       for (const client of this.clients) {
@@ -1852,6 +1953,9 @@ sendAllStateTo(ws, room) {
         
         const updates = [];
         for (const [seat, info] of seatMapUpdates.entries()) {
+          // VALIDASI: seat harus antara 1-35
+          if (seat < 1 || seat > this.MAX_SEATS) continue;
+          
           if (info && info.namauser && info.namauser !== "") {
             const { lastPoint, ...rest } = info;
             updates.push([seat, rest]);
@@ -1910,7 +2014,6 @@ sendAllStateTo(ws, room) {
     }
   }
 
-  // PERBAIKAN: Enhanced WebSocket cleanup - tanpa debounced cleanup
   async safeWebSocketCleanup(ws) {
     if (!ws) return;
     
@@ -1930,7 +2033,7 @@ sendAllStateTo(ws, room) {
         // Cancel semua cleanup timer yang ada
         this.cancelCleanup(userId);
         
-        // PERBAIKAN: Langsung schedule cleanup dengan grace period 5 detik
+        // Langsung schedule cleanup dengan grace period 5 detik
         if (!ws.isManualDestroy && !ws._isDuplicate) {
           this.scheduleCleanup(userId);
         }
@@ -2148,6 +2251,12 @@ sendAllStateTo(ws, room) {
             
             if (ws.roomname !== room || !roomList.includes(room)) return;
             
+            // VALIDASI: seat harus antara 1-35
+            if (seat < 1 || seat > this.MAX_SEATS) {
+              console.error(`[handleMessage:updatePoint] Invalid seat number: ${seat}`);
+              return;
+            }
+            
             // Save point asynchronously (non-blocking)
             this.savePointWithRetry(room, seat, x, y, fast).catch(() => {});
             
@@ -2160,6 +2269,12 @@ sendAllStateTo(ws, room) {
           case "removeKursiAndPoint": {
             const [, room, seat] = data;
             
+            // VALIDASI: seat harus antara 1-35
+            if (seat < 1 || seat > this.MAX_SEATS) {
+              console.error(`[handleMessage:removeKursiAndPoint] Invalid seat number: ${seat}`);
+              return;
+            }
+            
             if (ws.roomname !== room || !roomList.includes(room)) return;
             
             await this.updateSeatAtomic(room, seat, () => createEmptySeat());
@@ -2171,6 +2286,12 @@ sendAllStateTo(ws, room) {
 
           case "updateKursi": {
             const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
+            
+            // VALIDASI: seat harus antara 1-35
+            if (seat < 1 || seat > this.MAX_SEATS) {
+              console.error(`[handleMessage:updateKursi] Invalid seat number: ${seat}`);
+              return;
+            }
             
             if (ws.roomname !== room || !roomList.includes(room)) return;
             
@@ -2344,5 +2465,3 @@ export default {
     }
   }
 };
-
-
