@@ -135,7 +135,10 @@ export class ChatServer {
     try {
       this.state = state;
       this.env = env;
-
+      
+      // MUTE STATUS - GLOBAL BOOLEAN (true/false)
+      this.muteStatus = false; // Default tidak mute
+      
       this.lockManager = new PromiseLockManager();
       this.cleanupInProgress = new Set();
       this.clients = new Set();
@@ -313,6 +316,28 @@ export class ChatServer {
       } catch {
         // Ignore release errors
       }
+    }
+  }
+
+  // METHOD MUTE - GLOBAL (tanpa userId)
+  setMuteType(isMuted) {
+    try {
+      // isMuted harus boolean
+      this.muteStatus = isMuted === true;
+      return true;
+    } catch (error) {
+      console.error("Error in setMuteType:", error);
+      return false;
+    }
+  }
+
+  // METHOD GET MUTE - GLOBAL (tanpa userId)
+  getMuteType() {
+    try {
+      return this.muteStatus === true;
+    } catch (error) {
+      console.error("Error in getMuteType:", error);
+      return false;
     }
   }
 
@@ -2117,6 +2142,32 @@ export class ChatServer {
             const currentRoom = this.userCurrentRoom.get(idtarget);
             const isInRoom = currentRoom !== undefined;
             this.safeSend(ws, ["inRoomStatus", isInRoom]);
+            break;
+          }
+
+          // HANDLER MUTE - GLOBAL (tanpa userId)
+          case "setMuteType": {
+            const isMuted = data[1];
+            
+            // Panggil method tanpa parameter userId
+            const success = this.setMuteType(isMuted);
+            
+            // Kirim response ke client yang mengirim
+            this.safeSend(ws, ["muteTypeResponse", this.getMuteType()]);
+            
+            // Broadcast ke semua client di room yang sama
+            if (ws.roomname) {
+              this.broadcastToRoom(ws.roomname, ["muteStatusChanged", this.getMuteType()]);
+            }
+            
+            this.safeSend(ws, ["muteTypeSet", isMuted, success]);
+            break;
+          }
+
+          case "getMuteType": {
+            // Kirim status mute saat ini ke client
+            this.safeSend(ws, ["muteTypeResponse", this.getMuteType()]);
+            this.safeSend(ws, ["muteTypeRequested", true]);
             break;
           }
 
