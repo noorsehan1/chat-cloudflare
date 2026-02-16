@@ -91,7 +91,6 @@ class RateLimiter {
     const now = Date.now();
     const userRequests = this.requests.get(userId) || [];
     
-    // Clean old requests
     const recentRequests = userRequests.filter(time => now - time < this.windowMs);
     
     if (recentRequests.length >= this.maxRequests) {
@@ -136,10 +135,9 @@ export class ChatServer {
       this.state = state;
       this.env = env;
       
-      // MUTE STATUS - PER ROOM dengan persistent storage
-      this.muteStatus = new Map(); // key: roomName, value: boolean (memory cache)
-      this.storage = state.storage; // Durable Object storage
-      this._muteStatusLoaded = false; // Flag untuk menandai sudah load dari storage
+      this.muteStatus = new Map();
+      this.storage = state.storage;
+      this._muteStatusLoaded = false;
       
       this.lockManager = new PromiseLockManager();
       this.cleanupInProgress = new Set();
@@ -154,24 +152,20 @@ export class ChatServer {
       this.bufferSizeLimit = 50;
       this.userConnections = new Map();
 
-      // Point optimization buffers
       this._pointBuffer = new Map();
       this._pointFlushTimer = null;
-      this._pointFlushDelay = 16; // ~60fps
+      this._pointFlushDelay = 16;
       this._hasBufferedUpdates = false;
 
-      // Rate limiting
-      this.rateLimiter = new RateLimiter(60000, 100); // 100 requests per minute
-      this.connectionRateLimiter = new RateLimiter(10000, 5); // 5 connections per 10 seconds
+      this.rateLimiter = new RateLimiter(60000, 100);
+      this.connectionRateLimiter = new RateLimiter(10000, 5);
       
-      // Connection tracking
       this.connectionAttempts = new Map();
       this.maxConnectionAttempts = 10;
-      this.connectionBanTime = 30000; // 30 seconds ban
+      this.connectionBanTime = 30000;
       
-      // Safe mode
       this.safeMode = false;
-      this.loadThreshold = 0.9; // 90% load
+      this.loadThreshold = 0.9;
       this.lastLoadCheck = 0;
       this.loadCheckInterval = 5000;
 
@@ -181,7 +175,7 @@ export class ChatServer {
         this.lowcard = null;
       }
 
-      this.gracePeriod = 5000; // 5 detik
+      this.gracePeriod = 5000;
       this.disconnectedTimers = new Map();
       this.cleanupQueue = new QueueManager(5);
       this.currentNumber = 1;
@@ -190,18 +184,13 @@ export class ChatServer {
       this._nextConnId = 1;
       this._timers = [];
 
-      // Reset semua timer lama saat constructor
       this._cleanupAllTimers();
 
-      // Inisialisasi semua room dengan mute false (akan di-overwrite oleh storage nanti)
       for (const room of roomList) {
         this.muteStatus.set(room, false);
       }
 
-      // Load mute status dari storage secara async
-      this.loadMuteStatus().catch(err => {
-        console.error("Failed to load mute status:", err);
-      });
+      this.loadMuteStatus();
 
       try {
         this.initializeRooms();
@@ -214,12 +203,10 @@ export class ChatServer {
       this.cacheValidDuration = 2000;
       this.lastCacheUpdate = 0;
 
-      // Initialize point buffers for each room
       for (const room of roomList) {
         this._pointBuffer.set(room, []);
       }
 
-      // Grace period validation timer
       this._gracePeriodValidationTimer = null;
 
     } catch (error) {
@@ -243,7 +230,6 @@ export class ChatServer {
       this.gracePeriod = 5000;
       this.cleanupQueue = new QueueManager(5);
       
-      // MUTE STATUS - PER ROOM dengan persistent storage
       this.muteStatus = new Map();
       this.storage = state?.storage;
       this._muteStatusLoaded = false;
@@ -251,31 +237,26 @@ export class ChatServer {
         this.muteStatus.set(room, false);
       }
       
-      // Rate limiting
       this.rateLimiter = new RateLimiter(60000, 100);
       this.connectionRateLimiter = new RateLimiter(10000, 5);
       this.connectionAttempts = new Map();
       this.safeMode = false;
       this.loadThreshold = 0.9;
       
-      // Point optimization buffers
       this._pointBuffer = new Map();
       this._pointFlushTimer = null;
       this._pointFlushDelay = 16;
       this._hasBufferedUpdates = false;
       
-      // Reset timers
       this._cleanupAllTimers();
       
       this.createDefaultRoom();
     }
   }
 
-  // ========== MODIFIED: Load mute status dari persistent storage ==========
   async loadMuteStatus() {
     try {
       if (!this.storage) return;
-      
       const stored = await this.storage.get("muteStatus");
       if (stored && typeof stored === 'object') {
         for (const [room, isMuted] of Object.entries(stored)) {
@@ -283,34 +264,26 @@ export class ChatServer {
             this.muteStatus.set(room, isMuted === true);
           }
         }
-        console.log("[loadMuteStatus] Loaded mute status from storage:", stored);
       }
       this._muteStatusLoaded = true;
     } catch (error) {
-      console.error("[loadMuteStatus] Error:", error);
+      this._muteStatusLoaded = true;
     }
   }
 
-  // ========== MODIFIED: Save mute status ke persistent storage ==========
   async saveMuteStatus() {
     try {
       if (!this.storage) return;
-      
       const status = {};
       for (const [room, isMuted] of this.muteStatus.entries()) {
         if (roomList.includes(room)) {
           status[room] = isMuted === true;
         }
       }
-      
       await this.storage.put("muteStatus", status);
-      console.log("[saveMuteStatus] Saved mute status to storage:", status);
-    } catch (error) {
-      console.error("[saveMuteStatus] Error:", error);
-    }
+    } catch (error) {}
   }
 
-  // Helper untuk manage user connections dengan konsisten
   _addUserConnection(userId, ws) {
     if (!userId || !ws) return;
     
@@ -346,7 +319,6 @@ export class ChatServer {
     }
   }
 
-  // Enhanced lock dengan timeout protection
   async withLock(resourceId, operation, timeout = 2000) {
     const release = await this.lockManager.acquire(resourceId);
     
@@ -366,67 +338,50 @@ export class ChatServer {
       clearTimeout(timeoutId);
       return result;
     } catch (error) {
-      console.error(`Lock operation failed for ${resourceId}:`, error);
       throw error;
     } finally {
       try {
         clearTimeout(timeoutId);
         release();
-      } catch {
-        // Ignore release errors
-      }
+      } catch {}
     }
   }
 
-  // ========== MODIFIED: METHOD MUTE - PER ROOM dengan persistent storage ==========
   async setMuteType(isMuted, roomName) {
     try {
       if (!roomName || !roomList.includes(roomName)) {
-        console.error(`[setMuteType] Invalid room: ${roomName}`);
         return false;
       }
       
-      // Tunggu sampai mute status selesai di-load (jika belum)
       if (!this._muteStatusLoaded && this.storage) {
         await this.loadMuteStatus();
       }
       
-      // Set mute hanya untuk room tertentu di memory cache
       this.muteStatus.set(roomName, isMuted === true);
-      
-      // Simpan ke persistent storage
       await this.saveMuteStatus();
       
-      console.log(`[setMuteType] Room ${roomName} mute = ${isMuted} (saved to storage)`);
       return true;
     } catch (error) {
-      console.error("Error in setMuteType:", error);
       return false;
     }
   }
 
-  // ========== MODIFIED: METHOD GET MUTE - PER ROOM dengan persistent storage ==========
   async getMuteType(roomName) {
     try {
       if (!roomName || !roomList.includes(roomName)) {
-        console.error(`[getMuteType] Invalid room: ${roomName}`);
         return false;
       }
       
-      // Tunggu sampai mute status selesai di-load (jika belum)
       if (!this._muteStatusLoaded && this.storage) {
         await this.loadMuteStatus();
       }
       
-      // Get mute hanya untuk room tertentu dari memory cache
       return this.muteStatus.get(roomName) === true;
     } catch (error) {
-      console.error("Error in getMuteType:", error);
       return false;
     }
   }
 
-  // Safe mode management
   checkAndEnableSafeMode() {
     const now = Date.now();
     if (now - this.lastLoadCheck < this.loadCheckInterval) {
@@ -446,14 +401,11 @@ export class ChatServer {
   enableSafeMode() {
     if (this.safeMode) return;
     
-    console.log("⚠️ Entering safe mode due to high load");
     this.safeMode = true;
     
-    // Reduce concurrency in safe mode
     this.cleanupQueue.concurrency = 2;
-    this._pointFlushDelay = 100; // Slow down point updates
+    this._pointFlushDelay = 100;
     
-    // Schedule auto-exit
     setTimeout(() => {
       if (this.getServerLoad() < 0.7) {
         this.disableSafeMode();
@@ -462,7 +414,6 @@ export class ChatServer {
   }
 
   disableSafeMode() {
-    console.log("✅ Exiting safe mode");
     this.safeMode = false;
     this.cleanupQueue.concurrency = 5;
     this._pointFlushDelay = 16;
@@ -492,7 +443,6 @@ export class ChatServer {
     try {
       if (!room || !roomList.includes(room)) return;
       
-      // VALIDASI: Filter batch untuk memastikan hanya seat 1-35
       const validBatch = batch.filter(point => {
         return point && point.seat >= 1 && point.seat <= this.MAX_SEATS;
       });
@@ -502,7 +452,6 @@ export class ChatServer {
       const clientArray = this.roomClients.get(room);
       if (!clientArray || clientArray.length === 0) return;
       
-      // Create message once
       const message = JSON.stringify(["pointsBatch", room, validBatch]);
       
       for (let i = 0; i < clientArray.length; i++) {
@@ -510,30 +459,23 @@ export class ChatServer {
         if (client && client.readyState === 1 && client.roomname === room) {
           try {
             client.send(message);
-          } catch {
-            // Ignore send errors
-          }
+          } catch {}
         }
       }
-    } catch {
-      // Ignore broadcast errors
-    }
+    } catch {}
   }
 
   broadcastPointDirect(room, seat, x, y, fast) {
     try {
       if (!room || !roomList.includes(room)) return;
       
-      // VALIDASI: seat harus antara 1-35
       if (seat < 1 || seat > this.MAX_SEATS) {
-        console.error(`[broadcastPointDirect] Invalid seat number: ${seat}`);
         return;
       }
       
       const clientArray = this.roomClients.get(room);
       if (!clientArray || clientArray.length === 0) return;
       
-      // Create message once for all clients
       const message = JSON.stringify(["pointUpdated", room, seat, x, y, fast]);
       
       for (let i = 0; i < clientArray.length; i++) {
@@ -541,58 +483,41 @@ export class ChatServer {
         if (client && client.readyState === 1 && client.roomname === room) {
           try {
             client.send(message);
-          } catch {
-            // Ignore send errors
-          }
+          } catch {}
         }
       }
-    } catch {
-      // Ignore broadcast errors
-    }
+    } catch {}
   }
 
   scheduleCleanup(userId) {
     try {
       if (!userId) return;
       
-      // Cleanup timer yang sudah expired tapi belum dihapus
       this._cleanupExpiredTimers();
-      
-      // Cancel timer yang ada
       this.cancelCleanup(userId);
       
-      // Simpan waktu scheduled untuk validation
       const timerId = setTimeout(async () => {
         try {
-          // Hapus dari timer map
           this.disconnectedTimers.delete(userId);
           
-          // Cek apakah user masih connected
           const isStillConnected = await this.isUserStillConnected(userId);
           
           if (!isStillConnected) {
-            // Gunakan lock untuk mencegah race condition dengan join room
             await this.withLock(`grace-cleanup-${userId}`, async () => {
-              // Double check setelah dapat lock
               const doubleCheckConnected = await this.isUserStillConnected(userId);
               if (!doubleCheckConnected) {
                 await this.forceUserCleanup(userId);
               }
             });
           }
-        } catch (error) {
-          console.error(`Cleanup timer error for ${userId}:`, error);
-        }
+        } catch (error) {}
       }, this.gracePeriod);
       
-      // Simpan timer dengan metadata
       timerId._scheduledTime = Date.now();
       timerId._userId = userId;
       this.disconnectedTimers.set(userId, timerId);
       
-    } catch (error) {
-      console.error('Schedule cleanup error:', error);
-    }
+    } catch (error) {}
   }
 
   _cleanupExpiredTimers() {
@@ -601,7 +526,6 @@ export class ChatServer {
       const expiredUsers = [];
       
       for (const [userId, timer] of this.disconnectedTimers) {
-        // Jika timer sudah tidak ada atau undefined
         if (!timer) {
           expiredUsers.push(userId);
         }
@@ -610,85 +534,62 @@ export class ChatServer {
       for (const userId of expiredUsers) {
         this.disconnectedTimers.delete(userId);
       }
-    } catch {
-      // Ignore cleanup errors
-    }
+    } catch {}
   }
 
   cancelCleanup(userId) {
     try {
       if (!userId) return;
       
-      // Hapus timer
       const timer = this.disconnectedTimers.get(userId);
       if (timer) {
         clearTimeout(timer);
         this.disconnectedTimers.delete(userId);
       }
       
-      // Hapus dari cleanupInProgress
       if (this.cleanupInProgress && this.cleanupInProgress.has(userId)) {
         this.cleanupInProgress.delete(userId);
       }
       
-    } catch (error) {
-      console.error('Cancel cleanup error:', error);
-    }
+    } catch (error) {}
   }
 
   async isUserStillConnected(userId) {
     if (!userId) return false;
     
-    // Cek di userConnections
     const userConnections = this.userConnections.get(userId);
     if (!userConnections || userConnections.size === 0) {
       return false;
     }
     
-    // Cek apakah ada minimal satu connection yang valid
     for (const conn of userConnections) {
       if (!conn) continue;
-      
-      // Cek readyState (harus OPEN/1)
       if (conn.readyState !== 1) continue;
-      
-      // Cek apakah ini duplicate connection
       if (conn._isDuplicate) continue;
-      
-      // Cek apakah connection sedang closing
       if (conn._isClosing) continue;
-      
-      // Cek timestamp connection
       if (conn._connectionTime) {
         const connectionAge = Date.now() - conn._connectionTime;
-        // Jika connection terlalu tua (lebih dari 24 jam), mungkin ada masalah
         if (connectionAge > 24 * 60 * 60 * 1000) {
-          continue; // Connection terlalu tua, mungkin stuck
+          continue;
         }
       }
-      
-      // Connection valid ditemukan
       return true;
     }
     
-    // Tidak ada connection yang valid
     return false;
   }
 
   async executeGracePeriodCleanup(userId) {
     if (!userId || this.cleanupInProgress.has(userId)) return;
     
-    // Check safe mode
     this.checkAndEnableSafeMode();
     if (this.safeMode) {
-      // Delay cleanup in safe mode
       setTimeout(() => {
         this.executeGracePeriodCleanup(userId);
       }, 2000);
       return;
     }
     
-    // Langsung execute tanpa queue delay
     this.cleanupInProgress.add(userId);
     try {
       await this.withLock(`user-cleanup-${userId}`, async () => {
@@ -699,7 +600,6 @@ export class ChatServer {
         }
       });
     } catch (error) {
-      console.error(`Execute cleanup error for ${userId}:`, error);
     } finally {
       this.cleanupInProgress.delete(userId);
     }
@@ -721,19 +621,15 @@ export class ChatServer {
       this.roomClients.set(room, []);
       this.updateKursiBuffer.set(room, new Map());
       this._pointBuffer.set(room, []);
-    } catch {
-      // Ignore room creation errors
-    }
+    } catch {}
   }
 
-  // initializeRooms - Jangan buat data default
   initializeRooms() {
     for (const room of roomList) {
       try {
-        // SeatMap bisa dimulai dengan null untuk semua kursi
         const seatMap = new Map();
         for (let i = 1; i <= this.MAX_SEATS; i++) {
-          seatMap.set(i, null); // Tidak ada data default
+          seatMap.set(i, null);
         }
         this.roomSeats.set(room, seatMap);
 
@@ -746,9 +642,7 @@ export class ChatServer {
         this.roomClients.set(room, []);
         this.updateKursiBuffer.set(room, new Map());
         this._pointBuffer.set(room, []);
-      } catch {
-        // Ignore room initialization errors
-      }
+      } catch {}
     }
   }
 
@@ -759,9 +653,7 @@ export class ChatServer {
       this._tickTimer = setInterval(() => {
         try {
           this.tick();
-        } catch {
-          // Ignore tick errors
-        }
+        } catch {}
       }, this.intervalMillis);
 
       this._flushTimer = setInterval(() => {
@@ -769,9 +661,7 @@ export class ChatServer {
           if (this.clients.size > 0) {
             this.periodicFlush();
           }
-        } catch {
-          // Ignore flush errors
-        }
+        } catch {}
       }, 50);
 
       this._consistencyTimer = setInterval(() => {
@@ -779,9 +669,7 @@ export class ChatServer {
           if (this.clients.size > 0 && this.getServerLoad() < 0.7) {
             this.checkSeatConsistency();
           }
-        } catch {
-          // Ignore consistency errors
-        }
+        } catch {}
       }, 120000);
 
       this._connectionCleanupTimer = setInterval(() => {
@@ -789,50 +677,35 @@ export class ChatServer {
           if (this.getServerLoad() < 0.8) {
             this.cleanupDuplicateConnections();
           }
-        } catch {
-          // Ignore cleanup errors
-        }
+        } catch {}
       }, 30000);
 
-      // Timer untuk handle stuck cleanups dan orphaned users
       this._stuckCleanupTimer = setInterval(() => {
         try {
           if (this.getServerLoad() < 0.7) {
             this.cleanupStuckUsers();
           }
-        } catch {
-          // Ignore stuck cleanup errors
-        }
-      }, 45000); // Setiap 45 detik
+        } catch {}
+      }, 45000);
 
-      // Timer untuk cleanup memory (expired timers, dll)
       this._memoryCleanupTimer = setInterval(() => {
         try {
           this._performMemoryCleanup();
-        } catch {
-          // Ignore memory cleanup errors
-        }
-      }, 60000); // Setiap 60 detik
+        } catch {}
+      }, 60000);
       
-      // Timer untuk check safe mode
       this._safeModeTimer = setInterval(() => {
         try {
           this.checkAndEnableSafeMode();
-        } catch {
-          // Ignore safe mode check errors
-        }
-      }, 10000); // Setiap 10 detik
+        } catch {}
+      }, 10000);
 
-      // Timer untuk validasi grace period
       this._gracePeriodValidationTimer = setInterval(() => {
         try {
           this._validateGracePeriodTimers();
-        } catch {
-          // Ignore validation errors
-        }
-      }, 1000); // Cek setiap detik
+        } catch {}
+      }, 1000);
 
-      // Timer untuk validasi seat consistency (setiap 30 detik)
       this._seatValidationTimer = setInterval(() => {
         try {
           if (this.getServerLoad() < 0.8) {
@@ -840,9 +713,7 @@ export class ChatServer {
               this.validateSeatConsistency(room);
             }
           }
-        } catch {
-          // Ignore validation errors
-        }
+        } catch {}
       }, 30000);
 
       this._timers = [
@@ -862,45 +733,31 @@ export class ChatServer {
     }
   }
 
-  // Method untuk validasi grace period timer
   _validateGracePeriodTimers() {
     try {
       const now = Date.now();
-      const maxGracePeriod = this.gracePeriod + 1000; // 5 detik + 1 detik toleransi
+      const maxGracePeriod = this.gracePeriod + 1000;
       
       for (const [userId, timer] of this.disconnectedTimers) {
         if (timer && timer._scheduledTime) {
           const elapsed = now - timer._scheduledTime;
           if (elapsed > maxGracePeriod) {
-            console.warn(`Timer for ${userId} exceeded grace period: ${elapsed}ms`);
-            // Force cleanup sekarang
             clearTimeout(timer);
             this.disconnectedTimers.delete(userId);
             this.executeGracePeriodCleanup(userId);
           }
         }
       }
-    } catch (error) {
-      console.error('Grace period validation error:', error);
-    }
+    } catch (error) {}
   }
 
   _performMemoryCleanup() {
     try {
-      // Cleanup expired timers
       this._cleanupExpiredTimers();
       
-      // Cleanup empty room client arrays
-      for (const [room, clientArray] of this.roomClients) {
-        if (clientArray && clientArray.length === 0) {
-          // Optional: bisa dihapus jika ingin lebih aggressive
-        }
-      }
-      
-      // Cleanup dead WebSocket references
       const deadClients = [];
       for (const client of this.clients) {
-        if (!client || client.readyState === 3) { // CLOSED state
+        if (!client || client.readyState === 3) {
           deadClients.push(client);
         }
       }
@@ -909,27 +766,21 @@ export class ChatServer {
         this.clients.delete(client);
       }
       
-    } catch {
-      // Ignore memory cleanup errors
-    }
+    } catch {}
   }
 
   async cleanupStuckUsers() {
     try {
-      // Kumpulkan semua user yang perlu dicek
       const allTrackedUsers = new Set();
       
-      // 1. User yang ada di userCurrentRoom
       for (const [userId] of this.userCurrentRoom) {
         allTrackedUsers.add(userId);
       }
       
-      // 2. User yang ada di userToSeat
       for (const [userId] of this.userToSeat) {
         allTrackedUsers.add(userId);
       }
       
-      // 3. User yang ada di seat occupancy tapi tidak di tracking lain
       for (const [room, occupancyMap] of this.seatOccupancy) {
         for (const [seat, userId] of occupancyMap) {
           if (userId) {
@@ -938,7 +789,6 @@ export class ChatServer {
         }
       }
       
-      // Process dalam batch
       const batchSize = 10;
       const userArray = Array.from(allTrackedUsers);
       
@@ -948,35 +798,24 @@ export class ChatServer {
         await Promise.allSettled(
           batch.map(async (userId) => {
             try {
-              // Skip jika sedang dalam cleanup
               if (this.cleanupInProgress.has(userId)) return;
-              
-              // Skip jika ada timer aktif
               if (this.disconnectedTimers.has(userId)) return;
               
-              // Cek apakah user masih connected
               const isConnected = await this.isUserStillConnected(userId);
               
               if (!isConnected) {
-                // User disconnected tanpa timer, cleanup sekarang
-                console.log(`[StuckCleanup] Cleaning up disconnected user without timer: ${userId}`);
                 await this.withLock(`stuck-cleanup-${userId}`, async () => {
-                  // Double check setelah dapat lock
                   const doubleCheck = await this.isUserStillConnected(userId);
                   if (!doubleCheck) {
                     await this.forceUserCleanup(userId);
                   }
                 });
               }
-            } catch (error) {
-              console.error(`Error in stuck cleanup for ${userId}:`, error);
-            }
+            } catch (error) {}
           })
         );
       }
-    } catch (error) {
-      console.error('Stuck cleanup error:', error);
-    }
+    } catch (error) {}
   }
 
   getServerLoad() {
@@ -986,30 +825,24 @@ export class ChatServer {
 
   _cleanupAllTimers() {
     try {
-      // Cleanup semua interval timers
       if (this._timers) {
         for (const timer of this._timers) {
           if (timer) {
             try {
               clearInterval(timer);
               clearTimeout(timer);
-            } catch {
-              // Ignore timer errors
-            }
+            } catch {}
           }
         }
         this._timers = [];
       }
 
-      // Cleanup semua disconnected timers
       if (this.disconnectedTimers) {
         for (const timer of this.disconnectedTimers.values()) {
           if (timer) {
             try {
               clearTimeout(timer);
-            } catch {
-              // Ignore timer errors
-            }
+            } catch {}
           }
         }
         this.disconnectedTimers.clear();
@@ -1024,14 +857,11 @@ export class ChatServer {
         this._pointFlushTimer = null;
       }
       
-      // Cleanup grace period validation timer
       if (this._gracePeriodValidationTimer) {
         clearInterval(this._gracePeriodValidationTimer);
         this._gracePeriodValidationTimer = null;
       }
-    } catch {
-      // Ignore cleanup errors
-    }
+    } catch {}
   }
 
   _cleanupTimers() {
@@ -1098,7 +928,6 @@ export class ChatServer {
     }
   }
 
-  // Validasi konsistensi seat untuk mencegah data korup
   async validateSeatConsistency(room) {
     try {
       const seatMap = this.roomSeats.get(room);
@@ -1112,25 +941,17 @@ export class ChatServer {
         const occupantId = occupancyMap.get(seat);
         const seatData = seatMap.get(seat);
         
-        // Case 1: occupancy ada tapi seatData kosong
         if (occupantId && (!seatData || !seatData.namauser || seatData.namauser === "")) {
-          console.log(`[validateSeatConsistency] Fixing seat ${seat}: occupancy ${occupantId} but seatData empty`);
-          
           if (!seatData) {
             seatMap.set(seat, createEmptySeat());
           } else {
             Object.assign(seatData, createEmptySeat());
           }
-          
           occupancyMap.set(seat, null);
           fixed++;
         }
         
-        // Case 2: seatData ada tapi occupancy kosong
         else if (!occupantId && seatData && seatData.namauser && seatData.namauser !== "") {
-          console.log(`[validateSeatConsistency] Fixing seat ${seat}: seatData has ${seatData.namauser} but occupancy empty`);
-          
-          // Cek apakah user ini benar-benar online
           let isUserOnline = false;
           const connections = this.userConnections.get(seatData.namauser);
           if (connections && connections.size > 0) {
@@ -1143,22 +964,15 @@ export class ChatServer {
           }
           
           if (isUserOnline) {
-            // User online, perbaiki occupancy
             occupancyMap.set(seat, seatData.namauser);
           } else {
-            // User offline, kosongkan seat
             Object.assign(seatData, createEmptySeat());
           }
           fixed++;
         }
         
-        // Case 3: occupancy dan seatData tidak match
         else if (occupantId && seatData && seatData.namauser && seatData.namauser !== occupantId) {
-          console.log(`[validateSeatConsistency] Fixing seat ${seat}: mismatch occupancy=${occupantId} vs seatData=${seatData.namauser}`);
-          
-          // Prioritaskan occupancy
           if (occupantId) {
-            // Cek apakah occupant online
             let isOccupantOnline = false;
             const connections = this.userConnections.get(occupantId);
             if (connections && connections.size > 0) {
@@ -1171,10 +985,8 @@ export class ChatServer {
             }
             
             if (isOccupantOnline) {
-              // Update seatData dengan occupant
               seatData.namauser = occupantId;
             } else {
-              // Occupant offline, kosongkan
               occupancyMap.set(seat, null);
               Object.assign(seatData, createEmptySeat());
             }
@@ -1183,13 +995,7 @@ export class ChatServer {
         }
       }
       
-      if (fixed > 0) {
-        console.log(`[validateSeatConsistency] Fixed ${fixed} inconsistencies in room ${room}`);
-      }
-      
-    } catch (error) {
-      console.error(`[validateSeatConsistency] Error:`, error);
-    }
+    } catch (error) {}
   }
 
   async forceUserCleanup(userId) {
@@ -1197,9 +1003,7 @@ export class ChatServer {
     
     this.cleanupInProgress.add(userId);
     try {
-      // Gunakan lock spesifik untuk user ini
       await this.withLock(`force-cleanup-${userId}`, async () => {
-        // Cancel cleanup timer
         this.cancelCleanup(userId);
 
         const currentRoom = this.userCurrentRoom.get(userId);
@@ -1218,22 +1022,17 @@ export class ChatServer {
           }
         }
 
-        // Cleanup semua seat yang digunakan user
         const cleanupPromises = seatsToCleanup.map(({ room, seatNumber }) =>
           this.cleanupUserFromSeat(room, seatNumber, userId, true)
         );
         
         await Promise.allSettled(cleanupPromises);
 
-        // Hapus dari semua tracking maps
         this.userToSeat.delete(userId);
         this.userCurrentRoom.delete(userId);
         
-        // Hapus dari userConnections (harus sudah kosong jika user disconnected)
         const remainingConnections = this.userConnections.get(userId);
         if (remainingConnections && remainingConnections.size > 0) {
-          // Masih ada connections? Mungkin race condition
-          // Cek apakah ada connection yang valid
           let hasValidConnection = false;
           for (const conn of remainingConnections) {
             if (conn && conn.readyState === 1 && !conn._isDuplicate && !conn._isClosing) {
@@ -1249,7 +1048,6 @@ export class ChatServer {
           this.userConnections.delete(userId);
         }
 
-        // Hapus dari roomClients
         if (this.roomClients) {
           for (const [room, clientArray] of this.roomClients) {
             if (clientArray && clientArray.length > 0) {
@@ -1267,7 +1065,6 @@ export class ChatServer {
       });
 
     } catch (error) {
-      console.error(`Force user cleanup error for ${userId}:`, error);
     } finally {
       this.cleanupInProgress.delete(userId);
     }
@@ -1275,9 +1072,7 @@ export class ChatServer {
 
   async cleanupUserFromSeat(room, seatNumber, userId, immediate = true) {
     try {
-      // VALIDASI: seatNumber harus antara 1-35
       if (seatNumber < 1 || seatNumber > this.MAX_SEATS) {
-        console.error(`[cleanupUserFromSeat] Invalid seat number: ${seatNumber}`);
         return;
       }
       
@@ -1301,9 +1096,7 @@ export class ChatServer {
           this.userToSeat.delete(userId);
         }
       });
-    } catch (error) {
-      console.error(`Cleanup from seat error for ${userId}:`, error);
-    }
+    } catch (error) {}
   }
 
   async cleanupFromRoom(ws, room) {
@@ -1318,47 +1111,33 @@ export class ChatServer {
         
         await this.cleanupUserFromSeat(room, seat, ws.idtarget, true);
         
-        // Hapus dari roomClients
         this._removeFromRoomClients(ws, room);
-        
-        // Hapus dari userConnections
         this._removeUserConnection(ws.idtarget, ws);
-        
-        // Hapus tracking
         this.userCurrentRoom.delete(ws.idtarget);
         
-        // Reset WebSocket properties
         ws.roomname = undefined;
         ws.numkursi = new Set();
         this.userToSeat.delete(ws.idtarget);
         
-        // Update room count
         this.updateRoomCount(room);
       });
-    } catch (error) {
-      console.error(`Cleanup from room error for ${ws.idtarget}:`, error);
-    }
+    } catch (error) {}
   }
 
   clearSeatBuffer(room, seatNumber) {
     try {
-      // VALIDASI: seatNumber harus antara 1-35
       if (seatNumber < 1 || seatNumber > this.MAX_SEATS) {
         return;
       }
       
       const roomMap = this.updateKursiBuffer.get(room);
       if (roomMap) roomMap.delete(seatNumber);
-    } catch {
-      // Ignore buffer errors
-    }
+    } catch {}
   }
 
   async updateSeatAtomic(room, seatNumber, updateFn) {
     try {
-      // VALIDASI: seatNumber harus antara 1-35
       if (seatNumber < 1 || seatNumber > this.MAX_SEATS) {
-        console.error(`[updateSeatAtomic] Invalid seat number: ${seatNumber}`);
         return null;
       }
       
@@ -1405,9 +1184,7 @@ export class ChatServer {
 
   async savePointWithRetry(room, seat, x, y, fast) {
     try {
-      // VALIDASI: seat harus antara 1-35
       if (seat < 1 || seat > this.MAX_SEATS) {
-        console.error(`[savePointWithRetry] Invalid seat number: ${seat}`);
         return false;
       }
       
@@ -1436,61 +1213,43 @@ export class ChatServer {
     }
   }
   
-  // ensureSeatsData - Jangan buat data default
   async ensureSeatsData(room) {
     try {
       const seatMap = this.roomSeats.get(room);
       const occupancyMap = this.seatOccupancy.get(room);
       
       if (!seatMap || !occupancyMap) {
-        console.error(`[ensureSeatsData] Room ${room} data not found`);
         return;
       }
       
-      // VALIDASI: Pastikan semua seat 1-35 memiliki MAP (tapi tidak perlu data)
       let needsFix = false;
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        // Pastikan seatMap memiliki entry (bisa undefined/null)
         if (!seatMap.has(seat)) {
-          console.log(`[ensureSeatsData] Seat ${seat} in ${room} missing map entry, creating...`);
-          seatMap.set(seat, null); // Set ke null, bukan createEmptySeat()
+          seatMap.set(seat, null);
           needsFix = true;
         }
         
-        // Pastikan occupancyMap memiliki entry
         if (!occupancyMap.has(seat)) {
           occupancyMap.set(seat, null);
           needsFix = true;
         }
       }
       
-      // Cek konsistensi - hanya occupancy yang penting
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const seatData = seatMap.get(seat);
         const occupancyData = occupancyMap.get(seat);
         
-        // Jika ada occupant, pastikan seatData tidak bertentangan
         if (occupancyData) {
-          // Jika seatData null, biarkan null
-          // Jika seatData ada tapi namauser berbeda, reset
           if (seatData && seatData.namauser && seatData.namauser !== occupancyData) {
-            console.log(`[ensureSeatsData] Resetting inconsistent seat data for ${seat} in ${room}`);
-            seatMap.set(seat, null); // Reset ke null
+            seatMap.set(seat, null);
             needsFix = true;
           }
         }
       }
       
-      if (needsFix) {
-        console.log(`[ensureSeatsData] Fixed data structure for room ${room}`);
-      }
-      
-    } catch (error) {
-      console.error(`[ensureSeatsData] Error for room ${room}:`, error);
-    }
+    } catch (error) {}
   }
   
-  // findEmptySeat dengan lock per seat
   async findEmptySeat(room, ws) {
     if (!room || !ws || !ws.idtarget) return null;
     
@@ -1500,20 +1259,16 @@ export class ChatServer {
       
       if (!occupancyMap || !seatMap) return null;
 
-      // CEK 1: Apakah user sudah punya kursi?
       for (let i = 1; i <= this.MAX_SEATS; i++) {
         const occupantId = occupancyMap.get(i);
         const seatData = seatMap.get(i);
         
         if (occupantId === ws.idtarget && seatData && seatData.namauser === ws.idtarget) {
-          console.log(`[findEmptySeat] User ${ws.idtarget} already has seat ${i} in ${room}`);
           return i;
         }
       }
       
-      // CEK 2: Cari kursi kosong dengan LOCK per kursi
       for (let i = 1; i <= this.MAX_SEATS; i++) {
-        // Gunakan lock untuk setiap kursi yang dicek
         const release = await this.lockManager.acquire(`seat-check-${room}-${i}`);
         
         try {
@@ -1524,38 +1279,30 @@ export class ChatServer {
           const isSeatDataEmpty = !seatData || !seatData.namauser || seatData.namauser === "";
           
           if (isOccupancyEmpty && isSeatDataEmpty) {
-            console.log(`[findEmptySeat] Found empty seat ${i} in ${room}`);
             return i;
           }
         } finally {
-          release(); // Lepas lock setelah cek
+          release();
         }
       }
       
-      // CEK 3: Cari kursi yang occupancy-nya null TAPI seatData-nya bermasalah
       for (let i = 1; i <= this.MAX_SEATS; i++) {
         const occupantId = occupancyMap.get(i);
         const seatData = seatMap.get(i);
         
-        // Kursi yang occupancy-nya null tapi seatData masih ada nama (inkonsistensi)
         if (occupantId === null && seatData && seatData.namauser && seatData.namauser !== "") {
-          console.log(`[findEmptySeat] Fixing inconsistent seat ${i} in ${room}`);
-          // Reset seatData
           Object.assign(seatData, createEmptySeat());
           return i;
         }
       }
       
-      // CEK 4: Cari kursi yang ditempati user yang sudah disconnect (hanya jika benar-benar tidak ada kursi kosong)
       for (let i = 1; i <= this.MAX_SEATS; i++) {
         const occupantId = occupancyMap.get(i);
         const seatData = seatMap.get(i);
         
         if (occupantId && seatData && seatData.namauser === occupantId) {
-          // Cek apakah user ini benar-benar online
           let isOccupantOnline = false;
           
-          // Cek di userConnections
           const connections = this.userConnections.get(occupantId);
           if (connections && connections.size > 0) {
             for (const conn of connections) {
@@ -1566,26 +1313,20 @@ export class ChatServer {
             }
           }
           
-          // Jika tidak online, kursi bisa diambil
           if (!isOccupantOnline) {
-            console.log(`[findEmptySeat] Taking over disconnected user ${occupantId}'s seat ${i} in ${room}`);
             await this.cleanupUserFromSeat(room, i, occupantId, true);
             return i;
           }
         }
       }
       
-      // TIDAK ADA KURSI KOSONG
-      console.log(`[findEmptySeat] No empty seats available in ${room}`);
       return null;
       
     } catch (error) {
-      console.error(`[findEmptySeat] Error:`, error);
       return null;
     }
   }
 
-  // handleJoinRoom - Hanya set occupancy, tidak set data kursi
   async handleJoinRoom(ws, room) {
     if (!ws || !ws.idtarget) {
       this.safeSend(ws, ["error", "User ID not set"]);
@@ -1597,46 +1338,35 @@ export class ChatServer {
       return false;
     }
     
-    // Rate limiting check
     if (!this.rateLimiter.check(ws.idtarget)) {
       this.safeSend(ws, ["error", "Too many requests"]);
       return false;
     }
     
     try {
-      // LOCK ROOM LEVEL - Cegah multiple join bersamaan
       const roomRelease = await this.lockManager.acquire(`room-join-${room}`);
       
       try {
-        // CANCEL CLEANUP DI AWAL
         this.cancelCleanup(ws.idtarget);
         
-        // VALIDASI: Pastikan data kursi untuk seat 1-35 tersedia (tapi kosong)
         await this.ensureSeatsData(room);
         
-        // CEK APAKAH USER SUDAH ADA DI ROOM INI?
         const previousRoom = this.userCurrentRoom.get(ws.idtarget);
         if (previousRoom) {
           if (previousRoom === room) {
-            // User sudah di room ini, kirimkan state saja
-            console.log(`[handleJoinRoom] User ${ws.idtarget} already in room ${room}`);
             this.sendAllStateTo(ws, room);
             
-            // ========== TAMBAHAN: Kirim mute status saat join ==========
             const isMuted = await this.getMuteType(room);
             this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
             
             return true;
           } else {
-            // User pindah room, cleanup dari room sebelumnya
             await this.cleanupFromRoom(ws, previousRoom);
           }
         }
         
-        // CEK APAKAH USER SUDAH PUNYA KURSI DI ROOM INI?
         const seatInfo = this.userToSeat.get(ws.idtarget);
         if (seatInfo && seatInfo.room === room) {
-          // User sudah punya kursi, validasi
           const seatMap = this.roomSeats.get(room);
           const occupancyMap = this.seatOccupancy.get(room);
           
@@ -1644,7 +1374,6 @@ export class ChatServer {
             const occupantId = occupancyMap.get(seatInfo.seat);
             
             if (occupantId === ws.idtarget) {
-              console.log(`[handleJoinRoom] User ${ws.idtarget} already has seat ${seatInfo.seat} in ${room}`);
               
               ws.roomname = room;
               ws.numkursi = new Set([seatInfo.seat]);
@@ -1657,7 +1386,6 @@ export class ChatServer {
               this._addUserConnection(ws.idtarget, ws);
               this.sendAllStateTo(ws, room);
               
-              // ========== TAMBAHAN: Kirim mute status saat join ==========
               const isMuted = await this.getMuteType(room);
               this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
               
@@ -1666,11 +1394,9 @@ export class ChatServer {
           }
         }
         
-        // CARI KURSI KOSONG DENGAN TRANSACTION - HANYA CEK OCCUPANCY
         let assignedSeat = null;
         
         for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-          // LOCK per kursi
           const seatRelease = await this.lockManager.acquire(`seat-assign-${room}-${seat}`);
           
           try {
@@ -1680,32 +1406,25 @@ export class ChatServer {
             
             const occupantId = occupancyMap.get(seat);
             
-            // CEK KETAT: kursi harus benar-benar kosong (hanya cek occupancy)
             const isReallyEmpty = occupantId === null;
             
             if (isReallyEmpty) {
-              // ASSIGN KURSI - HANYA SET OCCUPANCY, TIDAK SET DATA KURSI
               occupancyMap.set(seat, ws.idtarget);
               
-              // TIDAK MENGISI DATA KURSI - Biarkan kosong, user akan mengisi sendiri nanti
-              // seatMap tidak disentuh sama sekali
-              
               assignedSeat = seat;
-              break; // Dapat kursi, keluar loop
+              break;
             }
             
           } finally {
-            seatRelease(); // Lepas lock kursi
+            seatRelease();
           }
         }
         
         if (!assignedSeat) {
-          console.log(`[handleJoinRoom] No empty seat for ${ws.idtarget} in ${room}`);
           this.safeSend(ws, ["roomFull", room]);
           return false;
         }
         
-        // UPDATE TRACKING
         this.userToSeat.set(ws.idtarget, { room, seat: assignedSeat });
         this.userCurrentRoom.set(ws.idtarget, room);
         ws.roomname = room;
@@ -1718,38 +1437,30 @@ export class ChatServer {
         
         this._addUserConnection(ws.idtarget, ws);
         
-        // SEND RESPONSE - Beritahu user seat yang dialokasikan
         this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
         
-        // ========== TAMBAHAN: Kirim mute status saat join ==========
         const isMuted = await this.getMuteType(room);
         this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
         
-        // Kirim state room yang ada (hanya kursi yang sudah terisi oleh user lain)
         setTimeout(() => {
           this.sendAllStateTo(ws, room);
         }, 100);
         
         this.updateRoomCount(room);
         
-        console.log(`[handleJoinRoom] User ${ws.idtarget} assigned seat ${assignedSeat} in ${room} (seat data will be set manually)`);
-        
         return true;
         
       } finally {
-        roomRelease(); // Lepas lock room
+        roomRelease();
       }
       
     } catch (error) {
-      console.error(`[handleJoinRoom] Error:`, error);
       this.safeSend(ws, ["error", "Failed to join room"]);
       return false;
     }
   }
 
-  // Assign kursi secara atomic (fungsi tambahan)
   async assignSeatAtomic(room, seat, userId) {
-    // LOCK khusus untuk assign kursi
     const release = await this.lockManager.acquire(`atomic-assign-${room}-${seat}`);
     
     try {
@@ -1758,7 +1469,6 @@ export class ChatServer {
       
       if (!occupancyMap || !seatMap) return false;
       
-      // DOUBLE CHECK: Pastikan masih kosong
       const occupantId = occupancyMap.get(seat);
       const seatData = seatMap.get(seat);
       
@@ -1767,10 +1477,9 @@ export class ChatServer {
           (!seatData || !seatData.namauser || seatData.namauser === "");
       
       if (!isStillEmpty) {
-        return false; // Kursi sudah terisi
+        return false;
       }
       
-      // ASSIGN
       occupancyMap.set(seat, userId);
       
       if (!seatData) {
@@ -1797,7 +1506,6 @@ export class ChatServer {
     }
   }
 
-  // getJumlahRoom - Hitung berdasarkan occupancy
   getJumlahRoom() {
     try {
       const now = Date.now();
@@ -1908,12 +1616,9 @@ export class ChatServer {
       
       this.broadcastToRoom(room, ["roomUserCount", room, count]);
       
-    } catch {
-      // Ignore broadcast errors
-    }
+    } catch {}
   }
 
-  // sendAllStateTo - Hanya kirim kursi yang benar-benar terisi
   sendAllStateTo(ws, room) {
     try {
       if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room || 
@@ -1922,15 +1627,12 @@ export class ChatServer {
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) return;
 
-      // Send kursi data - HANYA kursi yang benar-benar memiliki data
       const allKursiMeta = {};
       const lastPointsData = [];
 
-      // Loop SEMUA kursi 1-35
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         
-        // HANYA kirim jika info ada dan memiliki namauser
         if (info && info.namauser && info.namauser !== "") {
           allKursiMeta[seat] = {
             noimageUrl: info.noimageUrl || "",
@@ -1943,7 +1645,6 @@ export class ChatServer {
           };
         }
 
-        // Ambil POINT jika ada
         if (info && info.lastPoint) {
           lastPointsData.push({
             seat: seat,
@@ -1967,9 +1668,7 @@ export class ChatServer {
       this.safeSend(ws, ["roomUserCount", room, count]);
       
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
-    } catch (error) {
-      console.error("Error in sendAllStateTo:", error);
-    }
+    } catch (error) {}
   }
 
   async handleSetIdTarget2(ws, id, baru) {
@@ -1977,7 +1676,6 @@ export class ChatServer {
     
     try {
       await this.withLock(`reconnect-${id}`, async () => {
-        // CANCEL CLEANUP DI AWAL - sangat penting!
         this.cancelCleanup(id);
         
         if (baru === true) {
@@ -2000,9 +1698,7 @@ export class ChatServer {
         if (seatInfo) {
           const { room, seat } = seatInfo;
           
-          // VALIDASI: seat harus antara 1-35
           if (seat < 1 || seat > this.MAX_SEATS) {
-            console.log(`[handleSetIdTarget2] Invalid seat ${seat} for ${id}, cleaning up`);
             this.userToSeat.delete(id);
             this.userCurrentRoom.delete(id);
             this.safeSend(ws, ["needJoinRoom"]);
@@ -2017,7 +1713,6 @@ export class ChatServer {
             const occupancyUser = occupancyMap.get(seat);
             
             if (seatData && seatData.namauser === id && occupancyUser === id) {
-              // User valid, proceed dengan reconnect
               
               ws.roomname = room;
               ws.numkursi = new Set([seat]);
@@ -2029,10 +1724,8 @@ export class ChatServer {
               
               this._addUserConnection(id, ws);
               
-              // Send all state including points
               this.sendAllStateTo(ws, room);
               
-              // Send point from this seat specifically
               if (seatData.lastPoint) {
                 this.safeSend(ws, ["pointUpdated", room, seat, 
                   seatData.lastPoint.x, 
@@ -2041,7 +1734,6 @@ export class ChatServer {
                 ]);
               }
               
-              // ========== TAMBAHAN: Kirim mute status saat reconnect ==========
               const isMuted = await this.getMuteType(room);
               this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
               
@@ -2051,7 +1743,6 @@ export class ChatServer {
             }
           }
           
-          // Seat info tidak valid, cleanup dan minta join room baru
           this.userToSeat.delete(id);
           this.userCurrentRoom.delete(id);
           if (seatInfo.room) {
@@ -2093,9 +1784,7 @@ export class ChatServer {
           batch.map(userId => this.handleDuplicateConnections(userId))
         );
       }
-    } catch {
-      // Ignore duplicate cleanup errors
-    }
+    } catch {}
   }
 
   async handleDuplicateConnections(userId) {
@@ -2129,17 +1818,13 @@ export class ChatServer {
             if (client.readyState === 1) {
               this.safeSend(client, ["duplicateConnection", "Another connection was opened with your account"]);
             }
-          } catch {
-            // Ignore send errors
-          }
+          } catch {}
           
           try {
             if (client.readyState === 1) {
               client.close(1000, "Duplicate connection");
             }
-          } catch {
-            // Ignore close errors
-          }
+          } catch {}
           
           this.clients.delete(client);
           if (client.roomname) {
@@ -2148,7 +1833,6 @@ export class ChatServer {
           this._removeUserConnection(userId, client);
         }
         
-        // Update remaining connections
         const remainingConnections = new Set();
         for (const client of this.clients) {
           if (client && client.idtarget === userId && client.readyState === 1) {
@@ -2157,9 +1841,7 @@ export class ChatServer {
         }
         this.userConnections.set(userId, remainingConnections);
       });
-    } catch {
-      // Ignore duplicate handling errors
-    }
+    } catch {}
   }
 
   handleOnDestroy(ws, idtarget) {
@@ -2203,9 +1885,7 @@ export class ChatServer {
         if (ws.readyState === 1) {
           try {
             ws.close(1000, "Manual destroy");
-          } catch {
-            // Ignore close errors
-          }
+          } catch {}
         }
       });
     } catch {
@@ -2213,9 +1893,7 @@ export class ChatServer {
         this.clients.delete(ws);
         this.cancelCleanup(idtarget);
         this._removeUserConnection(idtarget, ws);
-      } catch {
-        // Ignore fallback errors
-      }
+      } catch {}
     }
   }
 
@@ -2260,9 +1938,7 @@ export class ChatServer {
           if (client.readyState === 1) {
             try {
               client.close(1000, "Session removed");
-            } catch {
-              // Ignore close errors
-            }
+            } catch {}
           }
           this.clients.delete(client);
           
@@ -2278,9 +1954,7 @@ export class ChatServer {
           }
         }
       });
-    } catch {
-      // Ignore full remove errors
-    }
+    } catch {}
   }
 
   getAllOnlineUsers() {
@@ -2337,7 +2011,6 @@ export class ChatServer {
         
         const updates = [];
         for (const [seat, info] of seatMapUpdates.entries()) {
-          // VALIDASI: seat harus antara 1-35
           if (seat < 1 || seat > this.MAX_SEATS) continue;
           
           if (info && info.namauser && info.namauser !== "") {
@@ -2357,20 +2030,14 @@ export class ChatServer {
         
         this.updateKursiBuffer.set(room, new Map());
       }
-    } catch {
-      // Ignore flush errors
-    }
+    } catch {}
   }
 
   periodicFlush() {
     try {
       this.flushKursiUpdates();
-      
-      // Also flush any buffered points
       this.flushBufferedPoints();
-    } catch {
-      // Ignore periodic flush errors
-    }
+    } catch {}
   }
 
   tick() {
@@ -2393,9 +2060,7 @@ export class ChatServer {
       for (const client of clientsToNotify) {
         this.safeSend(client, ["currentNumber", this.currentNumber]);
       }
-    } catch {
-      // Ignore tick errors
-    }
+    } catch {}
   }
 
   async safeWebSocketCleanup(ws) {
@@ -2405,19 +2070,14 @@ export class ChatServer {
     const room = ws.roomname;
     
     try {
-      // Mark as closing to prevent race conditions
       ws._isClosing = true;
       
-      // Remove from tracking maps
       this.clients.delete(ws);
       
       if (userId) {
         this._removeUserConnection(userId, ws);
-        
-        // Cancel semua cleanup timer yang ada
         this.cancelCleanup(userId);
         
-        // Langsung schedule cleanup dengan grace period 5 detik
         if (!ws.isManualDestroy && !ws._isDuplicate) {
           this.scheduleCleanup(userId);
         }
@@ -2427,16 +2087,12 @@ export class ChatServer {
         this._removeFromRoomClients(ws, room);
       }
       
-      // Cleanup WebSocket references
       try {
         if (ws.readyState === 1) {
           ws.close(1000, "Normal closure");
         }
-      } catch {
-        // Ignore close errors
-      }
+      } catch {}
       
-      // Clear references
       setTimeout(() => {
         ws.roomname = null;
         ws.idtarget = null;
@@ -2444,8 +2100,6 @@ export class ChatServer {
       }, 1000);
       
     } catch (error) {
-      console.error("WebSocket cleanup error:", error);
-      // Force cleanup
       this.clients.delete(ws);
       if (userId) {
         this.cancelCleanup(userId);
@@ -2456,7 +2110,6 @@ export class ChatServer {
   async handleMessage(ws, raw) {
     if (!ws || ws.readyState !== 1 || ws._isDuplicate || ws._isClosing) return;
 
-    // Check rate limiting
     if (ws.idtarget && !this.rateLimiter.check(ws.idtarget)) {
       this.safeSend(ws, ["error", "Too many requests"]);
       return;
@@ -2466,9 +2119,7 @@ export class ChatServer {
       if (raw.length > 50000) {
         try {
           ws.close(1009, "Message too large");
-        } catch {
-          // Ignore close errors
-        }
+        } catch {}
         return;
       }
 
@@ -2514,36 +2165,30 @@ export class ChatServer {
                 break;
             }
             
-            // Broadcast ke SEMUA user di room TANPA dariUser
             this.broadcastToRoom(roomName, ["rollangakBroadcast", roomName, username, angka]);
             
             break;
           }
-          // ========== HANDLER MUTE - PER ROOM dengan persistent storage ==========
+
           case "setMuteType": {
             const isMuted = data[1];
-            const roomName = data[2]; // Ambil dari parameter (WAJIB ADA!)
+            const roomName = data[2];
             
             if (!roomName) {
               this.safeSend(ws, ["error", "Room name required for mute"]);
               break;
             }
             
-            // Validasi roomName
             if (!roomList.includes(roomName)) {
               this.safeSend(ws, ["error", "Invalid room name"]);
               break;
             }
             
-            // Panggil method dengan parameter roomName (async)
             const success = await this.setMuteType(isMuted, roomName);
             
             if (success) {
-              // Kirim response ke client yang mengirim
               const currentMuteStatus = await this.getMuteType(roomName);
               this.safeSend(ws, ["muteTypeResponse", currentMuteStatus, roomName]);
-              
-              // Broadcast ke semua client di room yang sama (HANYA room itu)
               this.broadcastToRoom(roomName, ["muteStatusChanged", currentMuteStatus, roomName]);
             }
             
@@ -2552,25 +2197,22 @@ export class ChatServer {
           }
 
           case "getMuteType": {
-            const roomName = data[1] || ""; // Ambil dari parameter
+            const roomName = data[1] || "";
             
             if (!roomName) {
               this.safeSend(ws, ["error", "Room name required for get mute"]);
               break;
             }
             
-            // Validasi roomName
             if (!roomList.includes(roomName)) {
               this.safeSend(ws, ["error", "Invalid room name"]);
               break;
             }
             
-            // Kirim status mute untuk room tertentu (async)
             const isMuted = await this.getMuteType(roomName);
             this.safeSend(ws, ["muteTypeResponse", isMuted, roomName]);
             break;
           }
-          // ========== END HANDLER MUTE ==========
 
           case "onDestroy": {
             const idtarget = ws.idtarget;
@@ -2703,16 +2345,11 @@ export class ChatServer {
             
             if (ws.roomname !== room || !roomList.includes(room)) return;
             
-            // VALIDASI: seat harus antara 1-35
             if (seat < 1 || seat > this.MAX_SEATS) {
-              console.error(`[handleMessage:updatePoint] Invalid seat number: ${seat}`);
               return;
             }
             
-            // Save point asynchronously (non-blocking)
             this.savePointWithRetry(room, seat, x, y, fast).catch(() => {});
-            
-            // Broadcast langsung
             this.broadcastPointDirect(room, seat, x, y, fast);
             
             break;
@@ -2721,9 +2358,7 @@ export class ChatServer {
           case "removeKursiAndPoint": {
             const [, room, seat] = data;
             
-            // VALIDASI: seat harus antara 1-35
             if (seat < 1 || seat > this.MAX_SEATS) {
-              console.error(`[handleMessage:removeKursiAndPoint] Invalid seat number: ${seat}`);
               return;
             }
             
@@ -2739,9 +2374,7 @@ export class ChatServer {
           case "updateKursi": {
             const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
             
-            // VALIDASI: seat harus antara 1-35
             if (seat < 1 || seat > this.MAX_SEATS) {
-              console.error(`[handleMessage:updateKursi] Invalid seat number: ${seat}`);
               return;
             }
             
@@ -2822,14 +2455,11 @@ export class ChatServer {
             break;
         }
       } catch (error) {
-        console.error(`Error handling message ${evt}:`, error);
         if (ws.readyState === 1) {
           this.safeSend(ws, ["error", "Server error"]);
         }
       }
-    } catch (error) {
-      console.error("General message handling error:", error);
-    }
+    } catch (error) {}
   }
 
   async fetch(request) {
@@ -2860,21 +2490,14 @@ export class ChatServer {
       ws.addEventListener("message", (ev) => {
         try {
           Promise.resolve().then(() => {
-            this.handleMessage(ws, ev.data).catch((error) => {
-              console.error("Async message handling error:", error);
-            });
+            this.handleMessage(ws, ev.data).catch((error) => {});
           });
-        } catch (error) {
-          console.error("Sync message handling error:", error);
-        }
+        } catch (error) {}
       });
 
-      ws.addEventListener("error", (error) => {
-        console.error("WebSocket error:", error);
-      });
+      ws.addEventListener("error", (error) => {});
 
       ws.addEventListener("close", (event) => {
-        // Gunakan safe cleanup
         Promise.resolve().then(() => {
           this.safeWebSocketCleanup(ws);
         });
@@ -2882,7 +2505,6 @@ export class ChatServer {
 
       return new Response(null, { status: 101, webSocket: client });
     } catch (error) {
-      console.error("Fetch error:", error);
       return new Response("Internal server error", { status: 500 });
     }
   }
@@ -2912,7 +2534,6 @@ export default {
         headers: { "content-type": "text/plain" }
       });
     } catch (error) {
-      console.error("Default fetch error:", error);
       return new Response("Server error", { status: 500 });
     }
   }
