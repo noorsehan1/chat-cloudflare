@@ -136,8 +136,10 @@ export class ChatServer {
       this.state = state;
       this.env = env;
       
-      // MUTE STATUS - PER ROOM (bukan global!)
-      this.muteStatus = new Map(); // key: roomName, value: boolean
+      // MUTE STATUS - PER ROOM dengan persistent storage
+      this.muteStatus = new Map(); // key: roomName, value: boolean (memory cache)
+      this.storage = state.storage; // Durable Object storage
+      this._muteStatusLoaded = false; // Flag untuk menandai sudah load dari storage
       
       this.lockManager = new PromiseLockManager();
       this.cleanupInProgress = new Set();
@@ -191,10 +193,15 @@ export class ChatServer {
       // Reset semua timer lama saat constructor
       this._cleanupAllTimers();
 
-      // Inisialisasi semua room dengan mute false
+      // Inisialisasi semua room dengan mute false (akan di-overwrite oleh storage nanti)
       for (const room of roomList) {
         this.muteStatus.set(room, false);
       }
+
+      // Load mute status dari storage secara async
+      this.loadMuteStatus().catch(err => {
+        console.error("Failed to load mute status:", err);
+      });
 
       try {
         this.initializeRooms();
@@ -236,8 +243,10 @@ export class ChatServer {
       this.gracePeriod = 5000;
       this.cleanupQueue = new QueueManager(5);
       
-      // MUTE STATUS - PER ROOM (inisialisasi ulang)
+      // MUTE STATUS - PER ROOM dengan persistent storage
       this.muteStatus = new Map();
+      this.storage = state?.storage;
+      this._muteStatusLoaded = false;
       for (const room of roomList) {
         this.muteStatus.set(room, false);
       }
@@ -259,6 +268,45 @@ export class ChatServer {
       this._cleanupAllTimers();
       
       this.createDefaultRoom();
+    }
+  }
+
+  // ========== MODIFIED: Load mute status dari persistent storage ==========
+  async loadMuteStatus() {
+    try {
+      if (!this.storage) return;
+      
+      const stored = await this.storage.get("muteStatus");
+      if (stored && typeof stored === 'object') {
+        for (const [room, isMuted] of Object.entries(stored)) {
+          if (roomList.includes(room)) {
+            this.muteStatus.set(room, isMuted === true);
+          }
+        }
+        console.log("[loadMuteStatus] Loaded mute status from storage:", stored);
+      }
+      this._muteStatusLoaded = true;
+    } catch (error) {
+      console.error("[loadMuteStatus] Error:", error);
+    }
+  }
+
+  // ========== MODIFIED: Save mute status ke persistent storage ==========
+  async saveMuteStatus() {
+    try {
+      if (!this.storage) return;
+      
+      const status = {};
+      for (const [room, isMuted] of this.muteStatus.entries()) {
+        if (roomList.includes(room)) {
+          status[room] = isMuted === true;
+        }
+      }
+      
+      await this.storage.put("muteStatus", status);
+      console.log("[saveMuteStatus] Saved mute status to storage:", status);
+    } catch (error) {
+      console.error("[saveMuteStatus] Error:", error);
     }
   }
 
@@ -330,17 +378,26 @@ export class ChatServer {
     }
   }
 
-  // METHOD MUTE - PER ROOM
-  setMuteType(isMuted, roomName) {
+  // ========== MODIFIED: METHOD MUTE - PER ROOM dengan persistent storage ==========
+  async setMuteType(isMuted, roomName) {
     try {
       if (!roomName || !roomList.includes(roomName)) {
         console.error(`[setMuteType] Invalid room: ${roomName}`);
         return false;
       }
       
-      // Set mute hanya untuk room tertentu
+      // Tunggu sampai mute status selesai di-load (jika belum)
+      if (!this._muteStatusLoaded && this.storage) {
+        await this.loadMuteStatus();
+      }
+      
+      // Set mute hanya untuk room tertentu di memory cache
       this.muteStatus.set(roomName, isMuted === true);
-      console.log(`[setMuteType] Room ${roomName} mute = ${isMuted}`);
+      
+      // Simpan ke persistent storage
+      await this.saveMuteStatus();
+      
+      console.log(`[setMuteType] Room ${roomName} mute = ${isMuted} (saved to storage)`);
       return true;
     } catch (error) {
       console.error("Error in setMuteType:", error);
@@ -348,15 +405,20 @@ export class ChatServer {
     }
   }
 
-  // METHOD GET MUTE - PER ROOM
-  getMuteType(roomName) {
+  // ========== MODIFIED: METHOD GET MUTE - PER ROOM dengan persistent storage ==========
+  async getMuteType(roomName) {
     try {
       if (!roomName || !roomList.includes(roomName)) {
         console.error(`[getMuteType] Invalid room: ${roomName}`);
         return false;
       }
       
-      // Get mute hanya untuk room tertentu
+      // Tunggu sampai mute status selesai di-load (jika belum)
+      if (!this._muteStatusLoaded && this.storage) {
+        await this.loadMuteStatus();
+      }
+      
+      // Get mute hanya untuk room tertentu dari memory cache
       return this.muteStatus.get(roomName) === true;
     } catch (error) {
       console.error("Error in getMuteType:", error);
@@ -664,7 +726,7 @@ export class ChatServer {
     }
   }
 
-  // ========== MODIFIED: initializeRooms - Jangan buat data default ==========
+  // initializeRooms - Jangan buat data default
   initializeRooms() {
     for (const room of roomList) {
       try {
@@ -1374,7 +1436,7 @@ export class ChatServer {
     }
   }
   
-  // ========== MODIFIED: ensureSeatsData - Jangan buat data default ==========
+  // ensureSeatsData - Jangan buat data default
   async ensureSeatsData(room) {
     try {
       const seatMap = this.roomSeats.get(room);
@@ -1523,7 +1585,7 @@ export class ChatServer {
     }
   }
 
-  // ========== MODIFIED: handleJoinRoom - Hanya set occupancy, tidak set data kursi ==========
+  // handleJoinRoom - Hanya set occupancy, tidak set data kursi
   async handleJoinRoom(ws, room) {
     if (!ws || !ws.idtarget) {
       this.safeSend(ws, ["error", "User ID not set"]);
@@ -1559,6 +1621,11 @@ export class ChatServer {
             // User sudah di room ini, kirimkan state saja
             console.log(`[handleJoinRoom] User ${ws.idtarget} already in room ${room}`);
             this.sendAllStateTo(ws, room);
+            
+            // ========== TAMBAHAN: Kirim mute status saat join ==========
+            const isMuted = await this.getMuteType(room);
+            this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
+            
             return true;
           } else {
             // User pindah room, cleanup dari room sebelumnya
@@ -1589,6 +1656,10 @@ export class ChatServer {
               
               this._addUserConnection(ws.idtarget, ws);
               this.sendAllStateTo(ws, room);
+              
+              // ========== TAMBAHAN: Kirim mute status saat join ==========
+              const isMuted = await this.getMuteType(room);
+              this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
               
               return true;
             }
@@ -1649,6 +1720,10 @@ export class ChatServer {
         
         // SEND RESPONSE - Beritahu user seat yang dialokasikan
         this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
+        
+        // ========== TAMBAHAN: Kirim mute status saat join ==========
+        const isMuted = await this.getMuteType(room);
+        this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
         
         // Kirim state room yang ada (hanya kursi yang sudah terisi oleh user lain)
         setTimeout(() => {
@@ -1722,7 +1797,7 @@ export class ChatServer {
     }
   }
 
-  // ========== MODIFIED: getJumlahRoom - Hitung berdasarkan occupancy ==========
+  // getJumlahRoom - Hitung berdasarkan occupancy
   getJumlahRoom() {
     try {
       const now = Date.now();
@@ -1838,7 +1913,7 @@ export class ChatServer {
     }
   }
 
-  // ========== MODIFIED: sendAllStateTo - Hanya kirim kursi yang benar-benar terisi ==========
+  // sendAllStateTo - Hanya kirim kursi yang benar-benar terisi
   sendAllStateTo(ws, room) {
     try {
       if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room || 
@@ -1965,6 +2040,10 @@ export class ChatServer {
                   seatData.lastPoint.fast
                 ]);
               }
+              
+              // ========== TAMBAHAN: Kirim mute status saat reconnect ==========
+              const isMuted = await this.getMuteType(room);
+              this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
               
               this.updateRoomCount(room);
               
@@ -2426,21 +2505,21 @@ export class ChatServer {
           }
 
           case "rollangak": {
-    const roomName = data[1];
-    const username = data[2];
-    const angka = data[3];
-    
-    if (!roomName || !roomList.includes(roomName)) {
-        this.safeSend(ws, ["error", "Invalid room"]);
-        break;
-    }
-    
-    // Broadcast ke SEMUA user di room TANPA dariUser
-    this.broadcastToRoom(roomName, ["rollangakBroadcast", roomName, username, angka]);
-    
-    break;
-}
-          // ========== HANDLER MUTE - PER ROOM ==========
+            const roomName = data[1];
+            const username = data[2];
+            const angka = data[3];
+            
+            if (!roomName || !roomList.includes(roomName)) {
+                this.safeSend(ws, ["error", "Invalid room"]);
+                break;
+            }
+            
+            // Broadcast ke SEMUA user di room TANPA dariUser
+            this.broadcastToRoom(roomName, ["rollangakBroadcast", roomName, username, angka]);
+            
+            break;
+          }
+          // ========== HANDLER MUTE - PER ROOM dengan persistent storage ==========
           case "setMuteType": {
             const isMuted = data[1];
             const roomName = data[2]; // Ambil dari parameter (WAJIB ADA!)
@@ -2456,15 +2535,16 @@ export class ChatServer {
               break;
             }
             
-            // Panggil method dengan parameter roomName
-            const success = this.setMuteType(isMuted, roomName);
+            // Panggil method dengan parameter roomName (async)
+            const success = await this.setMuteType(isMuted, roomName);
             
             if (success) {
               // Kirim response ke client yang mengirim
-              this.safeSend(ws, ["muteTypeResponse", this.getMuteType(roomName), roomName]);
+              const currentMuteStatus = await this.getMuteType(roomName);
+              this.safeSend(ws, ["muteTypeResponse", currentMuteStatus, roomName]);
               
               // Broadcast ke semua client di room yang sama (HANYA room itu)
-              this.broadcastToRoom(roomName, ["muteStatusChanged", this.getMuteType(roomName), roomName]);
+              this.broadcastToRoom(roomName, ["muteStatusChanged", currentMuteStatus, roomName]);
             }
             
             this.safeSend(ws, ["muteTypeSet", isMuted, success, roomName]);
@@ -2485,8 +2565,9 @@ export class ChatServer {
               break;
             }
             
-            // Kirim status mute untuk room tertentu
-            this.safeSend(ws, ["muteTypeResponse", this.getMuteType(roomName), roomName]);
+            // Kirim status mute untuk room tertentu (async)
+            const isMuted = await this.getMuteType(roomName);
+            this.safeSend(ws, ["muteTypeResponse", isMuted, roomName]);
             break;
           }
           // ========== END HANDLER MUTE ==========
