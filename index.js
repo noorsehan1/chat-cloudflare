@@ -259,13 +259,15 @@ export class ChatServer {
       // Konversi ke boolean strict
       const muteValue = isMuted === true || isMuted === "true" || isMuted === 1;
       
+      console.log(`[Mute] SET room ${roomName} = ${muteValue}`);
+      
       // Simpan ke MEMORY untuk room ini
       this.muteStatus.set(roomName, muteValue);
       
-      // Simpan ke STORAGE untuk room ini (seperti kursi)
+      // Simpan ke STORAGE untuk room ini
       if (this.storage) {
         await this.storage.put(`mute_${roomName}`, muteValue);
-        console.log(`[Mute] Tersimpan: ${roomName} = ${muteValue}`);
+        console.log(`[Mute] Tersimpan di storage: ${roomName} = ${muteValue}`);
       }
       
       // Broadcast ke semua client di room ini SAJA
@@ -282,13 +284,16 @@ export class ChatServer {
   async getRoomMute(roomName) {
     try {
       if (!roomName || !roomList.includes(roomName)) {
+        console.log(`[Mute] Room ${roomName} tidak valid`);
         return false;
       }
+      
+      console.log(`[Mute] GET status untuk room: ${roomName}`);
       
       // CEK MEMORY untuk room ini
       if (this.muteStatus.has(roomName)) {
         const value = this.muteStatus.get(roomName);
-        console.log(`[Mute] Memory: ${roomName} = ${value}`);
+        console.log(`[Mute] Dari MEMORY: ${roomName} = ${value}`);
         return value === true;
       }
       
@@ -302,12 +307,12 @@ export class ChatServer {
         // Simpan ke memory untuk下次
         this.muteStatus.set(roomName, muteValue);
         
-        console.log(`[Mute] Storage: ${roomName} = ${muteValue}`);
+        console.log(`[Mute] Dari STORAGE: ${roomName} = ${muteValue}`);
         return muteValue;
       }
       
-      // DEFAULT false (seperti kursi kosong)
-      console.log(`[Mute] Default: ${roomName} = false`);
+      // DEFAULT false
+      console.log(`[Mute] DEFAULT: ${roomName} = false`);
       return false;
     } catch (error) {
       console.error("[Mute] Error get:", error);
@@ -901,17 +906,34 @@ export class ChatServer {
       await this.withLock(`room-cleanup-${room}-${ws.idtarget}`, async () => {
         const seatInfo = this.userToSeat.get(ws.idtarget);
         if (!seatInfo || seatInfo.room !== room) return;
+        
         const { seat } = seatInfo;
         await this.cleanupUserFromSeat(room, seat, ws.idtarget, true);
+        
+        // HAPUS dari roomClients
         this._removeFromRoomClients(ws, room);
+        
+        // HAPUS user connection
         this._removeUserConnection(ws.idtarget, ws);
+        
+        // HAPUS current room
         this.userCurrentRoom.delete(ws.idtarget);
+        
+        // RESET semua data user di WebSocket
         ws.roomname = undefined;
         ws.numkursi = new Set();
+        
+        // HAPUS dari userToSeat
         this.userToSeat.delete(ws.idtarget);
+        
+        // Update count room lama
         this.updateRoomCount(room);
+        
+        console.log(`[Cleanup] User ${ws.idtarget} dibersihkan dari room ${room}`);
       });
-    } catch (error) {}
+    } catch (error) {
+      console.error("[Cleanup] Error:", error);
+    }
   }
 
   clearSeatBuffer(room, seatNumber) {
@@ -1064,7 +1086,8 @@ export class ChatServer {
       return false;
     }
     
-    console.log(`[Mute] User ${ws.idtarget} join room ${room}`);
+    console.log(`[Join] User ${ws.idtarget} mencoba join room ${room}`);
+    console.log(`[Join] Current room sebelumnya: ${ws.roomname}`);
     
     try {
       const roomRelease = await this.lockManager.acquire(`room-join-${room}`);
@@ -1072,21 +1095,32 @@ export class ChatServer {
         this.cancelCleanup(ws.idtarget);
         await this.ensureSeatsData(room);
         
+        // CEK APAKAH SUDAH DI ROOM LAIN
         const previousRoom = this.userCurrentRoom.get(ws.idtarget);
+        
         if (previousRoom) {
           if (previousRoom === room) {
+            // SUDAH DI ROOM YANG SAMA
+            console.log(`[Join] User ${ws.idtarget} sudah di room ${room}`);
             this.sendAllStateTo(ws, room);
-            // AMBIL STATUS UNTUK ROOM INI
+            
+            // AMBIL STATUS MUTE UNTUK ROOM INI
             const isMuted = await this.getRoomMute(room);
-            console.log(`[Mute] User ${ws.idtarget} sudah di room ${room}, status: ${isMuted}`);
+            console.log(`[Join] Status mute room ${room}: ${isMuted}`);
             this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
+            
             return true;
           } else {
-            // PINDAH ROOM: cleanup dari room lama dulu
+            // PINDAH ROOM: cleanup dari room lama DULU
+            console.log(`[Join] User ${ws.idtarget} pindah dari ${previousRoom} ke ${room}`);
             await this.cleanupFromRoom(ws, previousRoom);
+            
+            // PASTIKAN sudah bersih
+            console.log(`[Join] Setelah cleanup - roomname: ${ws.roomname}, currentRoom: ${this.userCurrentRoom.get(ws.idtarget)}`);
           }
         }
         
+        // CEK APAKAH USER SUDAH PUNYA SEAT DI ROOM INI
         const seatInfo = this.userToSeat.get(ws.idtarget);
         if (seatInfo && seatInfo.room === room) {
           const seatMap = this.roomSeats.get(room);
@@ -1094,30 +1128,36 @@ export class ChatServer {
           if (seatMap && occupancyMap) {
             const occupantId = occupancyMap.get(seatInfo.seat);
             if (occupantId === ws.idtarget) {
+              // USER KEMBALI KE ROOM YANG SAMA
               ws.roomname = room;
               ws.numkursi = new Set([seatInfo.seat]);
+              
               const clientArray = this.roomClients.get(room);
               if (clientArray && !clientArray.includes(ws)) clientArray.push(ws);
+              
               this._addUserConnection(ws.idtarget, ws);
               this.sendAllStateTo(ws, room);
-              // AMBIL STATUS UNTUK ROOM INI
+              
+              // AMBIL STATUS MUTE UNTUK ROOM INI
               const isMuted = await this.getRoomMute(room);
-              console.log(`[Mute] User ${ws.idtarget} kembali ke room ${room}, status: ${isMuted}`);
+              console.log(`[Join] User ${ws.idtarget} kembali ke room ${room}, status mute: ${isMuted}`);
               this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
+              
               return true;
             }
           }
         }
         
+        // CARI KURSI KOSONG
         let assignedSeat = null;
         for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
           const seatRelease = await this.lockManager.acquire(`seat-assign-${room}-${seat}`);
           try {
             const occupancyMap = this.seatOccupancy.get(room);
             if (!occupancyMap) continue;
+            
             const occupantId = occupancyMap.get(seat);
-            const isReallyEmpty = occupantId === null;
-            if (isReallyEmpty) {
+            if (occupantId === null) {
               occupancyMap.set(seat, ws.idtarget);
               assignedSeat = seat;
               break;
@@ -1130,6 +1170,7 @@ export class ChatServer {
           return false;
         }
         
+        // SET DATA USER
         this.userToSeat.set(ws.idtarget, { room, seat: assignedSeat });
         this.userCurrentRoom.set(ws.idtarget, room);
         ws.roomname = room;
@@ -1137,22 +1178,23 @@ export class ChatServer {
         
         const clientArray = this.roomClients.get(room);
         if (clientArray && !clientArray.includes(ws)) clientArray.push(ws);
-        this._addUserConnection(ws.idtarget, ws);
         
+        this._addUserConnection(ws.idtarget, ws);
         this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
         
-        // AMBIL STATUS UNTUK ROOM YANG BARU
+        // AMBIL STATUS MUTE UNTUK ROOM BARU
         const isMuted = await this.getRoomMute(room);
-        console.log(`[Mute] User ${ws.idtarget} masuk room ${room}, status: ${isMuted}`);
+        console.log(`[Join] User ${ws.idtarget} BERHASIL join room ${room}, status mute: ${isMuted}`);
         this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
         
         setTimeout(() => { this.sendAllStateTo(ws, room); }, 100);
         this.updateRoomCount(room);
         
         return true;
+        
       } finally { roomRelease(); }
     } catch (error) {
-      console.error("[Mute] Error join room:", error);
+      console.error("[Join] Error:", error);
       this.safeSend(ws, ["error", "Failed to join room"]);
       return false;
     }
@@ -1321,9 +1363,9 @@ export class ChatServer {
               if (seatData.lastPoint) {
                 this.safeSend(ws, ["pointUpdated", room, seat, seatData.lastPoint.x, seatData.lastPoint.y, seatData.lastPoint.fast]);
               }
-              // AMBIL STATUS UNTUK ROOM INI
+              // AMBIL STATUS MUTE UNTUK ROOM INI
               const isMuted = await this.getRoomMute(room);
-              console.log(`[Mute] User ${id} reconnect ke room ${room}, status: ${isMuted}`);
+              console.log(`[Reconnect] User ${id} reconnect ke room ${room}, status mute: ${isMuted}`);
               this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
               this.updateRoomCount(room);
               return;
@@ -1611,7 +1653,6 @@ export class ChatServer {
             this.broadcastToRoom(roomName, ["rollangakBroadcast", roomName, username, angka]);
             break;
           }
-          // SET MUTE STATUS
           case "setMuteType": {
             const isMuted = data[1];
             const roomName = data[2];
@@ -1627,7 +1668,6 @@ export class ChatServer {
             this.safeSend(ws, ["muteTypeSet", muteValue, success, roomName]);
             break;
           }
-          // GET MUTE STATUS
           case "getMuteType": {
             const roomName = data[1];
             
