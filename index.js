@@ -136,8 +136,8 @@ export class ChatServer {
       this.state = state;
       this.env = env;
       
-      // MUTE STATUS - GLOBAL BOOLEAN (true/false)
-      this.muteStatus = false; // Default tidak mute
+      // MUTE STATUS - PER ROOM (bukan global!)
+      this.muteStatus = new Map(); // key: roomName, value: boolean
       
       this.lockManager = new PromiseLockManager();
       this.cleanupInProgress = new Set();
@@ -191,6 +191,11 @@ export class ChatServer {
       // Reset semua timer lama saat constructor
       this._cleanupAllTimers();
 
+      // Inisialisasi semua room dengan mute false
+      for (const room of roomList) {
+        this.muteStatus.set(room, false);
+      }
+
       try {
         this.initializeRooms();
       } catch {
@@ -230,6 +235,12 @@ export class ChatServer {
       this.lowcard = null;
       this.gracePeriod = 5000;
       this.cleanupQueue = new QueueManager(5);
+      
+      // MUTE STATUS - PER ROOM (inisialisasi ulang)
+      this.muteStatus = new Map();
+      for (const room of roomList) {
+        this.muteStatus.set(room, false);
+      }
       
       // Rate limiting
       this.rateLimiter = new RateLimiter(60000, 100);
@@ -287,7 +298,7 @@ export class ChatServer {
     }
   }
 
-  // PERBAIKAN: Enhanced lock dengan timeout protection
+  // Enhanced lock dengan timeout protection
   async withLock(resourceId, operation, timeout = 2000) {
     const release = await this.lockManager.acquire(resourceId);
     
@@ -319,11 +330,17 @@ export class ChatServer {
     }
   }
 
-  // METHOD MUTE - GLOBAL (tanpa userId)
-  setMuteType(isMuted) {
+  // METHOD MUTE - PER ROOM
+  setMuteType(isMuted, roomName) {
     try {
-      // isMuted harus boolean
-      this.muteStatus = isMuted === true;
+      if (!roomName || !roomList.includes(roomName)) {
+        console.error(`[setMuteType] Invalid room: ${roomName}`);
+        return false;
+      }
+      
+      // Set mute hanya untuk room tertentu
+      this.muteStatus.set(roomName, isMuted === true);
+      console.log(`[setMuteType] Room ${roomName} mute = ${isMuted}`);
       return true;
     } catch (error) {
       console.error("Error in setMuteType:", error);
@@ -331,17 +348,23 @@ export class ChatServer {
     }
   }
 
-  // METHOD GET MUTE - GLOBAL (tanpa userId)
-  getMuteType() {
+  // METHOD GET MUTE - PER ROOM
+  getMuteType(roomName) {
     try {
-      return this.muteStatus === true;
+      if (!roomName || !roomList.includes(roomName)) {
+        console.error(`[getMuteType] Invalid room: ${roomName}`);
+        return false;
+      }
+      
+      // Get mute hanya untuk room tertentu
+      return this.muteStatus.get(roomName) === true;
     } catch (error) {
       console.error("Error in getMuteType:", error);
       return false;
     }
   }
 
-  // PERBAIKAN: Safe mode management
+  // Safe mode management
   checkAndEnableSafeMode() {
     const now = Date.now();
     if (now - this.lastLoadCheck < this.loadCheckInterval) {
@@ -476,7 +499,7 @@ export class ChatServer {
       // Cancel timer yang ada
       this.cancelCleanup(userId);
       
-      // PERBAIKAN: Simpan waktu scheduled untuk validation
+      // Simpan waktu scheduled untuk validation
       const timerId = setTimeout(async () => {
         try {
           // Hapus dari timer map
@@ -603,7 +626,7 @@ export class ChatServer {
       return;
     }
     
-    // PERBAIKAN: Langsung execute tanpa queue delay
+    // Langsung execute tanpa queue delay
     this.cleanupInProgress.add(userId);
     try {
       await this.withLock(`user-cleanup-${userId}`, async () => {
@@ -735,7 +758,7 @@ export class ChatServer {
         }
       }, 10000); // Setiap 10 detik
 
-      // PERBAIKAN: Timer untuk validasi grace period
+      // Timer untuk validasi grace period
       this._gracePeriodValidationTimer = setInterval(() => {
         try {
           this._validateGracePeriodTimers();
@@ -743,6 +766,19 @@ export class ChatServer {
           // Ignore validation errors
         }
       }, 1000); // Cek setiap detik
+
+      // Timer untuk validasi seat consistency (setiap 30 detik)
+      this._seatValidationTimer = setInterval(() => {
+        try {
+          if (this.getServerLoad() < 0.8) {
+            for (const room of roomList) {
+              this.validateSeatConsistency(room);
+            }
+          }
+        } catch {
+          // Ignore validation errors
+        }
+      }, 30000);
 
       this._timers = [
         this._tickTimer, 
@@ -752,7 +788,8 @@ export class ChatServer {
         this._stuckCleanupTimer,
         this._memoryCleanupTimer,
         this._safeModeTimer,
-        this._gracePeriodValidationTimer
+        this._gracePeriodValidationTimer,
+        this._seatValidationTimer
       ];
       
     } catch {
@@ -760,7 +797,7 @@ export class ChatServer {
     }
   }
 
-  // PERBAIKAN: Method untuk validasi grace period timer
+  // Method untuk validasi grace period timer
   _validateGracePeriodTimers() {
     try {
       const now = Date.now();
@@ -993,6 +1030,100 @@ export class ChatServer {
       return inconsistencies;
     } catch {
       return 0;
+    }
+  }
+
+  // Validasi konsistensi seat untuk mencegah data korup
+  async validateSeatConsistency(room) {
+    try {
+      const seatMap = this.roomSeats.get(room);
+      const occupancyMap = this.seatOccupancy.get(room);
+      
+      if (!seatMap || !occupancyMap) return;
+      
+      let fixed = 0;
+      
+      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        const occupantId = occupancyMap.get(seat);
+        const seatData = seatMap.get(seat);
+        
+        // Case 1: occupancy ada tapi seatData kosong
+        if (occupantId && (!seatData || !seatData.namauser || seatData.namauser === "")) {
+          console.log(`[validateSeatConsistency] Fixing seat ${seat}: occupancy ${occupantId} but seatData empty`);
+          
+          if (!seatData) {
+            seatMap.set(seat, createEmptySeat());
+          } else {
+            Object.assign(seatData, createEmptySeat());
+          }
+          
+          occupancyMap.set(seat, null);
+          fixed++;
+        }
+        
+        // Case 2: seatData ada tapi occupancy kosong
+        else if (!occupantId && seatData && seatData.namauser && seatData.namauser !== "") {
+          console.log(`[validateSeatConsistency] Fixing seat ${seat}: seatData has ${seatData.namauser} but occupancy empty`);
+          
+          // Cek apakah user ini benar-benar online
+          let isUserOnline = false;
+          const connections = this.userConnections.get(seatData.namauser);
+          if (connections && connections.size > 0) {
+            for (const conn of connections) {
+              if (conn && conn.readyState === 1) {
+                isUserOnline = true;
+                break;
+              }
+            }
+          }
+          
+          if (isUserOnline) {
+            // User online, perbaiki occupancy
+            occupancyMap.set(seat, seatData.namauser);
+          } else {
+            // User offline, kosongkan seat
+            Object.assign(seatData, createEmptySeat());
+          }
+          fixed++;
+        }
+        
+        // Case 3: occupancy dan seatData tidak match
+        else if (occupantId && seatData && seatData.namauser && seatData.namauser !== occupantId) {
+          console.log(`[validateSeatConsistency] Fixing seat ${seat}: mismatch occupancy=${occupantId} vs seatData=${seatData.namauser}`);
+          
+          // Prioritaskan occupancy
+          if (occupantId) {
+            // Cek apakah occupant online
+            let isOccupantOnline = false;
+            const connections = this.userConnections.get(occupantId);
+            if (connections && connections.size > 0) {
+              for (const conn of connections) {
+                if (conn && conn.readyState === 1) {
+                  isOccupantOnline = true;
+                  break;
+                }
+              }
+            }
+            
+            if (isOccupantOnline) {
+              // Update seatData dengan occupant
+              seatData.namauser = occupantId;
+            } else {
+              // Occupant offline, kosongkan
+              occupancyMap.set(seat, null);
+              Object.assign(seatData, createEmptySeat());
+            }
+          }
+          fixed++;
+        }
+      }
+      
+      if (fixed > 0) {
+        console.log(`[validateSeatConsistency] Fixed ${fixed} inconsistencies in room ${room}`);
+      }
+      
+    } catch (error) {
+      console.error(`[validateSeatConsistency] Error:`, error);
     }
   }
 
@@ -1288,6 +1419,7 @@ export class ChatServer {
     }
   }
   
+  // findEmptySeat dengan lock per seat
   async findEmptySeat(room, ws) {
     if (!room || !ws || !ws.idtarget) return null;
     
@@ -1297,68 +1429,92 @@ export class ChatServer {
       
       if (!occupancyMap || !seatMap) return null;
 
-      let candidateSeat = null;
-      
-      // Cek apakah user sudah punya seat di room ini
+      // CEK 1: Apakah user sudah punya kursi?
       for (let i = 1; i <= this.MAX_SEATS; i++) {
-        if (occupancyMap.get(i) === ws.idtarget) {
-          const seatData = seatMap.get(i);
-          if (seatData && seatData.namauser === ws.idtarget) {
-            await this.withLock(`seat-verify-quick-${room}-${i}`, async () => {
-              const verifySeatData = seatMap.get(i);
-              const verifyOccupancy = occupancyMap.get(i);
-              if (verifySeatData && verifySeatData.namauser === ws.idtarget && 
-                  verifyOccupancy === ws.idtarget) {
-                candidateSeat = i;
-              }
-            });
-            if (candidateSeat) return candidateSeat;
-          }
+        const occupantId = occupancyMap.get(i);
+        const seatData = seatMap.get(i);
+        
+        if (occupantId === ws.idtarget && seatData && seatData.namauser === ws.idtarget) {
+          console.log(`[findEmptySeat] User ${ws.idtarget} already has seat ${i} in ${room}`);
+          return i;
         }
       }
       
-      // Cari seat kosong
+      // CEK 2: Cari kursi kosong dengan LOCK per kursi
       for (let i = 1; i <= this.MAX_SEATS; i++) {
-        if (occupancyMap.get(i) === null) {
+        // Gunakan lock untuk setiap kursi yang dicek
+        const release = await this.lockManager.acquire(`seat-check-${room}-${i}`);
+        
+        try {
+          const occupantId = occupancyMap.get(i);
           const seatData = seatMap.get(i);
-          if (!seatData || seatData.namauser === "") {
-            candidateSeat = i;
-            break;
+          
+          const isOccupancyEmpty = occupantId === null;
+          const isSeatDataEmpty = !seatData || !seatData.namauser || seatData.namauser === "";
+          
+          if (isOccupancyEmpty && isSeatDataEmpty) {
+            console.log(`[findEmptySeat] Found empty seat ${i} in ${room}`);
+            return i;
           }
+        } finally {
+          release(); // Lepas lock setelah cek
         }
       }
       
-      if (candidateSeat) return candidateSeat;
-      
-      // Cari seat yang occupied oleh user yang sudah disconnected
+      // CEK 3: Cari kursi yang occupancy-nya null TAPI seatData-nya bermasalah
       for (let i = 1; i <= this.MAX_SEATS; i++) {
-        const occupiedBy = occupancyMap.get(i);
-        if (occupiedBy && occupiedBy !== ws.idtarget) {
+        const occupantId = occupancyMap.get(i);
+        const seatData = seatMap.get(i);
+        
+        // Kursi yang occupancy-nya null tapi seatData masih ada nama (inkonsistensi)
+        if (occupantId === null && seatData && seatData.namauser && seatData.namauser !== "") {
+          console.log(`[findEmptySeat] Fixing inconsistent seat ${i} in ${room}`);
+          // Reset seatData
+          Object.assign(seatData, createEmptySeat());
+          return i;
+        }
+      }
+      
+      // CEK 4: Cari kursi yang ditempati user yang sudah disconnect (hanya jika benar-benar tidak ada kursi kosong)
+      for (let i = 1; i <= this.MAX_SEATS; i++) {
+        const occupantId = occupancyMap.get(i);
+        const seatData = seatMap.get(i);
+        
+        if (occupantId && seatData && seatData.namauser === occupantId) {
+          // Cek apakah user ini benar-benar online
           let isOccupantOnline = false;
-          for (const client of this.clients) {
-            if (client && client.idtarget === occupiedBy && 
-                client.readyState === 1 && !client._isDuplicate && !client._isClosing) {
-              isOccupantOnline = true;
-              break;
+          
+          // Cek di userConnections
+          const connections = this.userConnections.get(occupantId);
+          if (connections && connections.size > 0) {
+            for (const conn of connections) {
+              if (conn && conn.readyState === 1 && !conn._isDuplicate && !conn._isClosing) {
+                isOccupantOnline = true;
+                break;
+              }
             }
           }
           
+          // Jika tidak online, kursi bisa diambil
           if (!isOccupantOnline) {
-            const seatData = seatMap.get(i);
-            if (seatData && seatData.namauser === occupiedBy) {
-              await this.cleanupUserFromSeat(room, i, occupiedBy, true);
-              return i;
-            }
+            console.log(`[findEmptySeat] Taking over disconnected user ${occupantId}'s seat ${i} in ${room}`);
+            await this.cleanupUserFromSeat(room, i, occupantId, true);
+            return i;
           }
         }
       }
       
+      // TIDAK ADA KURSI KOSONG
+      console.log(`[findEmptySeat] No empty seats available in ${room}`);
       return null;
-    } catch {
+      
+    } catch (error) {
+      console.error(`[findEmptySeat] Error:`, error);
       return null;
     }
   }
 
+  // handleJoinRoom dengan locking bertingkat
   async handleJoinRoom(ws, room) {
     if (!ws || !ws.idtarget) {
       this.safeSend(ws, ["error", "User ID not set"]);
@@ -1377,69 +1533,209 @@ export class ChatServer {
     }
     
     try {
-      return await Promise.race([
-        this.withLock(`join-room-${room}-${ws.idtarget}`, async () => {
-          // CANCEL CLEANUP DI AWAL - sangat penting!
-          this.cancelCleanup(ws.idtarget);
-          
-          // VALIDASI 1: Pastikan data kursi untuk seat 1-35 tersedia
-          await this.ensureSeatsData(room);
-          
-          const previousRoom = this.userCurrentRoom.get(ws.idtarget);
-          if (previousRoom && previousRoom !== room) {
+      // LOCK ROOM LEVEL - Cegah multiple join bersamaan
+      const roomRelease = await this.lockManager.acquire(`room-join-${room}`);
+      
+      try {
+        // CANCEL CLEANUP DI AWAL
+        this.cancelCleanup(ws.idtarget);
+        
+        // VALIDASI: Pastikan data kursi untuk seat 1-35 tersedia
+        await this.ensureSeatsData(room);
+        
+        // CEK APAKAH USER SUDAH ADA DI ROOM INI?
+        const previousRoom = this.userCurrentRoom.get(ws.idtarget);
+        if (previousRoom) {
+          if (previousRoom === room) {
+            // User sudah di room ini, kirimkan state saja
+            console.log(`[handleJoinRoom] User ${ws.idtarget} already in room ${room}`);
+            this.sendAllStateTo(ws, room);
+            return true;
+          } else {
+            // User pindah room, cleanup dari room sebelumnya
             await this.cleanupFromRoom(ws, previousRoom);
           }
+        }
+        
+        // CEK APAKAH USER SUDAH PUNYA KURSI DI ROOM INI?
+        const seatInfo = this.userToSeat.get(ws.idtarget);
+        if (seatInfo && seatInfo.room === room) {
+          // User sudah punya kursi, validasi dan kirim state
+          const seatMap = this.roomSeats.get(room);
+          const occupancyMap = this.seatOccupancy.get(room);
           
-          const seat = await this.findEmptySeat(room, ws);
-          
-          // VALIDASI 2: seat harus antara 1-35, bukan 0 atau null
-          if (!seat || seat < 1 || seat > this.MAX_SEATS) {
-            console.log(`[handleJoinRoom] No valid seat found for ${ws.idtarget} in ${room}`);
-            this.safeSend(ws, ["roomFull", room]);
-            return false;
+          if (seatMap && occupancyMap) {
+            const seatData = seatMap.get(seatInfo.seat);
+            const occupantId = occupancyMap.get(seatInfo.seat);
+            
+            if (seatData && seatData.namauser === ws.idtarget && occupantId === ws.idtarget) {
+              console.log(`[handleJoinRoom] User ${ws.idtarget} already has seat ${seatInfo.seat} in ${room}`);
+              
+              ws.roomname = room;
+              ws.numkursi = new Set([seatInfo.seat]);
+              
+              const clientArray = this.roomClients.get(room);
+              if (clientArray && !clientArray.includes(ws)) {
+                clientArray.push(ws);
+              }
+              
+              this._addUserConnection(ws.idtarget, ws);
+              this.sendAllStateTo(ws, room);
+              
+              return true;
+            }
           }
+        }
+        
+        // CARI KURSI KOSONG DENGAN TRANSACTION
+        let assignedSeat = null;
+        
+        for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+          // LOCK per kursi
+          const seatRelease = await this.lockManager.acquire(`seat-assign-${room}-${seat}`);
           
-          console.log(`[handleJoinRoom] Assigning seat ${seat} to ${ws.idtarget} in ${room}`);
-          
-          await this.withLock(`seat-assign-${room}-${seat}`, async () => {
+          try {
             const occupancyMap = this.seatOccupancy.get(room);
-            if (occupancyMap) {
+            const seatMap = this.roomSeats.get(room);
+            
+            if (!occupancyMap || !seatMap) continue;
+            
+            const occupantId = occupancyMap.get(seat);
+            const seatData = seatMap.get(seat);
+            
+            // CEK KETAT: kursi harus benar-benar kosong
+            const isReallyEmpty = 
+                occupantId === null && 
+                (!seatData || !seatData.namauser || seatData.namauser === "");
+            
+            if (isReallyEmpty) {
+              // ASSIGN KURSI
               occupancyMap.set(seat, ws.idtarget);
+              
+              if (!seatData) {
+                seatMap.set(seat, {
+                  noimageUrl: "",
+                  namauser: ws.idtarget,
+                  color: "",
+                  itembawah: 0,
+                  itematas: 0,
+                  vip: 0,
+                  viptanda: 0,
+                  lastPoint: null,
+                  lastUpdated: Date.now()
+                });
+              } else {
+                // Reset seat data
+                seatData.noimageUrl = "";
+                seatData.namauser = ws.idtarget;
+                seatData.color = "";
+                seatData.itembawah = 0;
+                seatData.itematas = 0;
+                seatData.vip = 0;
+                seatData.viptanda = 0;
+                seatData.lastPoint = null;
+                seatData.lastUpdated = Date.now();
+              }
+              
+              assignedSeat = seat;
+              break; // Dapat kursi, keluar loop
             }
             
-            this.userToSeat.set(ws.idtarget, { room, seat });
-            this.userCurrentRoom.set(ws.idtarget, room);
-            ws.roomname = room;
-            ws.numkursi = new Set([seat]);
-            
-            const clientArray = this.roomClients.get(room);
-            if (clientArray && !clientArray.includes(ws)) {
-              clientArray.push(ws);
-            }
-            
-            this._addUserConnection(ws.idtarget, ws);
-          });
-          
-          // Send rooMasuk immediately
-          this.safeSend(ws, ["rooMasuk", seat, room]);
-          
-          // Send state
-          setTimeout(() => {
-            this.sendAllStateTo(ws, room);
-          }, 100);
-          
-          this.updateRoomCount(room);
-          
-          return true;
-        }),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Join room timeout')), 5000)
-        )
-      ]);
+          } finally {
+            seatRelease(); // Lepas lock kursi
+          }
+        }
+        
+        if (!assignedSeat) {
+          console.log(`[handleJoinRoom] No empty seat for ${ws.idtarget} in ${room}`);
+          this.safeSend(ws, ["roomFull", room]);
+          return false;
+        }
+        
+        // UPDATE TRACKING
+        this.userToSeat.set(ws.idtarget, { room, seat: assignedSeat });
+        this.userCurrentRoom.set(ws.idtarget, room);
+        ws.roomname = room;
+        ws.numkursi = new Set([assignedSeat]);
+        
+        const clientArray = this.roomClients.get(room);
+        if (clientArray && !clientArray.includes(ws)) {
+          clientArray.push(ws);
+        }
+        
+        this._addUserConnection(ws.idtarget, ws);
+        
+        // SEND RESPONSE
+        this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
+        
+        setTimeout(() => {
+          this.sendAllStateTo(ws, room);
+        }, 100);
+        
+        this.updateRoomCount(room);
+        
+        console.log(`[handleJoinRoom] User ${ws.idtarget} assigned seat ${assignedSeat} in ${room}`);
+        
+        return true;
+        
+      } finally {
+        roomRelease(); // Lepas lock room
+      }
+      
     } catch (error) {
-      console.error(`Join room error for ${ws.idtarget}:`, error);
+      console.error(`[handleJoinRoom] Error:`, error);
       this.safeSend(ws, ["error", "Failed to join room"]);
       return false;
+    }
+  }
+
+  // Assign kursi secara atomic (fungsi tambahan)
+  async assignSeatAtomic(room, seat, userId) {
+    // LOCK khusus untuk assign kursi
+    const release = await this.lockManager.acquire(`atomic-assign-${room}-${seat}`);
+    
+    try {
+      const occupancyMap = this.seatOccupancy.get(room);
+      const seatMap = this.roomSeats.get(room);
+      
+      if (!occupancyMap || !seatMap) return false;
+      
+      // DOUBLE CHECK: Pastikan masih kosong
+      const occupantId = occupancyMap.get(seat);
+      const seatData = seatMap.get(seat);
+      
+      const isStillEmpty = 
+          occupantId === null && 
+          (!seatData || !seatData.namauser || seatData.namauser === "");
+      
+      if (!isStillEmpty) {
+        return false; // Kursi sudah terisi
+      }
+      
+      // ASSIGN
+      occupancyMap.set(seat, userId);
+      
+      if (!seatData) {
+        seatMap.set(seat, {
+          noimageUrl: "",
+          namauser: userId,
+          color: "",
+          itembawah: 0,
+          itematas: 0,
+          vip: 0,
+          viptanda: 0,
+          lastPoint: null,
+          lastUpdated: Date.now()
+        });
+      } else {
+        seatData.namauser = userId;
+        seatData.lastUpdated = Date.now();
+      }
+      
+      return true;
+      
+    } finally {
+      release();
     }
   }
 
@@ -2145,34 +2441,71 @@ export class ChatServer {
             break;
           }
 
-          // HANDLER MUTE - GLOBAL (tanpa userId) DENGAN ROOMNAME
+          case "rollangak": {
+    const roomName = data[1];
+    const username = data[2];
+    const angka = data[3];
+    
+    if (!roomName || !roomList.includes(roomName)) {
+        this.safeSend(ws, ["error", "Invalid room"]);
+        break;
+    }
+    
+    // Broadcast ke SEMUA user di room TANPA dariUser
+    this.broadcastToRoom(roomName, ["rollangakBroadcast", roomName, username, angka]);
+    
+    break;
+}
+          // ========== HANDLER MUTE - PER ROOM ==========
           case "setMuteType": {
             const isMuted = data[1];
-            const roomName = ws.roomname || ""; // Ambil roomname dari WebSocket
+            const roomName = data[2]; // Ambil dari parameter (WAJIB ADA!)
             
-            // Panggil method tanpa parameter userId
-            const success = this.setMuteType(isMuted);
-            
-            // Kirim response ke client yang mengirim dengan menyertakan roomname
-            this.safeSend(ws, ["muteTypeResponse", this.getMuteType(), roomName]);
-            
-            // Broadcast ke semua client di room yang sama dengan menyertakan roomname
-            if (roomName) {
-              this.broadcastToRoom(roomName, ["muteStatusChanged", this.getMuteType(), roomName]);
+            if (!roomName) {
+              this.safeSend(ws, ["error", "Room name required for mute"]);
+              break;
             }
             
-            this.safeSend(ws, ["muteTypeSet", isMuted, success]);
+            // Validasi roomName
+            if (!roomList.includes(roomName)) {
+              this.safeSend(ws, ["error", "Invalid room name"]);
+              break;
+            }
+            
+            // Panggil method dengan parameter roomName
+            const success = this.setMuteType(isMuted, roomName);
+            
+            if (success) {
+              // Kirim response ke client yang mengirim
+              this.safeSend(ws, ["muteTypeResponse", this.getMuteType(roomName), roomName]);
+              
+              // Broadcast ke semua client di room yang sama (HANYA room itu)
+              this.broadcastToRoom(roomName, ["muteStatusChanged", this.getMuteType(roomName), roomName]);
+            }
+            
+            this.safeSend(ws, ["muteTypeSet", isMuted, success, roomName]);
             break;
           }
 
           case "getMuteType": {
-            const roomName = ws.roomname || ""; // Ambil roomname dari WebSocket
+            const roomName = data[1] || ""; // Ambil dari parameter
             
-            // Kirim status mute saat ini ke client dengan menyertakan roomname
-            this.safeSend(ws, ["muteTypeResponse", this.getMuteType(), roomName]);
-            this.safeSend(ws, ["muteTypeRequested", true]);
+            if (!roomName) {
+              this.safeSend(ws, ["error", "Room name required for get mute"]);
+              break;
+            }
+            
+            // Validasi roomName
+            if (!roomList.includes(roomName)) {
+              this.safeSend(ws, ["error", "Invalid room name"]);
+              break;
+            }
+            
+            // Kirim status mute untuk room tertentu
+            this.safeSend(ws, ["muteTypeResponse", this.getMuteType(roomName), roomName]);
             break;
           }
+          // ========== END HANDLER MUTE ==========
 
           case "onDestroy": {
             const idtarget = ws.idtarget;
