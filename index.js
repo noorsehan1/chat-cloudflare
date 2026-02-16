@@ -2145,19 +2145,20 @@ export class ChatServer {
             break;
           }
 
-          // HANDLER MUTE - GLOBAL (tanpa userId)
+          // HANDLER MUTE - GLOBAL (tanpa userId) DENGAN ROOMNAME
           case "setMuteType": {
             const isMuted = data[1];
+            const roomName = ws.roomname || ""; // Ambil roomname dari WebSocket
             
             // Panggil method tanpa parameter userId
             const success = this.setMuteType(isMuted);
             
-            // Kirim response ke client yang mengirim
-            this.safeSend(ws, ["muteTypeResponse", this.getMuteType()]);
+            // Kirim response ke client yang mengirim dengan menyertakan roomname
+            this.safeSend(ws, ["muteTypeResponse", this.getMuteType(), roomName]);
             
-            // Broadcast ke semua client di room yang sama
-            if (ws.roomname) {
-              this.broadcastToRoom(ws.roomname, ["muteStatusChanged", this.getMuteType()]);
+            // Broadcast ke semua client di room yang sama dengan menyertakan roomname
+            if (roomName) {
+              this.broadcastToRoom(roomName, ["muteStatusChanged", this.getMuteType(), roomName]);
             }
             
             this.safeSend(ws, ["muteTypeSet", isMuted, success]);
@@ -2165,8 +2166,10 @@ export class ChatServer {
           }
 
           case "getMuteType": {
-            // Kirim status mute saat ini ke client
-            this.safeSend(ws, ["muteTypeResponse", this.getMuteType()]);
+            const roomName = ws.roomname || ""; // Ambil roomname dari WebSocket
+            
+            // Kirim status mute saat ini ke client dengan menyertakan roomname
+            this.safeSend(ws, ["muteTypeResponse", this.getMuteType(), roomName]);
             this.safeSend(ws, ["muteTypeRequested", true]);
             break;
           }
