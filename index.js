@@ -2,8 +2,7 @@ import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
   "LowCard 1", "LowCard 2", "Gacor", "General", "Pakistan", "Philippines", "India", "Indonesia", "Birthday Party", "Heart Lovers","Cat lovers","Chikahan Tambayan", "Lounge Talk",
-  "Noxxeliverothcifsa", "Friendly Corner", "Best friend", "Relax & Chat", "The Chatter Room"
-];
+  "Noxxeliverothcifsa", "Friendly Corner", "Easy Talk", "Relax & Chat", "The Chatter Room" ];
 
 class PromiseLockManager {
   constructor() {
@@ -1827,6 +1826,7 @@ export default {
     } catch (error) { return new Response("Server error", { status: 500 }); }
   }
 };
+
 
 
 
