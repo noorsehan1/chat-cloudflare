@@ -1580,6 +1580,18 @@ export class ChatServer {
             this.broadcastToRoom(roomName, ["rollangakBroadcast", roomName, username, angka]);
             break;
           }
+
+          // TAMBAHKAN INI:
+case "modwarning": {
+  const roomName = data[1];
+  
+  // Validasi room
+  if (roomName && roomList.includes(roomName)) {
+    // Broadcast ke semua client di room tersebut
+    this.broadcastToRoom(roomName, ["modwarning", roomName]);
+  }
+  break;
+}
           // ===== MUTE METHODS - SEMUA LOGIKA DI SERVER =====
           case "setMuteType": {
             const isMuted = data[1];
