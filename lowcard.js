@@ -1,470 +1,621 @@
 // ============================
-// LowCardGameManager (Clean Version - No Double Time)
+// LowCardGameManager (With 2 Second Delay - English Messages)
 // ============================
 export class LowCardGameManager {
   constructor(chatServer) {
     this.chatServer = chatServer;
-    this.activeGames = new Map(); // key: room, value: game state
+    this.activeGames = new Map();
   }
 
   handleEvent(ws, data) {
-    const evt = data[0];
-    switch (evt) {
-      case "gameLowCardStart":
-        this.startGame(ws, data[1]);
-        break;
-      case "gameLowCardJoin":
-        this.joinGame(ws);
-        break;
-      case "gameLowCardNumber":
-        this.submitNumber(ws, data[1], data[2] || "");
-        break;
-      case "gameLowCardEnd":
-        this.endGame(ws.roomname);
-        break;
+    try {
+      if (!ws || !data || !Array.isArray(data) || data.length === 0) return;
+
+      const evt = data[0];
+      if (typeof evt !== 'string') return;
+
+      switch (evt) {
+        case "gameLowCardStart":
+          this.startGame(ws, data[1]);
+          break;
+        case "gameLowCardJoin":
+          this.joinGame(ws);
+          break;
+        case "gameLowCardNumber":
+          this.submitNumber(ws, data[1], data[2] || "");
+          break;
+        case "gameLowCardEnd":
+          if (ws?.roomname) this.endGame(ws.roomname);
+          break;
+      }
+    } catch (error) {
+      // Silent fail
     }
   }
 
   clearAllTimers(game) {
-    if (game?.countdownTimers) {
-      game.countdownTimers.forEach(timer => {
-        if (timer.interval) clearInterval(timer.interval);
-        if (timer.timeout) clearTimeout(timer.timeout);
-      });
-      game.countdownTimers = [];
+    try {
+      if (game?.countdownTimers) {
+        game.countdownTimers.forEach(timer => {
+          if (timer?.interval) clearInterval(timer.interval);
+          if (timer?.timeout) clearTimeout(timer.timeout);
+        });
+        game.countdownTimers = [];
+      }
+    } catch (error) {
+      // Silent fail
     }
   }
 
   getGame(room) {
-    return this.activeGames.get(room);
+    try {
+      return room ? this.activeGames.get(room) || null : null;
+    } catch {
+      return null;
+    }
   }
 
   getRandomCardTanda() {
-    const tandaOptions = ["C1", "C2", "C3", "C4"];
-    return tandaOptions[Math.floor(Math.random() * tandaOptions.length)];
+    try {
+      const tandaOptions = ["C1", "C2", "C3", "C4"];
+      return tandaOptions[Math.floor(Math.random() * tandaOptions.length)];
+    } catch {
+      return "C1";
+    }
   }
 
   getRandomDrawTime() {
-    return Math.floor(Math.random() * 23) + 3;
+    try {
+      return Math.floor(Math.random() * 23) + 3;
+    } catch {
+      return 10;
+    }
   }
 
   getBotNumberByRound(round) {
-    if (round <= 2) {
-      return Math.floor(Math.random() * 12) + 1;
-    }
-    
-    if (round >= 3) {
-      const isGetHighNumber = Math.random() < 0.6;
-      
-      if (isGetHighNumber) {
-        const bigNumbers = [8, 9, 10, 11, 12];
-        return bigNumbers[Math.floor(Math.random() * bigNumbers.length)];
-      } else {
-        const smallNumbers = [1, 2, 3, 4, 5, 6, 7];
-        return smallNumbers[Math.floor(Math.random() * smallNumbers.length)];
+    try {
+      if (round <= 2) {
+        return Math.floor(Math.random() * 12) + 1;
       }
+      
+      if (round >= 3) {
+        const isGetHighNumber = Math.random() < 0.6;
+        
+        if (isGetHighNumber) {
+          const bigNumbers = [8, 9, 10, 11, 12];
+          return bigNumbers[Math.floor(Math.random() * bigNumbers.length)];
+        } else {
+          const smallNumbers = [1, 2, 3, 4, 5, 6, 7];
+          return smallNumbers[Math.floor(Math.random() * smallNumbers.length)];
+        }
+      }
+      
+      return Math.floor(Math.random() * 12) + 1;
+    } catch {
+      return 7;
     }
-    
-    return Math.floor(Math.random() * 12) + 1;
   }
 
   startGame(ws, bet) {
-  const room = ws.roomname;
-  if (!room) return;
-  
-  if (this.activeGames.has(room)) {
-    this.chatServer.safeSend(ws, ["gameLowCardError", "Game already running in this room"]);
-    return;
-  }
+    try {
+      if (!ws?.roomname || !ws?.idtarget) return;
 
-  const betAmount = parseInt(bet, 10) || 0;
-  
-  // MODIFIED: Allow bet 0 OR bet >= 100
-  if (betAmount < 0) {
-    this.chatServer.safeSend(ws, ["gameLowCardError", "Invalid bet amount"]);
-    return;
-  }
-  
-  // MODIFIED: Check if bet is valid (0 or >= 100)
-  if (betAmount !== 0 && betAmount < 100) {
-    this.chatServer.safeSend(ws, ["gameLowCardError", "Bet must be 0 or at least 100"]);
-    return;
-  }
-
-  const game = {
-    room,
-    players: new Map(),
-    botPlayers: new Map(),
-    registrationOpen: true,
-    round: 1,
-    numbers: new Map(),
-    tanda: new Map(),
-    eliminated: new Set(),
-    winner: null,
-    betAmount,
-    countdownTimers: [],
-    registrationTime: 25,
-    drawTime: 30,
-    hostId: ws.idtarget,
-    hostName: ws.username || ws.idtarget,
-    useBots: false
-  };
-
-  game.players.set(ws.idtarget, { 
-    id: ws.idtarget, 
-    name: ws.username || ws.idtarget 
-  });
-
-  this.activeGames.set(room, game);
-
-  this.chatServer.broadcastToRoom(room, [
-    "gameLowCardStart",
-    game.betAmount
-  ]);
-
-  this.chatServer.safeSend(ws, [
-    "gameLowCardStartSuccess",
-    game.hostName,
-    game.betAmount
-  ]);
-
-  this.startRegistrationCountdown(room);
-}
-  startRegistrationCountdown(room) {
-    const game = this.getGame(room);
-    if (!game) return;
-    
-    this.clearAllTimers(game);
-
-    let timeLeft = game.registrationTime;
-    const timesToNotify = [ 20, 10, 5, 0];
-
-    const interval = setInterval(() => {
-      if (!this.activeGames.has(room)) {
-        clearInterval(interval);
+      const room = ws.roomname;
+      
+      if (this.activeGames.has(room)) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Game already running in this room"]);
         return;
       }
 
-      if (timesToNotify.includes(timeLeft)) {
-        if (timeLeft === 0) {
-          this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
-          
-          if (game.players.size === 1) {
-            this.addFourMozBots(room);
-          }
-          
-          this.closeRegistration(room);
-          clearInterval(interval);
-        } else {
-          this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
-        }
+      const betAmount = parseInt(bet, 10) || 0;
+      
+      if (betAmount < 0) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Invalid bet amount"]);
+        return;
+      }
+      
+      if (betAmount !== 0 && betAmount < 100) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Bet must be 0 or at least 100"]);
+        return;
       }
 
-      timeLeft--;
-      if (timeLeft < 0) clearInterval(interval);
-    }, 1000);
+      const game = {
+        room,
+        players: new Map(),
+        botPlayers: new Map(),
+        registrationOpen: true,
+        round: 1,
+        numbers: new Map(),
+        tanda: new Map(),
+        eliminated: new Set(),
+        winner: null,
+        betAmount,
+        countdownTimers: [],
+        registrationTime: 25,
+        drawTime: 30,
+        hostId: ws.idtarget,
+        hostName: ws.username || ws.idtarget,
+        useBots: false,
+        evaluationLocked: false,
+        drawTimeExpired: false
+      };
 
-    game.countdownTimers.push({ interval });
+      game.players.set(ws.idtarget, { 
+        id: ws.idtarget, 
+        name: ws.username || ws.idtarget 
+      });
+
+      this.activeGames.set(room, game);
+
+      this.chatServer?.broadcastToRoom?.(room, ["gameLowCardStart", game.betAmount]);
+      this.chatServer?.safeSend?.(ws, ["gameLowCardStartSuccess", game.hostName, game.betAmount]);
+
+      this.startRegistrationCountdown(room);
+    } catch (error) {
+      // Silent fail
+    }
+  }
+
+  startRegistrationCountdown(room) {
+    try {
+      const game = this.getGame(room);
+      if (!game) return;
+      
+      this.clearAllTimers(game);
+
+      let timeLeft = game.registrationTime;
+      const timesToNotify = [20, 10, 5, 0];
+
+      const interval = setInterval(() => {
+        try {
+          if (!this.activeGames.has(room)) {
+            clearInterval(interval);
+            return;
+          }
+
+          if (timesToNotify.includes(timeLeft)) {
+            if (timeLeft === 0) {
+              this.chatServer?.broadcastToRoom?.(room, ["gameLowCardTimeLeft", "TIME UP!"]);
+              
+              if (game.players.size === 1) {
+                this.addFourMozBots(room);
+              }
+              
+              this.closeRegistration(room);
+              clearInterval(interval);
+            } else {
+              this.chatServer?.broadcastToRoom?.(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
+            }
+          }
+
+          timeLeft--;
+          if (timeLeft < 0) clearInterval(interval);
+        } catch {
+          clearInterval(interval);
+        }
+      }, 1000);
+
+      game.countdownTimers.push({ interval });
+    } catch {
+      // Silent fail
+    }
   }
 
   addFourMozBots(room) {
-    const game = this.getGame(room);
-    if (!game) return;
-    
-    game.useBots = true;
-    
-    const mozNames = ["moz 1", "moz 2", "moz 3", "moz 4"];
-    
-    for (let i = 0; i < 4; i++) {
-      const botId = `BOT_MOZ_${room}_${i}`;
-      const botName = mozNames[i];
+    try {
+      const game = this.getGame(room);
+      if (!game) return;
       
-      game.players.set(botId, { 
-        id: botId, 
-        name: botName 
-      });
-      game.botPlayers.set(botId, botName);
+      game.useBots = true;
       
-      this.chatServer.broadcastToRoom(room, [
-        "gameLowCardJoin",
-        botName,
-        game.betAmount
-      ]);
+      const mozNames = ["moz 1", "moz 2", "moz 3", "moz 4"];
+      
+      for (let i = 0; i < 4; i++) {
+        const botId = `BOT_MOZ_${room}_${i}`;
+        const botName = mozNames[i];
+        
+        game.players.set(botId, { id: botId, name: botName });
+        game.botPlayers.set(botId, botName);
+        
+        this.chatServer?.broadcastToRoom?.(room, ["gameLowCardJoin", botName, game.betAmount]);
+      }
+    } catch {
+      // Silent fail
     }
   }
 
   startDrawCountdown(room) {
-    const game = this.getGame(room);
-    if (!game) return;
-    
-    this.clearAllTimers(game);
-
-    let timeLeft = game.drawTime;
-    const timesToNotify = [20, 10, 5, 0];
-
-    const interval = setInterval(() => {
-      if (!this.activeGames.has(room)) {
-        clearInterval(interval);
-        return;
-      }
-
-      if (timesToNotify.includes(timeLeft)) {
-        if (timeLeft === 0) {
-          this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
-          this.evaluateRound(room);
-          clearInterval(interval);
-        } else {
-          this.chatServer.broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
-        }
-      }
-
-      timeLeft--;
-      if (timeLeft < 0) clearInterval(interval);
-    }, 1000);
-
-    game.countdownTimers.push({ interval });
-
-    // Schedule bot draws
-    if (game.useBots) {
-      const activeBots = Array.from(game.botPlayers.keys())
-        .filter(botId => !game.eliminated.has(botId) && !game.numbers.has(botId));
+    try {
+      const game = this.getGame(room);
+      if (!game) return;
       
-      activeBots.forEach(botId => {
-        const drawTime = this.getRandomDrawTime();
+      this.clearAllTimers(game);
+      game.evaluationLocked = false;
+      game.drawTimeExpired = false;
+
+      let timeLeft = game.drawTime;
+      const timesToNotify = [20, 10, 5, 0];
+
+      const interval = setInterval(() => {
+        try {
+          if (!this.activeGames.has(room)) {
+            clearInterval(interval);
+            return;
+          }
+
+          if (timesToNotify.includes(timeLeft)) {
+            if (timeLeft === 0) {
+              this.chatServer?.broadcastToRoom?.(room, ["gameLowCardTimeLeft", "TIME UP!"]);
+              
+              game.drawTimeExpired = true;
+              
+              const activePlayers = Array.from(game.players.keys())
+                .filter(id => !game.eliminated.has(id));
+              const allDrawn = game.numbers.size === activePlayers.length;
+              
+              if (!allDrawn) {
+                this.chatServer?.broadcastToRoom?.(room, ["gameLowCardInfo", "Time is up, processing current draws..."]);
+              }
+              
+              game.evaluationLocked = true;
+              this.chatServer?.broadcastToRoom?.(room, ["gameLowCardWait", "Please wait for results..."]);
+              
+              // 2 SECOND DELAY
+              const timeout = setTimeout(() => {
+                try {
+                  this.evaluateRound(room);
+                } catch {
+                  // Silent fail
+                }
+              }, 2000);
+              
+              game.countdownTimers.push({ timeout });
+              clearInterval(interval);
+            } else {
+              this.chatServer?.broadcastToRoom?.(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
+            }
+          }
+
+          timeLeft--;
+          if (timeLeft < 0) clearInterval(interval);
+        } catch {
+          clearInterval(interval);
+        }
+      }, 1000);
+
+      game.countdownTimers.push({ interval });
+
+      if (game.useBots) {
+        const activeBots = Array.from(game.botPlayers.keys())
+          .filter(botId => !game.eliminated.has(botId) && !game.numbers.has(botId));
         
-        const timeout = setTimeout(() => {
-          this.handleBotDraw(room, botId);
-        }, drawTime * 1000);
-        
-        game.countdownTimers.push({ timeout });
-      });
+        activeBots.forEach(botId => {
+          const drawTime = this.getRandomDrawTime();
+          
+          const timeout = setTimeout(() => {
+            try {
+              if (!game.drawTimeExpired && !game.evaluationLocked) {
+                this.handleBotDraw(room, botId);
+              }
+            } catch {
+              // Silent fail
+            }
+          }, drawTime * 1000);
+          
+          game.countdownTimers.push({ timeout });
+        });
+      }
+    } catch {
+      // Silent fail
     }
   }
 
   handleBotDraw(room, botId) {
-    const game = this.getGame(room);
-    if (!game || game.eliminated.has(botId) || game.numbers.has(botId)) {
-      return;
-    }
-    
-    const botNumber = this.getBotNumberByRound(game.round);
-    const tanda = this.getRandomCardTanda();
-    
-    game.numbers.set(botId, botNumber);
-    game.tanda.set(botId, tanda);
-    
-    const botPlayer = game.players.get(botId);
-    const botName = botPlayer ? botPlayer.name : botId;
-    
-    this.chatServer.broadcastToRoom(room, [
-      "gameLowCardPlayerDraw",
-      botName,
-      botNumber,
-      tanda
-    ]);
-    
-    if (game.numbers.size === game.players.size - game.eliminated.size) {
-      this.evaluateRound(room);
+    try {
+      const game = this.getGame(room);
+      if (!game || game.eliminated.has(botId) || game.numbers.has(botId)) return;
+      
+      if (game.drawTimeExpired || game.evaluationLocked) return;
+      
+      const botNumber = this.getBotNumberByRound(game.round);
+      const tanda = this.getRandomCardTanda();
+      
+      game.numbers.set(botId, botNumber);
+      game.tanda.set(botId, tanda);
+      
+      const botPlayer = game.players.get(botId);
+      const botName = botPlayer?.name || botId;
+      
+      this.chatServer?.broadcastToRoom?.(room, ["gameLowCardPlayerDraw", botName, botNumber, tanda]);
+      
+      const activePlayers = Array.from(game.players.keys())
+        .filter(id => !game.eliminated.has(id));
+      const allDrawn = game.numbers.size === activePlayers.length;
+      
+      if (!game.evaluationLocked && allDrawn) {
+        game.evaluationLocked = true;
+        this.chatServer?.broadcastToRoom?.(room, ["gameLowCardWait", "Please wait for results..."]);
+        
+        // 2 SECOND DELAY
+        const timeout = setTimeout(() => {
+          try {
+            this.evaluateRound(room);
+          } catch {
+            // Silent fail
+          }
+        }, 2000);
+        
+        game.countdownTimers.push({ timeout });
+      }
+    } catch {
+      // Silent fail
     }
   }
 
   joinGame(ws) {
-    const room = ws.roomname;
-    const game = this.getGame(room);
-    if (!game || !game.registrationOpen) {
-      this.chatServer.safeSend(ws, ["gameLowCardError", "Registration closed or no game"]);
-      return;
-    }
-    if (game.players.has(ws.idtarget)) {
-      this.chatServer.safeSend(ws, ["gameLowCardError", "Already joined"]);
-      return;
-    }
+    try {
+      if (!ws?.roomname || !ws?.idtarget) return;
 
-    game.players.set(ws.idtarget, { 
-      id: ws.idtarget, 
-      name: ws.username || ws.idtarget 
-    });
+      const room = ws.roomname;
+      const game = this.getGame(room);
+      
+      if (game?.evaluationLocked) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Game in progress, please wait"]);
+        return;
+      }
+      
+      if (!game?.registrationOpen) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Registration closed or no game"]);
+        return;
+      }
+      
+      if (game.players.has(ws.idtarget)) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Already joined"]);
+        return;
+      }
 
-    this.chatServer.broadcastToRoom(room, [
-      "gameLowCardJoin",
-      ws.username || ws.idtarget,
-      game.betAmount
-    ]);
+      game.players.set(ws.idtarget, { 
+        id: ws.idtarget, 
+        name: ws.username || ws.idtarget 
+      });
+
+      this.chatServer?.broadcastToRoom?.(room, ["gameLowCardJoin", ws.username || ws.idtarget, game.betAmount]);
+    } catch {
+      // Silent fail
+    }
   }
 
   closeRegistration(room) {
-    const game = this.getGame(room);
-    if (!game) return;
+    try {
+      const game = this.getGame(room);
+      if (!game) return;
 
-    const playerCount = game.players.size;
-    
-    if (playerCount < 2) {
-      const hostSocket = Array.from(this.chatServer.clients)
-        .find(ws => ws.idtarget === game.hostId);
-      if (hostSocket) {
-        this.chatServer.safeSend(hostSocket, ["gameLowCardNoJoin", game.hostName, game.betAmount]);
+      const playerCount = game.players.size;
+      
+      if (playerCount < 2) {
+        const hostSocket = Array.from(this.chatServer?.clients || [])
+          .find(ws => ws?.idtarget === game.hostId);
+        
+        if (hostSocket) {
+          this.chatServer?.safeSend?.(hostSocket, ["gameLowCardNoJoin", game.hostName, game.betAmount]);
+        }
+
+        this.chatServer?.broadcastToRoom?.(room, ["gameLowCardError", "Need at least 2 players", game.hostId]);
+        this.activeGames.delete(room);
+        return;
       }
 
-      this.chatServer.broadcastToRoom(room, ["gameLowCardError", "Need at least 2 players", game.hostId]);
-      this.activeGames.delete(room);
-      return;
+      game.registrationOpen = false;
+
+      const playersList = Array.from(game.players.values()).map(p => p.name || p.id);
+
+      this.chatServer?.broadcastToRoom?.(room, ["gameLowCardClosed", playersList]);
+      this.chatServer?.broadcastToRoom?.(room, ["gameLowCardPlayersInGame", playersList, game.betAmount]);
+      this.chatServer?.broadcastToRoom?.(room, ["gameLowCardNextRound", 1]);
+
+      this.startDrawCountdown(room);
+    } catch {
+      // Silent fail
     }
-
-    game.registrationOpen = false;
-
-    const playersList = Array.from(game.players.values()).map(p => p.name || p.id);
-
-    this.chatServer.broadcastToRoom(room, ["gameLowCardClosed", playersList]);
-    this.chatServer.broadcastToRoom(room, ["gameLowCardPlayersInGame", playersList, game.betAmount]);
-    this.chatServer.broadcastToRoom(room, ["gameLowCardNextRound", 1]);
-
-    this.startDrawCountdown(room);
   }
 
   submitNumber(ws, number, tanda = "") {
-    const room = ws.roomname;
-    const game = this.getGame(room);
-    if (!game) {
-      this.chatServer.safeSend(ws, ["gameLowCardError", "No active game"]);
-      return;
-    }
-    
-    if (game.registrationOpen) {
-      this.chatServer.safeSend(ws, ["gameLowCardError", "Registration still open"]);
-      return;
-    }
-    
-    if (!game.players.has(ws.idtarget) || game.eliminated.has(ws.idtarget)) {
-      this.chatServer.safeSend(ws, ["gameLowCardError", "Not in game or eliminated"]);
-      return;
-    }
-    
-    if (game.numbers.has(ws.idtarget)) {
-      this.chatServer.safeSend(ws, ["gameLowCardError", "Already submitted number"]);
-      return;
-    }
+    try {
+      if (!ws?.roomname || !ws?.idtarget) return;
 
-    const n = parseInt(number, 10);
-    if (isNaN(n) || n < 1 || n > 12) {
-      this.chatServer.safeSend(ws, ["gameLowCardError", "Invalid number (1-12)"]);
-      return;
-    }
+      const room = ws.roomname;
+      const game = this.getGame(room);
+      
+      if (!game) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "No active game"]);
+        return;
+      }
+      
+      if (game.evaluationLocked) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Please wait, results are being processed..."]);
+        return;
+      }
+      
+      if (game.registrationOpen) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Registration still open"]);
+        return;
+      }
+      
+      if (!game.players.has(ws.idtarget) || game.eliminated.has(ws.idtarget)) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Not in game or eliminated"]);
+        return;
+      }
+      
+      if (game.numbers.has(ws.idtarget)) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Already submitted number"]);
+        return;
+      }
 
-    game.numbers.set(ws.idtarget, n);
-    game.tanda.set(ws.idtarget, tanda);
-    
-    const player = game.players.get(ws.idtarget);
-    const playerName = player ? player.name : ws.idtarget;
-    
-    this.chatServer.broadcastToRoom(room, [
-      "gameLowCardPlayerDraw",
-      playerName,
-      n,
-      tanda
-    ]);
+      const activePlayers = Array.from(game.players.keys())
+        .filter(id => !game.eliminated.has(id));
+      const allDrawn = game.numbers.size === activePlayers.length;
+      
+      if (allDrawn) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "All players have already drawn, please wait for results..."]);
+        return;
+      }
 
-    if (game.numbers.size === game.players.size - game.eliminated.size) {
-      this.evaluateRound(room);
+      if (game.drawTimeExpired) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Draw time has expired!"]);
+        return;
+      }
+
+      const n = parseInt(number, 10);
+      if (isNaN(n) || n < 1 || n > 12) {
+        this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Invalid number (1-12)"]);
+        return;
+      }
+
+      game.numbers.set(ws.idtarget, n);
+      game.tanda.set(ws.idtarget, tanda);
+      
+      const player = game.players.get(ws.idtarget);
+      const playerName = player?.name || ws.idtarget;
+      
+      this.chatServer?.broadcastToRoom?.(room, ["gameLowCardPlayerDraw", playerName, n, tanda]);
+
+      const newActivePlayers = Array.from(game.players.keys())
+        .filter(id => !game.eliminated.has(id));
+      const nowAllDrawn = game.numbers.size === newActivePlayers.length;
+      
+      if (!game.evaluationLocked && nowAllDrawn) {
+        game.evaluationLocked = true;
+        this.chatServer?.broadcastToRoom?.(room, ["gameLowCardWait", "Please wait for results..."]);
+        
+        // 2 SECOND DELAY
+        const timeout = setTimeout(() => {
+          try {
+            this.evaluateRound(room);
+          } catch {
+            // Silent fail
+          }
+        }, 2000);
+        
+        game.countdownTimers.push({ timeout });
+      }
+    } catch {
+      // Silent fail
     }
   }
 
   evaluateRound(room) {
-    const game = this.getGame(room);
-    if (!game) return;
-    
-    this.clearAllTimers(game);
+    try {
+      const game = this.getGame(room);
+      if (!game) return;
+      
+      this.clearAllTimers(game);
 
-    const { numbers, tanda, players, eliminated, round, betAmount } = game;
-    const entries = Array.from(numbers.entries());
+      const { numbers, tanda, players, eliminated, round, betAmount } = game;
+      const entries = Array.from(numbers.entries());
 
-    const submittedIds = new Set(numbers.keys());
-    const activePlayers = Array.from(players.keys()).filter(id => !eliminated.has(id));
-    const noSubmit = activePlayers.filter(id => !submittedIds.has(id));
-    noSubmit.forEach(id => eliminated.add(id));
+      const submittedIds = new Set(numbers.keys());
+      const activePlayers = Array.from(players.keys()).filter(id => !eliminated.has(id));
+      const noSubmit = activePlayers.filter(id => !submittedIds.has(id));
+      noSubmit.forEach(id => eliminated.add(id));
 
-    if (entries.length === 0) {
-      this.chatServer.broadcastToRoom(room, ["gameLowCardError", "No numbers drawn this round"]);
-      this.activeGames.delete(room);
-      return;
+      if (entries.length === 0) {
+        this.chatServer?.broadcastToRoom?.(room, ["gameLowCardError", "No numbers drawn this round"]);
+        this.activeGames.delete(room);
+        return;
+      }
+
+      if (entries.length === 1 && noSubmit.length === activePlayers.length - 1) {
+        const winnerId = entries[0][0];
+        const winnerPlayer = players.get(winnerId);
+        const winnerName = winnerPlayer?.name || winnerId;
+        const totalCoin = betAmount * players.size;
+        game.winner = winnerId;
+        
+        this.chatServer?.broadcastToRoom?.(room, ["gameLowCardWinner", winnerName, totalCoin]);
+        this.activeGames.delete(room);
+        return;
+      }
+
+      const values = Array.from(numbers.values());
+      const allSame = values.every(v => v === values[0]);
+      let losers = [];
+
+      if (!allSame) {
+        const lowest = Math.min(...values);
+        losers = entries.filter(([, n]) => n === lowest).map(([id]) => id);
+        losers.forEach(id => eliminated.add(id));
+      }
+
+      const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
+
+      if (remaining.length === 1) {
+        const winnerId = remaining[0];
+        const winnerPlayer = players.get(winnerId);
+        const winnerName = winnerPlayer?.name || winnerId;
+        const totalCoin = betAmount * players.size;
+        game.winner = winnerId;
+        
+        this.chatServer?.broadcastToRoom?.(room, ["gameLowCardWinner", winnerName, totalCoin]);
+        this.activeGames.delete(room);
+        return;
+      }
+
+      const numbersArr = entries.map(([id, n]) => {
+        const player = players.get(id);
+        const playerName = player?.name || id;
+        const playerTanda = tanda.get(id) || "";
+        return `${playerName}:${n}(${playerTanda})`;
+      });
+      
+      const loserNames = losers.concat(noSubmit).map(id => {
+        const player = players.get(id);
+        return player?.name || id;
+      });
+      
+      const remainingNames = remaining.map(id => {
+        const player = players.get(id);
+        return player?.name || id;
+      });
+
+      this.chatServer?.broadcastToRoom?.(room, [
+        "gameLowCardRoundResult",
+        round,
+        numbersArr,
+        loserNames,
+        remainingNames
+      ]);
+
+      numbers.clear();
+      tanda.clear();
+      game.round++;
+      game.evaluationLocked = false;
+      
+      this.chatServer?.broadcastToRoom?.(room, ["gameLowCardNextRound", game.round]);
+      this.startDrawCountdown(room);
+    } catch {
+      // Silent fail
     }
-
-    if (entries.length === 1 && noSubmit.length === activePlayers.length - 1) {
-      const winnerId = entries[0][0];
-      const winnerPlayer = players.get(winnerId);
-      const winnerName = winnerPlayer ? winnerPlayer.name : winnerId;
-      const totalCoin = betAmount * players.size;
-      game.winner = winnerId;
-      this.chatServer.broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
-      this.activeGames.delete(room);
-      return;
-    }
-
-    const values = Array.from(numbers.values());
-    const allSame = values.every(v => v === values[0]);
-    let losers = [];
-
-    if (!allSame) {
-      const lowest = Math.min(...values);
-      losers = entries.filter(([, n]) => n === lowest).map(([id]) => id);
-      losers.forEach(id => eliminated.add(id));
-    }
-
-    const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
-
-    if (remaining.length === 1) {
-      const winnerId = remaining[0];
-      const winnerPlayer = players.get(winnerId);
-      const winnerName = winnerPlayer ? winnerPlayer.name : winnerId;
-      const totalCoin = betAmount * players.size;
-      game.winner = winnerId;
-      this.chatServer.broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
-      this.activeGames.delete(room);
-      return;
-    }
-
-    const numbersArr = entries.map(([id, n]) => {
-      const player = players.get(id);
-      const playerName = player ? player.name : id;
-      const playerTanda = tanda.get(id) || "";
-      return `${playerName}:${n}(${playerTanda})`;
-    });
-    
-    const loserNames = losers.concat(noSubmit).map(id => {
-      const player = players.get(id);
-      return player ? player.name : id;
-    });
-    
-    const remainingNames = remaining.map(id => {
-      const player = players.get(id);
-      return player ? player.name : id;
-    });
-
-    this.chatServer.broadcastToRoom(room, [
-      "gameLowCardRoundResult",
-      round,
-      numbersArr,
-      loserNames,
-      remainingNames
-    ]);
-
-    numbers.clear();
-    tanda.clear();
-    game.round++;
-    
-    this.chatServer.broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
-    this.startDrawCountdown(room);
   }
 
   endGame(room) {
-    const game = this.getGame(room);
-    if (!game) return;
-    
-    const playersList = Array.from(game.players.values()).map(p => p.name || p.id);
-    this.chatServer.broadcastToRoom(room, ["gameLowCardEnd", playersList]);
-    this.clearAllTimers(game);
-    this.activeGames.delete(room);
+    try {
+      const game = this.getGame(room);
+      if (!game) return;
+      
+      const playersList = Array.from(game.players.values()).map(p => p.name || p.id);
+      
+      this.chatServer?.broadcastToRoom?.(room, ["gameLowCardEnd", playersList]);
+      this.clearAllTimers(game);
+      
+      game.players?.clear();
+      game.botPlayers?.clear();
+      game.numbers?.clear();
+      game.tanda?.clear();
+      game.eliminated?.clear();
+      
+      this.activeGames.delete(room);
+    } catch {
+      // Silent fail
+    }
   }
 }
-
-
-
