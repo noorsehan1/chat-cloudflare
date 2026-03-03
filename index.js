@@ -1923,5 +1923,6 @@ export default {
       }
       return new Response("WebSocket endpoint", { status: 200, headers: { "content-type": "text/plain" } });
     } catch (error) { return new Response("Server error", { status: 500 }); }
-  }
+   }
 };
+
