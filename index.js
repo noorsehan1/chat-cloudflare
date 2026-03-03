@@ -391,7 +391,7 @@ export class ChatServer {
       } catch (err) {
         console.error("Main timer error:", err);
       }
-    }, 2000);
+    }, intervalMillis);
     
     this._maintenanceTimer = setInterval(() => {
       if (this.isShuttingDown) return;
@@ -2229,3 +2229,4 @@ export default {
     }
   }
 };
+
