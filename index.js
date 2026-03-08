@@ -2,7 +2,7 @@ import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
   "LowCard 1", "LowCard 2", "Gacor", "General", "Pakistan", "Philippines", "India", "Indonesia", "Birthday Party", "Heart Lovers","Cat lovers","Chikahan Tambayan", "Lounge Talk",
-  "Noxxeliverothcifsa", "Friendly Corner", "Easy Talk", "Relax & Chat", "The Chatter Room" ];
+  "Noxxeliverothcifsa", "Friendly Corner", "BLUE PARADISE", "Relax & Chat", "The Chatter Room" ];
 
 class PromiseLockManager {
   constructor() {
@@ -1869,7 +1869,8 @@ case "modwarning": {
           case "gameLowCardJoin":
           case "gameLowCardNumber":
           case "gameLowCardEnd":
-            if (ws.roomname === "LowCard 1" || ws.roomname === "LowCard 2" || ws.roomname === "Noxxeliverothcifsa" || ws.roomname === "Chikahan Tambayan") {
+            if (ws.roomname === "LowCard 1" || ws.roomname === "LowCard 2" || ws.roomname === "Noxxeliverothcifsa" ||
+                ws.roomname === "Chikahan Tambayan" || ws.roomname === "BLUE PARADISE" ) {
               if (this.lowcard) await this.lowcard.handleEvent(ws, data);
               else this.safeSend(ws, ["error", "Game system not available"]);
             }
@@ -1925,4 +1926,5 @@ export default {
     } catch (error) { return new Response("Server error", { status: 500 }); }
    }
 };
+
 
