@@ -8,22 +8,20 @@ class PromiseLockManager {
   constructor() {
     this.locks = new Map();
     this.queue = new Map();
-    // TAMBAHAN: untuk cleanup lock yang macet
     this.lockTimestamps = new Map();
+    this.cleanupInterval = null;
   }
 
   async acquire(resourceId) {
-    // CEK: jika lock sudah ada lebih dari 10 detik, force release
     if (this.locks.has(resourceId)) {
       const lockTime = this.lockTimestamps.get(resourceId) || 0;
       if (Date.now() - lockTime > 10000) {
-        // Lock terlalu lama, force release
         this.locks.delete(resourceId);
         this.lockTimestamps.delete(resourceId);
         const oldQueue = this.queue.get(resourceId);
         if (oldQueue) {
           for (const resolve of oldQueue) {
-            resolve(); // resolve semua yang nunggu
+            resolve();
           }
           this.queue.delete(resourceId);
         }
@@ -49,7 +47,7 @@ class PromiseLockManager {
     const queue = this.queue.get(resourceId);
     if (queue && queue.length > 0) {
       const nextResolve = queue.shift();
-      this.lockTimestamps.set(resourceId, Date.now()); // update timestamp
+      this.lockTimestamps.set(resourceId, Date.now());
       nextResolve();
       if (queue.length === 0) {
         this.queue.delete(resourceId);
@@ -64,11 +62,10 @@ class PromiseLockManager {
     return this.locks.has(resourceId);
   }
 
-  // TAMBAHAN: cleanup berkala untuk lock yang macet
   cleanupStuckLocks() {
     const now = Date.now();
     for (const [resourceId, lockTime] of this.lockTimestamps) {
-      if (now - lockTime > 10000) { // 10 detik
+      if (now - lockTime > 10000) {
         this.locks.delete(resourceId);
         this.lockTimestamps.delete(resourceId);
         const queue = this.queue.get(resourceId);
@@ -88,12 +85,11 @@ class QueueManager {
     this.queue = [];
     this.active = 0;
     this.concurrency = concurrency;
-    // TAMBAHAN: batas maksimum queue
     this.maxQueueSize = 200;
+    this.processing = false;
   }
 
   async add(job) {
-    // TAMBAHAN: cegah queue terlalu besar
     if (this.queue.length > this.maxQueueSize) {
       console.warn("Queue full, job rejected");
       return Promise.reject(new Error("Server busy, try again later"));
@@ -101,37 +97,44 @@ class QueueManager {
 
     return new Promise((resolve, reject) => {
       this.queue.push({ job, resolve, reject, timestamp: Date.now() });
-      this.run();
+      if (!this.processing) {
+        this.process();
+      }
     });
   }
 
-  async run() {
-    if (this.active >= this.concurrency || this.queue.length === 0) return;
-    
-    // TAMBAHAN: hapus job yang sudah terlalu lama di queue (>30 detik)
-    while (this.queue.length > 0 && Date.now() - this.queue[0].timestamp > 30000) {
-      const expired = this.queue.shift();
-      expired.reject(new Error("Request timeout"));
+  async process() {
+    if (this.processing) return;
+    this.processing = true;
+
+    while (this.queue.length > 0 && this.active < this.concurrency) {
+      while (this.queue.length > 0 && Date.now() - this.queue[0].timestamp > 30000) {
+        const expired = this.queue.shift();
+        expired.reject(new Error("Request timeout"));
+      }
+      
+      if (this.queue.length === 0) break;
+      
+      this.active++;
+      const { job, resolve, reject } = this.queue.shift();
+      
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error("Job execution timeout")), 10000);
+      });
+      
+      try {
+        const result = await Promise.race([job(), timeoutPromise]);
+        resolve(result);
+      } catch (error) {
+        reject(error);
+      } finally {
+        this.active--;
+      }
     }
-    
-    if (this.queue.length === 0) return;
-    
-    this.active++;
-    const { job, resolve, reject } = this.queue.shift();
-    
-    // TAMBAHAN: timeout untuk setiap job
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error("Job execution timeout")), 10000);
-    });
-    
-    try {
-      const result = await Promise.race([job(), timeoutPromise]);
-      resolve(result);
-    } catch (error) {
-      reject(error);
-    } finally {
-      this.active--;
-      this.run();
+
+    this.processing = false;
+    if (this.queue.length > 0) {
+      setTimeout(() => this.process(), 10);
     }
   }
 
@@ -143,7 +146,6 @@ class QueueManager {
     }
   }
 
-  // TAMBAHAN: dapatkan ukuran queue
   size() {
     return this.queue.length;
   }
@@ -154,7 +156,6 @@ class RateLimiter {
     this.windowMs = windowMs;
     this.maxRequests = maxRequests;
     this.requests = new Map();
-    setInterval(() => this.cleanup(), windowMs);
   }
 
   check(userId) {
@@ -200,9 +201,7 @@ export class ChatServer {
       this.state = state;
       this.env = env;
       
-      // MUTE STATUS - Map untuk menyimpan status per room di SERVER
       this.muteStatus = new Map();
-      // Set default false untuk semua room
       for (const room of roomList) {
         this.muteStatus.set(room, false);
       }
@@ -252,9 +251,14 @@ export class ChatServer {
       this.maxNumber = 6;
       this.intervalMillis = 15 * 60 * 1000;
       this._nextConnId = 1;
-      this._timers = [];
 
-      this._cleanupAllTimers();
+      // ===== SATU TIMER UTAMA =====
+      this.mainTimer = null;
+      
+      // Counter untuk task periodic
+      this.tickCounter = 0;
+      this.lastNumberTick = Date.now();
+      this.numberTickInterval = this.intervalMillis; // 15 menit
 
       try {
         this.initializeRooms();
@@ -262,7 +266,7 @@ export class ChatServer {
         this.createDefaultRoom();
       }
 
-      this.startTimers();
+      this.startMainTimer();
       this.roomCountsCache = new Map();
       this.cacheValidDuration = 2000;
       this.lastCacheUpdate = 0;
@@ -271,16 +275,17 @@ export class ChatServer {
         this._pointBuffer.set(room, []);
       }
 
-      this._gracePeriodValidationTimer = null;
-
-      // TAMBAHAN: interval untuk cleanup lock yang macet
-      this._stuckLockCleanupTimer = setInterval(() => {
-        try {
-          if (this.lockManager) {
-            this.lockManager.cleanupStuckLocks();
-          }
-        } catch (e) {}
-      }, 30000);
+      // Memory cleanup counters
+      this.lastMemoryCleanup = Date.now();
+      this.memoryCleanupInterval = 30000; // 30 detik
+      this.lastClientCleanup = Date.now();
+      this.clientCleanupInterval = 15000; // 15 detik
+      this.lastLockCleanup = Date.now();
+      this.lockCleanupInterval = 10000; // 10 detik
+      this.lastRateLimitCleanup = Date.now();
+      this.rateLimitCleanupInterval = 30000; // 30 detik
+      this.lastSeatCheck = Date.now();
+      this.seatCheckInterval = 30000; // 30 detik
 
     } catch (error) {
       console.error("ChatServer constructor error:", error);
@@ -298,12 +303,11 @@ export class ChatServer {
       this.MAX_SEATS = 35;
       this.currentNumber = 1;
       this._nextConnId = 1;
-      this._timers = [];
+      this.mainTimer = null;
       this.lowcard = null;
       this.gracePeriod = 5000;
       this.cleanupQueue = new QueueManager(5);
       
-      // MUTE STATUS - tetap inisialisasi
       this.muteStatus = new Map();
       for (const room of roomList) {
         this.muteStatus.set(room, false);
@@ -322,13 +326,172 @@ export class ChatServer {
       this._pointFlushDelay = 16;
       this._hasBufferedUpdates = false;
       
-      this._cleanupAllTimers();
-      
       this.createDefaultRoom();
+
+      this.lastMemoryCleanup = Date.now();
+      this.memoryCleanupInterval = 30000;
+      this.lastClientCleanup = Date.now();
+      this.clientCleanupInterval = 15000;
+      this.lastLockCleanup = Date.now();
+      this.lockCleanupInterval = 10000;
+      this.lastRateLimitCleanup = Date.now();
+      this.rateLimitCleanupInterval = 30000;
+      this.lastSeatCheck = Date.now();
+      this.seatCheckInterval = 30000;
+      this.tickCounter = 0;
+      this.lastNumberTick = Date.now();
+      this.numberTickInterval = 15 * 60 * 1000;
     }
   }
 
-  // ========== MUTE STATUS METHODS - SEMUA LOGIKA DI SERVER ==========
+  // ========== SATU TIMER UTAMA ==========
+
+  startMainTimer() {
+    // SATU TIMER yang jalan setiap 50ms untuk SEMUA tugas
+    this.mainTimer = setInterval(() => {
+      try {
+        this.runMainTasks();
+      } catch (error) {
+        // Silent catch
+      }
+    }, 50);
+  }
+
+  runMainTasks() {
+    const now = Date.now();
+    
+    // ===== TASK CEPAT (SETIAP 50ms) =====
+    // 1. Flush kursi updates
+    this.flushKursiUpdates();
+    
+    // 2. Flush buffered points
+    this.flushBufferedPoints();
+    
+    // ===== TASK SEDANG (SETIAP 500ms - menggunakan counter) =====
+    if (this.tickCounter % 10 === 0) { // 50ms * 10 = 500ms
+      // Check safe mode
+      if (now - this.lastLoadCheck >= this.loadCheckInterval) {
+        this.checkAndEnableSafeMode();
+        this.lastLoadCheck = now;
+      }
+      
+      // Validate grace period timers
+      this.validateGracePeriodTimers();
+    }
+    
+    // ===== TASK LAMBAT (BERDASARKAN INTERVAL WAKTU) =====
+    // Lock cleanup (setiap 10 detik)
+    if (now - this.lastLockCleanup >= this.lockCleanupInterval) {
+      if (this.lockManager) {
+        this.lockManager.cleanupStuckLocks();
+      }
+      this.lastLockCleanup = now;
+    }
+    
+    // Client cleanup (setiap 15 detik)
+    if (now - this.lastClientCleanup >= this.clientCleanupInterval) {
+      this.cleanupDuplicateConnections();
+      this.lastClientCleanup = now;
+    }
+    
+    // Memory cleanup (setiap 30 detik)
+    if (now - this.lastMemoryCleanup >= this.memoryCleanupInterval) {
+      this.performMemoryCleanup();
+      this.lastMemoryCleanup = now;
+    }
+    
+    // Rate limiter cleanup (setiap 30 detik)
+    if (now - this.lastRateLimitCleanup >= this.rateLimitCleanupInterval) {
+      this.rateLimiter.cleanup();
+      this.connectionRateLimiter.cleanup();
+      this.lastRateLimitCleanup = now;
+    }
+    
+    // Seat consistency check (setiap 30 detik, dengan sampling)
+    if (now - this.lastSeatCheck >= this.seatCheckInterval && this.getServerLoad() < 0.8) {
+      this.sampledSeatConsistencyCheck();
+      this.lastSeatCheck = now;
+    }
+    
+    // ===== TICK NUMBER (SETIAP 15 MENIT) =====
+    if (now - this.lastNumberTick >= this.numberTickInterval) {
+      this.tick();
+      this.lastNumberTick = now;
+    }
+    
+    // Increment counter
+    this.tickCounter = (this.tickCounter + 1) % 1000;
+  }
+
+  sampledSeatConsistencyCheck() {
+    try {
+      // Check random 3 room setiap kali
+      const roomsToCheck = [];
+      const roomCount = roomList.length;
+      for (let i = 0; i < 3; i++) {
+        const randomIndex = Math.floor(Math.random() * roomCount);
+        roomsToCheck.push(roomList[randomIndex]);
+      }
+
+      for (const room of roomsToCheck) {
+        if (this.getServerLoad() >= 0.8) break;
+        this.validateSeatConsistency(room);
+      }
+    } catch {}
+  }
+
+  validateGracePeriodTimers() {
+    try {
+      const now = Date.now();
+      const maxGracePeriod = this.gracePeriod + 1000;
+      for (const [userId, timer] of this.disconnectedTimers) {
+        if (timer && timer._scheduledTime) {
+          const elapsed = now - timer._scheduledTime;
+          if (elapsed > maxGracePeriod) {
+            clearTimeout(timer);
+            this.disconnectedTimers.delete(userId);
+            this.executeGracePeriodCleanup(userId);
+          }
+        }
+      }
+    } catch (error) {}
+  }
+
+  performMemoryCleanup() {
+    try {
+      // Cleanup dead clients
+      const deadClients = [];
+      for (const client of this.clients) {
+        if (!client || client.readyState === 3) deadClients.push(client);
+      }
+      for (const client of deadClients) {
+        this.clients.delete(client);
+      }
+
+      // Cleanup empty room clients arrays
+      for (const [room, clientArray] of this.roomClients) {
+        if (clientArray && clientArray.length === 0) {
+          // Keep the array but ensure it's clean
+        } else if (clientArray) {
+          // Filter out dead clients
+          const filtered = clientArray.filter(c => c && c.readyState === 1);
+          if (filtered.length !== clientArray.length) {
+            this.roomClients.set(room, filtered);
+          }
+        }
+      }
+
+      // Cleanup oversized point buffers
+      for (const [room, points] of this._pointBuffer) {
+        if (points && points.length > 100) {
+          // Trim if too large
+          this._pointBuffer.set(room, points.slice(-100));
+        }
+      }
+    } catch {}
+  }
+
+  // ========== MUTE STATUS METHODS ==========
 
   setRoomMute(roomName, isMuted) {
     try {
@@ -337,15 +500,11 @@ export class ChatServer {
         return false;
       }
       
-      // Konversi ke boolean
       const muteValue = isMuted === true || isMuted === "true" || isMuted === 1;
-      
-      // Simpan di MAP SERVER untuk room INI SAJA
       this.muteStatus.set(roomName, muteValue);
       
       console.log(`[Mute] SET: room ${roomName} = ${muteValue}`);
       
-      // Broadcast KE ROOM INI SAJA - semua client di room ini dapat notifikasi
       this.broadcastToRoom(roomName, ["muteStatusChanged", muteValue, roomName]);
       
       return true;
@@ -362,7 +521,6 @@ export class ChatServer {
         return false;
       }
       
-      // Ambil dari MAP SERVER, default false
       const value = this.muteStatus.get(roomName);
       console.log(`[Mute] GET: room ${roomName} = ${value}`);
       
@@ -373,7 +531,6 @@ export class ChatServer {
     }
   }
 
-  // Method untuk debug - lihat semua status mute
   debugMuteStatus() {
     console.log("=== MUTE STATUS MAP (SERVER) ===");
     for (const room of roomList) {
@@ -523,7 +680,6 @@ export class ChatServer {
   scheduleCleanup(userId) {
     try {
       if (!userId) return;
-      this._cleanupExpiredTimers();
       this.cancelCleanup(userId);
       const timerId = setTimeout(async () => {
         try {
@@ -543,19 +699,6 @@ export class ChatServer {
       timerId._userId = userId;
       this.disconnectedTimers.set(userId, timerId);
     } catch (error) {}
-  }
-
-  _cleanupExpiredTimers() {
-    try {
-      const now = Date.now();
-      const expiredUsers = [];
-      for (const [userId, timer] of this.disconnectedTimers) {
-        if (!timer) expiredUsers.push(userId);
-      }
-      for (const userId of expiredUsers) {
-        this.disconnectedTimers.delete(userId);
-      }
-    } catch {}
   }
 
   cancelCleanup(userId) {
@@ -648,128 +791,11 @@ export class ChatServer {
     }
   }
 
-  startTimers() {
-    try {
-      this._cleanupTimers();
-      this._tickTimer = setInterval(() => { try { this.tick(); } catch {} }, this.intervalMillis);
-      this._flushTimer = setInterval(() => { try { if (this.clients.size > 0) this.periodicFlush(); } catch {} }, 50);
-      this._consistencyTimer = setInterval(() => { try { if (this.clients.size > 0 && this.getServerLoad() < 0.7) this.checkSeatConsistency(); } catch {} }, 120000);
-      this._connectionCleanupTimer = setInterval(() => { try { if (this.getServerLoad() < 0.8) this.cleanupDuplicateConnections(); } catch {} }, 30000);
-      this._stuckCleanupTimer = setInterval(() => { try { if (this.getServerLoad() < 0.7) this.cleanupStuckUsers(); } catch {} }, 45000);
-      this._memoryCleanupTimer = setInterval(() => { try { this._performMemoryCleanup(); } catch {} }, 60000);
-      this._safeModeTimer = setInterval(() => { try { this.checkAndEnableSafeMode(); } catch {} }, 10000);
-      this._gracePeriodValidationTimer = setInterval(() => { try { this._validateGracePeriodTimers(); } catch {} }, 1000);
-      this._seatValidationTimer = setInterval(() => { try { if (this.getServerLoad() < 0.8) { for (const room of roomList) this.validateSeatConsistency(room); } } catch {} }, 30000);
-      this._timers = [this._tickTimer, this._flushTimer, this._consistencyTimer, this._connectionCleanupTimer, this._stuckCleanupTimer, this._memoryCleanupTimer, this._safeModeTimer, this._gracePeriodValidationTimer, this._seatValidationTimer];
-    } catch {
-      this._timers = [];
-    }
-  }
-
-  _validateGracePeriodTimers() {
-    try {
-      const now = Date.now();
-      const maxGracePeriod = this.gracePeriod + 1000;
-      for (const [userId, timer] of this.disconnectedTimers) {
-        if (timer && timer._scheduledTime) {
-          const elapsed = now - timer._scheduledTime;
-          if (elapsed > maxGracePeriod) {
-            clearTimeout(timer);
-            this.disconnectedTimers.delete(userId);
-            this.executeGracePeriodCleanup(userId);
-          }
-        }
-      }
-    } catch (error) {}
-  }
-
-  _performMemoryCleanup() {
-    try {
-      this._cleanupExpiredTimers();
-      const deadClients = [];
-      for (const client of this.clients) {
-        if (!client || client.readyState === 3) deadClients.push(client);
-      }
-      for (const client of deadClients) {
-        this.clients.delete(client);
-      }
-    } catch {}
-  }
-
-  async cleanupStuckUsers() {
-    try {
-      const allTrackedUsers = new Set();
-      for (const [userId] of this.userCurrentRoom) allTrackedUsers.add(userId);
-      for (const [userId] of this.userToSeat) allTrackedUsers.add(userId);
-      for (const [room, occupancyMap] of this.seatOccupancy) {
-        for (const [seat, userId] of occupancyMap) {
-          if (userId) allTrackedUsers.add(userId);
-        }
-      }
-      const batchSize = 10;
-      const userArray = Array.from(allTrackedUsers);
-      for (let i = 0; i < userArray.length; i += batchSize) {
-        const batch = userArray.slice(i, i + batchSize);
-        await Promise.allSettled(batch.map(async (userId) => {
-          try {
-            if (this.cleanupInProgress.has(userId)) return;
-            if (this.disconnectedTimers.has(userId)) return;
-            const isConnected = await this.isUserStillConnected(userId);
-            if (!isConnected) {
-              await this.withLock(`stuck-cleanup-${userId}`, async () => {
-                const doubleCheck = await this.isUserStillConnected(userId);
-                if (!doubleCheck) {
-                  await this.forceUserCleanup(userId);
-                }
-              });
-            }
-          } catch (error) {}
-        }));
-      }
-    } catch (error) {}
-  }
-
   getServerLoad() {
     const activeConnections = Array.from(this.clients).filter(c => c.readyState === 1).length;
-    // TAMBAHAN: pertimbangkan ukuran queue
     const queueSize = this.cleanupQueue ? this.cleanupQueue.size() : 0;
     const queueLoad = Math.min(queueSize / 50, 0.3);
     return Math.min(activeConnections / 100 + queueLoad, 0.95);
-  }
-
-  _cleanupAllTimers() {
-    try {
-      if (this._timers) {
-        for (const timer of this._timers) {
-          if (timer) {
-            try { clearInterval(timer); clearTimeout(timer); } catch {}
-          }
-        }
-        this._timers = [];
-      }
-      if (this.disconnectedTimers) {
-        for (const timer of this.disconnectedTimers.values()) {
-          if (timer) { try { clearTimeout(timer); } catch {} }
-        }
-        this.disconnectedTimers.clear();
-      }
-      if (this.cleanupQueue) this.cleanupQueue.clear();
-      if (this._pointFlushTimer) {
-        clearTimeout(this._pointFlushTimer);
-        this._pointFlushTimer = null;
-      }
-      if (this._gracePeriodValidationTimer) {
-        clearInterval(this._gracePeriodValidationTimer);
-        this._gracePeriodValidationTimer = null;
-      }
-      if (this._stuckLockCleanupTimer) {
-        clearInterval(this._stuckLockCleanupTimer);
-      }
-    } catch {}
-  }
-
-  _cleanupTimers() {
-    this._cleanupAllTimers();
   }
 
   updateRoomCount(room) {
@@ -1132,7 +1158,6 @@ export class ChatServer {
           if (previousRoom === room) {
             this.sendAllStateTo(ws, room);
             
-            // KIRIM STATUS MUTE UNTUK ROOM INI
             const isMuted = this.getRoomMute(room);
             this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
             
@@ -1158,7 +1183,6 @@ export class ChatServer {
               this._addUserConnection(ws.idtarget, ws);
               this.sendAllStateTo(ws, room);
               
-              // KIRIM STATUS MUTE UNTUK ROOM INI
               const isMuted = this.getRoomMute(room);
               this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
               
@@ -1199,7 +1223,6 @@ export class ChatServer {
         this._addUserConnection(ws.idtarget, ws);
         this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
         
-        // KIRIM STATUS MUTE UNTUK ROOM BARU
         const isMuted = this.getRoomMute(room);
         this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
         
@@ -1378,7 +1401,6 @@ export class ChatServer {
               if (seatData.lastPoint) {
                 this.safeSend(ws, ["pointUpdated", room, seat, seatData.lastPoint.x, seatData.lastPoint.y, seatData.lastPoint.fast]);
               }
-              // KIRIM STATUS MUTE UNTUK ROOM INI
               const isMuted = this.getRoomMute(room);
               this.safeSend(ws, ["muteTypeResponse", isMuted, room]);
               this.updateRoomCount(room);
@@ -1586,13 +1608,6 @@ export class ChatServer {
     } catch {}
   }
 
-  periodicFlush() {
-    try {
-      this.flushKursiUpdates();
-      this.flushBufferedPoints();
-    } catch {}
-  }
-
   tick() {
     try {
       this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
@@ -1668,18 +1683,15 @@ export class ChatServer {
             break;
           }
 
-          // TAMBAHKAN INI:
-case "modwarning": {
-  const roomName = data[1];
-  
-  // Validasi room
-  if (roomName && roomList.includes(roomName)) {
-    // Broadcast ke semua client di room tersebut
-    this.broadcastToRoom(roomName, ["modwarning", roomName]);
-  }
-  break;
-}
-          // ===== MUTE METHODS - SEMUA LOGIKA DI SERVER =====
+          case "modwarning": {
+            const roomName = data[1];
+            
+            if (roomName && roomList.includes(roomName)) {
+              this.broadcastToRoom(roomName, ["modwarning", roomName]);
+            }
+            break;
+          }
+
           case "setMuteType": {
             const isMuted = data[1];
             const roomName = data[2];
@@ -1692,10 +1704,8 @@ case "modwarning": {
             const success = this.setRoomMute(roomName, isMuted);
             const muteValue = isMuted === true || isMuted === "true" || isMuted === 1;
             
-            // Kirim response ke pengirim
             this.safeSend(ws, ["muteTypeSet", muteValue, success, roomName]);
             
-            // BROADCAST SUDAH DILAKUKAN DI setRoomMute()
             break;
           }
           
@@ -1709,11 +1719,9 @@ case "modwarning": {
             
             const isMuted = this.getRoomMute(roomName);
             
-            // Kirim status ke pengirim saja
             this.safeSend(ws, ["muteTypeResponse", isMuted, roomName]);
             break;
           }
-          // ===== END OF MUTE METHODS =====
           
           case "onDestroy": {
             const idtarget = ws.idtarget;
@@ -1786,9 +1794,6 @@ case "modwarning": {
             const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
             if (ws.roomname !== roomname || ws.idtarget !== username) return;
             if (!roomList.includes(roomname)) return;
-            
-            // TIDAK ADA PENGECEKAN MUTE - chat tetap jalan normal
-            // Mute hanya untuk notifikasi, tidak mempengaruhi fungsi chat
             
             let isPrimaryConnection = true;
             const userConnections = this.userConnections.get(username);
@@ -1926,6 +1931,3 @@ export default {
     } catch (error) { return new Response("Server error", { status: 500 }); }
    }
 };
-
-
-
