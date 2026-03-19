@@ -2,7 +2,7 @@ import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
   "LowCard 1", "LowCard 2", "Gacor", "General", "Pakistan", "Philippines", "India", "Indonesia", "Birthday Party", "Heart Lovers","Cat lovers","Chikahan Tambayan", "Lounge Talk",
-  "Noxxeliverothcifsa", "One Side Love", "BLUE PARADISE", "Relax & Chat", "The Chatter Room"
+  "Noxxeliverothcifsa", "One Side Love", "BLUE DYNASTY", "Relax & Chat", "The Chatter Room"
 ];
 
 // Constants
@@ -2393,7 +2393,7 @@ export class ChatServer {
           case "gameLowCardJoin":
           case "gameLowCardNumber":
           case "gameLowCardEnd":
-            if (["LowCard 1", "LowCard 2", "Noxxeliverothcifsa", "Chikahan Tambayan", "BLUE PARADISE", "One Side Love"].includes(ws.roomname)) {
+            if (["LowCard 1", "LowCard 2", "Noxxeliverothcifsa", "Chikahan Tambayan", "BLUE DYNASTY", "One Side Love"].includes(ws.roomname)) {
               if (this.lowcard) {
                 await this.lowcard.handleEvent(ws, data);
               } else {
