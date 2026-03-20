@@ -311,7 +311,7 @@ export class ChatServer {
         this.lowcard = null;
       }
 
-      // Disconnect handling - GRACE PERIOD 5 DETIK TETAP!
+      // Disconnect handling - GRACE PERIOD 5 DETIK
       this.gracePeriod = CONSTANTS.GRACE_PERIOD;
       this.disconnectedTimers = new Map();
       this.cleanupQueue = new QueueManager(5);
@@ -322,7 +322,7 @@ export class ChatServer {
       this.intervalMillis = 15 * 60 * 1000;
       this._nextConnId = 1;
 
-      // Hapus mainTimer, ganti dengan alarm
+      // Alarm timer (gantikan setInterval)
       this.tickCounter = 0;
       this.lastNumberTick = Date.now();
       this.numberTickInterval = this.intervalMillis;
@@ -635,9 +635,7 @@ export class ChatServer {
       } catch {}
     }
     
-    // ❌ TIDAK ADA KODE YANG RESET POINT BUFFER!
-    // ❌ TIDAK ADA KODE YANG RESET UPDATE KURSI BUFFER!
-    // ❌ TIDAK ADA KODE YANG SENTUH roomSeats!
+    // ❌ TIDAK ADA KODE YANG RESET POINT ATAU KURSI!
     
     console.log("✅ Aggressive cleanup completed");
   }
@@ -1082,23 +1080,32 @@ export class ChatServer {
         // ✅ CEK LAGI APAKAH USER BENAR-BENAR OFFLINE
         const isOnline = await this.isUserStillConnected(userId);
         
-        if (isOnline) {
+        if (isOnline && !this._isPermanentLeave) {
           console.log(`⚠️ User ${userId} masih online, tidak jadi hapus kursi!`);
           return; // BATALKAN HAPUS!
         }
         
         if (immediate && this._isPermanentLeave) {
           // ✅ BARU HAPUS KALAU USER SUDAH DIPASTIKAN OFFLINE!
+          console.log(`🗑️ Menghapus user ${userId} dari kursi ${seatNumber} di room ${room}`);
+          
           Object.assign(seatInfo, createEmptySeat());
           occupancyMap.set(seatNumber, null);
           this.clearSeatBuffer(room, seatNumber);
+          
+          // ✅ BROADCAST KE SEMUA USER DI ROOM
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
+          
+          // ✅ UPDATE JUMLAH USER
           this.updateRoomCount(room);
+          
           this.userToSeat.delete(userId);
         }
       });
       
-    } catch {}
+    } catch (error) {
+      console.error("Error in cleanupUserFromSeat:", error);
+    }
   }
 
   // ========== CLEANUP MANAGEMENT ==========
@@ -1125,14 +1132,18 @@ export class ChatServer {
               }
             });
           }
-        } catch {}
+        } catch (error) {
+          console.error("Error in scheduleCleanup timer:", error);
+        }
       }, this.gracePeriod);
       
       timerId._scheduledTime = Date.now();
       timerId._userId = userId;
       this.disconnectedTimers.set(userId, timerId);
       
-    } catch {}
+    } catch (error) {
+      console.error("Error in scheduleCleanup:", error);
+    }
   }
 
   cancelCleanup(userId) {
@@ -1147,7 +1158,9 @@ export class ChatServer {
       
       this.cleanupInProgress?.delete(userId);
       
-    } catch {}
+    } catch (error) {
+      console.error("Error in cancelCleanup:", error);
+    }
   }
 
   async isUserStillConnected(userId) {
@@ -1230,6 +1243,8 @@ export class ChatServer {
         }
       });
       
+    } catch (error) {
+      console.error("Error in forceUserCleanup:", error);
     } finally {
       this.cleanupInProgress.delete(userId);
     }
@@ -1243,7 +1258,9 @@ export class ChatServer {
         const seatInfo = this.userToSeat.get(ws.idtarget);
         
         if (seatInfo?.room === room) {
+          this._isPermanentLeave = true;
           await this.cleanupUserFromSeat(room, seatInfo.seat, ws.idtarget, true);
+          this._isPermanentLeave = false;
         }
         
         this._removeFromRoomClients(ws, room);
@@ -1257,7 +1274,9 @@ export class ChatServer {
         this.updateRoomCount(room);
       });
       
-    } catch {}
+    } catch (error) {
+      console.error("Error in cleanupFromRoom:", error);
+    }
   }
 
   async fullRemoveById(idtarget) {
@@ -1312,7 +1331,9 @@ export class ChatServer {
         }
       });
       
-    } catch {}
+    } catch (error) {
+      console.error("Error in fullRemoveById:", error);
+    }
   }
 
   validateGracePeriodTimers() {
@@ -1332,7 +1353,9 @@ export class ChatServer {
         }
       }
       
-    } catch {}
+    } catch (error) {
+      console.error("Error in validateGracePeriodTimers:", error);
+    }
   }
 
   async executeGracePeriodCleanup(userId) {
@@ -1357,6 +1380,8 @@ export class ChatServer {
         }
       });
       
+    } catch (error) {
+      console.error("Error in executeGracePeriodCleanup:", error);
     } finally {
       this.cleanupInProgress.delete(userId);
     }
@@ -1465,7 +1490,8 @@ export class ChatServer {
         roomRelease();
       }
       
-    } catch {
+    } catch (error) {
+      console.error("Error in handleJoinRoom:", error);
       this.safeSend(ws, ["error", "Failed to join room"]);
       return false;
     }
@@ -1480,7 +1506,9 @@ export class ChatServer {
         
         if (baru === true) {
           await this.cleanupQueue.add(async () => {
+            this._isPermanentLeave = true;
             await this.forceUserCleanup(id);
+            this._isPermanentLeave = false;
           });
           
           ws.idtarget = id;
@@ -1548,7 +1576,9 @@ export class ChatServer {
           
           if (seatInfo.room) {
             await this.cleanupQueue.add(async () => {
+              this._isPermanentLeave = true;
               await this.cleanupUserFromSeat(seatInfo.room, seatInfo.seat, id, true);
+              this._isPermanentLeave = false;
             });
           }
         }
@@ -1556,7 +1586,8 @@ export class ChatServer {
         this.safeSend(ws, ["needJoinRoom"]);
       });
       
-    } catch {
+    } catch (error) {
+      console.error("Error in handleSetIdTarget2:", error);
       this.safeSend(ws, ["error", "Reconnection failed"]);
     }
   }
@@ -2036,7 +2067,9 @@ export class ChatServer {
           const seatInfo = this.userToSeat.get(idtarget);
           if (seatInfo) {
             await this.cleanupQueue.add(async () => {
+              this._isPermanentLeave = true;
               await this.cleanupUserFromSeat(seatInfo.room, seatInfo.seat, idtarget, true);
+              this._isPermanentLeave = false;
             });
           }
           
