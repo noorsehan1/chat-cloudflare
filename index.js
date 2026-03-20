@@ -2466,3 +2466,33 @@ export class ChatServer {
     }
   }
 }
+
+export default {
+  async fetch(req, env) {
+    try {
+      if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
+        const id = env.CHAT_SERVER.idFromName("global-chat");
+        const obj = env.CHAT_SERVER.get(id);
+        return obj.fetch(req);
+      }
+      
+      if (new URL(req.url).pathname === "/health") {
+        return new Response("ok", { 
+          status: 200, 
+          headers: { 
+            "content-type": "text/plain", 
+            "cache-control": "no-cache" 
+          } 
+        });
+      }
+      
+      return new Response("WebSocket endpoint", { 
+        status: 200, 
+        headers: { "content-type": "text/plain" } 
+      });
+      
+    } catch {
+      return new Response("Server error", { status: 500 });
+    }
+  }
+};
