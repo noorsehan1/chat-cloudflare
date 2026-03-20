@@ -1358,212 +1358,242 @@ export class ChatServer {
 
   // ========== ROOM MANAGEMENT ==========
 
-  async handleJoinRoom(ws, room) {
-    if (!ws?.idtarget) {
-      this.safeSend(ws, ["error", "User ID not set"]);
-      return false;
-    }
+async handleJoinRoom(ws, room) {
+  if (!ws?.idtarget) {
+    this.safeSend(ws, ["error", "User ID not set"]);
+    return false;
+  }
+  
+  if (!roomList.includes(room)) {
+    this.safeSend(ws, ["error", "Invalid room"]);
+    return false;
+  }
+  
+  if (!this.rateLimiter.check(ws.idtarget)) {
+    this.safeSend(ws, ["error", "Too many requests"]);
+    return false;
+  }
+  
+  let roomRelease = null;
+  
+  try {
+    roomRelease = await this.lockManager.acquire(`room-join-${room}`);
     
-    if (!roomList.includes(room)) {
-      this.safeSend(ws, ["error", "Invalid room"]);
-      return false;
-    }
+    this.cancelCleanup(ws.idtarget);
+    await this.ensureSeatsData(room);
     
-    if (!this.rateLimiter.check(ws.idtarget)) {
-      this.safeSend(ws, ["error", "Too many requests"]);
-      return false;
-    }
+    // Cek room sebelumnya
+    const previousRoom = this.userCurrentRoom.get(ws.idtarget);
     
-    let roomRelease = null;
-    
-    try {
-      roomRelease = await this.lockManager.acquire(`room-join-${room}`);
-      
-      this.cancelCleanup(ws.idtarget);
-      await this.ensureSeatsData(room);
-      
-      // Cek room sebelumnya
-      const previousRoom = this.userCurrentRoom.get(ws.idtarget);
-      
-      if (previousRoom) {
-        if (previousRoom === room) {
-          this.sendAllStateTo(ws, room);
-          this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
-          return true;
-        } else {
-          await this.cleanupFromRoom(ws, previousRoom);
-        }
+    if (previousRoom) {
+      if (previousRoom === room) {
+        this.sendAllStateTo(ws, room);
+        this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
+        return true;
+      } else {
+        await this.cleanupFromRoom(ws, previousRoom);
       }
-      
-      // Cek seat info existing
-      const seatInfo = this.userToSeat.get(ws.idtarget);
-      if (seatInfo?.room === room) {
-        const occupancyMap = this.seatOccupancy.get(room);
-        if (occupancyMap?.get(seatInfo.seat) === ws.idtarget) {
-          ws.roomname = room;
-          ws.numkursi = new Set([seatInfo.seat]);
-          
-          const clientArray = this.roomClients.get(room);
-          if (clientArray && !clientArray.includes(ws)) {
-            clientArray.push(ws);
-          }
-          
-          this._addUserConnection(ws.idtarget, ws);
-          this.sendAllStateTo(ws, room);
-          this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
-          return true;
-        }
-      }
-      
-      // Cari kursi kosong
-      let assignedSeat = null;
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const seatRelease = await this.lockManager.acquire(`seat-assign-${room}-${seat}`);
+    }
+    
+    // Cek seat info existing
+    const seatInfo = this.userToSeat.get(ws.idtarget);
+    if (seatInfo?.room === room) {
+      const occupancyMap = this.seatOccupancy.get(room);
+      if (occupancyMap?.get(seatInfo.seat) === ws.idtarget) {
+        ws.roomname = room;
+        ws.numkursi = new Set([seatInfo.seat]);
         
-        try {
-          const occupancyMap = this.seatOccupancy.get(room);
-          if (!occupancyMap) {
-            seatRelease();
-            continue;
-          }
-          
-          if (occupancyMap.get(seat) === null) {
-            occupancyMap.set(seat, ws.idtarget);
-            assignedSeat = seat;
-            seatRelease();
-            break;
-          }
-          seatRelease();
-        } catch {
-          seatRelease();
+        const clientArray = this.roomClients.get(room);
+        if (clientArray && !clientArray.includes(ws)) {
+          clientArray.push(ws);
         }
+        
+        this._addUserConnection(ws.idtarget, ws);
+        this.sendAllStateTo(ws, room);
+        this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
+        return true;
       }
+    }
+    
+    // Cari kursi kosong
+    let assignedSeat = null;
+    for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+      const seatRelease = await this.lockManager.acquire(`seat-assign-${room}-${seat}`);
       
-      if (!assignedSeat) {
-        this.safeSend(ws, ["roomFull", room]);
-        return false;
+      try {
+        const occupancyMap = this.seatOccupancy.get(room);
+        if (!occupancyMap) {
+          seatRelease();
+          continue;
+        }
+        
+        if (occupancyMap.get(seat) === null) {
+          occupancyMap.set(seat, ws.idtarget);
+          assignedSeat = seat;
+          seatRelease();
+          break;
+        }
+        seatRelease();
+      } catch (err) {
+        seatRelease();
       }
-      
-      // Assign seat
-      this.userToSeat.set(ws.idtarget, { room, seat: assignedSeat });
-      this.userCurrentRoom.set(ws.idtarget, room);
-      ws.roomname = room;
-      ws.numkursi = new Set([assignedSeat]);
-      
-      const clientArray = this.roomClients.get(room);
-      if (clientArray && !clientArray.includes(ws)) {
-        clientArray.push(ws);
-      }
-      
-      this._addUserConnection(ws.idtarget, ws);
-      this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
-      this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
-      
-      setTimeout(() => this.sendAllStateTo(ws, room), 100);
-      this.updateRoomCount(room);
-      
-      return true;
-      
-    } catch (error) {
-      console.error("Join room error:", error);
-      this.safeSend(ws, ["error", "Failed to join room"]);
+    }
+    
+    if (!assignedSeat) {
+      this.safeSend(ws, ["roomFull", room]);
       return false;
-    } finally {
-      if (roomRelease) {
-        try { roomRelease(); } catch {}
+    }
+    
+    // Buat seat data jika belum ada
+    const seatMap = this.roomSeats.get(room);
+    if (seatMap && !seatMap.get(assignedSeat)) {
+      seatMap.set(assignedSeat, {
+        noimageUrl: "",
+        namauser: ws.idtarget,
+        color: "",
+        itembawah: 0,
+        itematas: 0,
+        vip: 0,
+        viptanda: 0,
+        lastPoint: null,
+        lastUpdated: Date.now()
+      });
+    } else if (seatMap) {
+      const existingSeat = seatMap.get(assignedSeat);
+      if (existingSeat) {
+        existingSeat.namauser = ws.idtarget;
+        existingSeat.lastUpdated = Date.now();
       }
+    }
+    
+    // Assign seat
+    this.userToSeat.set(ws.idtarget, { room, seat: assignedSeat });
+    this.userCurrentRoom.set(ws.idtarget, room);
+    ws.roomname = room;
+    ws.numkursi = new Set([assignedSeat]);
+    
+    const clientArray = this.roomClients.get(room);
+    if (clientArray && !clientArray.includes(ws)) {
+      clientArray.push(ws);
+    }
+    
+    this._addUserConnection(ws.idtarget, ws);
+    this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
+    this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
+    
+    // Kirim state setelah join
+    setTimeout(() => {
+      if (ws.readyState === 1) {
+        this.sendAllStateTo(ws, room);
+      }
+    }, 50);
+    
+    this.updateRoomCount(room);
+    
+    return true;
+    
+  } catch (error) {
+    console.error("Join room error:", error);
+    this.safeSend(ws, ["error", "Failed to join room"]);
+    return false;
+  } finally {
+    if (roomRelease) {
+      try { 
+        roomRelease(); 
+      } catch (err) {}
     }
   }
+}
 
-  async handleSetIdTarget2(ws, id, baru) {
-    if (!id || !ws) return;
-    
-    try {
-      await this.withLock(`reconnect-${id}`, async () => {
-        this.cancelCleanup(id);
+ async handleSetIdTarget2(ws, id, baru) {
+  if (!id || !ws) return;
+  
+  try {
+    await this.withLock(`reconnect-${id}`, async () => {
+      this.cancelCleanup(id);
+      
+      if (baru === true) {
+        await this.cleanupQueue.add(async () => {
+          await this.forceUserCleanup(id);
+        });
         
-        if (baru === true) {
-          await this.cleanupQueue.add(async () => {
-            await this.forceUserCleanup(id);
-          });
-          
-          ws.idtarget = id;
-          ws.roomname = undefined;
-          ws.numkursi = new Set();
-          ws._connectionTime = Date.now();
-          
-          this.safeSend(ws, ["joinroomawal"]);
+        ws.idtarget = id;
+        ws.roomname = undefined;
+        ws.numkursi = new Set();
+        ws._connectionTime = Date.now();
+        
+        this.safeSend(ws, ["joinroomawal"]);
+        return;
+      }
+      
+      ws.idtarget = id;
+      ws._connectionTime = Date.now();
+      
+      const seatInfo = this.userToSeat.get(id);
+      
+      if (seatInfo) {
+        const { room, seat } = seatInfo;
+        
+        if (seat < 1 || seat > this.MAX_SEATS) {
+          this.userToSeat.delete(id);
+          this.userCurrentRoom.delete(id);
+          this.safeSend(ws, ["needJoinRoom"]);
           return;
         }
         
-        ws.idtarget = id;
-        ws._connectionTime = Date.now();
+        const seatMap = this.roomSeats.get(room);
+        const occupancyMap = this.seatOccupancy.get(room);
         
-        const seatInfo = this.userToSeat.get(id);
-        
-        if (seatInfo) {
-          const { room, seat } = seatInfo;
+        if (seatMap && occupancyMap) {
+          const seatData = seatMap.get(seat);
+          const occupantId = occupancyMap.get(seat);
           
-          if (seat < 1 || seat > this.MAX_SEATS) {
-            this.userToSeat.delete(id);
-            this.userCurrentRoom.delete(id);
-            this.safeSend(ws, ["needJoinRoom"]);
-            return;
-          }
-          
-          const seatMap = this.roomSeats.get(room);
-          const occupancyMap = this.seatOccupancy.get(room);
-          
-          if (seatMap && occupancyMap) {
-            const seatData = seatMap.get(seat);
-            const occupantId = occupancyMap.get(seat);
+          if (seatData?.namauser === id && occupantId === id) {
+            ws.roomname = room;
+            ws.numkursi = new Set([seat]);
             
-            if (seatData?.namauser === id && occupantId === id) {
-              ws.roomname = room;
-              ws.numkursi = new Set([seat]);
-              
-              const clientArray = this.roomClients.get(room);
-              if (clientArray && !clientArray.includes(ws)) {
-                clientArray.push(ws);
-              }
-              
-              this._addUserConnection(id, ws);
-              this.sendAllStateTo(ws, room);
-              
-              if (seatData.lastPoint) {
-                this.safeSend(ws, [
-                  "pointUpdated", 
-                  room, 
-                  seat, 
-                  seatData.lastPoint.x, 
-                  seatData.lastPoint.y, 
-                  seatData.lastPoint.fast
-                ]);
-              }
-              
-              this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
-              this.updateRoomCount(room);
-              return;
+            const clientArray = this.roomClients.get(room);
+            if (clientArray && !clientArray.includes(ws)) {
+              clientArray.push(ws);
             }
-          }
-          
-          this.userToSeat.delete(id);
-          this.userCurrentRoom.delete(id);
-          
-          if (seatInfo.room) {
-            await this.cleanupQueue.add(async () => {
-              await this.cleanupUserFromSeat(seatInfo.room, seatInfo.seat, id, true);
-            });
+            
+            this._addUserConnection(id, ws);
+            this.sendAllStateTo(ws, room);
+            
+            if (seatData.lastPoint) {
+              this.safeSend(ws, [
+                "pointUpdated", 
+                room, 
+                seat, 
+                seatData.lastPoint.x, 
+                seatData.lastPoint.y, 
+                seatData.lastPoint.fast
+              ]);
+            }
+            
+            this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
+            this.updateRoomCount(room);
+            return;
           }
         }
         
-        this.safeSend(ws, ["needJoinRoom"]);
-      });
+        this.userToSeat.delete(id);
+        this.userCurrentRoom.delete(id);
+        
+        if (seatInfo.room) {
+          await this.cleanupQueue.add(async () => {
+            await this.cleanupUserFromSeat(seatInfo.room, seatInfo.seat, id, true);
+          });
+        }
+      }
       
-    } catch {
-      this.safeSend(ws, ["error", "Reconnection failed"]);
-    }
+      this.safeSend(ws, ["needJoinRoom"]);
+    });
+    
+  } catch {
+    this.safeSend(ws, ["error", "Reconnection failed"]);
   }
+}
 
   // ========== BROADCAST & SEND ==========
 
