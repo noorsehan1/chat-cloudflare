@@ -2498,5 +2498,40 @@ export default {
   }
 };
 
+export class ChatServerV2 {
+  constructor(state, env) {
+    this.state = state;
+    this.clients = new Set();
+  }
 
+  async fetch(request) {
+    if (request.headers.get("Upgrade") !== "websocket") {
+      return new Response("Expected WebSocket", { status: 400 });
+    }
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+
+    server.accept();
+    this.clients.add(server);
+
+    server.addEventListener("message", (event) => {
+      for (let ws of this.clients) {
+        try {
+          ws.send(event.data);
+        } catch {}
+      }
+    });
+
+    server.addEventListener("close", () => {
+      this.clients.delete(server);
+    });
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client
+    });
+  }
+}
 
