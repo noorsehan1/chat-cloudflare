@@ -7,7 +7,17 @@ compatibility_date = "2026-03-20"
 name = "CHAT_SERVER"
 class_name = "ChatServer"
 
-# Migration (WAJIB sesuai yang sudah pernah dipakai)
+# Migration - use the correct version based on your deployed state
+# If this is a fresh deployment, use v1
 [[migrations]]
-tag = "v3"
-new_sqlite_classes = ["ChatServer"]
+tag = "v1"
+new_classes = ["ChatServer"]
+
+# If you already have v1 deployed and need to update, use:
+# [[migrations]]
+# tag = "v2"
+# new_classes = ["ChatServer"]
+# 
+# [[migrations]]
+# tag = "v3"
+# new_classes = ["ChatServer"]
