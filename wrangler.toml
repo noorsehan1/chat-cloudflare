@@ -6,7 +6,7 @@ compatibility_date = "2025-08-22"
 name = "CHAT_SERVER"
 class_name = "ChatServer"
 
-# Migration untuk Durable Object
+# Untuk free plan, harus pakai SQLite
 [[migrations]]
 tag = "v1"
-new_classes = ["ChatServer"]
+new_sqlite_classes = ["ChatServer"]
