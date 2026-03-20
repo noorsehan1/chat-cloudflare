@@ -2467,32 +2467,29 @@ export class ChatServer {
   }
 }
 
-export default {
-  async fetch(req, env) {
-    try {
-      if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
-        const id = env.CHAT_SERVER.idFromName("global-chat");
-        const obj = env.CHAT_SERVER.get(id);
-        return obj.fetch(req);
-      }
-      
-      if (new URL(req.url).pathname === "/health") {
-        return new Response("ok", { 
-          status: 200, 
-          headers: { 
-            "content-type": "text/plain", 
-            "cache-control": "no-cache" 
-          } 
-        });
-      }
-      
-      return new Response("WebSocket endpoint", { 
-        status: 200, 
-        headers: { "content-type": "text/plain" } 
-      });
-      
-    } catch {
-      return new Response("Server error", { status: 500 });
-    }
+export class ChatServer {
+  constructor(state, env) {
+    this.state = state;
   }
-};
+
+  async fetch(request) {
+    if (request.headers.get("Upgrade") !== "websocket") {
+      return new Response("Expected WebSocket", { status: 400 });
+    }
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+
+    server.accept();
+
+    server.addEventListener("message", (event) => {
+      server.send("Reply: " + event.data);
+    });
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client
+    });
+  }
+}
