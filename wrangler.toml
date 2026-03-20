@@ -4,8 +4,6 @@ compatibility_date = "2025-08-22"
 
 [[durable_objects.bindings]]
 name = "CHAT_SERVER"
-class_name = "ChatServerSQLite"  # Nama class baru
+class_name = "ChatServer"
 
-[[migrations]]
-tag = "v6"
-new_sqlite_classes = ["ChatServerSQLite"]
+# Tidak perlu migrations untuk class yang sudah ada
