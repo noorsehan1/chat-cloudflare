@@ -241,7 +241,7 @@ function createEmptySeat() {
 }
 
 // Kelas utama ChatServerV2
-export class ChatServerV2 {
+export class ChatServer {
   constructor(state, env) {
     try {
       this.state = state;
