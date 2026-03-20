@@ -5,8 +5,3 @@ compatibility_date = "2026-03-20"
 [[durable_objects.bindings]]
 name = "CHAT_SERVER"
 class_name = "ChatServer"
-
-# Ini untuk Cloudflare, BUKAN untuk kode Anda!
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["ChatServer"]
