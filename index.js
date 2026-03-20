@@ -240,7 +240,7 @@ function createEmptySeat() {
   };
 }
 
-// Kelas utama
+// Kelas utama ChatServerV2
 export class ChatServerV2 {
   constructor(state, env) {
     try {
@@ -331,7 +331,6 @@ export class ChatServerV2 {
       this.lastMemoryHealthCheck = Date.now();
       this.memoryHealthCheckInterval = 300000;
       
-      // Heartbeat untuk WebSocket
       this.heartbeatIntervals = new Map();
 
       if (this.state && this.state.storage) {
@@ -581,7 +580,6 @@ export class ChatServerV2 {
     }
   }
 
-  // WebSocket heartbeat
   startHeartbeat(ws) {
     if (this.heartbeatIntervals.has(ws)) return;
     
@@ -2085,7 +2083,6 @@ export class ChatServerV2 {
   async handleMessage(ws, raw) {
     if (!ws || ws.readyState !== 1 || ws._isDuplicate || ws._isClosing) return;
     
-    // Handle ping/pong
     if (raw === "ping" || raw === "pong") {
       if (raw === "ping") {
         try { ws.send("pong"); } catch {}
@@ -2120,7 +2117,6 @@ export class ChatServerV2 {
       
       const evt = data[0];
       
-      // Handle pong response
       if (evt === "pong") {
         ws.lastPong = Date.now();
         return;
@@ -2412,7 +2408,6 @@ export class ChatServerV2 {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       
-      // Accept WebSocket dengan timeout
       await Promise.race([
         server.accept(),
         new Promise((_, reject) => setTimeout(() => reject(new Error("Accept timeout")), CONSTANTS.WS_CONNECTION_TIMEOUT))
@@ -2431,8 +2426,6 @@ export class ChatServerV2 {
       ws.lastPong = Date.now();
       
       this.clients.add(ws);
-      
-      // Start heartbeat
       this.startHeartbeat(ws);
       
       ws.addEventListener("message", (ev) => {
@@ -2463,35 +2456,53 @@ export class ChatServerV2 {
   }
 }
 
-// Export default untuk worker
+// Export untuk Durable Object
+export { ChatServerV2 };
+
+// Export default untuk Worker
 export default {
   async fetch(req, env) {
     try {
-      if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
-        // Pastikan menggunakan ChatServerV2 sesuai binding
-        const id = env.CHAT_SERVER.idFromName("global-chat");
-        const obj = env.CHAT_SERVER.get(id);
-        return obj.fetch(req);
-      }
+      const url = new URL(req.url);
       
-      if (new URL(req.url).pathname === "/health") {
-        return new Response("ok", { 
-          status: 200, 
-          headers: { 
-            "content-type": "text/plain", 
-            "cache-control": "no-cache" 
-          } 
+      if (req.method === "OPTIONS") {
+        return new Response(null, {
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Upgrade",
+            "Access-Control-Max-Age": "86400",
+          },
         });
       }
       
-      return new Response("WebSocket endpoint", { 
-        status: 200, 
-        headers: { "content-type": "text/plain" } 
+      if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+        const id = env.CHAT_SERVER.idFromName("global-chat");
+        const durableObject = env.CHAT_SERVER.get(id);
+        return durableObject.fetch(req);
+      }
+      
+      if (url.pathname === "/health") {
+        return new Response("OK", { 
+          status: 200,
+          headers: {
+            "Content-Type": "text/plain",
+            "Access-Control-Allow-Origin": "*"
+          }
+        });
+      }
+      
+      return new Response("WebSocket server ready", { 
+        status: 200,
+        headers: {
+          "Content-Type": "text/plain",
+          "Access-Control-Allow-Origin": "*"
+        }
       });
       
     } catch (error) {
-      console.error("Worker fetch error:", error);
-      return new Response("Server error", { status: 500 });
+      console.error("Worker error:", error);
+      return new Response(`Error: ${error.message}`, { status: 500 });
     }
   }
 };
