@@ -2696,10 +2696,14 @@ export class ChatServer {
   }
 }
 
-// ✅ KRUSIAL: EKSPOR YANG BENAR
-export { ChatServer };
 
-// ✅ KRUSIAL: EKSPOR DEFAULT UNTUK WORKER
+
+// ✅ EKSPOR YANG BENAR - HANYA SEKALI
+
+// Ekspor class ChatServer (sudah diekspor di deklarasi class)
+// Hapus baris: export { ChatServer };
+
+// Ekspor default untuk Worker
 export default {
   async fetch(req, env) {
     try {
