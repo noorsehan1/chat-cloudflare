@@ -2456,9 +2456,6 @@ export class ChatServerV2 {
   }
 }
 
-// Export untuk Durable Object
-export { ChatServerV2 };
-
 // Export default untuk Worker
 export default {
   async fetch(req, env) {
