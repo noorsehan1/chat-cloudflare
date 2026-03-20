@@ -1,122 +1,45 @@
-// Durable Object ChatServer
 export class ChatServer {
   constructor(state, env) {
     this.state = state;
-    this.sessions = new Set();
+    this.sessions = [];
   }
 
   async fetch(request) {
-    // Cek apakah request adalah WebSocket upgrade
-    const upgradeHeader = request.headers.get('Upgrade');
-    if (!upgradeHeader || upgradeHeader !== 'websocket') {
-      return new Response('Expected WebSocket', { status: 426 });
+    // WAJIB cek websocket
+    if (request.headers.get("Upgrade") !== "websocket") {
+      return new Response("Expected WebSocket", { status: 400 });
     }
 
-    try {
-      // Buat WebSocket pair
-      const webSocketPair = new WebSocketPair();
-      const [client, server] = Object.values(webSocketPair);
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
 
-      // Handle server-side WebSocket
-      this.handleSession(server);
+    // WAJIB
+    server.accept();
 
-      // Return client WebSocket
-      return new Response(null, {
-        status: 101,
-        webSocket: client,
-      });
-    } catch (err) {
-      console.error('Failed to create WebSocket:', err);
-      return new Response('Internal Server Error', { status: 500 });
-    }
-  }
+    // simpan koneksi
+    this.sessions.push(server);
 
-  handleSession(webSocket) {
-    // KRITICAL: Harus accept WebSocket dulu
-    webSocket.accept();
-    
-    console.log('New WebSocket connection accepted');
-    
-    // Kirim pesan selamat datang
-    webSocket.send(JSON.stringify({
-      type: 'welcome',
-      message: 'Connected to ChatServer',
-      timestamp: Date.now()
-    }));
+    // handle message
+    server.addEventListener("message", (event) => {
+      const msg = event.data;
 
-    // Handle incoming messages
-    webSocket.addEventListener('message', async (event) => {
-      console.log('Message received:', event.data);
-      
-      // Echo back the message
-      try {
-        const data = JSON.parse(event.data);
-        webSocket.send(JSON.stringify({
-          type: 'echo',
-          original: data,
-          timestamp: Date.now()
-        }));
-      } catch {
-        // If not JSON, send as plain text
-        webSocket.send(`Echo: ${event.data}`);
+      // broadcast ke semua client
+      for (let ws of this.sessions) {
+        try {
+          ws.send(msg);
+        } catch (e) {}
       }
     });
 
-    // Handle close
-    webSocket.addEventListener('close', (event) => {
-      console.log(`WebSocket closed: ${event.code} - ${event.reason}`);
-      this.sessions.delete(webSocket);
+    // handle close
+    server.addEventListener("close", () => {
+      this.sessions = this.sessions.filter(ws => ws !== server);
     });
 
-    // Handle error
-    webSocket.addEventListener('error', (error) => {
-      console.error('WebSocket error:', error);
-      this.sessions.delete(webSocket);
+    return new Response(null, {
+      status: 101,
+      webSocket: client
     });
   }
 }
-
-// Main Worker
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    
-    // Routing untuk WebSocket
-    if (url.pathname === '/ws' || url.pathname === '/') {
-      try {
-        // Gunakan Durable Object
-        const id = env.CHAT_SERVER.idFromName('default');
-        const chatServer = env.CHAT_SERVER.get(id);
-        return await chatServer.fetch(request);
-      } catch (err) {
-        console.error('Durable Object error:', err);
-        return new Response('WebSocket connection failed', { status: 500 });
-      }
-    }
-    
-    // Untuk testing langsung (tanpa Durable Object)
-    if (url.pathname === '/direct') {
-      const upgradeHeader = request.headers.get('Upgrade');
-      if (!upgradeHeader || upgradeHeader !== 'websocket') {
-        return new Response('Expected WebSocket', { status: 426 });
-      }
-
-      const webSocketPair = new WebSocketPair();
-      const [client, server] = Object.values(webSocketPair);
-
-      server.accept();
-      server.send('Connected to direct WebSocket');
-      
-      server.addEventListener('message', (event) => {
-        server.send(`Echo: ${event.data}`);
-      });
-
-      return new Response(null, {
-        status: 101,
-        webSocket: client,
-      });
-    }
-    
-    return new Response('Not Found', { status: 404 });
-  }
-};
