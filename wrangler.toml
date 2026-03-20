@@ -6,6 +6,4 @@ compatibility_date = "2025-08-22"
 name = "CHAT_SERVER"
 class_name = "ChatServer"
 
-[[migrations]]
-tag = "v4"
-new_sqlite_classes = ["ChatServer"]
+# Remove the migrations section completely
