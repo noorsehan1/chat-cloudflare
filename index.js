@@ -2466,72 +2466,33 @@ export class ChatServer {
     }
   }
 }
+
 export default {
   async fetch(req, env) {
     try {
-      // HANDLE WEBSOCKET
       if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
         const id = env.CHAT_SERVER.idFromName("global-chat");
         const obj = env.CHAT_SERVER.get(id);
         return obj.fetch(req);
       }
-
-      // HEALTH CHECK
+      
       if (new URL(req.url).pathname === "/health") {
-        return new Response("ok", {
-          status: 200,
-          headers: {
-            "content-type": "text/plain",
-            "cache-control": "no-cache"
-          }
+        return new Response("ok", { 
+          status: 200, 
+          headers: { 
+            "content-type": "text/plain", 
+            "cache-control": "no-cache" 
+          } 
         });
       }
-
-      return new Response("WebSocket endpoint", {
-        status: 200,
-        headers: { "content-type": "text/plain" }
+      
+      return new Response("WebSocket endpoint", { 
+        status: 200, 
+        headers: { "content-type": "text/plain" } 
       });
-
-    } catch (err) {
-      return new Response("Server error: " + err.message, { status: 500 });
+      
+    } catch {
+      return new Response("Server error", { status: 500 });
     }
   }
 };
-
-export class ChatServerV2 {
-  constructor(state, env) {
-    this.state = state;
-    this.clients = new Set();
-  }
-
-  async fetch(request) {
-    if (request.headers.get("Upgrade") !== "websocket") {
-      return new Response("Expected WebSocket", { status: 400 });
-    }
-
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-
-    server.accept();
-    this.clients.add(server);
-
-    server.addEventListener("message", (event) => {
-      for (let ws of this.clients) {
-        try {
-          ws.send(event.data);
-        } catch {}
-      }
-    });
-
-    server.addEventListener("close", () => {
-      this.clients.delete(server);
-    });
-
-    return new Response(null, {
-      status: 101,
-      webSocket: client
-    });
-  }
-}
-
