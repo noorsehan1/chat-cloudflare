@@ -2499,48 +2499,4 @@ export default {
 };
 
 
-// ✅ DURABLE OBJECT (WAJIB ADA)
-export class ChatServer {
-  constructor(state, env) {
-    this.state = state;
-    this.clients = new Set();
-  }
 
-  async fetch(request) {
-    if (request.headers.get("Upgrade") !== "websocket") {
-      return new Response("Expected WebSocket", { status: 400 });
-    }
-
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-
-    // WAJIB
-    server.accept();
-
-    // simpan client
-    this.clients.add(server);
-
-    // handle pesan
-    server.addEventListener("message", (event) => {
-      const msg = event.data;
-
-      // broadcast ke semua client
-      for (let ws of this.clients) {
-        try {
-          ws.send(msg);
-        } catch {}
-      }
-    });
-
-    // handle close
-    server.addEventListener("close", () => {
-      this.clients.delete(server);
-    });
-
-    return new Response(null, {
-      status: 101,
-      webSocket: client
-    });
-  }
-}
