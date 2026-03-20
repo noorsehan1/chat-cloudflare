@@ -6,6 +6,7 @@ compatibility_date = "2025-08-22"
 name = "CHAT_SERVER"
 class_name = "ChatServerV2"
 
+# Gunakan tag yang lebih tinggi dari yang sudah ada
 [[migrations]]
-tag = "v1"
-new_classes = ["ChatServerV2"]
+tag = "v6"
+new_sqlite_classes = ["ChatServerV2"]
