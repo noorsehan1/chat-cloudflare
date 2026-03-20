@@ -242,7 +242,8 @@ function createEmptySeat() {
   };
 }
 
-export class ChatServer {
+// Kelas utama ChatServer (untuk kompatibilitas)
+export class ChatServerV2 {
   constructor(state, env) {
     try {
       this.state = state;
@@ -289,7 +290,8 @@ export class ChatServer {
       // Lowcard game
       try {
         this.lowcard = new LowCardGameManager(this);
-      } catch {
+      } catch (e) {
+        console.error("Failed to initialize LowCardGameManager:", e);
         this.lowcard = null;
       }
 
@@ -313,7 +315,8 @@ export class ChatServer {
       // Initialize rooms
       try {
         this.initializeRooms();
-      } catch {
+      } catch (e) {
+        console.error("Failed to initialize rooms:", e);
         this.createDefaultRoom();
       }
 
@@ -344,10 +347,34 @@ export class ChatServer {
       this.lastMemoryHealthCheck = Date.now();
       this.memoryHealthCheckInterval = 300000; // 5 menit
 
+      // Set alarm jika state tersedia
+      if (this.state && this.state.storage) {
+        this.state.storage.setAlarm(Date.now() + 60000);
+      }
+
     } catch (error) {
-      console.error("ChatServer constructor error:", error);
+      console.error("ChatServerV2 constructor error:", error);
       // Fallback initialization
       this.initializeFallback();
+    }
+  }
+
+  // Alarm handler untuk periodic cleanup
+  async alarm() {
+    try {
+      await this.performMemoryCleanup();
+      await this.cleanupDuplicateConnections();
+      
+      // Reschedule alarm
+      if (this.state && this.state.storage) {
+        this.state.storage.setAlarm(Date.now() + 60000);
+      }
+    } catch (error) {
+      console.error("Alarm handler error:", error);
+      // Reschedule even on error
+      if (this.state && this.state.storage) {
+        this.state.storage.setAlarm(Date.now() + 60000);
+      }
     }
   }
 
@@ -498,9 +525,6 @@ export class ChatServer {
           const filtered = clientArray.filter(c => c && c.readyState === 1);
           if (filtered.length !== clientArray.length) {
             this.roomClients.set(room, filtered);
-          }
-          if (filtered.length === 0 && this.roomSeats.has(room)) {
-            // Keep empty array for existing rooms
           }
         }
       }
@@ -2467,6 +2491,7 @@ export class ChatServer {
   }
 }
 
+// Export default untuk worker
 export default {
   async fetch(req, env) {
     try {
