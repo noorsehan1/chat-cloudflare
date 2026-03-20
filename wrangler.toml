@@ -6,4 +6,7 @@ compatibility_date = "2025-08-22"
 name = "CHAT_SERVER"
 class_name = "ChatServer"
 
-# Hapus migrations jika tidak pakai D1 SQLite
+# HAPUS MIGRATIONS KARENA TIDAK PAKAI SQLITE
+# [[migrations]]
+# tag = "v3"
+# new_sqlite_classes = ["ChatServer"]
