@@ -2,21 +2,10 @@ name = "chat-cloudflare"
 main = "index.js"
 compatibility_date = "2026-03-20"
 
-# Durable Object binding
 [[durable_objects.bindings]]
 name = "CHAT_SERVER"
 class_name = "ChatServer"
 
-# IMPORTANT: Use new_sqlite_classes for free plan
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["ChatServer"]
-
-# Add v2 and v3 to match existing deployment
-[[migrations]]
-tag = "v2"
-new_sqlite_classes = ["ChatServer"]
-
-[[migrations]]
-tag = "v3"
 new_sqlite_classes = ["ChatServer"]
