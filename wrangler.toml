@@ -6,7 +6,12 @@ compatibility_date = "2025-08-22"
 name = "CHAT_SERVER"
 class_name = "ChatServer"
 
-# WAJIB pakai SQLite untuk free plan
+# Migration dengan tag baru
 [[migrations]]
-tag = "v1"
+tag = "v2"
 new_sqlite_classes = ["ChatServer"]
+
+# Hapus migration lama
+[[migrations]]
+tag = "v3"
+deleted_classes = ["ChatServer"]
