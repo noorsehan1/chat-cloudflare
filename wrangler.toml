@@ -6,7 +6,7 @@ compatibility_date = "2025-08-22"
 name = "CHAT_SERVER"
 class_name = "ChatServer"
 
-# Tambahkan migration untuk Durable Object (tanpa SQLite)
+# Migration untuk Durable Object
 [[migrations]]
 tag = "v1"
 new_classes = ["ChatServer"]
