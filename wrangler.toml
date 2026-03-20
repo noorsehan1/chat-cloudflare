@@ -1,4 +1,4 @@
-name = "chat-cloudflare"
+name = "chat-app-2026"  # Sama dengan nama project di atas
 main = "index.js"
 compatibility_date = "2026-03-20"
 
