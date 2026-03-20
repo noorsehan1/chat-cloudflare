@@ -240,7 +240,7 @@ function createEmptySeat() {
   };
 }
 
-// Kelas utama ChatServerV2
+// Kelas utama ChatServer
 export class ChatServer {
   constructor(state, env) {
     try {
@@ -338,7 +338,7 @@ export class ChatServer {
       }
 
     } catch (error) {
-      console.error("ChatServerV2 constructor error:", error);
+      console.error("ChatServer constructor error:", error);
       this.initializeFallback();
     }
   }
