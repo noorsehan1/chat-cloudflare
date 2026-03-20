@@ -479,10 +479,12 @@ export class ChatServer {
       this.lastNumberTick = Date.now();
       this.numberTickInterval = this.intervalMillis;
 
-      // Initialize rooms
+      // INITIALIZE ROOMS - PASTIKAN PAKAI createEmptySeat()
       try {
         this.initializeRooms();
-      } catch {
+        console.log(`✅ All ${roomList.length} rooms initialized successfully`);
+      } catch (error) {
+        console.error("Failed to initialize rooms, using default room only:", error);
         this.createDefaultRoom();
       }
 
@@ -559,6 +561,7 @@ export class ChatServer {
     this.safeMode = false;
     this.loadThreshold = CONSTANTS.LOAD_THRESHOLD;
     
+    // PASTIKAN DEFAULT ROOM PAKAI createEmptySeat()
     this.createDefaultRoom();
 
     this.lastMemoryCleanup = Date.now();
@@ -981,7 +984,6 @@ export class ChatServer {
       
       if (isNaN(xNum) || isNaN(yNum)) return false;
       
-      // UPDATE LANGSUNG - TANPA BUFFER
       const updatedSeat = await this.updateSeatAtomic(room, seat, (currentSeat) => {
         currentSeat.lastPoint = { 
           x: xNum, 
@@ -992,7 +994,6 @@ export class ChatServer {
         return currentSeat;
       });
       
-      // BROADCAST LANGSUNG - TANPA BUFFER
       this.broadcastPointDirect(room, seat, xNum, yNum, fast);
       return !!updatedSeat;
       
@@ -1002,6 +1003,8 @@ export class ChatServer {
     }
   }
 
+  // ========== SEAT MANAGEMENT - FIXED ==========
+
   createDefaultRoom() {
     try {
       const room = "General";
@@ -1009,6 +1012,7 @@ export class ChatServer {
       const occupancyMap = new Map();
       
       for (let i = 1; i <= this.MAX_SEATS; i++) {
+        // ✅ FIX: Pakai createEmptySeat(), BUKAN null!
         seatMap.set(i, createEmptySeat());
         occupancyMap.set(i, null);
       }
@@ -1017,7 +1021,11 @@ export class ChatServer {
       this.seatOccupancy.set(room, occupancyMap);
       this.roomClients.set(room, []);
       
-    } catch {}
+      console.log(`✅ Default room ${room} initialized with ${this.MAX_SEATS} seats`);
+      
+    } catch (error) {
+      console.error("Failed to create default room:", error);
+    }
   }
 
   initializeRooms() {
@@ -1027,7 +1035,8 @@ export class ChatServer {
         const occupancyMap = new Map();
         
         for (let i = 1; i <= this.MAX_SEATS; i++) {
-          seatMap.set(i, null);
+          // ✅ FIX: Pakai createEmptySeat(), BUKAN null!
+          seatMap.set(i, createEmptySeat());
           occupancyMap.set(i, null);
         }
         
@@ -1035,7 +1044,11 @@ export class ChatServer {
         this.seatOccupancy.set(room, occupancyMap);
         this.roomClients.set(room, []);
         
-      } catch {}
+        console.log(`✅ Room ${room} initialized with ${this.MAX_SEATS} seats`);
+        
+      } catch (error) {
+        console.error(`Failed to initialize room ${room}:`, error);
+      }
     }
   }
 
@@ -1044,14 +1057,25 @@ export class ChatServer {
       const seatMap = this.roomSeats.get(room);
       const occupancyMap = this.seatOccupancy.get(room);
       
-      if (!seatMap || !occupancyMap) return;
-      
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        if (!seatMap.has(seat)) seatMap.set(seat, null);
-        if (!occupancyMap.has(seat)) occupancyMap.set(seat, null);
+      if (!seatMap || !occupancyMap) {
+        console.warn(`Room ${room} has no seat data, creating...`);
+        this.roomSeats.set(room, new Map());
+        this.seatOccupancy.set(room, new Map());
+        return;
       }
       
-    } catch {}
+      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+        if (!seatMap.has(seat)) {
+          seatMap.set(seat, createEmptySeat());
+        }
+        if (!occupancyMap.has(seat)) {
+          occupancyMap.set(seat, null);
+        }
+      }
+      
+    } catch (error) {
+      console.error(`Error ensuring seats data for room ${room}:`, error);
+    }
   }
 
   async updateSeatAtomic(room, seatNumber, updateFn) {
@@ -1062,7 +1086,10 @@ export class ChatServer {
         const seatMap = this.roomSeats.get(room);
         const occupancyMap = this.seatOccupancy.get(room);
         
-        if (!seatMap || !occupancyMap) return null;
+        if (!seatMap || !occupancyMap) {
+          console.error(`Room ${room} not found for seat update`);
+          return null;
+        }
         
         let currentSeat = seatMap.get(seatNumber);
         if (!currentSeat) {
@@ -1084,7 +1111,8 @@ export class ChatServer {
         return updatedSeat;
       });
       
-    } catch {
+    } catch (error) {
+      console.error(`Error updating seat ${room}-${seatNumber}:`, error);
       return null;
     }
   }
@@ -1096,7 +1124,17 @@ export class ChatServer {
       const occupancyMap = this.seatOccupancy.get(room);
       const seatMap = this.roomSeats.get(room);
       
-      if (!occupancyMap || !seatMap) return null;
+      if (!occupancyMap || !seatMap) {
+        console.error(`Room ${room} not found for findEmptySeat`);
+        return null;
+      }
+      
+      // DEBUG: Cek status kursi
+      let occupiedCount = 0;
+      for (let i = 1; i <= this.MAX_SEATS; i++) {
+        if (occupancyMap.get(i)) occupiedCount++;
+      }
+      console.log(`🔍 Room ${room}: ${occupiedCount}/${this.MAX_SEATS} seats occupied`);
       
       // Cek kursi user sendiri
       for (let i = 1; i <= this.MAX_SEATS; i++) {
@@ -1104,6 +1142,7 @@ export class ChatServer {
         const seatData = seatMap.get(i);
         
         if (occupantId === ws.idtarget && seatData?.namauser === ws.idtarget) {
+          console.log(`✅ User ${ws.idtarget} already in seat ${i}`);
           return i;
         }
       }
@@ -1119,6 +1158,7 @@ export class ChatServer {
           const isSeatDataEmpty = !seatData || !seatData.namauser;
           
           if (isOccupancyEmpty && isSeatDataEmpty) {
+            console.log(`✅ Found empty seat ${i} for user ${ws.idtarget}`);
             return i;
           }
         } finally {
@@ -1132,6 +1172,7 @@ export class ChatServer {
         const seatData = seatMap.get(i);
         
         if (occupantId === null && seatData?.namauser) {
+          console.log(`🔄 Cleaning inconsistent seat ${i}`);
           Object.assign(seatData, createEmptySeat());
           return i;
         }
@@ -1146,15 +1187,18 @@ export class ChatServer {
           const isOnline = await this.isUserStillConnected(occupantId);
           
           if (!isOnline) {
+            console.log(`🔄 Cleaning offline user from seat ${i}`);
             await this.cleanupUserFromSeat(room, i, occupantId, true);
             return i;
           }
         }
       }
       
+      console.log(`❌ No empty seat found in room ${room}`);
       return null;
       
-    } catch {
+    } catch (error) {
+      console.error(`Error finding empty seat in ${room}:`, error);
       return null;
     }
   }
@@ -1166,15 +1210,22 @@ export class ChatServer {
       const occupancyMap = this.seatOccupancy.get(room);
       const seatMap = this.roomSeats.get(room);
       
-      if (!occupancyMap || !seatMap) return false;
+      if (!occupancyMap || !seatMap) {
+        console.error(`Room ${room} not found for assignSeatAtomic`);
+        return false;
+      }
       
       const occupantId = occupancyMap.get(seat);
       const seatData = seatMap.get(seat);
       
       const isStillEmpty = occupantId === null && (!seatData || !seatData.namauser);
       
-      if (!isStillEmpty) return false;
+      if (!isStillEmpty) {
+        console.warn(`Seat ${room}-${seat} is not empty (occupant: ${occupantId}, seatUser: ${seatData?.namauser})`);
+        return false;
+      }
       
+      // ✅ Assign user ke kursi
       occupancyMap.set(seat, userId);
       
       if (!seatData) {
@@ -1194,8 +1245,12 @@ export class ChatServer {
         seatData.lastUpdated = Date.now();
       }
       
+      console.log(`✅ User ${userId} assigned to room ${room} seat ${seat}`);
       return true;
       
+    } catch (error) {
+      console.error(`Error assigning seat ${room}-${seat}:`, error);
+      return false;
     } finally {
       release();
     }
@@ -1215,20 +1270,25 @@ export class ChatServer {
         if (!seatInfo || seatInfo.namauser !== userId) return;
         
         const isOnline = await this.isUserStillConnected(userId);
-        if (isOnline) return;
+        if (isOnline) {
+          console.log(`User ${userId} still online, skipping cleanup`);
+          return;
+        }
         
         if (immediate) {
+          console.log(`Cleaning up user ${userId} from room ${room} seat ${seatNumber}`);
           Object.assign(seatInfo, createEmptySeat());
           occupancyMap.set(seatNumber, null);
           
-          // BROADCAST LANGSUNG - TANPA BUFFER
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
           this.updateRoomCount(room);
           this.userToSeat.delete(userId);
         }
       });
       
-    } catch {}
+    } catch (error) {
+      console.error(`Error cleaning up user from seat:`, error);
+    }
   }
 
   scheduleCleanup(userId) {
@@ -1251,14 +1311,18 @@ export class ChatServer {
               }
             });
           }
-        } catch {}
+        } catch (error) {
+          console.error(`Error in cleanup timer for ${userId}:`, error);
+        }
       }, this.gracePeriod);
       
       timerId._scheduledTime = Date.now();
       timerId._userId = userId;
       this.disconnectedTimers.set(userId, timerId);
       
-    } catch {}
+    } catch (error) {
+      console.error(`Error scheduling cleanup for ${userId}:`, error);
+    }
   }
 
   cancelCleanup(userId) {
@@ -1269,11 +1333,14 @@ export class ChatServer {
       if (timer) {
         clearTimeout(timer);
         this.disconnectedTimers.delete(userId);
+        console.log(`Cleanup cancelled for user ${userId}`);
       }
       
       this.cleanupInProgress?.delete(userId);
       
-    } catch {}
+    } catch (error) {
+      console.error(`Error cancelling cleanup for ${userId}:`, error);
+    }
   }
 
   async isUserStillConnected(userId) {
@@ -1354,8 +1421,12 @@ export class ChatServer {
             }
           }
         }
+        
+        console.log(`✅ Force cleanup completed for user ${userId}`);
       });
       
+    } catch (error) {
+      console.error(`Error force cleaning user ${userId}:`, error);
     } finally {
       this.cleanupInProgress.delete(userId);
     }
@@ -1381,9 +1452,13 @@ export class ChatServer {
         
         this.userToSeat.delete(ws.idtarget);
         this.updateRoomCount(room);
+        
+        console.log(`User ${ws.idtarget} cleaned up from room ${room}`);
       });
       
-    } catch {}
+    } catch (error) {
+      console.error(`Error cleaning up from room:`, error);
+    }
   }
 
   async fullRemoveById(idtarget) {
@@ -1404,8 +1479,6 @@ export class ChatServer {
             const info = seatMap.get(seatNumber);
             if (info?.namauser === idtarget) {
               Object.assign(info, createEmptySeat());
-              
-              // BROADCAST LANGSUNG - TANPA BUFFER
               this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
             }
           }
@@ -1438,9 +1511,13 @@ export class ChatServer {
             }
           }
         }
+        
+        console.log(`✅ User ${idtarget} completely removed`);
       });
       
-    } catch {}
+    } catch (error) {
+      console.error(`Error removing user ${idtarget}:`, error);
+    }
   }
 
   validateGracePeriodTimers() {
@@ -1460,7 +1537,9 @@ export class ChatServer {
         }
       }
       
-    } catch {}
+    } catch (error) {
+      console.error("Error validating grace period timers:", error);
+    }
   }
 
   async executeGracePeriodCleanup(userId) {
@@ -1483,6 +1562,8 @@ export class ChatServer {
         }
       });
       
+    } catch (error) {
+      console.error(`Error in grace period cleanup for ${userId}:`, error);
     } finally {
       this.cleanupInProgress.delete(userId);
     }
@@ -1504,6 +1585,11 @@ export class ChatServer {
       return false;
     }
     
+    // DEBUG: Cek state room sebelum join
+    console.log(`🔍 Join attempt: User ${ws.idtarget} to room ${room}`);
+    console.log(`   Room exists in roomSeats: ${this.roomSeats.has(room)}`);
+    console.log(`   Room exists in seatOccupancy: ${this.seatOccupancy.has(room)}`);
+    
     const breaker = this.roomCircuitBreakers.get(room);
     if (breaker && breaker.failures > CONSTANTS.CIRCUIT_BREAKER_THRESHOLD) {
       if (Date.now() - breaker.lastFailure < CONSTANTS.CIRCUIT_BREAKER_TIMEOUT) {
@@ -1521,10 +1607,21 @@ export class ChatServer {
         this.cancelCleanup(ws.idtarget);
         await this.ensureSeatsData(room);
         
+        const seatMap = this.roomSeats.get(room);
+        if (seatMap) {
+          let occupied = 0;
+          for (let i = 1; i <= this.MAX_SEATS; i++) {
+            const seat = seatMap.get(i);
+            if (seat?.namauser) occupied++;
+          }
+          console.log(`   Room ${room} current occupancy: ${occupied}/${this.MAX_SEATS}`);
+        }
+        
         const previousRoom = this.userCurrentRoom.get(ws.idtarget);
         
         if (previousRoom) {
           if (previousRoom === room) {
+            console.log(`User ${ws.idtarget} already in room ${room}, sending state`);
             this.sendAllStateTo(ws, room);
             this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
             return true;
@@ -1537,6 +1634,7 @@ export class ChatServer {
         if (seatInfo?.room === room) {
           const occupancyMap = this.seatOccupancy.get(room);
           if (occupancyMap?.get(seatInfo.seat) === ws.idtarget) {
+            console.log(`User ${ws.idtarget} reconnecting to seat ${seatInfo.seat}`);
             ws.roomname = room;
             ws.numkursi = new Set([seatInfo.seat]);
             
@@ -1564,6 +1662,7 @@ export class ChatServer {
             if (occupancyMap.get(seat) === null) {
               occupancyMap.set(seat, ws.idtarget);
               assignedSeat = seat;
+              console.log(`Temporarily assigned seat ${seat} to user ${ws.idtarget}`);
               break;
             }
           } finally {
@@ -1572,6 +1671,7 @@ export class ChatServer {
         }
         
         if (!assignedSeat) {
+          console.log(`Room ${room} is full`);
           const breaker = this.roomCircuitBreakers.get(room) || { failures: 0, lastFailure: Date.now() };
           breaker.failures++;
           breaker.lastFailure = Date.now();
@@ -1582,6 +1682,7 @@ export class ChatServer {
         
         const success = await this.assignSeatAtomic(room, assignedSeat, ws.idtarget);
         if (!success) {
+          console.error(`Failed to assign seat ${assignedSeat} to user ${ws.idtarget}`);
           this.safeSend(ws, ["error", "Failed to assign seat"]);
           return false;
         }
@@ -1600,20 +1701,22 @@ export class ChatServer {
         
         this._addUserConnection(ws.idtarget, ws);
         
-        // BROADCAST LANGSUNG - TANPA BUFFER
         this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
         this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
         
         setTimeout(() => this.sendAllStateTo(ws, room), 100);
         this.updateRoomCount(room);
         this.metrics.messagesProcessed++;
+        
+        console.log(`✅ User ${ws.idtarget} successfully joined room ${room} seat ${assignedSeat}`);
         return true;
         
       } finally {
         roomRelease();
       }
       
-    } catch {
+    } catch (error) {
+      console.error(`Error in handleJoinRoom for ${ws.idtarget}:`, error);
       this.metrics.errors++;
       this.safeSend(ws, ["error", "Failed to join room"]);
       return false;
@@ -1637,6 +1740,7 @@ export class ChatServer {
           ws.numkursi = new Set();
           ws._connectionTime = Date.now();
           
+          console.log(`New user ${id} connected`);
           this.safeSend(ws, ["joinroomawal"]);
           return;
         }
@@ -1664,6 +1768,7 @@ export class ChatServer {
             const occupantId = occupancyMap.get(seat);
             
             if (seatData?.namauser === id && occupantId === id) {
+              console.log(`User ${id} reconnecting to room ${room} seat ${seat}`);
               ws.roomname = room;
               ws.numkursi = new Set([seat]);
               
@@ -1676,7 +1781,6 @@ export class ChatServer {
               this.sendAllStateTo(ws, room);
               
               if (seatData.lastPoint) {
-                // BROADCAST LANGSUNG - TANPA BUFFER
                 this.safeSend(ws, [
                   "pointUpdated", 
                   room, 
@@ -1703,10 +1807,12 @@ export class ChatServer {
           }
         }
         
+        console.log(`User ${id} needs to join a room`);
         this.safeSend(ws, ["needJoinRoom"]);
       });
       
-    } catch {
+    } catch (error) {
+      console.error(`Error in handleSetIdTarget2 for ${id}:`, error);
       this.metrics.errors++;
       this.safeSend(ws, ["error", "Reconnection failed"]);
     }
@@ -1785,7 +1891,6 @@ export class ChatServer {
         this.roomCountsCache[room] = count;
       }
       
-      // BROADCAST LANGSUNG - TANPA BUFFER
       this.broadcastToRoom(room, ["roomUserCount", room, count]);
       
     } catch {}
@@ -1796,7 +1901,10 @@ export class ChatServer {
       if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room) return;
       
       const seatMap = this.roomSeats.get(room);
-      if (!seatMap) return;
+      if (!seatMap) {
+        console.error(`Room ${room} not found in sendAllStateTo`);
+        return;
+      }
       
       const allKursiMeta = {};
       const lastPointsData = [];
@@ -1827,12 +1935,10 @@ export class ChatServer {
       }
       
       if (Object.keys(allKursiMeta).length > 0) {
-        // BROADCAST LANGSUNG - TANPA BUFFER
         this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
       }
       
       if (lastPointsData.length > 0) {
-        // BROADCAST LANGSUNG - TANPA BUFFER
         this.safeSend(ws, ["allPointsList", room, lastPointsData]);
       }
       
@@ -1840,7 +1946,9 @@ export class ChatServer {
       this.safeSend(ws, ["roomUserCount", room, counts[room] || 0]);
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
       
-    } catch {}
+    } catch (error) {
+      console.error(`Error sending state to user:`, error);
+    }
   }
 
   getJumlahRoom() {
@@ -1899,7 +2007,6 @@ export class ChatServer {
       }
       
       this.invalidateRoomCache(room);
-      // BROADCAST LANGSUNG - TANPA BUFFER
       this.broadcastRoomUserCount(room);
       
       return count;
@@ -2435,7 +2542,6 @@ export class ChatServer {
             if (ws.roomname !== room || !roomList.includes(room)) return;
             if (seat < 1 || seat > this.MAX_SEATS) return;
             
-            // UPDATE DAN BROADCAST LANGSUNG - TANPA BUFFER
             this.savePointWithRetry(room, seat, x, y, fast).catch(() => {});
             break;
           }
@@ -2447,8 +2553,6 @@ export class ChatServer {
             if (ws.roomname !== room || !roomList.includes(room)) return;
             
             await this.updateSeatAtomic(room, seat, () => createEmptySeat());
-            
-            // BROADCAST LANGSUNG - TANPA BUFFER
             this.broadcastToRoom(room, ["removeKursi", room, seat]);
             this.updateRoomCount(room);
             break;
@@ -2478,8 +2582,6 @@ export class ChatServer {
             }
             
             this.updateRoomCount(room);
-            
-            // BROADCAST LANGSUNG - TANPA BUFFER
             this.broadcastToRoom(room, ["updateKursiResponse", room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda]);
             break;
           }
