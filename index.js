@@ -1448,14 +1448,59 @@ export class ChatServer {
             this.broadcastToRoom(roomname, chatMsg);
             break;
           }
-          case "updatePoint": {
-            const [, room, seat, x, y, fast] = data;
-            if (ws.roomname !== room || !roomList.includes(room)) return;
-            if (seat < 1 || seat > this.MAX_SEATS) return;
-            this.savePointWithRetry(room, seat, x, y, fast).catch(() => {});
-            this.broadcastPointDirect(room, seat, x, y, fast);
-            break;
-          }
+          // ========== MESSAGE HANDLING - BAGIAN UPDATE ==========
+
+case "updatePoint": {
+  const [, room, seat, x, y, fast] = data;
+  if (ws.roomname !== room || !roomList.includes(room)) return;
+  if (seat < 1 || seat > this.MAX_SEATS) return;
+  
+  this.savePointWithRetry(room, seat, x, y, fast).catch(() => {});
+  
+  // Broadcast ke semua user di room
+  this.broadcastPointDirect(room, seat, x, y, fast);
+  
+  // Kirim juga ke pengirim (agar dia lihat perubahannya)
+  this.safeSend(ws, ["pointUpdated", room, seat, x, y, fast]);
+  
+  break;
+}
+
+case "updateKursi": {
+  const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
+  
+  if (seat < 1 || seat > this.MAX_SEATS) return;
+  if (ws.roomname !== room || !roomList.includes(room)) return;
+  
+  await this.updateSeatAtomic(room, seat, () => ({
+    noimageUrl, 
+    namauser, 
+    color,
+    itembawah: itembawah || 0,
+    itematas: itematas || 0,
+    vip: vip || 0,
+    viptanda: viptanda || 0,
+    lastPoint: null,
+    lastUpdated: Date.now()
+  }));
+  
+  if (namauser === ws.idtarget) {
+    this.userToSeat.set(namauser, { room, seat });
+    this.userCurrentRoom.set(namauser, room);
+  }
+  
+  this.updateRoomCount(room);
+  
+  const response = ["updateKursiResponse", room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda];
+  
+  // Broadcast ke semua user di room
+  this.broadcastToRoom(room, response);
+  
+  // Kirim juga ke pengirim (agar dia lihat perubahannya)
+  this.safeSend(ws, response);
+  
+  break;
+}
           case "removeKursiAndPoint": {
             const [, room, seat] = data;
             if (seat < 1 || seat > this.MAX_SEATS) return;
@@ -1465,33 +1510,7 @@ export class ChatServer {
             this.updateRoomCount(room);
             break;
           }
-          case "updateKursi": {
-            const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
-            
-            if (seat < 1 || seat > this.MAX_SEATS) return;
-            if (ws.roomname !== room || !roomList.includes(room)) return;
-            
-            await this.updateSeatAtomic(room, seat, () => ({
-              noimageUrl, 
-              namauser, 
-              color,
-              itembawah: itembawah || 0,
-              itematas: itematas || 0,
-              vip: vip || 0,
-              viptanda: viptanda || 0,
-              lastPoint: null,
-              lastUpdated: Date.now()
-            }));
-            
-            if (namauser === ws.idtarget) {
-              this.userToSeat.set(namauser, { room, seat });
-              this.userCurrentRoom.set(namauser, room);
-            }
-            
-            this.updateRoomCount(room);
-            this.broadcastToRoom(room, ["updateKursiResponse", room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda]);
-            break;
-          }
+
           case "gift": {
             const [, roomname, sender, receiver, giftName] = data;
             if (ws.roomname !== roomname || ws.idtarget !== sender) return;
