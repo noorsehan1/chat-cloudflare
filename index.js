@@ -137,7 +137,6 @@ class QueueManager {
 
   async add(job) {
     if (this.queue.length > this.maxQueueSize) {
-      console.warn("Queue full, job rejected");
       throw new Error("Server busy, try again later");
     }
 
@@ -374,7 +373,6 @@ export class ChatServer {
       this._alarmRetryCount = 0;
       this._lastAlarmRun = 0;
       this._lastRunTimes = {
-        fastTasks: 0,
         mediumTasks: 0,
         numberTick: 0,
         lockCleanup: 0,
@@ -399,7 +397,6 @@ export class ChatServer {
       this._setupTickTimer();
       
     } catch (error) {
-      console.error("ChatServer constructor error:", error);
       this.initializeFallback();
       this._startAlarmLoop();
       this._setupTickTimer();
@@ -451,7 +448,6 @@ export class ChatServer {
     this._alarmRetryCount = 0;
     this._lastAlarmRun = 0;
     this._lastRunTimes = {
-      fastTasks: 0,
       mediumTasks: 0,
       numberTick: 0,
       lockCleanup: 0,
@@ -731,8 +727,6 @@ export class ChatServer {
       this._pointFlushPending = false;
       this.flushBufferedPoints();
     }, this._pointFlushDelay);
-    
-    this._pointFlushTimer._expiry = Date.now() + this._pointFlushDelay + 1000;
   }
 
   flushBufferedPoints() {
@@ -764,12 +758,8 @@ export class ChatServer {
       const message = JSON.stringify(["pointsBatch", room, validBatch]);
       
       for (const client of clientArray) {
-        if (client?.readyState === 1 && client.roomname === room && !client._isClosing) {
-          try { 
-            if (client.bufferedAmount < CONSTANTS.MAX_BUFFERED_AMOUNT) {
-              client.send(message); 
-            }
-          } catch {}
+        if (client?.readyState === 1 && client.roomname === room) {
+          try { client.send(message); } catch {}
         }
       }
     } catch {}
@@ -786,12 +776,8 @@ export class ChatServer {
       const message = JSON.stringify(["pointUpdated", room, seat, x, y, fast]);
       
       for (const client of clientArray) {
-        if (client?.readyState === 1 && client.roomname === room && !client._isClosing) {
-          try { 
-            if (client.bufferedAmount < CONSTANTS.MAX_BUFFERED_AMOUNT) {
-              client.send(message); 
-            }
-          } catch {}
+        if (client?.readyState === 1 && client.roomname === room) {
+          try { client.send(message); } catch {}
         }
       }
     } catch {}
@@ -1100,7 +1086,6 @@ export class ChatServer {
       }, this.gracePeriod);
       
       timerId._scheduledTime = Date.now();
-      timerId._expiry = Date.now() + this.gracePeriod + 5000;
       timerId._userId = userId;
       this.disconnectedTimers.set(userId, timerId);
       
@@ -1571,11 +1556,9 @@ export class ChatServer {
           if (client.idtarget && sentToUsers.has(client.idtarget)) continue;
           
           try {
-            if (client.bufferedAmount < CONSTANTS.MAX_BUFFERED_AMOUNT) {
-              client.send(message);
-              sentCount++;
-              if (client.idtarget) sentToUsers.add(client.idtarget);
-            }
+            client.send(message);
+            sentCount++;
+            if (client.idtarget) sentToUsers.add(client.idtarget);
           } catch {}
         }
       }
@@ -1784,23 +1767,12 @@ export class ChatServer {
         }
       }
 
-    } catch (error) {
-      console.error("Memory cleanup error:", error);
-    }
+    } catch (error) {}
   }
 
   async checkMemoryHealth() {
     if (typeof process !== 'undefined' && process.memoryUsage) {
       const used = process.memoryUsage().heapUsed / 1024 / 1024;
-      const mapSizes = {
-        clients: this.clients.size,
-        userConnections: this.userConnections.size,
-        roomClients: this.roomClients.size,
-        userToSeat: this.userToSeat.size,
-        disconnectedTimers: this.disconnectedTimers.size,
-        locks: this.lockManager?.locks.size || 0,
-        pointBuffer: Array.from(this._pointBuffer.values()).reduce((a, b) => a + b.length, 0)
-      };
       
       if (used > CONSTANTS.MEMORY_WARNING_THRESHOLD) {
         await this.aggressiveCleanup();
@@ -1811,9 +1783,7 @@ export class ChatServer {
         await this.aggressiveCleanup();
         
         if (global.gc) {
-          try {
-            global.gc();
-          } catch {}
+          try { global.gc(); } catch {}
         }
         
         setTimeout(() => {
@@ -1840,9 +1810,7 @@ export class ChatServer {
         this.cleanupQueue.clear();
       }
       
-    } catch (error) {
-      console.error("Aggressive cleanup error:", error);
-    }
+    } catch (error) {}
   }
 
   sampledSeatConsistencyCheck() {
