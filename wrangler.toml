@@ -9,3 +9,7 @@ class_name = "ChatServer"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ChatServer"]
+
+# CRON TRIGGER untuk cleanup (tambahkan ini)
+[triggers]
+crons = ["*/30 * * * *"]  # Cleanup setiap 30 menit
