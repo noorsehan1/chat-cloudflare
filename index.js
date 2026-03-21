@@ -1409,7 +1409,7 @@ export class ChatServer {
         this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
         this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
         
-        setTimeout(() => this.sendAllStateTo(ws, room), 100);
+        this.sendAllStateTo(ws, room);
         this.updateRoomCount(room);
         
         return true;
@@ -1597,10 +1597,14 @@ export class ChatServer {
       if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room) return;
       
       const seatMap = this.roomSeats.get(room);
-      if (!seatMap) return;
+      if (!seatMap) {
+        this.ensureSeatsData(room);
+        return;
+      }
       
       const allKursiMeta = {};
       const lastPointsData = [];
+      let hasData = false;
       
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
@@ -1615,6 +1619,7 @@ export class ChatServer {
             vip: info.vip || 0,
             viptanda: info.viptanda || 0
           };
+          hasData = true;
         }
         
         if (info?.lastPoint) {
@@ -1627,7 +1632,7 @@ export class ChatServer {
         }
       }
       
-      if (Object.keys(allKursiMeta).length > 0) {
+      if (hasData) {
         this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
       }
       
@@ -1639,7 +1644,7 @@ export class ChatServer {
       this.safeSend(ws, ["roomUserCount", room, counts[room] || 0]);
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
       
-    } catch {}
+    } catch (error) {}
   }
 
   getJumlahRoom() {
