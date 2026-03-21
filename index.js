@@ -1166,10 +1166,26 @@ export class ChatServer {
         
         if (!assignedSeat) { this.safeSend(ws, ["roomFull", room]); return false; }
         
+        // UPDATE SEAT ATOMIC dengan data user
+        await this.updateSeatAtomic(room, assignedSeat, (currentSeat) => {
+          return {
+            noimageUrl: ws.noimageUrl || "",
+            namauser: ws.idtarget,
+            color: ws.color || "",
+            itembawah: ws.itembawah || 0,
+            itematas: ws.itematas || 0,
+            vip: ws.vip || 0,
+            viptanda: ws.viptanda || 0,
+            lastPoint: null,
+            lastUpdated: Date.now()
+          };
+        });
+        
         this.userToSeat.set(ws.idtarget, { room, seat: assignedSeat });
         this.userCurrentRoom.set(ws.idtarget, room);
         ws.roomname = room;
         ws.numkursi = new Set([assignedSeat]);
+        
         const clientArray = this.roomClients.get(room);
         if (clientArray && !clientArray.includes(ws)) clientArray.push(ws);
         this._addUserConnection(ws.idtarget, ws);
@@ -1177,13 +1193,20 @@ export class ChatServer {
         this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
         this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
         
-        // Kirim semua state setelah join
+        // Kirim semua state ke user (termasuk kursi sendiri)
         this.sendAllStateTo(ws, room);
+        
+        // Broadcast ke room bahwa ada user baru
+        this.broadcastToRoom(room, ["userJoined", room, assignedSeat, ws.idtarget]);
         
         this.updateRoomCount(room);
         return true;
       } finally { roomRelease(); }
-    } catch { this.safeSend(ws, ["error", "Failed to join room"]); return false; }
+    } catch (error) {
+      console.error(`Join room error: ${error.message}`);
+      this.safeSend(ws, ["error", "Failed to join room"]);
+      return false;
+    }
   }
   
   async handleSetIdTarget2(ws, id, baru) {
@@ -1721,8 +1744,20 @@ export class ChatServer {
             const [, room, seat, x, y, fast] = data;
             if (ws.roomname !== room || !roomList.includes(room)) return;
             if (seat < 1 || seat > this.MAX_SEATS) return;
-            this.savePointWithRetry(room, seat, x, y, fast).catch(() => {});
+            
+            await this.updateSeatAtomic(room, seat, (currentSeat) => {
+              currentSeat.lastPoint = { 
+                x: typeof x === 'number' ? x : parseFloat(x), 
+                y: typeof y === 'number' ? y : parseFloat(y), 
+                fast: fast || false, 
+                timestamp: Date.now() 
+              };
+              return currentSeat;
+            });
+            
             this.broadcastPointDirect(room, seat, x, y, fast);
+            // Kirim juga ke pengirim
+            this.safeSend(ws, ["pointUpdated", room, seat, x, y, fast]);
             break;
           }
           case "removeKursiAndPoint": {
@@ -1738,15 +1773,29 @@ export class ChatServer {
             const [, room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda] = data;
             if (seat < 1 || seat > this.MAX_SEATS) return;
             if (ws.roomname !== room || !roomList.includes(room)) return;
+            
             await this.updateSeatAtomic(room, seat, () => ({
-              noimageUrl, namauser, color, itembawah: itembawah || 0, itematas: itematas || 0, vip: vip || 0, viptanda: viptanda || 0, lastPoint: null, lastUpdated: Date.now()
+              noimageUrl: noimageUrl || "",
+              namauser: namauser,
+              color: color || "",
+              itembawah: itembawah || 0,
+              itematas: itematas || 0,
+              vip: vip || 0,
+              viptanda: viptanda || 0,
+              lastPoint: null,
+              lastUpdated: Date.now()
             }));
+            
             if (namauser === ws.idtarget) {
               this.userToSeat.set(namauser, { room, seat });
               this.userCurrentRoom.set(namauser, room);
+              ws.numkursi = new Set([seat]);
             }
+            
             this.updateRoomCount(room);
             this.broadcastToRoom(room, ["updateKursiResponse", room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda]);
+            // Kirim juga ke pengirim
+            this.safeSend(ws, ["updateKursiResponse", room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda]);
             break;
           }
           case "gift": {
