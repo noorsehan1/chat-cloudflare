@@ -10,6 +10,6 @@ class_name = "ChatServer"
 tag = "v1"
 new_sqlite_classes = ["ChatServer"]
 
-# CRON TRIGGER untuk cleanup (tambahkan ini)
-[triggers]
-crons = ["*/30 * * * *"]  # Cleanup setiap 30 menit
+# HAPUS INI (tidak perlu karena sudah ada auto cleanup di dalam DO)
+# [triggers]
+# crons = ["*/30 * * * *"]
