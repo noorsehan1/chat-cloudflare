@@ -1,50 +1,45 @@
-import { LowCardGameManager } from "./lowcard.js";
+IKUTI INI   TAPI HARUS BISA KAYA KODE AWAL import { LowCardGameManager } from "./lowcard.js";
 
 const roomList = [
   "LowCard 1", "LowCard 2", "Gacor", "General", "Pakistan", "Philippines", "India", "Indonesia", "Birthday Party", "Heart Lovers","Cat lovers","Chikahan Tambayan", "Lounge Talk",
   "Noxxeliverothcifsa", "One Side Love", "BLUE DYNASTY", "Relax & Chat", "The Chatter Room"
 ];
 
-// ========== CONSTANTS OPTIMIZED FOR 200 USERS ==========
+// ========== CONSTANTS ==========
 const CONSTANTS = {
   LOCK_TIMEOUT: 10000,
   LOCK_ACQUIRE_TIMEOUT: 2000,
   GRACE_PERIOD: 5000,
-  MAX_QUEUE_SIZE: 100,
-  MAX_LOCK_QUEUE_SIZE: 50,
-  MAX_POINTS_PER_ROOM: 50,
-  MAX_POINTS_TOTAL: 1000,
-  MAX_POINTS_BEFORE_FLUSH: 200,
-  BUFFER_SIZE_LIMIT: 20,
+  MAX_QUEUE_SIZE: 50,
+  MAX_LOCK_QUEUE_SIZE: 30,
+  MAX_POINTS_PER_ROOM: 30,
+  MAX_POINTS_TOTAL: 500,
+  MAX_POINTS_BEFORE_FLUSH: 100,
+  BUFFER_SIZE_LIMIT: 10,
   CACHE_VALID_DURATION: 2000,
   MAX_SEATS: 35,
   MAX_CONNECTIONS_PER_USER: 2,
-  SAFE_SEND_RETRY: 3,
-  SAFE_SEND_RETRY_DELAY: 50,
-  BROADCAST_BATCH_SIZE: 20,
+  SAFE_SEND_RETRY: 2,
+  SAFE_SEND_RETRY_DELAY: 100,
+  BROADCAST_BATCH_SIZE: 10,
   MAX_MESSAGE_SIZE: 50000,
   MAX_ERROR_COUNT: 3,
-  MAX_BUFFERED_AMOUNT: 200000,
-  LOAD_THRESHOLD: 0.85,
-  LOAD_RECOVERY_THRESHOLD: 0.65,
+  MAX_BUFFERED_AMOUNT: 100000,
+  LOAD_THRESHOLD: 0.9,
+  LOAD_RECOVERY_THRESHOLD: 0.7,
   NUMBER_TICK_INTERVAL: 15 * 60 * 1000,
   MAX_NUMBER: 6,
-  KURSI_UPDATE_DEBOUNCE: 100,
+  KURSI_UPDATE_DEBOUNCE: 150,
   MAX_RETRIES: 3,
-  // RATE LIMITING OPTIMIZED
-  MIN_POINT_INTERVAL: 50,
-  MIN_CHAT_INTERVAL: 500,
-  MIN_KURSI_INTERVAL: 200,
+  // RATE LIMITING BARU
+  MIN_POINT_INTERVAL: 80,
+  MIN_CHAT_INTERVAL: 800,
+  MIN_KURSI_INTERVAL: 300,
   MAX_CHAT_LENGTH: 200,
-  MAX_EVENTS_PER_MINUTE: 120,
-  CLEANUP_INTERVAL: 30000,
-  MAP_CLEANUP_INTERVAL: 120000,
-  MAX_MAP_SIZE: 1000,
-  // LOAD BALANCING
-  REQUEST_WINDOW_MS: 10000,
-  MAX_REQUESTS_PER_WINDOW: 50,
-  BROADCAST_DELAY_MS: 5,
-  GAME_LIMIT: 10
+  MAX_EVENTS_PER_MINUTE: 60,
+  CLEANUP_INTERVAL: 60000,
+  MAP_CLEANUP_INTERVAL: 300000,
+  MAX_MAP_SIZE: 500
 };
 
 class PromiseLockManager {
@@ -120,7 +115,7 @@ class PromiseLockManager {
 }
 
 class QueueManager {
-  constructor(concurrency = 5) {
+  constructor(concurrency = 3) {
     this.queue = [];
     this.active = 0;
     this.concurrency = concurrency;
@@ -160,7 +155,7 @@ class QueueManager {
       }
     }
     this.processing = false;
-    if (this.queue.length > 0) setTimeout(() => this.process(), 5);
+    if (this.queue.length > 0) setTimeout(() => this.process(), 10);
   }
 
   clear() {
@@ -173,7 +168,7 @@ class QueueManager {
 }
 
 class RateLimiter {
-  constructor(windowMs = 60000, maxRequests = 200) {
+  constructor(windowMs = 60000, maxRequests = 100) {
     this.windowMs = windowMs;
     this.maxRequests = maxRequests;
     this.requests = new Map();
@@ -200,36 +195,6 @@ class RateLimiter {
   }
 }
 
-class LoadBalancer {
-  constructor() {
-    this.requestCounts = new Map();
-    this.lastReset = Date.now();
-  }
-  
-  shouldThrottle(userId) {
-    if (!userId) return false;
-    const now = Date.now();
-    
-    if (now - this.lastReset > CONSTANTS.REQUEST_WINDOW_MS) {
-      this.requestCounts.clear();
-      this.lastReset = now;
-    }
-    
-    const count = (this.requestCounts.get(userId) || 0) + 1;
-    this.requestCounts.set(userId, count);
-    
-    return count > CONSTANTS.MAX_REQUESTS_PER_WINDOW;
-  }
-  
-  cleanup() {
-    const now = Date.now();
-    if (now - this.lastReset > CONSTANTS.REQUEST_WINDOW_MS) {
-      this.requestCounts.clear();
-      this.lastReset = now;
-    }
-  }
-}
-
 function createEmptySeat() {
   return {
     noimageUrl: "", namauser: "", color: "", itembawah: 0, itematas: 0,
@@ -242,7 +207,6 @@ export class ChatServer {
     try {
       this.state = state;
       this.env = env;
-      this._startTime = Date.now();
       
       this.muteStatus = new Map();
       for (const room of roomList) this.muteStatus.set(room, false);
@@ -274,15 +238,12 @@ export class ChatServer {
       this.lastKursiTime = new Map();
       this.eventCounts = new Map();
       
-      // LOAD BALANCER
-      this.loadBalancer = new LoadBalancer();
-      
       // INTERVALS
       this._intervals = [];
       this._timeouts = new Set();
 
-      this.rateLimiter = new RateLimiter(60000, 200);
-      this.connectionRateLimiter = new RateLimiter(10000, 10);
+      this.rateLimiter = new RateLimiter(60000, 100);
+      this.connectionRateLimiter = new RateLimiter(10000, 5);
       
       this.safeMode = false;
       this.loadThreshold = CONSTANTS.LOAD_THRESHOLD;
@@ -291,7 +252,7 @@ export class ChatServer {
 
       this.gracePeriod = CONSTANTS.GRACE_PERIOD;
       this.disconnectedTimers = new Map();
-      this.cleanupQueue = new QueueManager(5);
+      this.cleanupQueue = new QueueManager(3);
       
       this.currentNumber = 1;
       this.maxNumber = CONSTANTS.MAX_NUMBER;
@@ -370,7 +331,6 @@ export class ChatServer {
         await this.cleanupDuplicateConnections();
         this.validateGracePeriodTimers();
         this.sampledSeatConsistencyCheck();
-        this.loadBalancer.cleanup();
       } catch (error) {}
     }, CONSTANTS.CLEANUP_INTERVAL);
     this._intervals.push(autoCleanupInterval);
@@ -398,7 +358,7 @@ export class ChatServer {
           else this.eventCounts.set(key, filtered);
         }
         
-        if (this._kursiUpdateDebounce.size > CONSTANTS.MAX_MAP_SIZE) {
+        if (this._kursiUpdateDebounce.size > 100) {
           for (const [key, timeout] of this._kursiUpdateDebounce) {
             clearTimeout(timeout);
           }
@@ -460,8 +420,6 @@ export class ChatServer {
     this.lastChatTime.clear();
     this.lastKursiTime.clear();
     this.eventCounts.clear();
-    
-    if (this.lowcard?.destroy) this.lowcard.destroy();
   }
 
   async loadState() {
@@ -517,12 +475,12 @@ export class ChatServer {
     this._nextConnId = 1;
     this.lowcard = null;
     this.gracePeriod = CONSTANTS.GRACE_PERIOD;
-    this.cleanupQueue = new QueueManager(5);
+    this.cleanupQueue = new QueueManager(3);
     this.muteStatus = new Map();
     for (const room of roomList) this.muteStatus.set(room, false);
     this.storage = this.state?.storage;
-    this.rateLimiter = new RateLimiter(60000, 200);
-    this.connectionRateLimiter = new RateLimiter(10000, 10);
+    this.rateLimiter = new RateLimiter(60000, 100);
+    this.connectionRateLimiter = new RateLimiter(10000, 5);
     this.safeMode = false;
     this.loadThreshold = CONSTANTS.LOAD_THRESHOLD;
     this._pointBuffer = new Map();
@@ -533,9 +491,7 @@ export class ChatServer {
     this.lastChatTime = new Map();
     this.lastKursiTime = new Map();
     this.eventCounts = new Map();
-    this.loadBalancer = new LoadBalancer();
     this._intervals = [];
-    this._startTime = Date.now();
     this.createDefaultRoom();
     this.lastNumberTick = Date.now();
     this.numberTickTimer = null;
@@ -684,7 +640,7 @@ export class ChatServer {
   enableSafeMode() {
     if (this.safeMode) return;
     this.safeMode = true;
-    this.cleanupQueue.concurrency = 2;
+    this.cleanupQueue.concurrency = 1;
     this._pointFlushDelay = 200;
     setTimeout(() => {
       if (this.getServerLoad() < CONSTANTS.LOAD_RECOVERY_THRESHOLD) this.disableSafeMode();
@@ -693,15 +649,15 @@ export class ChatServer {
 
   disableSafeMode() {
     this.safeMode = false;
-    this.cleanupQueue.concurrency = 5;
+    this.cleanupQueue.concurrency = 3;
     this._pointFlushDelay = 100;
   }
 
   getServerLoad() {
     const activeConnections = Array.from(this.clients).filter(c => c?.readyState === 1).length;
     const queueSize = this.cleanupQueue?.size() || 0;
-    const queueLoad = Math.min(queueSize / 100, 0.3);
-    return Math.min(activeConnections / 500 + queueLoad, 0.95);
+    const queueLoad = Math.min(queueSize / 50, 0.3);
+    return Math.min(activeConnections / 100 + queueLoad, 0.95);
   }
 
   flushBufferedPoints() {
@@ -1141,10 +1097,6 @@ export class ChatServer {
     if (!ws?.idtarget) { this.safeSend(ws, ["error", "User ID not set"]); return false; }
     if (!roomList.includes(room)) { this.safeSend(ws, ["error", "Invalid room"]); return false; }
     if (!this.rateLimiter.check(ws.idtarget)) { this.safeSend(ws, ["error", "Too many requests"]); return false; }
-    if (this.loadBalancer.shouldThrottle(ws.idtarget)) {
-      this.safeSend(ws, ["error", "Too many requests, slow down"]);
-      return false;
-    }
     
     try {
       const roomRelease = await this.lockManager.acquire(`room-join-${room}`);
@@ -1314,39 +1266,15 @@ export class ChatServer {
       if (!room || !roomList.includes(room)) return 0;
       const clientArray = this.roomClients.get(room);
       if (!clientArray?.length) return 0;
-      
       let sentCount = 0;
       const sentToUsers = new Set();
       const message = JSON.stringify(msg);
-      const BATCH_SIZE = CONSTANTS.BROADCAST_BATCH_SIZE;
-      
-      // Process in batches to avoid overwhelming
-      for (let i = 0; i < clientArray.length; i += BATCH_SIZE) {
-        const batch = clientArray.slice(i, i + BATCH_SIZE);
-        
-        for (const client of batch) {
-          if (client?.readyState === 1 && client.roomname === room && 
-              !client._isDuplicate && !client._isClosing) {
-            if (client.idtarget && sentToUsers.has(client.idtarget)) continue;
-            
-            if (client.bufferedAmount > CONSTANTS.MAX_BUFFERED_AMOUNT) {
-              continue;
-            }
-            
-            try {
-              client.send(message);
-              sentCount++;
-              if (client.idtarget) sentToUsers.add(client.idtarget);
-            } catch (e) {}
-          }
-        }
-        
-        // Small delay between batches
-        if (i + BATCH_SIZE < clientArray.length) {
-          setTimeout(() => {}, CONSTANTS.BROADCAST_DELAY_MS);
+      for (const client of clientArray) {
+        if (client?.readyState === 1 && client.roomname === room && !client._isDuplicate && !client._isClosing) {
+          if (client.idtarget && sentToUsers.has(client.idtarget)) continue;
+          try { client.send(message); sentCount++; if (client.idtarget) sentToUsers.add(client.idtarget); } catch {}
         }
       }
-      
       return sentCount;
     } catch { return 0; }
   }
@@ -1624,15 +1552,9 @@ export class ChatServer {
 
   // ========== MESSAGE HANDLING ==========
   async handleMessage(ws, raw) {
-    const startTime = Date.now();
-    
     if (!ws || ws.readyState !== 1 || ws._isDuplicate || ws._isClosing) return;
     if (ws.idtarget && !this.rateLimiter.check(ws.idtarget)) {
       this.safeSend(ws, ["error", "Too many requests"]);
-      return;
-    }
-    if (ws.idtarget && this.loadBalancer.shouldThrottle(ws.idtarget)) {
-      this.safeSend(ws, ["error", "Too many requests, slow down"]);
       return;
     }
     
@@ -1742,6 +1664,7 @@ export class ChatServer {
             if (ws.roomname !== roomname || ws.idtarget !== username) return;
             if (!roomList.includes(roomname)) return;
             
+            // RATE LIMIT CHAT
             if (!this.checkEventRate(ws.idtarget, 'chat')) return;
             if (message && message.length > CONSTANTS.MAX_CHAT_LENGTH) return;
             
@@ -1766,6 +1689,7 @@ export class ChatServer {
             if (ws.roomname !== room || !roomList.includes(room)) return;
             if (seat < 1 || seat > this.MAX_SEATS) return;
             
+            // RATE LIMIT POINT
             if (!this.checkEventRate(ws.idtarget, 'point')) return;
             
             this.savePointWithRetry(room, seat, x, y, fast).catch(() => {});
@@ -1788,6 +1712,7 @@ export class ChatServer {
             if (seat < 1 || seat > this.MAX_SEATS) return;
             if (ws.roomname !== room || !roomList.includes(room)) return;
             
+            // RATE LIMIT KURSI
             if (!this.checkEventRate(ws.idtarget, 'kursi')) return;
             
             const debounceKey = `${room}-${seat}`;
@@ -1874,15 +1799,6 @@ export class ChatServer {
         this.flushKursiUpdates();
         this.flushBufferedPoints();
         
-        // CPU Monitoring
-        const elapsed = Date.now() - startTime;
-        if (elapsed > 100) {
-          console.warn(`Slow message: ${elapsed}ms, event: ${evt}, user: ${ws.idtarget}`);
-          if (elapsed > 500) {
-            this.enableSafeMode();
-          }
-        }
-        
       } catch (error) {
         if (ws.readyState === 1) this.safeSend(ws, ["error", "Server error"]);
       }
@@ -1892,72 +1808,6 @@ export class ChatServer {
   // ========== FETCH HANDLER ==========
   async fetch(request) {
     try {
-      const url = new URL(request.url);
-      
-      // Stats endpoint for monitoring
-      if (url.pathname === "/stats") {
-        return new Response(JSON.stringify({
-          clients: this.clients.size,
-          connections: this.userConnections.size,
-          rooms: this.roomClients.size,
-          games: this.lowcard?.activeGames?.size || 0,
-          safeMode: this.safeMode,
-          load: this.getServerLoad(),
-          uptime: Date.now() - (this._startTime || Date.now()),
-          timestamp: Date.now()
-        }), {
-          status: 200,
-          headers: { "content-type": "application/json" }
-        });
-      }
-      
-      // Detailed stats endpoint
-      if (url.pathname === "/stats/detailed") {
-        const roomDetails = [];
-        for (const [room, clients] of this.roomClients) {
-          const seatMap = this.seatOccupancy.get(room);
-          let occupiedSeats = 0;
-          if (seatMap) {
-            for (let i = 1; i <= this.MAX_SEATS; i++) {
-              if (seatMap.get(i)) occupiedSeats++;
-            }
-          }
-          roomDetails.push({
-            room,
-            users: clients?.length || 0,
-            occupiedSeats
-          });
-        }
-        
-        return new Response(JSON.stringify({
-          clients: this.clients.size,
-          connections: this.userConnections.size,
-          rooms: this.roomClients.size,
-          roomDetails,
-          games: this.lowcard?.activeGames?.size || 0,
-          memory: {
-            userToSeat: this.userToSeat.size,
-            userCurrentRoom: this.userCurrentRoom.size,
-            disconnectedTimers: this.disconnectedTimers.size,
-            debounceMap: this._kursiUpdateDebounce.size,
-            pointBuffer: Array.from(this._pointBuffer.values()).reduce((a, b) => a + b.length, 0)
-          },
-          rateLimits: {
-            global: this.rateLimiter.requests.size,
-            points: this.lastPointTime.size,
-            chats: this.lastChatTime.size,
-            kursi: this.lastKursiTime.size
-          },
-          safeMode: this.safeMode,
-          load: this.getServerLoad(),
-          uptime: Date.now() - (this._startTime || Date.now()),
-          timestamp: Date.now()
-        }), {
-          status: 200,
-          headers: { "content-type": "application/json" }
-        });
-      }
-      
       const upgrade = request.headers.get("Upgrade") || "";
       if (upgrade.toLowerCase() !== "websocket") {
         return new Response("Expected WebSocket", { status: 426 });
@@ -2048,10 +1898,7 @@ export default {
           clients: obj.clients?.size || 0,
           rooms: obj.roomClients?.size || 0,
           connections: obj.userConnections?.size || 0,
-          games: obj.lowcard?.activeGames?.size || 0,
           safeMode: obj.safeMode,
-          load: obj.getServerLoad(),
-          uptime: Date.now() - (obj._startTime || Date.now()),
           timestamp: Date.now()
         };
         return new Response(JSON.stringify(stats), {
@@ -2066,4 +1913,4 @@ export default {
       return new Response("Server error", { status: 500 });
     }
   }
-};
+}; CEK PRILAKU APAKAH SAMA KODE AWAL
