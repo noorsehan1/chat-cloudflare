@@ -286,9 +286,7 @@ export class ChatServer {
       this.numberTickTimer = null;
       this._debounceCleanupTimer = null;
 
-      // ========== TAMBAHKAN INI ==========
       this._intervals = [];
-      // ==================================
 
       try { this.initializeRooms(); } catch { this.createDefaultRoom(); }
 
@@ -314,7 +312,6 @@ export class ChatServer {
     }
   }
 
-  // ========== TAMBAHKAN METHOD INI ==========
   startAutoCleanup() {
     const autoCleanupInterval = setInterval(async () => {
       try {
@@ -323,7 +320,6 @@ export class ChatServer {
     }, 300000);
     this._intervals.push(autoCleanupInterval);
   }
-  // =========================================
 
   startDebounceCleanupTimer() {
     if (this._debounceCleanupTimer) clearInterval(this._debounceCleanupTimer);
@@ -346,17 +342,7 @@ export class ChatServer {
     this._intervals.push(this._debounceCleanupTimer);
   }
 
-  startAutoCleanup() {
-    const autoCleanupInterval = setInterval(async () => {
-      try {
-        await this.cleanup();
-      } catch (error) {}
-    }, 300000);
-    this._intervals.push(autoCleanupInterval);
-  }
-
   async destroy() {
-    // ========== PERBAIKI METHOD DESTROY ==========
     if (this._intervals) {
       for (const interval of this._intervals) {
         clearInterval(interval);
@@ -468,9 +454,7 @@ export class ChatServer {
       this._hasBufferedUpdates = false;
       this._kursiUpdateDebounce = new Map();
       
-      // ========== TAMBAHKAN INI ==========
       this._intervals = [];
-      // ==================================
       
       this.createDefaultRoom();
       this.lastNumberTick = Date.now();
