@@ -9,11 +9,9 @@ export class LowCardGameManager {
     this._destroyed = false;
     
     // Auto cleanup setiap 5 menit
-    if (!this._destroyed) {
-      this._cleanupInterval = setInterval(() => {
-        if (!this._destroyed) this.cleanupStaleGames();
-      }, 300000);
-    }
+    this._cleanupInterval = setInterval(() => {
+      if (!this._destroyed) this.cleanupStaleGames();
+    }, 300000);
   }
 
   cleanupStaleGames() {
@@ -66,11 +64,18 @@ export class LowCardGameManager {
         game.countdownTimers = [];
       }
       
-      if (game._botTimers) {
+      if (game._botTimers && Array.isArray(game._botTimers)) {
         game._botTimers.forEach(timer => {
           try { clearTimeout(timer); } catch (e) {}
         });
         game._botTimers = [];
+      }
+      
+      if (game._botDrawTimeouts) {
+        game._botDrawTimeouts.forEach(timeout => {
+          try { clearTimeout(timeout); } catch (e) {}
+        });
+        game._botDrawTimeouts.clear();
       }
       
     } catch (error) {}
@@ -162,6 +167,7 @@ export class LowCardGameManager {
         betAmount,
         countdownTimers: [],
         _botTimers: [],
+        _botDrawTimeouts: new Set(),
         registrationTime: 25,
         drawTime: 30,
         hostId: ws.idtarget,
@@ -235,12 +241,14 @@ export class LowCardGameManager {
       const game = this.getGame(room);
       if (!game || !game._isActive || this._destroyed) return;
       
+      if (game.useBots || game.botPlayers.size > 0) return;
+      
       game.useBots = true;
       
       const mozNames = ["moz 1", "moz 2", "moz 3", "moz 4"];
       
       for (let i = 0; i < 4; i++) {
-        const botId = `BOT_MOZ_${room}_${i}_${Date.now()}`;
+        const botId = `BOT_MOZ_${room}_${i}_${Date.now()}_${Math.random()}`;
         const botName = mozNames[i];
         
         game.players.set(botId, { id: botId, name: botName });
@@ -329,6 +337,7 @@ export class LowCardGameManager {
           }, drawTime * 1000);
           
           game._botTimers.push(timeout);
+          game._botDrawTimeouts.add(timeout);
           game.countdownTimers.push({ timeout });
         });
       }
@@ -530,7 +539,6 @@ export class LowCardGameManager {
       const game = this.getGame(room);
       if (!game || !game._isActive || this._destroyed) return;
       
-      // Safety: jika tidak ada players, hapus game
       if (!game.players || game.players.size === 0) {
         this.activeGames.delete(room);
         return;
@@ -540,8 +548,13 @@ export class LowCardGameManager {
 
       const { numbers, tanda, players, eliminated, round, betAmount } = game;
       
-      // Safety: jika tidak ada numbers, lanjutkan ke round berikutnya
       if (!numbers || numbers.size === 0) {
+        const remainingPlayers = Array.from(players.keys()).filter(id => !eliminated.has(id));
+        if (remainingPlayers.length === 0) {
+          this.activeGames.delete(room);
+          return;
+        }
+        
         game.round++;
         game.evaluationLocked = false;
         game.drawTimeExpired = false;
@@ -562,6 +575,8 @@ export class LowCardGameManager {
         return;
       }
 
+      const remainingPlayers = Array.from(players.keys()).filter(id => !eliminated.has(id));
+
       if (entries.length === 1 && noSubmit.length === activePlayers.length - 1) {
         const winnerId = entries[0][0];
         const winnerPlayer = players.get(winnerId);
@@ -578,16 +593,16 @@ export class LowCardGameManager {
       const allSame = values.every(v => v === values[0]);
       let losers = [];
 
-      if (!allSame) {
+      if (!allSame && values.length > 0) {
         const lowest = Math.min(...values);
         losers = entries.filter(([, n]) => n === lowest).map(([id]) => id);
         losers.forEach(id => eliminated.add(id));
       }
 
-      const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
+      const newRemaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
 
-      if (remaining.length === 1) {
-        const winnerId = remaining[0];
+      if (newRemaining.length === 1) {
+        const winnerId = newRemaining[0];
         const winnerPlayer = players.get(winnerId);
         const winnerName = winnerPlayer?.name || winnerId;
         const totalCoin = betAmount * players.size;
@@ -610,7 +625,7 @@ export class LowCardGameManager {
         return player?.name || id;
       });
       
-      const remainingNames = remaining.map(id => {
+      const remainingNames = newRemaining.map(id => {
         const player = players.get(id);
         return player?.name || id;
       });
@@ -632,7 +647,6 @@ export class LowCardGameManager {
       this.chatServer?.broadcastToRoom?.(room, ["gameLowCardNextRound", game.round]);
       this.startDrawCountdown(room);
     } catch (error) {
-      // Safety: jika error, hapus game
       try {
         this.activeGames.delete(room);
       } catch (e) {}
@@ -644,20 +658,18 @@ export class LowCardGameManager {
       const game = this.getGame(room);
       if (!game) return;
       
-      // Mark game as inactive first
+      const playersList = Array.from(game.players?.values() || []).map(p => p.name || p.id);
+      
       game._isActive = false;
       
-      // Clear all timers
       this.clearAllTimers(game);
       
-      // Clear all maps and sets
       if (game.players) game.players.clear();
       if (game.botPlayers) game.botPlayers.clear();
       if (game.numbers) game.numbers.clear();
       if (game.tanda) game.tanda.clear();
       if (game.eliminated) game.eliminated.clear();
-      
-      const playersList = Array.from(game.players?.values() || []).map(p => p.name || p.id);
+      if (game._botDrawTimeouts) game._botDrawTimeouts.clear();
       
       if (this.chatServer && this.chatServer.broadcastToRoom) {
         try {
@@ -665,7 +677,6 @@ export class LowCardGameManager {
         } catch (e) {}
       }
       
-      // Delete from active games
       this.activeGames.delete(room);
     } catch (error) {}
   }
@@ -673,19 +684,16 @@ export class LowCardGameManager {
   destroy() {
     this._destroyed = true;
     
-    // Cleanup all games
     for (const [room, game] of this.activeGames.entries()) {
       this.endGame(room);
     }
     this.activeGames.clear();
     
-    // Clear cleanup interval
     if (this._cleanupInterval) {
       clearInterval(this._cleanupInterval);
       this._cleanupInterval = null;
     }
     
-    // Clear reference to chatServer
     this.chatServer = null;
   }
 }
