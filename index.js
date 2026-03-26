@@ -8,22 +8,22 @@ const roomList = [
 // ========== CONSTANTS ==========
 const CONSTANTS = {
   // ========== WAJIB DIUBAH (KRITIS) ==========
-  MAX_QUEUE_SIZE: 200,              // 50 → 200
-  MAX_LOCK_QUEUE_SIZE: 100,         // 30 → 100
-  MAX_POINTS_PER_ROOM: 100,         // 30 → 100
-  MAX_POINTS_TOTAL: 2000,           // 500 → 2000
-  MAX_POINTS_BEFORE_FLUSH: 200,     // 100 → 200
-  LOCK_ACQUIRE_TIMEOUT: 5000,       // 2000 → 5000
+  MAX_QUEUE_SIZE: 200,
+  MAX_LOCK_QUEUE_SIZE: 100,
+  MAX_POINTS_PER_ROOM: 100,
+  MAX_POINTS_TOTAL: 2000,
+  MAX_POINTS_BEFORE_FLUSH: 200,
+  LOCK_ACQUIRE_TIMEOUT: 5000,
   
   // ========== SANGAT DISARANKAN ==========
-  BUFFER_SIZE_LIMIT: 20,            // 10 → 20
-  BROADCAST_BATCH_SIZE: 20,         // 10 → 20
-  CACHE_VALID_DURATION: 5000,       // 2000 → 5000
-  LOAD_THRESHOLD: 0.85,             // 0.9 → 0.85
-  LOAD_RECOVERY_THRESHOLD: 0.65,    // 0.7 → 0.65
-  KURSI_UPDATE_DEBOUNCE: 150,       // 100 → 150
-  DEBOUNCE_CLEANUP_INTERVAL: 30000, // 60000 → 30000
-  MAX_DEBOUNCE_AGE: 20000,          // 30000 → 20000
+  BUFFER_SIZE_LIMIT: 20,
+  BROADCAST_BATCH_SIZE: 20,
+  CACHE_VALID_DURATION: 5000,
+  LOAD_THRESHOLD: 0.85,
+  LOAD_RECOVERY_THRESHOLD: 0.65,
+  KURSI_UPDATE_DEBOUNCE: 150,
+  DEBOUNCE_CLEANUP_INTERVAL: 30000,
+  MAX_DEBOUNCE_AGE: 20000,
   
   // ========== TETAP ==========
   LOCK_TIMEOUT: 10000,
@@ -286,6 +286,10 @@ export class ChatServer {
       this.numberTickTimer = null;
       this._debounceCleanupTimer = null;
 
+      // ========== TAMBAHKAN INI ==========
+      this._intervals = [];
+      // ==================================
+
       try { this.initializeRooms(); } catch { this.createDefaultRoom(); }
 
       this.startNumberTickTimer();
@@ -309,6 +313,17 @@ export class ChatServer {
       this.initializeFallback();
     }
   }
+
+  // ========== TAMBAHKAN METHOD INI ==========
+  startAutoCleanup() {
+    const autoCleanupInterval = setInterval(async () => {
+      try {
+        await this.cleanup();
+      } catch (error) {}
+    }, 300000);
+    this._intervals.push(autoCleanupInterval);
+  }
+  // =========================================
 
   startDebounceCleanupTimer() {
     if (this._debounceCleanupTimer) clearInterval(this._debounceCleanupTimer);
@@ -337,11 +352,11 @@ export class ChatServer {
         await this.cleanup();
       } catch (error) {}
     }, 300000);
-    this._intervals = this._intervals || [];
     this._intervals.push(autoCleanupInterval);
   }
 
   async destroy() {
+    // ========== PERBAIKI METHOD DESTROY ==========
     if (this._intervals) {
       for (const interval of this._intervals) {
         clearInterval(interval);
@@ -423,41 +438,47 @@ export class ChatServer {
   }
 
   initializeFallback() {
-    this.clients = new Set();
-    this.userToSeat = new Map();
-    this.userCurrentRoom = new Map();
-    this.roomSeats = new Map();
-    this.seatOccupancy = new Map();
-    this.roomClients = new Map();
-    this.updateKursiBuffer = new Map();
-    this.userConnections = new Map();
-    this.disconnectedTimers = new Map();
-    this.lockManager = new PromiseLockManager();
-    this.cleanupInProgress = new Set();
-    this.MAX_SEATS = CONSTANTS.MAX_SEATS;
-    this.currentNumber = 1;
-    this._nextConnId = 1;
-    this.lowcard = null;
-    this.gracePeriod = CONSTANTS.GRACE_PERIOD;
-    this.cleanupQueue = new QueueManager(3);
-    this.muteStatus = new Map();
-    for (const room of roomList) this.muteStatus.set(room, false);
-    this.storage = this.state?.storage;
-    this.rateLimiter = new RateLimiter(60000, 100);
-    this.connectionRateLimiter = new RateLimiter(10000, 5);
-    this.safeMode = false;
-    this.loadThreshold = CONSTANTS.LOAD_THRESHOLD;
-    this._pointBuffer = new Map();
-    this._pointFlushDelay = 100;
-    this._hasBufferedUpdates = false;
-    this._kursiUpdateDebounce = new Map();
-    this._intervals = [];
-    this.createDefaultRoom();
-    this.lastNumberTick = Date.now();
-    this.numberTickTimer = null;
-    this.startNumberTickTimer();
-    this.startAutoCleanup();
-    this.startDebounceCleanupTimer();
+    try {
+      this.clients = new Set();
+      this.userToSeat = new Map();
+      this.userCurrentRoom = new Map();
+      this.roomSeats = new Map();
+      this.seatOccupancy = new Map();
+      this.roomClients = new Map();
+      this.updateKursiBuffer = new Map();
+      this.userConnections = new Map();
+      this.disconnectedTimers = new Map();
+      this.lockManager = new PromiseLockManager();
+      this.cleanupInProgress = new Set();
+      this.MAX_SEATS = CONSTANTS.MAX_SEATS;
+      this.currentNumber = 1;
+      this._nextConnId = 1;
+      this.lowcard = null;
+      this.gracePeriod = CONSTANTS.GRACE_PERIOD;
+      this.cleanupQueue = new QueueManager(3);
+      this.muteStatus = new Map();
+      for (const room of roomList) this.muteStatus.set(room, false);
+      this.storage = this.state?.storage;
+      this.rateLimiter = new RateLimiter(60000, 100);
+      this.connectionRateLimiter = new RateLimiter(10000, 5);
+      this.safeMode = false;
+      this.loadThreshold = CONSTANTS.LOAD_THRESHOLD;
+      this._pointBuffer = new Map();
+      this._pointFlushDelay = 100;
+      this._hasBufferedUpdates = false;
+      this._kursiUpdateDebounce = new Map();
+      
+      // ========== TAMBAHKAN INI ==========
+      this._intervals = [];
+      // ==================================
+      
+      this.createDefaultRoom();
+      this.lastNumberTick = Date.now();
+      this.numberTickTimer = null;
+      this.startNumberTickTimer();
+      this.startAutoCleanup();
+      this.startDebounceCleanupTimer();
+    } catch (error) {}
   }
 
   async performMemoryCleanup() {
@@ -1824,10 +1845,18 @@ export class ChatServer {
   }
   
   async cleanup() {
-    await this.performMemoryCleanup();
-    await this.cleanupDuplicateConnections();
-    this.validateGracePeriodTimers();
-    this.sampledSeatConsistencyCheck();
+    try {
+      await this.performMemoryCleanup();
+    } catch (error) {}
+    try {
+      await this.cleanupDuplicateConnections();
+    } catch (error) {}
+    try {
+      this.validateGracePeriodTimers();
+    } catch (error) {}
+    try {
+      this.sampledSeatConsistencyCheck();
+    } catch (error) {}
   }
 }
 
