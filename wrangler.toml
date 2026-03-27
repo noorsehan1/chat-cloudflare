@@ -2,5 +2,4 @@ name = "chat-cloudflare"
 main = "index.js"
 compatibility_date = "2026-03-20"
 
-[limits]
-cpu_ms = 10
+# Tidak perlu [limits] untuk Free Plan
