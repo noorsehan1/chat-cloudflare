@@ -420,9 +420,8 @@ function createEmptySeat() {
 }
 
 export class ChatServer {
-  constructor(state, env) {
+  constructor(env) {
     try {
-      this.state = state;
       this.env = env;
       this._startTime = Date.now();
       this._lastActivityTime = Date.now();
@@ -432,8 +431,6 @@ export class ChatServer {
       
       this.muteStatus = new Map();
       for (const room of roomList) this.muteStatus.set(room, false);
-      
-      this.storage = state?.storage;
       
       this.lockManager = new PromiseLockManager();
       this.cleanupInProgress = new Set();
@@ -490,7 +487,6 @@ export class ChatServer {
         this._pointBuffer.set(room, []);
       }
 
-      this.loadState();
       this.startAutoCleanup();
       this.startIdleCleanup();
       this.startMemoryMonitor();
@@ -636,8 +632,6 @@ export class ChatServer {
     this.flushKursiUpdates();
     this.flushBufferedPoints();
     
-    await this.saveState();
-    
     for (const client of this.clients) {
       try {
         client.close(1000, "Server shutdown");
@@ -716,26 +710,6 @@ export class ChatServer {
     this._failedBatches = [];
   }
 
-  async loadState() {
-    try {
-      if (this.storage) {
-        const savedNumber = await this.storage.get("currentNumber");
-        if (savedNumber) this.currentNumber = savedNumber;
-        const savedLastTick = await this.storage.get("lastNumberTick");
-        if (savedLastTick) this.lastNumberTick = savedLastTick;
-      }
-    } catch {}
-  }
-
-  async saveState() {
-    try {
-      if (this.storage) {
-        await this.storage.put("currentNumber", this.currentNumber);
-        await this.storage.put("lastNumberTick", this.lastNumberTick);
-      }
-    } catch {}
-  }
-
   startNumberTickTimer() {
     if (this.numberTickTimer) clearTimeout(this.numberTickTimer);
     const scheduleNext = () => {
@@ -745,7 +719,6 @@ export class ChatServer {
       this.numberTickTimer = setTimeout(() => {
         this.tick();
         this.lastNumberTick = Date.now();
-        this.saveState();
         scheduleNext();
       }, delay);
     };
@@ -773,7 +746,6 @@ export class ChatServer {
       this.cleanupQueue = new QueueManager(3);
       this.muteStatus = new Map();
       for (const room of roomList) this.muteStatus.set(room, false);
-      this.storage = this.state?.storage;
       this.rateLimiter = new RateLimiter(60000, 100);
       this.connectionRateLimiter = new RateLimiter(10000, 5);
       this.roomRateLimiter = new RoomRateLimiter();
@@ -1525,7 +1497,6 @@ export class ChatServer {
           }
         }
         
-        // Cari seat kosong - jangan buat data baru
         let assignedSeat = null;
         const occupancyMap = this.seatOccupancy.get(room);
         if (occupancyMap) {
@@ -1543,7 +1514,6 @@ export class ChatServer {
           return false; 
         }
         
-        // Pastikan seatMap ada, tapi biarkan null (data akan diisi oleh updateKursi)
         const seatMap = this.roomSeats.get(room);
         if (!seatMap.has(assignedSeat) || seatMap.get(assignedSeat) === null) {
           seatMap.set(assignedSeat, null);
@@ -1607,7 +1577,6 @@ export class ChatServer {
           ws._isDuplicate = false;
           ws._isClosing = false;
           
-          // Simpan data user dari ws jika ada
           if (ws.userData) {
             ws.noimageUrl = ws.userData.noimageUrl || "";
             ws.color = ws.userData.color || "";
@@ -1629,7 +1598,6 @@ export class ChatServer {
         ws._isDuplicate = false;
         ws._isClosing = false;
         
-        // Restore user data
         if (ws.userData) {
           ws.noimageUrl = ws.userData.noimageUrl || "";
           ws.color = ws.userData.color || "";
@@ -1663,7 +1631,6 @@ export class ChatServer {
               if (clientArray && !clientArray.includes(ws)) clientArray.push(ws);
               this._addUserConnection(id, ws);
               
-              // Update seat data dengan data terbaru dari user
               if (seatData) {
                 seatData.noimageUrl = ws.noimageUrl || seatData.noimageUrl;
                 seatData.color = ws.color || seatData.color;
@@ -1775,7 +1742,6 @@ export class ChatServer {
       
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
-        // Hanya kirim data yang TIDAK null dan memiliki namauser
         if (info && info.namauser) {
           allKursiMeta[seat] = { 
             noimageUrl: info.noimageUrl || "", 
@@ -2247,6 +2213,13 @@ export class ChatServer {
             const [, room, seat, x, y, fast] = data;
             if (ws.roomname !== room || !roomList.includes(room)) return;
             if (seat < 1 || seat > this.MAX_SEATS) return;
+            
+            // ✅ Validasi: user harus duduk di kursi tersebut
+            const seatInfo = this.userToSeat.get(ws.idtarget);
+            if (!seatInfo || seatInfo.room !== room || seatInfo.seat !== seat) {
+              return;
+            }
+            
             this.savePointWithRetry(room, seat, x, y, fast).catch(() => {});
             this.broadcastPointDirect(room, seat, x, y, fast);
             break;
@@ -2533,37 +2506,34 @@ export default {
     try {
       const url = new URL(req.url);
       
+      // ✅ Singleton pattern - tanpa Durable Objects
+      if (!globalThis.chatServer) {
+        globalThis.chatServer = new ChatServer(env);
+      }
+      const chatServer = globalThis.chatServer;
+      
+      if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
+        return chatServer.fetch(req);
+      }
+      
       if (url.pathname === "/cleanup") {
-        const id = env.CHAT_SERVER.idFromName("global-chat");
-        const obj = env.CHAT_SERVER.get(id);
-        await obj.cleanup();
+        await chatServer.cleanup();
         return new Response("Cleanup completed", { status: 200 });
       }
       
       if (url.pathname === "/destroy") {
-        const id = env.CHAT_SERVER.idFromName("global-chat");
-        const obj = env.CHAT_SERVER.get(id);
-        await obj.destroy();
+        await chatServer.destroy();
+        globalThis.chatServer = null;
         return new Response("Destroy completed", { status: 200 });
       }
       
       if (url.pathname === "/shutdown") {
-        const id = env.CHAT_SERVER.idFromName("global-chat");
-        const obj = env.CHAT_SERVER.get(id);
-        await obj.gracefulShutdown();
+        await chatServer.gracefulShutdown();
         return new Response("Shutdown initiated", { status: 200 });
       }
       
-      if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
-        const id = env.CHAT_SERVER.idFromName("global-chat");
-        const obj = env.CHAT_SERVER.get(id);
-        return obj.fetch(req);
-      }
-      
       if (url.pathname === "/health") {
-        const id = env.CHAT_SERVER.idFromName("global-chat");
-        const obj = env.CHAT_SERVER.get(id);
-        const health = await obj.getHealthStatus();
+        const health = await chatServer.getHealthStatus();
         const statusCode = health.status === "healthy" ? 200 : 503;
         return new Response(JSON.stringify(health), { 
           status: statusCode, 
@@ -2572,18 +2542,16 @@ export default {
       }
       
       if (url.pathname === "/metrics") {
-        const id = env.CHAT_SERVER.idFromName("global-chat");
-        const obj = env.CHAT_SERVER.get(id);
-        const activeConnections = Array.from(obj.clients || []).filter(c => c?.readyState === 1).length;
+        const activeConnections = Array.from(chatServer.clients || []).filter(c => c?.readyState === 1).length;
         const metrics = {
           status: "healthy",
           activeConnections,
-          totalClients: obj.clients?.size || 0,
-          activeGames: obj.lowcard?.activeGames?.size || 0,
-          queueSize: obj.cleanupQueue?.size() || 0,
-          debounceSize: obj._kursiUpdateDebounce?.size || 0,
-          failedBatches: obj._failedBatches?.length || 0,
-          messageQueues: obj._messageQueues?.size || 0,
+          totalClients: chatServer.clients?.size || 0,
+          activeGames: chatServer.lowcard?.activeGames?.size || 0,
+          queueSize: chatServer.cleanupQueue?.size() || 0,
+          debounceSize: chatServer._kursiUpdateDebounce?.size || 0,
+          failedBatches: chatServer._failedBatches?.length || 0,
+          messageQueues: chatServer._messageQueues?.size || 0,
           timestamp: Date.now()
         };
         return new Response(JSON.stringify(metrics), {
@@ -2594,6 +2562,7 @@ export default {
       return new Response("WebSocket endpoint", { status: 200, headers: { "content-type": "text/plain" } });
       
     } catch (error) {
+      console.error("Fetch error:", error);
       return new Response("Server error", { status: 500 });
     }
   }
