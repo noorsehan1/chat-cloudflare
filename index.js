@@ -9,9 +9,6 @@ const roomList = [
 const CONSTANTS = {
   MAX_QUEUE_SIZE: 200,
   MAX_LOCK_QUEUE_SIZE: 100,
-  MAX_POINTS_PER_ROOM: 100,
-  MAX_POINTS_TOTAL: 2000,
-  MAX_POINTS_BEFORE_FLUSH: 200,
   LOCK_ACQUIRE_TIMEOUT: 5000,
   BUFFER_SIZE_LIMIT: 20,
   BROADCAST_BATCH_SIZE: 20,
@@ -510,6 +507,7 @@ export class ChatServer {
       this.bufferSizeLimit = CONSTANTS.BUFFER_SIZE_LIMIT;
       this.userConnections = new Map();
 
+      // POINT BUFFER - TETAP ADA TAPI TIDAK DIGUNAKAN
       this._pointBuffer = new Map();
       this._pointFlushDelay = 100;
       this._hasBufferedUpdates = false;
@@ -548,6 +546,7 @@ export class ChatServer {
       this._countsCacheTime = 0;
       this.cacheValidDuration = CONSTANTS.CACHE_VALID_DURATION;
 
+      // INISIALISASI POINT BUFFER (TIDAK DIGUNAKAN)
       for (const room of roomList) {
         this._pointBuffer.set(room, []);
       }
@@ -584,9 +583,6 @@ export class ChatServer {
           for (const [room, buffer] of this.updateKursiBuffer) {
             buffer.clear();
           }
-          
-          // Force flush point buffer
-          this.flushBufferedPoints();
           
           // Force GC
           if (global.gc) global.gc();
@@ -643,19 +639,6 @@ export class ChatServer {
           }
         }
         
-        for (const [room, points] of this._pointBuffer) {
-          if (points.length > CONSTANTS.MAX_POINTS_PER_ROOM) {
-            this.flushBufferedPoints();
-            break;
-          }
-        }
-        
-        if (this._failedBatches && this._failedBatches.length > 0) {
-          this._failedBatches = this._failedBatches.filter(failed => {
-            return (now - failed.timestamp) < 5000;
-          });
-        }
-        
         this.roomRateLimiter.cleanup();
         
         if (global.gc && Math.random() < 0.1) {
@@ -674,7 +657,6 @@ export class ChatServer {
         
         if (activeConnections === 0 && (now - this._lastActivityTime) > 300000) {
           this.flushKursiUpdates();
-          this.flushBufferedPoints();
           
           const nowTime = Date.now();
           const snapshot = Array.from(this._kursiUpdateDebounce.entries());
@@ -708,7 +690,6 @@ export class ChatServer {
           const memUsage = process.memoryUsage();
           if (memUsage.heapUsed / memUsage.heapTotal > CONSTANTS.EMERGENCY_MEMORY_THRESHOLD) {
             this.flushKursiUpdates();
-            this.flushBufferedPoints();
             for (const [key, timer] of this._kursiUpdateDebounce) {
               clearTimeout(timer);
             }
@@ -768,7 +749,6 @@ export class ChatServer {
     await new Promise(resolve => setTimeout(resolve, 5000));
     
     this.flushKursiUpdates();
-    this.flushBufferedPoints();
     
     await this.saveState();
     
@@ -1007,21 +987,6 @@ export class ChatServer {
         }
       }
 
-      for (const [room, points] of this._pointBuffer) {
-        if (points && points.length > CONSTANTS.MAX_POINTS_PER_ROOM) {
-          this._pointBuffer.set(room, points.slice(-CONSTANTS.MAX_POINTS_PER_ROOM));
-        }
-      }
-      
-      let totalPoints = 0;
-      for (const points of this._pointBuffer.values()) totalPoints += points.length;
-      if (totalPoints > CONSTANTS.MAX_POINTS_TOTAL) {
-        const reduceBy = Math.ceil((totalPoints - CONSTANTS.MAX_POINTS_TOTAL) / this._pointBuffer.size);
-        for (const [room, points] of this._pointBuffer) {
-          if (points.length > reduceBy) this._pointBuffer.set(room, points.slice(reduceBy));
-        }
-      }
-
       // Batasi buffer per room
       for (const [room, buffer] of this.updateKursiBuffer) {
         if (buffer && buffer.size > CONSTANTS.MAX_BUFFER_PER_ROOM) {
@@ -1159,49 +1124,35 @@ export class ChatServer {
     return Math.min(activeConnections / 100 + queueLoad, 0.95);
   }
 
-  flushBufferedPoints() {
-    for (const [room, points] of this._pointBuffer) {
-      if (points.length > 0) {
-        const batch = [...points];
-        const success = this.broadcastPointsBatch(room, batch);
-        if (success) {
-          points.splice(0, batch.length);
-        } else {
-          if (!this._failedBatches) this._failedBatches = [];
-          this._failedBatches.push({ room, batch, timestamp: Date.now() });
-        }
-      }
-    }
-    
-    if (this._failedBatches && this._failedBatches.length > 0) {
-      const now = Date.now();
-      this._failedBatches = this._failedBatches.filter(failed => {
-        if (now - failed.timestamp < 5000) {
-          const success = this.broadcastPointsBatch(failed.room, failed.batch);
-          return !success;
-        }
-        return false;
-      });
-    }
-  }
-
-  broadcastPointsBatch(room, batch) {
+  // ✅ PERBAIKAN POINT: LANGSUNG REPLACE, TIDAK PAKAI BUFFER
+  async savePointWithRetry(room, seat, x, y, fast) {
     try {
-      if (!room || !roomList.includes(room)) return false;
-      const clientArray = this.roomClients.get(room);
-      if (!clientArray || clientArray.length === 0) return false;
-      const message = JSON.stringify(["pointsBatch", room, batch]);
-      let sentCount = 0;
-      for (const client of clientArray) {
-        if (client?.readyState === 1 && client.roomname === room && !client._isDuplicate && !client._isClosing) {
-          try { 
-            client.send(message); 
-            sentCount++;
-          } catch {}
-        }
-      }
-      return sentCount > 0;
-    } catch { return false; }
+      if (seat < 1 || seat > this.MAX_SEATS) return false;
+      const xNum = typeof x === 'number' ? x : parseFloat(x);
+      const yNum = typeof y === 'number' ? y : parseFloat(y);
+      if (isNaN(xNum) || isNaN(yNum)) return false;
+      
+      // ✅ LANGSUNG UPDATE SEAT ATOMIC (REPLACE POINT LAMA)
+      await this.updateSeatAtomic(room, seat, (currentSeat) => {
+        // REPLACE point lama dengan yang baru
+        currentSeat.lastPoint = { 
+          x: xNum, 
+          y: yNum, 
+          fast: fast || false, 
+          timestamp: Date.now() 
+        };
+        return currentSeat;
+      });
+      
+      // ✅ LANGSUNG BROADCAST KE ROOM
+      this.broadcastPointDirect(room, seat, xNum, yNum, fast);
+      return true;
+      
+    } catch (error) {
+      // Jika gagal, tetap broadcast
+      this.broadcastPointDirect(room, seat, x, y, fast);
+      return false;
+    }
   }
 
   broadcastPointDirect(room, seat, x, y, fast) {
@@ -1219,27 +1170,10 @@ export class ChatServer {
     } catch {}
   }
 
-  async savePointWithRetry(room, seat, x, y, fast) {
-    try {
-      if (seat < 1 || seat > this.MAX_SEATS) return false;
-      const xNum = typeof x === 'number' ? x : parseFloat(x);
-      const yNum = typeof y === 'number' ? y : parseFloat(y);
-      if (isNaN(xNum) || isNaN(yNum)) return false;
-      
-      const points = this._pointBuffer.get(room) || [];
-      if (points.length > CONSTANTS.MAX_POINTS_BEFORE_FLUSH) this.flushBufferedPoints();
-      
-      await this.updateSeatAtomic(room, seat, (currentSeat) => {
-        currentSeat.lastPoint = { x: xNum, y: yNum, fast: fast || false, timestamp: Date.now() };
-        return currentSeat;
-      });
-      
-      this.broadcastPointDirect(room, seat, xNum, yNum, fast);
-      return true;
-    } catch {
-      this.broadcastPointDirect(room, seat, x, y, fast);
-      return false;
-    }
+  // METHOD INI TETAP ADA TAPI TIDAK DIGUNAKAN (UNTUK COMPATIBILITY)
+  flushBufferedPoints() {
+    // TIDAK ADA YANG PERLU DI-FLUSH KARENA TIDAK PAKAI BUFFER
+    return;
   }
 
   createDefaultRoom() {
@@ -1682,134 +1616,118 @@ export class ChatServer {
   }
 
   async handleJoinRoom(ws, room) {
-  if (!ws?.idtarget) { 
-    this.safeSend(ws, ["error", "User ID not set"]); 
-    return false; 
-  }
-  if (!roomList.includes(room)) { 
-    this.safeSend(ws, ["error", "Invalid room"]); 
-    return false; 
-  }
-  if (!this.rateLimiter.check(ws.idtarget)) { 
-    this.safeSend(ws, ["error", "Too many requests"]); 
-    return false; 
-  }
-  
-  try {
-    const roomRelease = await this.lockManager.acquire(`room-join-assign-${room}`);
+    if (!ws?.idtarget) { this.safeSend(ws, ["error", "User ID not set"]); return false; }
+    if (!roomList.includes(room)) { this.safeSend(ws, ["error", "Invalid room"]); return false; }
+    if (!this.rateLimiter.check(ws.idtarget)) { this.safeSend(ws, ["error", "Too many requests"]); return false; }
+    
     try {
-      this.cancelCleanup(ws.idtarget);
-      await this.ensureSeatsData(room);
-      
-      const previousRoom = this.userCurrentRoom.get(ws.idtarget);
-      
-      // CEK APAKAH USER DALAM GRACE PERIOD
-      const pendingData = this._pendingReconnections.get(ws.idtarget);
-      if (pendingData && pendingData.seatInfo && pendingData.seatInfo.room === room) {
-        const { seat } = pendingData.seatInfo;
-        const occupancyMap = this.seatOccupancy.get(room);
-        const seatMap = this.roomSeats.get(room);
+      const roomRelease = await this.lockManager.acquire(`room-join-assign-${room}`);
+      try {
+        this.cancelCleanup(ws.idtarget);
+        await this.ensureSeatsData(room);
         
-        if (occupancyMap && seatMap) {
-          if (occupancyMap.get(seat) === null) {
-            occupancyMap.set(seat, ws.idtarget);
-            const seatData = seatMap.get(seat);
-            if (seatData && seatData.namauser === ws.idtarget) {
-              ws.roomname = room;
-              ws.numkursi = new Set([seat]);
-              const clientArray = this.roomClients.get(room);
-              if (clientArray && !clientArray.includes(ws)) clientArray.push(ws);
-              this._addUserConnection(ws.idtarget, ws);
-              this.userToSeat.set(ws.idtarget, { room, seat });
-              this.userCurrentRoom.set(ws.idtarget, room);
-              
-              this.sendAllStateTo(ws, room);
-              if (seatData.lastPoint) {
-                this.safeSend(ws, ["pointUpdated", room, seat, 
-                  seatData.lastPoint.x, seatData.lastPoint.y, seatData.lastPoint.fast]);
+        const previousRoom = this.userCurrentRoom.get(ws.idtarget);
+        
+        const pendingData = this._pendingReconnections.get(ws.idtarget);
+        if (pendingData && pendingData.seatInfo && pendingData.seatInfo.room === room) {
+          const { seat } = pendingData.seatInfo;
+          const occupancyMap = this.seatOccupancy.get(room);
+          const seatMap = this.roomSeats.get(room);
+          
+          if (occupancyMap && seatMap) {
+            if (occupancyMap.get(seat) === null) {
+              occupancyMap.set(seat, ws.idtarget);
+              const seatData = seatMap.get(seat);
+              if (seatData && seatData.namauser === ws.idtarget) {
+                ws.roomname = room;
+                ws.numkursi = new Set([seat]);
+                const clientArray = this.roomClients.get(room);
+                if (clientArray && !clientArray.includes(ws)) clientArray.push(ws);
+                this._addUserConnection(ws.idtarget, ws);
+                this.userToSeat.set(ws.idtarget, { room, seat });
+                this.userCurrentRoom.set(ws.idtarget, room);
+                
+                this.sendAllStateTo(ws, room);
+                if (seatData.lastPoint) {
+                  this.safeSend(ws, ["pointUpdated", room, seat, seatData.lastPoint.x, seatData.lastPoint.y, seatData.lastPoint.fast]);
+                }
+                this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
+                this.updateRoomCount(room);
+                
+                this._pendingReconnections.delete(ws.idtarget);
+                return true;
               }
-              this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
-              this.updateRoomCount(room);
-              
-              this._pendingReconnections.delete(ws.idtarget);
-              return true;
             }
           }
         }
-      }
-      
-      // JIKA SUDAH DI ROOM YANG SAMA
-      if (previousRoom === room) {
-        this.sendAllStateTo(ws, room);
-        this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
-        return true;
-      } else if (previousRoom) {
-        await this.cleanupFromRoom(ws, previousRoom);
-      }
-      
-      // CEK APAKAH USER SUDAH PUNYA SEAT DI ROOM INI
-      const seatInfo = this.userToSeat.get(ws.idtarget);
-      if (seatInfo?.room === room) {
-        const occupancyMap = this.seatOccupancy.get(room);
-        if (occupancyMap?.get(seatInfo.seat) === ws.idtarget) {
-          ws.roomname = room;
-          ws.numkursi = new Set([seatInfo.seat]);
-          const clientArray = this.roomClients.get(room);
-          if (clientArray && !clientArray.includes(ws)) clientArray.push(ws);
-          this._addUserConnection(ws.idtarget, ws);
+        
+        if (previousRoom === room) {
           this.sendAllStateTo(ws, room);
           this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
           return true;
+        } else if (previousRoom) {
+          await this.cleanupFromRoom(ws, previousRoom);
         }
-      }
-      
-      // CARI SEAT KOSONG
-      let assignedSeat = null;
-      const occupancyMap = this.seatOccupancy.get(room);
-      if (occupancyMap) {
-        for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-          if (occupancyMap.get(seat) === null) {
-            occupancyMap.set(seat, ws.idtarget);
-            assignedSeat = seat;
-            break;
+        
+        const seatInfo = this.userToSeat.get(ws.idtarget);
+        if (seatInfo?.room === room) {
+          const occupancyMap = this.seatOccupancy.get(room);
+          if (occupancyMap?.get(seatInfo.seat) === ws.idtarget) {
+            ws.roomname = room;
+            ws.numkursi = new Set([seatInfo.seat]);
+            const clientArray = this.roomClients.get(room);
+            if (clientArray && !clientArray.includes(ws)) clientArray.push(ws);
+            this._addUserConnection(ws.idtarget, ws);
+            this.sendAllStateTo(ws, room);
+            this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
+            return true;
           }
         }
+        
+        let assignedSeat = null;
+        const occupancyMap = this.seatOccupancy.get(room);
+        if (occupancyMap) {
+          for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
+            if (occupancyMap.get(seat) === null) {
+              occupancyMap.set(seat, ws.idtarget);
+              assignedSeat = seat;
+              break;
+            }
+          }
+        }
+        
+        if (!assignedSeat) { 
+          this.safeSend(ws, ["roomFull", room]); 
+          return false; 
+        }
+        
+        // TIDAK MEMBUAT DATA KURSI DI SINI
+        // Biarkan updateSeatAtomic yang membuat saat pertama kali ada update
+        
+        this.userToSeat.set(ws.idtarget, { room, seat: assignedSeat });
+        this.userCurrentRoom.set(ws.idtarget, room);
+        ws.roomname = room;
+        ws.numkursi = new Set([assignedSeat]);
+        
+        const clientArray = this.roomClients.get(room);
+        if (clientArray && !clientArray.includes(ws)) clientArray.push(ws);
+        this._addUserConnection(ws.idtarget, ws);
+        
+        this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
+        this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
+        
+        setTimeout(() => this.sendAllStateTo(ws, room), 100);
+        
+        this.updateRoomCount(room);
+        return true;
+      } finally { 
+        roomRelease(); 
       }
-      
-      if (!assignedSeat) { 
-        this.safeSend(ws, ["roomFull", room]); 
-        return false; 
-      }
-      
-      // ✅ KEMBALI KE KODE AWAL - TIDAK MEMBUAT DATA KURSI
-      // Data kursi akan dibuat oleh updateSeatAtomic saat user melakukan updateKursi
-      // Atau oleh cleanupUserFromSeat jika diperlukan
-      
-      this.userToSeat.set(ws.idtarget, { room, seat: assignedSeat });
-      this.userCurrentRoom.set(ws.idtarget, room);
-      ws.roomname = room;
-      ws.numkursi = new Set([assignedSeat]);
-      
-      const clientArray = this.roomClients.get(room);
-      if (clientArray && !clientArray.includes(ws)) clientArray.push(ws);
-      this._addUserConnection(ws.idtarget, ws);
-      
-      this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
-      this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
-      
-      setTimeout(() => this.sendAllStateTo(ws, room), 100);
-      
-      this.updateRoomCount(room);
-      return true;
-      
-    } finally { 
-      roomRelease(); 
+    } catch (error) {
+      this.safeSend(ws, ["error", "Failed to join room"]);
+      return false;
     }
-  } catch (error) {
-    this.safeSend(ws, ["error", "Failed to join room"]);
-    return false;
   }
-}
 
   async handleSetIdTarget2(ws, id, baru) {
     if (!id || !ws) return;
@@ -1994,6 +1912,7 @@ export class ChatServer {
     } catch {}
   }
 
+  // ✅ PERBAIKAN sendAllStateTo - AMBIL POINT DARI seatMap
   sendAllStateTo(ws, room) {
     try {
       if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room) return;
@@ -2001,6 +1920,7 @@ export class ChatServer {
       if (!seatMap) return;
       const allKursiMeta = {};
       const lastPointsData = [];
+      
       for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
         const info = seatMap.get(seat);
         if (info?.namauser) {
@@ -2014,16 +1934,32 @@ export class ChatServer {
             viptanda: info.viptanda || 0
           };
         }
+        // ✅ AMBIL POINT LANGSUNG DARI seatMap (bukan dari buffer)
         if (info?.lastPoint) {
-          lastPointsData.push({ seat: seat, x: info.lastPoint.x || 0, y: info.lastPoint.y || 0, fast: info.lastPoint.fast || false });
+          lastPointsData.push({ 
+            seat: seat, 
+            x: info.lastPoint.x || 0, 
+            y: info.lastPoint.y || 0, 
+            fast: info.lastPoint.fast || false 
+          });
         }
       }
-      if (Object.keys(allKursiMeta).length > 0) this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
-      if (lastPointsData.length > 0) this.safeSend(ws, ["allPointsList", room, lastPointsData]);
+      
+      if (Object.keys(allKursiMeta).length > 0) {
+        this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
+      }
+      
+      // ✅ KIRIM POINT KE USER YANG BARU JOIN
+      if (lastPointsData.length > 0) {
+        this.safeSend(ws, ["allPointsList", room, lastPointsData]);
+      }
+      
       const counts = this.getJumlahRoom();
       this.safeSend(ws, ["roomUserCount", room, counts[room] || 0]);
       this.safeSend(ws, ["currentNumber", this.currentNumber]);
-    } catch {}
+    } catch (error) {
+      // Silent fail
+    }
   }
 
   getJumlahRoom() {
@@ -2458,6 +2394,7 @@ export class ChatServer {
             const [, room, seat, x, y, fast] = data;
             if (ws.roomname !== room || !roomList.includes(room)) return;
             if (seat < 1 || seat > this.MAX_SEATS) return;
+            // ✅ LANGSUNG SIMPAN DAN BROADCAST (TANPA BUFFER)
             this.savePointWithRetry(room, seat, x, y, fast).catch(() => {});
             this.broadcastPointDirect(room, seat, x, y, fast);
             break;
@@ -2593,7 +2530,7 @@ export class ChatServer {
         }
         
         this.flushKursiUpdates();
-        this.flushBufferedPoints();
+        // HAPUS PANGGILAN flushBufferedPoints() KARENA TIDAK DIGUNAKAN
         
       } catch (error) {
         if (ws.readyState === 1) this.safeSend(ws, ["error", "Server error"]);
