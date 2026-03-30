@@ -35,13 +35,12 @@ const CONSTANTS = {
   MAX_TIMER_AGE: 30000,
   MAX_MESSAGE_QUEUE_SIZE: 100,
   MESSAGES_PER_SECOND_LIMIT: 5,
-  // PERBAIKAN: Batasan baru untuk mencegah crash
   MAX_BUFFER_PER_ROOM: 100,
-  MAX_DEBOUNCE_TIMERS: 500,
   EMERGENCY_MEMORY_THRESHOLD: 0.85,
   EMERGENCY_CLEANUP_INTERVAL: 5000,
   STORAGE_TIMEOUT: 3000,
-  MAX_FAILED_BATCHES: 100
+  MAX_FAILED_BATCHES: 100,
+  MAX_QUEUE_HARD_LIMIT: 500
 };
 
 // ========== GLOBAL ERROR HANDLER ==========
@@ -211,7 +210,6 @@ class QueueManager {
   async add(job, retryCount = 0) {
     if (this.destroyed) throw new Error("Queue manager destroyed");
     
-    // Hard limit untuk queue
     if (this.queue.length >= CONSTANTS.MAX_QUEUE_HARD_LIMIT) {
       if (retryCount < 3) {
         const delay = 100 * Math.pow(2, retryCount);
@@ -221,7 +219,6 @@ class QueueManager {
       throw new Error("Server busy - queue full after retries");
     }
     
-    // Auto cleanup jika queue terlalu besar
     if (this.queue.length > this.maxQueueSize) {
       const expiredCount = Math.floor(this.queue.length * 0.3);
       for (let i = 0; i < expiredCount; i++) {
@@ -463,7 +460,6 @@ function createEmptySeat() {
   };
 }
 
-// Fungsi untuk mengambil data ringkas kursi (tanpa data besar)
 function getCompactSeatData(seat) {
   if (!seat || !seat.namauser) return null;
   return {
@@ -507,11 +503,9 @@ export class ChatServer {
       this.bufferSizeLimit = CONSTANTS.BUFFER_SIZE_LIMIT;
       this.userConnections = new Map();
 
-      // POINT BUFFER - TETAP ADA TAPI TIDAK DIGUNAKAN
       this._pointBuffer = new Map();
       this._pointFlushDelay = 100;
       this._hasBufferedUpdates = false;
-      this._kursiUpdateDebounce = new Map();
 
       this.rateLimiter = new RateLimiter(60000, 100);
       this.connectionRateLimiter = new RateLimiter(10000, 5);
@@ -533,20 +527,17 @@ export class ChatServer {
       this.lastNumberTick = Date.now();
       
       this.numberTickTimer = null;
-      this._debounceCleanupTimer = null;
 
       this._intervals = [];
 
       try { this.initializeRooms(); } catch { this.createDefaultRoom(); }
 
       this.startNumberTickTimer();
-      this.startDebounceCleanupTimer();
       
       this.roomCountsCache = null;
       this._countsCacheTime = 0;
       this.cacheValidDuration = CONSTANTS.CACHE_VALID_DURATION;
 
-      // INISIALISASI POINT BUFFER (TIDAK DIGUNAKAN)
       for (const room of roomList) {
         this._pointBuffer.set(room, []);
       }
@@ -557,6 +548,7 @@ export class ChatServer {
       this.startMemoryMonitor();
       this.startForcedCleanup();
       this.startEmergencyCleanup();
+      this.startPeriodicFlush();
 
     } catch (error) {
       console.error("ChatServer constructor error:", error);
@@ -564,32 +556,30 @@ export class ChatServer {
     }
   }
 
-  // Emergency cleanup untuk mencegah memory overflow
+  startPeriodicFlush() {
+    this._periodicFlush = setInterval(() => {
+      try {
+        for (const room of roomList) {
+          this.flushRoomKursiUpdates(room);
+        }
+      } catch (error) {}
+    }, 1000);
+    this._intervals.push(this._periodicFlush);
+  }
+
   startEmergencyCleanup() {
     this._emergencyCleanup = setInterval(() => {
       try {
         const memUsage = process.memoryUsage();
         const heapPercent = memUsage.heapUsed / memUsage.heapTotal;
         
-        // Memory kritis (>90%)
         if (heapPercent > 0.9) {
-          // Clear semua debounce timer
-          for (const [key, timer] of this._kursiUpdateDebounce) {
-            clearTimeout(timer);
-          }
-          this._kursiUpdateDebounce.clear();
-          
-          // Clear semua buffer kursi
           for (const [room, buffer] of this.updateKursiBuffer) {
-            buffer.clear();
+            if (buffer) buffer.clear();
           }
-          
-          // Force GC
           if (global.gc) global.gc();
         }
-        // Memory tinggi (>80%)
         else if (heapPercent > 0.8) {
-          // Batasi buffer
           for (const [room, buffer] of this.updateKursiBuffer) {
             if (buffer && buffer.size > 50) {
               const entries = Array.from(buffer.entries());
@@ -597,19 +587,8 @@ export class ChatServer {
               this.updateKursiBuffer.set(room, limited);
             }
           }
-          
-          // Batasi debounce
-          if (this._kursiUpdateDebounce.size > 200) {
-            const entries = Array.from(this._kursiUpdateDebounce.entries());
-            const limited = new Map(entries.slice(-100));
-            this._kursiUpdateDebounce.clear();
-            for (const [key, timer] of limited) {
-              this._kursiUpdateDebounce.set(key, timer);
-            }
-          }
         }
         
-        // Batasi failed batches
         if (this._failedBatches && this._failedBatches.length > CONSTANTS.MAX_FAILED_BATCHES) {
           this._failedBatches = this._failedBatches.slice(-Math.floor(CONSTANTS.MAX_FAILED_BATCHES / 2));
         }
@@ -623,13 +602,6 @@ export class ChatServer {
     this._forcedCleanupInterval = setInterval(() => {
       try {
         const now = Date.now();
-        
-        for (const [key, timer] of this._kursiUpdateDebounce) {
-          if (timer && (now - (timer._createdAt || 0)) > CONSTANTS.MAX_TIMER_AGE) {
-            clearTimeout(timer);
-            this._kursiUpdateDebounce.delete(key);
-          }
-        }
         
         for (const [userId, timer] of this.disconnectedTimers) {
           if (timer && (now - (timer._scheduledTime || 0)) > CONSTANTS.MAX_TIMER_AGE) {
@@ -657,15 +629,6 @@ export class ChatServer {
         
         if (activeConnections === 0 && (now - this._lastActivityTime) > 300000) {
           this.flushKursiUpdates();
-          
-          const nowTime = Date.now();
-          const snapshot = Array.from(this._kursiUpdateDebounce.entries());
-          for (const [key, timer] of snapshot) {
-            if (timer && (nowTime - (timer._createdAt || 0)) > 60000) {
-              clearTimeout(timer);
-              this._kursiUpdateDebounce.delete(key);
-            }
-          }
         } else if (activeConnections > 0) {
           this._lastActivityTime = now;
         }
@@ -679,21 +642,15 @@ export class ChatServer {
       this._memoryMonitor = setInterval(() => {
         try {
           const activeConns = Array.from(this.clients).filter(c => c?.readyState === 1).length;
-          const debounceSize = this._kursiUpdateDebounce.size;
           const queueSize = this.cleanupQueue?.size() || 0;
           
-          if (debounceSize > 1000 || queueSize > 100) {
+          if (queueSize > 100) {
             if (global.gc) global.gc();
           }
           
-          // Monitor memory usage
           const memUsage = process.memoryUsage();
           if (memUsage.heapUsed / memUsage.heapTotal > CONSTANTS.EMERGENCY_MEMORY_THRESHOLD) {
             this.flushKursiUpdates();
-            for (const [key, timer] of this._kursiUpdateDebounce) {
-              clearTimeout(timer);
-            }
-            this._kursiUpdateDebounce.clear();
             if (global.gc) global.gc();
           }
         } catch (e) {}
@@ -709,28 +666,6 @@ export class ChatServer {
       } catch (error) {}
     }, 300000);
     this._intervals.push(autoCleanupInterval);
-  }
-
-  startDebounceCleanupTimer() {
-    if (this._debounceCleanupTimer) clearInterval(this._debounceCleanupTimer);
-    this._debounceCleanupTimer = setInterval(() => {
-      try {
-        const now = Date.now();
-        const snapshot = Array.from(this._kursiUpdateDebounce.entries());
-        for (const [key, timer] of snapshot) {
-          if (timer && timer._createdAt && (now - timer._createdAt) > CONSTANTS.MAX_DEBOUNCE_AGE) {
-            clearTimeout(timer);
-            this._kursiUpdateDebounce.delete(key);
-          } else if (timer && !timer._createdAt) {
-            clearTimeout(timer);
-            this._kursiUpdateDebounce.delete(key);
-          }
-        }
-      } catch (error) {}
-    }, CONSTANTS.DEBOUNCE_CLEANUP_INTERVAL);
-    
-    if (!this._intervals) this._intervals = [];
-    this._intervals.push(this._debounceCleanupTimer);
   }
 
   async gracefulShutdown() {
@@ -772,10 +707,6 @@ export class ChatServer {
       clearTimeout(this.numberTickTimer);
       this.numberTickTimer = null;
     }
-    if (this._debounceCleanupTimer) {
-      clearInterval(this._debounceCleanupTimer);
-      this._debounceCleanupTimer = null;
-    }
     if (this._idleCheckInterval) {
       clearInterval(this._idleCheckInterval);
       this._idleCheckInterval = null;
@@ -792,18 +723,16 @@ export class ChatServer {
       clearInterval(this._emergencyCleanup);
       this._emergencyCleanup = null;
     }
+    if (this._periodicFlush) {
+      clearInterval(this._periodicFlush);
+      this._periodicFlush = null;
+    }
     
     for (const [userId, timer] of this.disconnectedTimers) {
       clearTimeout(timer);
     }
     this.disconnectedTimers.clear();
     this._pendingReconnections.clear();
-    
-    const debounceSnapshot = Array.from(this._kursiUpdateDebounce.entries());
-    for (const [key, timer] of debounceSnapshot) {
-      clearTimeout(timer);
-    }
-    this._kursiUpdateDebounce.clear();
     
     for (const [ws, queue] of this._messageQueues) {
       queue.clear();
@@ -852,7 +781,6 @@ export class ChatServer {
         if (results && results[1]) this.lastNumberTick = results[1];
       }
     } catch (error) {
-      // Gunakan default values
       this.currentNumber = 1;
       this.lastNumberTick = Date.now();
     }
@@ -872,7 +800,7 @@ export class ChatServer {
         ]);
       }
     } catch (error) {
-      // Silent fail, jangan crash
+      // Silent fail
     }
   }
 
@@ -923,7 +851,6 @@ export class ChatServer {
       this._pointBuffer = new Map();
       this._pointFlushDelay = 100;
       this._hasBufferedUpdates = false;
-      this._kursiUpdateDebounce = new Map();
       this._intervals = [];
       this.roomCountsCache = null;
       this._countsCacheTime = 0;
@@ -938,11 +865,11 @@ export class ChatServer {
       this.numberTickTimer = null;
       this.startNumberTickTimer();
       this.startAutoCleanup();
-      this.startDebounceCleanupTimer();
       this.startIdleCleanup();
       this.startMemoryMonitor();
       this.startForcedCleanup();
       this.startEmergencyCleanup();
+      this.startPeriodicFlush();
     } catch (error) {}
   }
 
@@ -987,7 +914,6 @@ export class ChatServer {
         }
       }
 
-      // Batasi buffer per room
       for (const [room, buffer] of this.updateKursiBuffer) {
         if (buffer && buffer.size > CONSTANTS.MAX_BUFFER_PER_ROOM) {
           const entries = Array.from(buffer.entries());
@@ -1084,7 +1010,6 @@ export class ChatServer {
       clearTimeout(timeoutId);
       return result;
     } catch (error) {
-      // Log tapi jangan throw, return null untuk operasi yang gagal
       console.error(`Lock operation failed for ${resourceId}:`, error.message);
       return null;
     } finally {
@@ -1124,7 +1049,6 @@ export class ChatServer {
     return Math.min(activeConnections / 100 + queueLoad, 0.95);
   }
 
-  // ✅ PERBAIKAN POINT: LANGSUNG REPLACE, TIDAK PAKAI BUFFER
   async savePointWithRetry(room, seat, x, y, fast) {
     try {
       if (seat < 1 || seat > this.MAX_SEATS) return false;
@@ -1132,9 +1056,7 @@ export class ChatServer {
       const yNum = typeof y === 'number' ? y : parseFloat(y);
       if (isNaN(xNum) || isNaN(yNum)) return false;
       
-      // ✅ LANGSUNG UPDATE SEAT ATOMIC (REPLACE POINT LAMA)
       await this.updateSeatAtomic(room, seat, (currentSeat) => {
-        // REPLACE point lama dengan yang baru
         currentSeat.lastPoint = { 
           x: xNum, 
           y: yNum, 
@@ -1144,12 +1066,10 @@ export class ChatServer {
         return currentSeat;
       });
       
-      // ✅ LANGSUNG BROADCAST KE ROOM
       this.broadcastPointDirect(room, seat, xNum, yNum, fast);
       return true;
       
     } catch (error) {
-      // Jika gagal, tetap broadcast
       this.broadcastPointDirect(room, seat, x, y, fast);
       return false;
     }
@@ -1170,9 +1090,7 @@ export class ChatServer {
     } catch {}
   }
 
-  // METHOD INI TETAP ADA TAPI TIDAK DIGUNAKAN (UNTUK COMPATIBILITY)
   flushBufferedPoints() {
-    // TIDAK ADA YANG PERLU DI-FLUSH KARENA TIDAK PAKAI BUFFER
     return;
   }
 
@@ -1264,6 +1182,11 @@ export class ChatServer {
           
           const currentVersion = currentSeat._version || 0;
           const updatedSeat = updateFn(currentSeat);
+          
+          if (updatedSeat._version && updatedSeat._version <= currentVersion) {
+            return currentSeat;
+          }
+          
           updatedSeat._version = currentVersion + 1;
           updatedSeat.lastUpdated = Date.now();
           
@@ -1278,16 +1201,10 @@ export class ChatServer {
           const buffer = this.updateKursiBuffer.get(room);
           if (buffer) {
             if (updatedSeat.namauser) {
-              if (buffer.size >= this.bufferSizeLimit * 2) {
+              buffer.set(seatNumber, getCompactSeatData(updatedSeat));
+              if (buffer.size >= this.bufferSizeLimit) {
                 this.flushRoomKursiUpdates(room);
               }
-              if (buffer.size >= this.bufferSizeLimit) {
-                const entries = Array.from(buffer.entries());
-                const firstKeys = entries.slice(0, Math.floor(this.bufferSizeLimit / 2));
-                for (const [key] of firstKeys) buffer.delete(key);
-              }
-              // Simpan compact data di buffer
-              buffer.set(seatNumber, getCompactSeatData(updatedSeat));
             } else {
               buffer.delete(seatNumber);
             }
@@ -1324,21 +1241,18 @@ export class ChatServer {
         const seatMap = this.roomSeats.get(room);
         if (!occupancyMap || !seatMap) return null;
         
-        // Cari user yang sudah punya seat
         for (let i = 1; i <= this.MAX_SEATS; i++) {
           const occupantId = occupancyMap.get(i);
           const seatData = seatMap.get(i);
           if (occupantId === ws.idtarget && seatData?.namauser === ws.idtarget) return i;
         }
         
-        // Cari seat kosong
         for (let i = 1; i <= this.MAX_SEATS; i++) {
           const occupantId = occupancyMap.get(i);
           const seatData = seatMap.get(i);
           if (occupantId === null && (!seatData || !seatData.namauser)) return i;
         }
         
-        // Cleanup seat yang bermasalah
         for (let i = 1; i <= this.MAX_SEATS; i++) {
           const occupantId = occupancyMap.get(i);
           const seatData = seatMap.get(i);
@@ -1701,9 +1615,6 @@ export class ChatServer {
           return false; 
         }
         
-        // TIDAK MEMBUAT DATA KURSI DI SINI
-        // Biarkan updateSeatAtomic yang membuat saat pertama kali ada update
-        
         this.userToSeat.set(ws.idtarget, { room, seat: assignedSeat });
         this.userCurrentRoom.set(ws.idtarget, room);
         ws.roomname = room;
@@ -1888,11 +1799,9 @@ export class ChatServer {
             client.send(message); 
             sentCount++; 
           } catch (e) {
-            // Handle semua error, jangan propagate
             if (e.code === 1001 || e.code === 1006 || e.message?.includes('closed') || e.message?.includes('CLOSED')) {
               setTimeout(() => this._removeFromRoomClients(client, room), 0);
             }
-            // Silent fail untuk error lain
           }
         }
       }
@@ -1912,12 +1821,13 @@ export class ChatServer {
     } catch {}
   }
 
-  // ✅ PERBAIKAN sendAllStateTo - AMBIL POINT DARI seatMap
   sendAllStateTo(ws, room) {
     try {
       if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room) return;
+      
       const seatMap = this.roomSeats.get(room);
       if (!seatMap) return;
+      
       const allKursiMeta = {};
       const lastPointsData = [];
       
@@ -1934,12 +1844,12 @@ export class ChatServer {
             viptanda: info.viptanda || 0
           };
         }
-        // ✅ AMBIL POINT LANGSUNG DARI seatMap (bukan dari buffer)
-        if (info?.lastPoint) {
+        
+        if (info?.lastPoint && info.lastPoint.x !== undefined && info.lastPoint.y !== undefined) {
           lastPointsData.push({ 
             seat: seat, 
-            x: info.lastPoint.x || 0, 
-            y: info.lastPoint.y || 0, 
+            x: info.lastPoint.x, 
+            y: info.lastPoint.y, 
             fast: info.lastPoint.fast || false 
           });
         }
@@ -1949,7 +1859,6 @@ export class ChatServer {
         this.safeSend(ws, ["allUpdateKursiList", room, allKursiMeta]);
       }
       
-      // ✅ KIRIM POINT KE USER YANG BARU JOIN
       if (lastPointsData.length > 0) {
         this.safeSend(ws, ["allPointsList", room, lastPointsData]);
       }
@@ -2245,7 +2154,6 @@ export class ChatServer {
         ws.roomname = null; 
         ws.idtarget = null; 
         ws.numkursi = null;
-        ws._kursiUpdateDebounce = null;
         ws._isDuplicate = null;
         ws._isClosing = null;
         ws._connectionTime = null;
@@ -2394,7 +2302,6 @@ export class ChatServer {
             const [, room, seat, x, y, fast] = data;
             if (ws.roomname !== room || !roomList.includes(room)) return;
             if (seat < 1 || seat > this.MAX_SEATS) return;
-            // ✅ LANGSUNG SIMPAN DAN BROADCAST (TANPA BUFFER)
             this.savePointWithRetry(room, seat, x, y, fast).catch(() => {});
             this.broadcastPointDirect(room, seat, x, y, fast);
             break;
@@ -2415,81 +2322,39 @@ export class ChatServer {
             if (seat < 1 || seat > this.MAX_SEATS) return;
             if (ws.roomname !== room || !roomList.includes(room)) return;
             
-            const debounceKey = `${room}-${seat}`;
+            await this.updateSeatAtomic(room, seat, () => ({
+              noimageUrl: noimageUrl || "", 
+              namauser: namauser || "", 
+              color: color || "",
+              itembawah: itembawah || 0,
+              itematas: itematas || 0,
+              vip: vip || 0,
+              viptanda: viptanda || 0,
+              lastPoint: null,
+              lastUpdated: Date.now()
+            }));
             
-            const existingTimer = this._kursiUpdateDebounce.get(debounceKey);
-            if (existingTimer) {
-              clearTimeout(existingTimer);
-              this._kursiUpdateDebounce.delete(debounceKey);
+            if (namauser === ws.idtarget) {
+              this.userToSeat.set(namauser, { room, seat });
+              this.userCurrentRoom.set(namauser, room);
             }
             
-            let isExecuted = false;
+            this.updateRoomCount(room);
             
-            const cleanupTimer = () => {
-              if (this._kursiUpdateDebounce.get(debounceKey) === timerId) {
-                this._kursiUpdateDebounce.delete(debounceKey);
-              }
-            };
+            const response = ["updateKursiResponse", room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda];
             
-            const executeUpdate = async () => {
-              if (isExecuted) return;
-              isExecuted = true;
-              
-              try {
-                await this.updateSeatAtomic(room, seat, () => ({
-                  noimageUrl: noimageUrl || "", 
-                  namauser: namauser || "", 
-                  color: color || "",
-                  itembawah: itembawah || 0,
-                  itematas: itematas || 0,
-                  vip: vip || 0,
-                  viptanda: viptanda || 0,
-                  lastPoint: null,
-                  lastUpdated: Date.now()
-                }));
-                
-                if (namauser === ws.idtarget) {
-                  this.userToSeat.set(namauser, { room, seat });
-                  this.userCurrentRoom.set(namauser, room);
-                }
-                
-                this.updateRoomCount(room);
-                
-                const response = ["updateKursiResponse", room, seat, noimageUrl, namauser, color, itembawah, itematas, vip, viptanda];
-                
-                const clientArray = this.roomClients.get(room);
-                if (clientArray && clientArray.length > 0) {
-                  const message = JSON.stringify(response);
-                  for (const client of clientArray) {
-                    if (client !== ws && client?.readyState === 1 && client.roomname === room && !client._isDuplicate && !client._isClosing) {
-                      try { client.send(message); } catch {}
-                    }
-                  }
-                }
-                
-                this.safeSend(ws, response);
-              } catch (error) {
-                this.safeSend(ws, ["error", "Failed to update seat"]);
-              } finally {
-                cleanupTimer();
-              }
-            };
-            
-            const timerId = setTimeout(async () => {
-              try {
-                await executeUpdate();
-              } catch (error) {
-                // Error sudah ditangani di executeUpdate
-              } finally {
-                if (this._kursiUpdateDebounce.get(debounceKey) === timerId) {
-                  this._kursiUpdateDebounce.delete(debounceKey);
+            const clientArray = this.roomClients.get(room);
+            if (clientArray && clientArray.length > 0) {
+              const message = JSON.stringify(response);
+              for (const client of clientArray) {
+                if (client?.readyState === 1 && client.roomname === room && 
+                    !client._isDuplicate && !client._isClosing) {
+                  try { client.send(message); } catch {}
                 }
               }
-            }, CONSTANTS.KURSI_UPDATE_DEBOUNCE);
+            }
             
-            timerId._createdAt = Date.now();
-            timerId._cleanup = cleanupTimer;
-            this._kursiUpdateDebounce.set(debounceKey, timerId);
+            this.safeSend(ws, response);
             
             break;
           }
@@ -2530,7 +2395,6 @@ export class ChatServer {
         }
         
         this.flushKursiUpdates();
-        // HAPUS PANGGILAN flushBufferedPoints() KARENA TIDAK DIGUNAKAN
         
       } catch (error) {
         if (ws.readyState === 1) this.safeSend(ws, ["error", "Server error"]);
@@ -2635,9 +2499,9 @@ export class ChatServer {
         active: this.cleanupQueue?.active || 0,
         healthy: (this.cleanupQueue?.size() || 0) < 100
       },
-      debounceHealth: {
-        size: this._kursiUpdateDebounce.size,
-        healthy: this._kursiUpdateDebounce.size < 500
+      bufferHealth: {
+        totalBuffers: this.updateKursiBuffer.size,
+        healthy: true
       },
       failedBatches: this._failedBatches?.length || 0,
       messageQueues: this._messageQueues.size,
@@ -2699,7 +2563,7 @@ export default {
           totalClients: obj.clients?.size || 0,
           activeGames: obj.lowcard?.activeGames?.size || 0,
           queueSize: obj.cleanupQueue?.size() || 0,
-          debounceSize: obj._kursiUpdateDebounce?.size || 0,
+          bufferSize: obj.updateKursiBuffer?.size || 0,
           failedBatches: obj._failedBatches?.length || 0,
           messageQueues: obj._messageQueues?.size || 0,
           pendingReconnections: obj._pendingReconnections?.size || 0,
@@ -2716,4 +2580,4 @@ export default {
       return new Response("Server error", { status: 500 });
     }
   }
-};
+}
