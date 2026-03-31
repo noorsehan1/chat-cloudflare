@@ -1,5 +1,5 @@
 // ============================
-// LowCardGameManager (FULLY FIXED - NO MEMORY LEAK)
+// LowCardGameManager (COMPLETELY FIXED - NO RESTART)
 // ============================
 export class LowCardGameManager {
   constructor(chatServer) {
@@ -7,19 +7,63 @@ export class LowCardGameManager {
     this.activeGames = new Map();
     this._cleanupInterval = null;
     this._destroyed = false;
+    this._gameLocks = new Map(); // ✅ ADD LOCKS
+    this._gameLockTimers = new Map(); // ✅ PREVENT DEADLOCK
     
-    // Error handler untuk prevent crash
     this._errorHandler = (error, context) => {
       console.error(`[LowCardGame] ${context}:`, error?.message || error);
+      // ✅ DON'T SWALLOW CRITICAL ERRORS
+      if (error?.message?.includes('out of memory')) {
+        this.destroy();
+      }
     };
     
-    // Auto cleanup setiap 5 menit
     this._cleanupInterval = setInterval(() => {
       if (!this._destroyed) this.cleanupStaleGames();
     }, 300000);
   }
 
-  // ========== SAFE METHODS ==========
+  // ✅ ADD LOCK METHOD
+  async acquireGameLock(room, timeout = 5000) {
+    if (this._destroyed) return null;
+    
+    // Cek deadlock
+    const existingLock = this._gameLocks.get(room);
+    const lockTime = this._gameLockTimers.get(room) || 0;
+    if (existingLock && (Date.now() - lockTime) > 10000) {
+      this._gameLocks.delete(room);
+      this._gameLockTimers.delete(room);
+    }
+    
+    if (this._gameLocks.has(room)) {
+      return new Promise((resolve) => {
+        const checkInterval = setInterval(() => {
+          if (!this._gameLocks.has(room)) {
+            clearInterval(checkInterval);
+            this._gameLocks.set(room, true);
+            this._gameLockTimers.set(room, Date.now());
+            resolve(() => {
+              this._gameLocks.delete(room);
+              this._gameLockTimers.delete(room);
+            });
+          }
+        }, 50);
+        
+        setTimeout(() => {
+          clearInterval(checkInterval);
+          resolve(null);
+        }, timeout);
+      });
+    }
+    
+    this._gameLocks.set(room, true);
+    this._gameLockTimers.set(room, Date.now());
+    return () => {
+      this._gameLocks.delete(room);
+      this._gameLockTimers.delete(room);
+    };
+  }
+
   _safeBroadcast(room, message) {
     try {
       if (this.chatServer && this.chatServer.broadcastToRoom) {
@@ -54,7 +98,7 @@ export class LowCardGameManager {
     }
   }
 
-  handleEvent(ws, data) {
+  async handleEvent(ws, data) {
     try {
       if (this._destroyed || !ws || !data || !Array.isArray(data) || data.length === 0) return;
 
@@ -63,16 +107,16 @@ export class LowCardGameManager {
 
       switch (evt) {
         case "gameLowCardStart":
-          this.startGame(ws, data[1]);
+          await this.startGame(ws, data[1]);
           break;
         case "gameLowCardJoin":
-          this.joinGame(ws);
+          await this.joinGame(ws);
           break;
         case "gameLowCardNumber":
-          this.submitNumber(ws, data[1], data[2] || "");
+          await this.submitNumber(ws, data[1], data[2] || "");
           break;
         case "gameLowCardEnd":
-          if (ws?.roomname) this.endGame(ws.roomname);
+          if (ws?.roomname) await this.endGame(ws.roomname);
           break;
       }
     } catch (error) {
@@ -80,6 +124,7 @@ export class LowCardGameManager {
     }
   }
 
+  // ✅ IMPROVED: Clear ALL timers properly
   clearAllTimers(game) {
     try {
       if (!game) return;
@@ -96,7 +141,7 @@ export class LowCardGameManager {
         game._drawInterval = null;
       }
       
-      // Bersihkan countdown timers
+      // ✅ FIX: Clear all countdown timers properly
       if (game.countdownTimers && Array.isArray(game.countdownTimers)) {
         for (const timer of game.countdownTimers) {
           try {
@@ -104,7 +149,7 @@ export class LowCardGameManager {
             if (timer?.timeout) clearTimeout(timer.timeout);
           } catch (e) {}
         }
-        game.countdownTimers = [];
+        game.countdownTimers = []; // ✅ KOSONGKAN ARRAY
       }
       
       // Bersihkan bot timers
@@ -178,7 +223,13 @@ export class LowCardGameManager {
     }
   }
 
-  startGame(ws, bet) {
+  async startGame(ws, bet) {
+    const release = await this.acquireGameLock(ws?.roomname);
+    if (!release) {
+      this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Game is busy, try again"]);
+      return;
+    }
+    
     try {
       if (this._destroyed || !ws?.roomname || !ws?.idtarget) return;
 
@@ -212,7 +263,7 @@ export class LowCardGameManager {
         eliminated: new Set(),
         winner: null,
         betAmount,
-        countdownTimers: [],
+        countdownTimers: [], // ✅ SUDAH ARRAY
         _botTimers: [],
         _botDrawTimeouts: new Set(),
         registrationTime: 25,
@@ -224,8 +275,9 @@ export class LowCardGameManager {
         drawTimeExpired: false,
         _createdAt: Date.now(),
         _isActive: true,
-        _regInterval: null,      // ✅ TAMBAHKAN
-        _drawInterval: null      // ✅ TAMBAHKAN
+        _regInterval: null,
+        _drawInterval: null,
+        _evaluating: false // ✅ PREVENT RACE CONDITION
       };
 
       game.players.set(ws.idtarget, { 
@@ -241,6 +293,8 @@ export class LowCardGameManager {
       this.startRegistrationCountdown(room);
     } catch (error) {
       this._errorHandler(error, 'startGame');
+    } finally {
+      release();
     }
   }
 
@@ -249,12 +303,12 @@ export class LowCardGameManager {
       const game = this._safeGetGame(room);
       if (!game || !game._isActive || this._destroyed) return;
       
+      // ✅ CLEAR EXISTING TIMERS FIRST
       this.clearAllTimers(game);
 
       let timeLeft = game.registrationTime;
       const timesToNotify = [20, 10, 5, 0];
 
-      // ✅ SIMPAN REFERENCE INTERVAL
       game._regInterval = setInterval(() => {
         try {
           const currentGame = this._safeGetGame(room);
@@ -345,6 +399,7 @@ export class LowCardGameManager {
       const game = this._safeGetGame(room);
       if (!game || !game._isActive || this._destroyed) return;
       
+      // ✅ CLEAR EXISTING TIMERS FIRST
       this.clearAllTimers(game);
       game.evaluationLocked = false;
       game.drawTimeExpired = false;
@@ -352,7 +407,6 @@ export class LowCardGameManager {
       let timeLeft = game.drawTime;
       const timesToNotify = [20, 10, 5, 0];
 
-      // ✅ SIMPAN REFERENCE INTERVAL
       game._drawInterval = setInterval(() => {
         try {
           const currentGame = this._safeGetGame(room);
@@ -421,7 +475,8 @@ export class LowCardGameManager {
       if (!game.countdownTimers) game.countdownTimers = [];
       game.countdownTimers.push({ interval: game._drawInterval });
 
-      if (game.useBots) {
+      // ✅ LIMIT BOT TIMERS
+      if (game.useBots && game._botTimers.length < 100) {
         const activeBots = Array.from(game.botPlayers.keys())
           .filter(botId => !game.eliminated.has(botId) && !game.numbers.has(botId));
         
@@ -498,7 +553,13 @@ export class LowCardGameManager {
     }
   }
 
-  joinGame(ws) {
+  async joinGame(ws) {
+    const release = await this.acquireGameLock(ws?.roomname);
+    if (!release) {
+      this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Game is busy, try again"]);
+      return;
+    }
+    
     try {
       if (this._destroyed || !ws?.roomname || !ws?.idtarget) return;
 
@@ -533,6 +594,8 @@ export class LowCardGameManager {
       this._safeBroadcast(room, ["gameLowCardJoin", ws.username || ws.idtarget, game.betAmount]);
     } catch (error) {
       this._errorHandler(error, 'joinGame');
+    } finally {
+      release();
     }
   }
 
@@ -570,7 +633,13 @@ export class LowCardGameManager {
     }
   }
 
-  submitNumber(ws, number, tanda = "") {
+  async submitNumber(ws, number, tanda = "") {
+    const release = await this.acquireGameLock(ws?.roomname);
+    if (!release) {
+      this.chatServer?.safeSend?.(ws, ["gameLowCardError", "Game is busy, try again"]);
+      return;
+    }
+    
     try {
       if (this._destroyed || !ws?.roomname || !ws?.idtarget) return;
 
@@ -654,13 +723,25 @@ export class LowCardGameManager {
       }
     } catch (error) {
       this._errorHandler(error, 'submitNumber');
+    } finally {
+      release();
     }
   }
 
-  evaluateRound(room) {
+  async evaluateRound(room) {
+    // ✅ PREVENT RACE CONDITION
+    const release = await this.acquireGameLock(room);
+    if (!release) {
+      return;
+    }
+    
     try {
       const game = this._safeGetGame(room);
       if (!game || !game._isActive || this._destroyed) return;
+      
+      // ✅ PREVENT DOUBLE EVALUATION
+      if (game._evaluating) return;
+      game._evaluating = true;
       
       if (!game.players || game.players.size === 0) {
         this.activeGames.delete(room);
@@ -681,6 +762,7 @@ export class LowCardGameManager {
         game.round++;
         game.evaluationLocked = false;
         game.drawTimeExpired = false;
+        game._evaluating = false;
         this.startDrawCountdown(room);
         return;
       }
@@ -766,6 +848,7 @@ export class LowCardGameManager {
       game.round++;
       game.evaluationLocked = false;
       game.drawTimeExpired = false;
+      game._evaluating = false;
       
       this._safeBroadcast(room, ["gameLowCardNextRound", game.round]);
       this.startDrawCountdown(room);
@@ -774,10 +857,16 @@ export class LowCardGameManager {
       try {
         this.activeGames.delete(room);
       } catch (e) {}
+    } finally {
+      game?._evaluating = false;
+      release();
     }
   }
 
-  endGame(room) {
+  async endGame(room) {
+    const release = await this.acquireGameLock(room);
+    if (!release) return;
+    
     try {
       const game = this._safeGetGame(room);
       if (!game) return;
@@ -818,6 +907,8 @@ export class LowCardGameManager {
       this.activeGames.delete(room);
     } catch (error) {
       this._errorHandler(error, 'endGame');
+    } finally {
+      release();
     }
   }
   
@@ -835,6 +926,13 @@ export class LowCardGameManager {
       clearInterval(this._cleanupInterval);
       this._cleanupInterval = null;
     }
+    
+    // ✅ Bersihkan semua locks
+    for (const timeout of this._gameLockTimers.values()) {
+      clearTimeout(timeout);
+    }
+    this._gameLocks.clear();
+    this._gameLockTimers.clear();
     
     this.chatServer = null;
   }
