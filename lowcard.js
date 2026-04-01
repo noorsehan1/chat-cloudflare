@@ -12,10 +12,8 @@ export class LowCardGameManager {
     // Error handler untuk prevent crash
     this._errorHandler = (error, context) => {
       const errorMsg = error?.message || String(error);
-      // Batasi log error
       this._errorLogs.push({ time: Date.now(), context, error: errorMsg });
       if (this._errorLogs.length > 100) this._errorLogs.shift();
-      
       console.error(`[LowCardGame] ${context}:`, errorMsg);
     };
     
@@ -74,12 +72,10 @@ export class LowCardGameManager {
           continue;
         }
         
-        // Game lebih dari 1 jam dianggap stale
         if (game._createdAt && (now - game._createdAt) > 3600000) {
           staleGames.push(room);
         }
         
-        // Game tanpa players
         if (game.players && game.players.size === 0) {
           staleGames.push(room);
         }
@@ -98,19 +94,16 @@ export class LowCardGameManager {
     try {
       if (!game) return;
       
-      // Registration interval
       if (game._regInterval) {
         clearInterval(game._regInterval);
         game._regInterval = null;
       }
       
-      // Draw interval
       if (game._drawInterval) {
         clearInterval(game._drawInterval);
         game._drawInterval = null;
       }
       
-      // Countdown timers
       if (game.countdownTimers && Array.isArray(game.countdownTimers)) {
         for (const timer of game.countdownTimers) {
           if (timer) {
@@ -121,7 +114,6 @@ export class LowCardGameManager {
         game.countdownTimers = [];
       }
       
-      // Bot timers
       if (game._botTimers && Array.isArray(game._botTimers)) {
         for (const timer of game._botTimers) {
           if (timer) clearTimeout(timer);
@@ -129,7 +121,6 @@ export class LowCardGameManager {
         game._botTimers = [];
       }
       
-      // Bot draw timeouts
       if (game._botDrawTimeouts) {
         for (const timeout of game._botDrawTimeouts) {
           if (timeout) clearTimeout(timeout);
@@ -154,7 +145,7 @@ export class LowCardGameManager {
 
   getRandomDrawTime() {
     try {
-      return Math.floor(Math.random() * 23) + 3; // 3-25 detik
+      return Math.floor(Math.random() * 23) + 3;
     } catch {
       return 10;
     }
@@ -210,7 +201,6 @@ export class LowCardGameManager {
       }
     } catch (error) {
       this._errorHandler(error, 'handleEvent');
-      // Jangan throw error ke atas
     }
   }
 
@@ -224,7 +214,6 @@ export class LowCardGameManager {
 
       const room = ws.roomname;
       
-      // Cek game existing
       const existingGame = this.activeGames.get(room);
       if (existingGame && existingGame._isActive) {
         this._safeSend(ws, ["gameLowCardError", "Game already running in this room"]);
@@ -243,7 +232,6 @@ export class LowCardGameManager {
         return;
       }
 
-      // Buat game object
       const game = {
         room: room,
         players: new Map(),
@@ -278,11 +266,9 @@ export class LowCardGameManager {
 
       this.activeGames.set(room, game);
 
-      // Broadcast game start
       this._safeBroadcast(room, ["gameLowCardStart", game.betAmount]);
       this._safeSend(ws, ["gameLowCardStartSuccess", game.hostName, game.betAmount]);
 
-      // Start registration countdown
       this._startRegistrationCountdown(room);
       
     } catch (error) {
@@ -296,13 +282,11 @@ export class LowCardGameManager {
       const game = this._safeGetGame(room);
       if (!game || !game._isActive || this._destroyed) return;
       
-      // Bersihkan timer lama
       this._clearAllTimers(game);
 
       let timeLeft = game.registrationTime;
       const timesToNotify = [20, 10, 5, 0];
 
-      // Start registration interval
       game._regInterval = setInterval(() => {
         try {
           const currentGame = this._safeGetGame(room);
@@ -318,12 +302,10 @@ export class LowCardGameManager {
             if (timeLeft === 0) {
               this._safeBroadcast(room, ["gameLowCardTimeLeft", "TIME UP!"]);
               
-              // Add bots if only 1 player
               if (game.players && game.players.size === 1) {
                 this._addFourMozBots(room);
               }
               
-              // Close registration
               this._closeRegistration(room);
               
               if (game._regInterval) {
@@ -398,7 +380,6 @@ export class LowCardGameManager {
       const playerCount = game.players.size;
       
       if (playerCount < 2) {
-        // Notify host
         if (this.chatServer && this.chatServer.clients) {
           for (const client of this.chatServer.clients) {
             if (client && client.idtarget === game.hostId && client.readyState === 1) {
@@ -441,7 +422,6 @@ export class LowCardGameManager {
       let timeLeft = game.drawTime;
       const timesToNotify = [20, 10, 5, 0];
 
-      // Start draw interval
       game._drawInterval = setInterval(() => {
         try {
           const currentGame = this._safeGetGame(room);
@@ -470,7 +450,6 @@ export class LowCardGameManager {
               game.evaluationLocked = true;
               this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
               
-              // Evaluate after delay
               const evalTimeout = setTimeout(() => {
                 try {
                   const currentGame = this._safeGetGame(room);
@@ -511,7 +490,6 @@ export class LowCardGameManager {
       if (!game.countdownTimers) game.countdownTimers = [];
       game.countdownTimers.push({ interval: game._drawInterval });
 
-      // Handle bot draws
       if (game.useBots && game.botPlayers) {
         const activeBots = Array.from(game.botPlayers.keys())
           .filter(botId => !game.eliminated.has(botId) && !game.numbers.has(botId));
@@ -729,21 +707,45 @@ export class LowCardGameManager {
     }
   }
 
+  // ========== FIX: EVALUATE ROUND DENGAN SAFE DESTRUCTURING ==========
   _evaluateRound(room) {
     try {
       const game = this._safeGetGame(room);
       if (!game || !game._isActive || this._destroyed) return;
       
+      // VALIDASI LENGKAP
       if (!game.players || game.players.size === 0) {
         this.activeGames.delete(room);
         return;
       }
       
-      this._clearAllTimers(game);
-
-      const { numbers, tanda, players, eliminated, round, betAmount } = game;
+      // Safe destructuring dengan default
+      const numbers = game.numbers || new Map();
+      const tanda = game.tanda || new Map();
+      const players = game.players || new Map();
+      const eliminated = game.eliminated || new Set();
+      const round = game.round || 1;
+      const betAmount = game.betAmount || 0;
       
-      if (!numbers || numbers.size === 0) {
+      // Validasi numbers
+      if (!numbers || typeof numbers.entries !== 'function') {
+        this._errorHandler(new Error('Invalid numbers map'), 'evaluateRound');
+        this.activeGames.delete(room);
+        return;
+      }
+      
+      this._clearAllTimers(game);
+      
+      let entries = [];
+      try {
+        entries = Array.from(numbers.entries());
+      } catch (e) {
+        this._errorHandler(e, 'evaluateRound entries');
+        this.activeGames.delete(room);
+        return;
+      }
+      
+      if (entries.length === 0) {
         const remainingPlayers = Array.from(players.keys()).filter(id => !eliminated.has(id));
         if (remainingPlayers.length === 0) {
           this.activeGames.delete(room);
@@ -757,8 +759,6 @@ export class LowCardGameManager {
         return;
       }
       
-      const entries = Array.from(numbers.entries());
-
       const submittedIds = new Set(numbers.keys());
       const activePlayers = Array.from(players.keys()).filter(id => !eliminated.has(id));
       const noSubmit = activePlayers.filter(id => !submittedIds.has(id));
@@ -785,7 +785,7 @@ export class LowCardGameManager {
         return;
       }
 
-      const values = Array.from(numbers.values());
+      const values = entries.map(([, n]) => n);
       const allSame = values.length > 0 && values.every(v => v === values[0]);
       let losers = [];
 
@@ -848,7 +848,6 @@ export class LowCardGameManager {
       
     } catch (error) {
       this._errorHandler(error, 'evaluateRound');
-      // Clean up game on error
       try {
         this.activeGames.delete(room);
       } catch (e) {}
@@ -860,7 +859,6 @@ export class LowCardGameManager {
       const game = this.activeGames.get(room);
       if (!game) return;
       
-      // Get players list before cleanup
       const playersList = [];
       if (game.players) {
         for (const player of game.players.values()) {
@@ -870,10 +868,8 @@ export class LowCardGameManager {
       
       game._isActive = false;
       
-      // Bersihkan semua timer
       this._clearAllTimers(game);
       
-      // Bersihkan semua Map dan Set
       if (game.players) game.players.clear();
       if (game.botPlayers) game.botPlayers.clear();
       if (game.numbers) game.numbers.clear();
@@ -886,24 +882,20 @@ export class LowCardGameManager {
         game._botDrawTimeouts.clear();
       }
       
-      // Hapus references
       game.countdownTimers = null;
       game._botTimers = null;
       game._botDrawTimeouts = null;
       game._regInterval = null;
       game._drawInterval = null;
       
-      // Broadcast game end
       if (playersList.length > 0) {
         this._safeBroadcast(room, ["gameLowCardEnd", playersList]);
       }
       
-      // Hapus dari active games
       this.activeGames.delete(room);
       
     } catch (error) {
       this._errorHandler(error, 'endGame');
-      // Force delete
       this.activeGames.delete(room);
     }
   }
@@ -921,20 +913,17 @@ export class LowCardGameManager {
   destroy() {
     this._destroyed = true;
     
-    // End all active games
     const rooms = Array.from(this.activeGames.keys());
     for (const room of rooms) {
       this.endGame(room);
     }
     this.activeGames.clear();
     
-    // Bersihkan cleanup interval
     if (this._cleanupInterval) {
       clearInterval(this._cleanupInterval);
       this._cleanupInterval = null;
     }
     
-    // Hapus references
     this.chatServer = null;
     this._errorLogs = [];
   }
