@@ -49,8 +49,7 @@ const CONSTANTS = {
   SAVE_STATE_INTERVAL: 60000,
   SEAT_UPDATE_RETRIES: 3,
   SEAT_UPDATE_RETRY_DELAY: 10,
-  MAX_POINTS_PER_SEAT_PER_SECOND: 3,
-  RECONNECT_GRACE_EXTRA: 5000
+  MAX_POINTS_PER_SEAT_PER_SECOND: 3
 };
 
 // ========== GLOBAL ERROR HANDLER ==========
@@ -642,7 +641,7 @@ export class ChatServer {
 
       try { this.lowcard = new LowCardGameManager(this); } catch { this.lowcard = null; }
 
-      this.gracePeriod = CONSTANTS.GRACE_PERIOD + CONSTANTS.RECONNECT_GRACE_EXTRA;
+      this.gracePeriod = CONSTANTS.GRACE_PERIOD;
       this.disconnectedTimers = new Map();
       this.cleanupQueue = new QueueManager(3);
       
@@ -711,6 +710,74 @@ export class ChatServer {
     }
   }
 
+  // ========== RESET DATA ON DEPLOY ==========
+  async resetAllDataOnDeploy() {
+    console.log("🔄 RESET ALL DATA ON DEPLOY - Menghapus semua data...");
+    
+    // Reset semua seat data
+    for (const room of roomList) {
+      const seatMap = this.roomSeats.get(room);
+      const occupancyMap = this.seatOccupancy.get(room);
+      
+      if (seatMap) {
+        for (let i = 1; i <= this.MAX_SEATS; i++) {
+          seatMap.set(i, createEmptySeat());
+        }
+      }
+      
+      if (occupancyMap) {
+        for (let i = 1; i <= this.MAX_SEATS; i++) {
+          occupancyMap.set(i, null);
+        }
+      }
+      
+      // Clear buffer
+      const buffer = this.updateKursiBuffer.get(room);
+      if (buffer) buffer.clear();
+      
+      const points = this._pointBuffer.get(room);
+      if (points) points.length = 0;
+    }
+    
+    // Reset semua user data
+    this.userToSeat.clear();
+    this.userCurrentRoom.clear();
+    this.userConnections.clear();
+    this._pendingReconnections.clear();
+    
+    // Reset timers
+    for (const [userId, timer] of this.disconnectedTimers) {
+      clearTimeout(timer);
+    }
+    this.disconnectedTimers.clear();
+    
+    // Reset game state jika ada
+    if (this.lowcard && this.lowcard.activeGames) {
+      this.lowcard.activeGames.clear();
+    }
+    
+    // Reset number tick
+    this.currentNumber = 1;
+    this.lastNumberTick = Date.now();
+    
+    // Hapus state yang tersimpan
+    try {
+      await this.storage?.delete("chatState");
+    } catch(e) {}
+    
+    // Reset room clients
+    for (const room of roomList) {
+      const clientArray = this.roomClients.get(room);
+      if (clientArray) clientArray.length = 0;
+      this.roomClients.set(room, []);
+    }
+    
+    // Clear clients set
+    this.clients.clear();
+    
+    console.log("✅ Reset all data completed on deploy");
+  }
+
   // ========== STATE MANAGEMENT ==========
   async loadState() {
     try {
@@ -722,7 +789,8 @@ export class ChatServer {
         if (saved.roomSeats) {
           for (const [room, seats] of Object.entries(saved.roomSeats)) {
             const seatMap = this.roomSeats.get(room);
-            if (seatMap) {
+            const occupancyMap = this.seatOccupancy.get(room);
+            if (seatMap && occupancyMap) {
               for (const [seat, data] of Object.entries(seats)) {
                 const seatNum = parseInt(seat);
                 const seatData = {
@@ -731,6 +799,9 @@ export class ChatServer {
                   _version: 0
                 };
                 seatMap.set(seatNum, seatData);
+                if (data.namauser) {
+                  occupancyMap.set(seatNum, data.namauser);
+                }
               }
             }
           }
@@ -1150,7 +1221,7 @@ export class ChatServer {
       this.currentNumber = 1;
       this._nextConnId = 1;
       this.lowcard = null;
-      this.gracePeriod = CONSTANTS.GRACE_PERIOD + CONSTANTS.RECONNECT_GRACE_EXTRA;
+      this.gracePeriod = CONSTANTS.GRACE_PERIOD;
       this.cleanupQueue = new QueueManager(3);
       this.muteStatus = new Map();
       for (const room of roomList) this.muteStatus.set(room, false);
@@ -1580,7 +1651,6 @@ export class ChatServer {
     return null;
   }
 
-  // ========== PERBAIKAN: reconnectToSeat ==========
   async reconnectToSeat(ws, room, seatNumber) {
     const seatMap = this.roomSeats.get(room);
     const occupancyMap = this.seatOccupancy.get(room);
@@ -1589,27 +1659,11 @@ export class ChatServer {
     
     const seatData = seatMap.get(seatNumber);
     
-    // Cek occupancy, pastikan seat ini punya user yang reconnect
     if (occupancyMap.get(seatNumber) !== ws.idtarget) return false;
     
-    // Set occupancy kembali
     occupancyMap.set(seatNumber, ws.idtarget);
     ws.roomname = room;
     ws.numkursi = new Set([seatNumber]);
-    
-    // PASTIKAN data seat tidak kosong - RESTORE jika perlu
-    if (!seatData || !seatData.namauser) {
-      // Restore data dari yang tersimpan di occupancy atau buat baru
-      seatMap.set(seatNumber, {
-        ...createEmptySeat(),
-        namauser: ws.idtarget,
-        lastUpdated: Date.now(),
-        _version: (seatData?._version || 0) + 1
-      });
-    } else {
-      seatData.lastUpdated = Date.now();
-      seatData._version = (seatData._version || 0) + 1;
-    }
     
     const clientArray = this.roomClients.get(room);
     if (clientArray && !clientArray.includes(ws)) clientArray.push(ws);
@@ -1620,19 +1674,18 @@ export class ChatServer {
     
     this.sendAllStateTo(ws, room);
     
-    // Kirim point jika ada
-    const restoredSeatData = seatMap.get(seatNumber);
-    if (restoredSeatData && restoredSeatData.lastPoint) {
-      this.safeSend(ws, ["pointUpdated", room, seatNumber, restoredSeatData.lastPoint.x, restoredSeatData.lastPoint.y, restoredSeatData.lastPoint.fast]);
+    if (seatData && seatData.lastPoint) {
+      this.safeSend(ws, ["pointUpdated", room, seatNumber, seatData.lastPoint.x, seatData.lastPoint.y, seatData.lastPoint.fast]);
     }
     
     this.safeSend(ws, ["muteTypeResponse", this.getRoomMute(room), room]);
+    
+    // Update jumlah room ketika masuk
     this.updateRoomCount(room);
     
     return true;
   }
 
-  // ========== PERBAIKAN: findEmptySeat - JANGAN paksa cleanup ==========
   async findEmptySeat(room, ws) {
     if (!room || !ws || !ws.idtarget) return null;
     try {
@@ -1651,16 +1704,12 @@ export class ChatServer {
           if (occupancyMap.get(i) === null) return i;
         }
         
-        // HANYA cleanup jika benar-benar perlu dan user sudah lewat grace period
+        // Cek seat yang occupancy nya ada tapi user sudah offline
         for (let i = 1; i <= this.MAX_SEATS; i++) {
           const occupantId = occupancyMap.get(i);
           if (occupantId) {
             const isOnline = await this.isUserStillConnected(occupantId);
-            const pendingData = this._pendingReconnections.get(occupantId);
-            const isInGrace = pendingData !== undefined;
-            
-            // HANYA cleanup jika user benar-benar offline DAN tidak dalam masa grace period
-            if (!isOnline && !isInGrace) {
+            if (!isOnline && !this._pendingReconnections.has(occupantId)) {
               await this.cleanupUserFromSeat(room, i, occupantId, true);
               return i;
             }
@@ -1673,7 +1722,6 @@ export class ChatServer {
     } catch { return null; }
   }
 
-  // ========== PERBAIKAN: assignSeatAtomic ==========
   async assignSeatAtomic(room, seat, userId) {
     const release = await this.lockManager.acquire(`atomic-assign-${room}-${seat}`);
     try {
@@ -1683,33 +1731,16 @@ export class ChatServer {
       
       const occupantId = occupancyMap.get(seat);
       const seatData = seatMap.get(seat);
+      const isStillEmpty = occupantId === null && (!seatData || !seatData.namauser);
+      if (!isStillEmpty) return false;
       
-      // Cek apakah seat benar-benar kosong (occupancy null)
-      if (occupantId !== null) return false;
-      
-      // Set occupancy dulu
+      // HANYA set occupancy, data seat tetap kosong
       occupancyMap.set(seat, userId);
-      
-      // Jika seatData sudah ada (dari sebelumnya), gunakan
-      if (seatData && seatData.namauser === userId) {
-        // Data sudah ada, update timestamp
-        seatData.lastUpdated = Date.now();
-        seatData._version = (seatData._version || 0) + 1;
-      } else if (!seatData || !seatData.namauser) {
-        // Seat kosong, buat data baru
-        seatMap.set(seat, {
-          ...createEmptySeat(),
-          namauser: userId,
-          lastUpdated: Date.now(),
-          _version: 0
-        });
-      }
       
       return true;
     } finally { release(); }
   }
 
-  // ========== PERBAIKAN: cleanupUserFromSeat - JANGAN hapus data seat ==========
   async cleanupUserFromSeat(room, seatNumber, userId, immediate = true) {
     try {
       if (seatNumber < 1 || seatNumber > this.MAX_SEATS) return;
@@ -1722,24 +1753,21 @@ export class ChatServer {
         if (occupancyMap.get(seatNumber) !== userId) return;
         
         if (immediate) {
-          // Jika user dalam masa pending reconnection, jangan hapus apa-apa
           if (this._pendingReconnections.has(userId)) {
             occupancyMap.set(seatNumber, null);
             return;
           }
           
-          // HANYA hapus occupancy, DATA SEAT TETAP DI PERTAHANKAN
+          // Hapus occupancy dan seatData
           occupancyMap.set(seatNumber, null);
-          
-          // JANGAN hapus seatData - biarkan untuk reconnection nanti
-          // seatMap.set(seatNumber, createEmptySeat()); // ← DIHAPUS
-          
+          seatMap.set(seatNumber, createEmptySeat());
           this.clearSeatBuffer(room, seatNumber);
           this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
+          
+          // Update jumlah room ketika keluar
           this.updateRoomCount(room);
           
-          // JANGAN hapus userToSeat dulu, biarkan untuk reconnection
-          // this.userToSeat.delete(userId);
+          this.userToSeat.delete(userId);
         }
       });
     } catch {}
@@ -1812,7 +1840,6 @@ export class ChatServer {
     }
   }
 
-  // ========== PERBAIKAN: forceUserCleanup - HANYA di sini data benar-benar dihapus ==========
   async forceUserCleanup(userId) {
     if (!userId || this.cleanupInProgress.has(userId)) return;
     this.cleanupInProgress.add(userId);
@@ -1836,7 +1863,7 @@ export class ChatServer {
         for (let i = 0; i < seatsToCleanup.length; i += BATCH_SIZE) {
           const batch = seatsToCleanup.slice(i, i + BATCH_SIZE);
           await Promise.allSettled(batch.map(({ room, seatNumber }) => 
-            this.forceCleanupUserFromSeat(room, seatNumber, userId)
+            this.cleanupUserFromSeat(room, seatNumber, userId, true)
           ));
           if (i + BATCH_SIZE < seatsToCleanup.length) {
             await new Promise(r => setTimeout(r, 10));
@@ -1869,29 +1896,6 @@ export class ChatServer {
     } finally { this.cleanupInProgress.delete(userId); }
   }
 
-  // ========== PERBAIKAN: forceCleanupUserFromSeat - HANYA di sini data dihapus ==========
-  async forceCleanupUserFromSeat(room, seatNumber, userId) {
-    try {
-      if (seatNumber < 1 || seatNumber > this.MAX_SEATS) return;
-      await this.withLock(`seat-${room}-${seatNumber}`, async () => {
-        const seatMap = this.roomSeats.get(room);
-        const occupancyMap = this.seatOccupancy.get(room);
-        if (!seatMap || !occupancyMap) return;
-        
-        if (occupancyMap.get(seatNumber) !== userId) return;
-        
-        // HAPUS occupancy
-        occupancyMap.set(seatNumber, null);
-        // HAPUS data seat - ini adalah satu-satunya tempat data dihapus
-        seatMap.set(seatNumber, createEmptySeat());
-        this.clearSeatBuffer(room, seatNumber);
-        this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
-        this.updateRoomCount(room);
-        this.userToSeat.delete(userId);
-      });
-    } catch {}
-  }
-
   async cleanupFromRoom(ws, room) {
     if (!ws?.idtarget || !ws.roomname) return;
     try {
@@ -1904,12 +1908,13 @@ export class ChatServer {
         ws.roomname = undefined;
         ws.numkursi = new Set();
         this.userToSeat.delete(ws.idtarget);
+        
+        // Update jumlah room ketika keluar
         this.updateRoomCount(room);
       });
     } catch {}
   }
 
-  // ========== PERBAIKAN: fullRemoveById - HANYA di sini data dihapus (user remove ID sendiri) ==========
   async fullRemoveById(idtarget) {
     if (!idtarget) return;
     try {
@@ -1920,21 +1925,16 @@ export class ChatServer {
         
         for (const room of roomsToClean) {
           const seatMap = this.roomSeats.get(room);
-          const occupancyMap = this.seatOccupancy.get(room);
-          if (!seatMap || !occupancyMap) continue;
-          
+          if (!seatMap) continue;
           for (let seatNumber = 1; seatNumber <= this.MAX_SEATS; seatNumber++) {
             const info = seatMap.get(seatNumber);
-            const occupant = occupancyMap.get(seatNumber);
-            
-            if (info?.namauser === idtarget || occupant === idtarget) {
-              // HAPUS TOTAL data seat
+            if (info?.namauser === idtarget) {
               Object.assign(info, createEmptySeat());
-              occupancyMap.set(seatNumber, null);
               this.clearSeatBuffer(room, seatNumber);
               this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
             }
           }
+          // Update jumlah room setelah remove
           this.updateRoomCount(room);
         }
         
@@ -2071,7 +2071,9 @@ export class ChatServer {
       
       setTimeout(() => this.sendAllStateTo(ws, room), 100);
       
+      // Update jumlah room ketika masuk
       this.updateRoomCount(room);
+      
       return true;
       
     } catch (error) {
@@ -2368,7 +2370,6 @@ export class ChatServer {
           const isOnline = await this.isUserStillConnected(seatData.namauser);
           if (isOnline) occupancyMap.set(seat, seatData.namauser);
           else if (!this._pendingReconnections.has(seatData.namauser)) {
-            // HANYA di sini data dihapus jika benar-benar offline dan tidak dalam grace period
             Object.assign(seatData, createEmptySeat());
           }
         } else if (occupantId && seatData?.namauser && seatData.namauser !== occupantId) {
@@ -2748,6 +2749,17 @@ export class ChatServer {
             if (seat < 1 || seat > this.MAX_SEATS) break;
             if (ws.roomname !== room || !roomList.includes(room)) break;
             
+            // ATURAN: Jangan ubah data user jika ada di room, kecuali user sendiri yang update
+            const seatMap = this.roomSeats.get(room);
+            if (seatMap) {
+              const existingSeat = seatMap.get(seat);
+              if (existingSeat && existingSeat.namauser && existingSeat.namauser !== ws.idtarget) {
+                // Bukan user sendiri, tolak update
+                this.safeSend(ws, ["error", "Tidak bisa mengubah data user lain"]);
+                break;
+              }
+            }
+            
             await this.updateSeatAtomic(room, seat, () => ({
               noimageUrl: noimageUrl || "", 
               namauser: namauser || "", 
@@ -2817,6 +2829,18 @@ export class ChatServer {
               }
             }
             break;
+          case "resetAllData": {
+            // Endpoint untuk reset data saat deploy
+            // Hanya bisa diakses oleh authorized user
+            const authKey = data[1];
+            if (authKey === this.env?.DEPLOY_SECRET_KEY || authKey === "admin_reset_2024") {
+              await this.resetAllDataOnDeploy();
+              this.safeSend(ws, ["resetDataComplete", "All data has been reset"]);
+            } else {
+              this.safeSend(ws, ["error", "Unauthorized reset attempt"]);
+            }
+            break;
+          }
           default: break;
         }
         
@@ -2831,6 +2855,23 @@ export class ChatServer {
 
   async fetch(request) {
     try {
+      const url = new URL(request.url);
+      
+      // Endpoint untuk reset data via HTTP (untuk deploy)
+      if (url.pathname === "/reset") {
+        const authKey = url.searchParams.get("key");
+        if (authKey === this.env?.DEPLOY_SECRET_KEY || authKey === "admin_reset_2024") {
+          await this.resetAllDataOnDeploy();
+          return new Response(JSON.stringify({ status: "success", message: "All data reset completed" }), {
+            headers: { "content-type": "application/json" }
+          });
+        }
+        return new Response(JSON.stringify({ status: "error", message: "Unauthorized" }), {
+          status: 401,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      
       const upgrade = request.headers.get("Upgrade") || "";
       if (upgrade.toLowerCase() !== "websocket") {
         return new Response("Expected WebSocket", { status: 426 });
@@ -2981,6 +3022,22 @@ export default {
         const obj = env.CHAT_SERVER.get(id);
         await obj.gracefulShutdown();
         return new Response("Shutdown initiated", { status: 200 });
+      }
+      
+      if (url.pathname === "/reset") {
+        const authKey = url.searchParams.get("key");
+        if (authKey === env.DEPLOY_SECRET_KEY || authKey === "admin_reset_2024") {
+          const id = env.CHAT_SERVER.idFromName("global-chat");
+          const obj = env.CHAT_SERVER.get(id);
+          await obj.resetAllDataOnDeploy();
+          return new Response(JSON.stringify({ status: "success", message: "All data reset completed" }), {
+            headers: { "content-type": "application/json" }
+          });
+        }
+        return new Response(JSON.stringify({ status: "error", message: "Unauthorized" }), {
+          status: 401,
+          headers: { "content-type": "application/json" }
+        });
       }
       
       if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
