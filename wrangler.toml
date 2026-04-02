@@ -9,7 +9,3 @@ class_name = "ChatServer"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ChatServer"]
-
-# HAPUS INI (tidak perlu karena sudah ada auto cleanup di dalam DO)
-# [triggers]
-# crons = ["*/30 * * * *"]
