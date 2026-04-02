@@ -784,30 +784,40 @@ export class ChatServer {
 
   // ========== MEMORY MANAGEMENT ==========
   _emergencyMemoryCleanup() {
-    for (const [room, points] of this._pointBuffer) {
-      if (points.length > 100) {
-        this.broadcastToRoom(room, ["batchPoints", room, points]);
-        points.length = 0;
-      }
+  // ✅ HANYA untuk point buffer, JANGAN sentuh buffer kursi
+  for (const [room, points] of this._pointBuffer) {
+    if (points.length > 100) {
+      this.broadcastToRoom(room, ["batchPoints", room, points]);
+      points.length = 0;
     }
-    
-    for (const [room, buffer] of this.updateKursiBuffer) {
-      if (buffer.size > 50) {
-        const entries = Array.from(buffer.entries());
-        const keep = entries.slice(-30);
-        this.updateKursiBuffer.set(room, new Map(keep));
-      }
-    }
-    
-    this.flushKursiUpdates();
   }
+  
+  // ❌ HAPUS bagian ini - JANGAN sentuh updateKursiBuffer
+  // for (const [room, buffer] of this.updateKursiBuffer) {
+  //   if (buffer.size > 50) {
+  //     const entries = Array.from(buffer.entries());
+  //     const keep = entries.slice(-30);
+  //     this.updateKursiBuffer.set(room, new Map(keep));
+  //   }
+  // }
+  
+  this.flushKursiUpdates();
+}
 
-  _forceMemoryCleanup() {
-    this._pointBuffer.clear();
-    for (const room of roomList) {
-      this._pointBuffer.set(room, []);
-    }
-    
+_forceMemoryCleanup() {
+  // ✅ HANYA bersihkan point buffer
+  this._pointBuffer.clear();
+  for (const room of roomList) {
+    this._pointBuffer.set(room, []);
+  }
+  
+  // ✅ KURANGI agresivitas - hanya jika benar-benar darurat
+  // HANYA jika memory di atas batas panic, baru bersihkan buffer kursi
+  const memUsage = process.memoryUsage();
+  const heapUsedMB = memUsage.heapUsed / 1024 / 1024;
+  
+  if (heapUsedMB > CONSTANTS.MEMORY_PANIC_THRESHOLD + 20) {
+    // Sangat darurat, baru bersihkan buffer kursi
     for (const [room, buffer] of this.updateKursiBuffer) {
       if (buffer.size > 20) {
         const entries = Array.from(buffer.entries());
@@ -815,21 +825,23 @@ export class ChatServer {
         this.updateKursiBuffer.set(room, new Map(keep));
       }
     }
-    
-    const now = Date.now();
-    for (const [userId, timer] of this.disconnectedTimers) {
-      if (now - timer._scheduledTime > 30000) {
-        clearTimeout(timer);
-        this.disconnectedTimers.delete(userId);
-      }
-    }
-    
-    if (this.lowcard && this.lowcard.activeGames) {
-      this.lowcard.activeGames.clear();
-    }
-    
-    safeGC();
   }
+  
+  // ✅ JANGAN hapus disconnectedTimers sembarangan
+  // const now = Date.now();
+  // for (const [userId, timer] of this.disconnectedTimers) {
+  //   if (now - timer._scheduledTime > 30000) {
+  //     clearTimeout(timer);
+  //     this.disconnectedTimers.delete(userId);
+  //   }
+  // }
+  
+  if (this.lowcard && this.lowcard.activeGames) {
+    this.lowcard.activeGames.clear();
+  }
+  
+  safeGC();
+}
 
   cleanupMessageQueues() {
     const toDelete = [];
@@ -1195,73 +1207,64 @@ export class ChatServer {
   }
 
   async performMemoryCleanup() {
-    try {
-      const deadClients = [];
-      for (const client of this.clients) {
-        if (!client || client.readyState === 3) deadClients.push(client);
-      }
-      for (const client of deadClients) this.clients.delete(client);
+  try {
+    // ✅ HANYA bersihkan client yang mati
+    const deadClients = [];
+    for (const client of this.clients) {
+      if (!client || client.readyState === 3) deadClients.push(client);
+    }
+    for (const client of deadClients) this.clients.delete(client);
 
-      const roomClientsSnapshot = Array.from(this.roomClients.entries());
-      for (const [room, clientArray] of roomClientsSnapshot) {
-        if (clientArray) {
-          const filtered = clientArray.filter(c => c && c.readyState === 1);
-          if (filtered.length !== clientArray.length) {
-            this.roomClients.set(room, filtered);
-          }
+    // ✅ HANYA filter room clients yang mati
+    const roomClientsSnapshot = Array.from(this.roomClients.entries());
+    for (const [room, clientArray] of roomClientsSnapshot) {
+      if (clientArray) {
+        const filtered = clientArray.filter(c => c && c.readyState === 1);
+        if (filtered.length !== clientArray.length) {
+          this.roomClients.set(room, filtered);
         }
       }
+    }
 
-      const now = Date.now();
-      const userConnectionsSnapshot = Array.from(this.userConnections.entries());
-      
-      for (const [userId, connections] of userConnectionsSnapshot) {
-        if (!connections) continue;
-        
-        const activeConnections = new Set();
-        for (const conn of connections) {
-          if (conn && conn.readyState === 1 && !conn._isClosing) {
-            activeConnections.add(conn);
-          }
-        }
-        
-        if (activeConnections.size === 0) {
-          if (!this._pendingReconnections.has(userId)) {
-            setTimeout(() => this.forceUserCleanup(userId), 0);
-          }
-          this.userConnections.delete(userId);
-        } else if (activeConnections.size !== connections.size) {
-          this.userConnections.set(userId, activeConnections);
-        }
+    // ❌ HAPUS bagian ini - JANGAN hapus user connections!
+    // const now = Date.now();
+    // const userConnectionsSnapshot = Array.from(this.userConnections.entries());
+    // for (const [userId, connections] of userConnectionsSnapshot) {
+    //   ...
+    // }
+
+    // ❌ HAPUS bagian ini - JANGAN hapus buffer kursi!
+    // for (const [room, buffer] of this.updateKursiBuffer) {
+    //   if (buffer && buffer.size > CONSTANTS.MAX_BUFFER_PER_ROOM) {
+    //     const entries = Array.from(buffer.entries());
+    //     const newBuffer = new Map(entries.slice(-CONSTANTS.MAX_BUFFER_PER_ROOM));
+    //     this.updateKursiBuffer.set(room, newBuffer);
+    //   }
+    // }
+
+    // ✅ HANYA bersihkan timer yang sudah sangat lama
+    const now = Date.now();
+    const disconnectedSnapshot = Array.from(this.disconnectedTimers.entries());
+    for (const [userId, timer] of disconnectedSnapshot) {
+      if (timer._scheduledTime && (now - timer._scheduledTime) > this.gracePeriod + 30000) {
+        clearTimeout(timer);
+        this.disconnectedTimers.delete(userId);
+        this._pendingReconnections.delete(userId);
+        // JANGAN panggil executeGracePeriodCleanup otomatis
+        // this.executeGracePeriodCleanup(userId);
       }
+    }
 
-      for (const [room, buffer] of this.updateKursiBuffer) {
-        if (buffer && buffer.size > CONSTANTS.MAX_BUFFER_PER_ROOM) {
-          const entries = Array.from(buffer.entries());
-          const newBuffer = new Map(entries.slice(-CONSTANTS.MAX_BUFFER_PER_ROOM));
-          this.updateKursiBuffer.set(room, newBuffer);
-        }
-      }
+    // ✅ AMAN - lock dan rate limiter cleanup
+    this.lockManager?.cleanupStuckLocks();
+    this.rateLimiter.cleanup();
+    this.connectionRateLimiter.cleanup();
+    this.roomRateLimiter.cleanup();
+    this.seatRateLimiter.cleanup();
+    this.cleanupMessageQueues();
 
-      const disconnectedSnapshot = Array.from(this.disconnectedTimers.entries());
-      for (const [userId, timer] of disconnectedSnapshot) {
-        if (timer._scheduledTime && (now - timer._scheduledTime) > this.gracePeriod + 5000) {
-          clearTimeout(timer);
-          this.disconnectedTimers.delete(userId);
-          this._pendingReconnections.delete(userId);
-          this.executeGracePeriodCleanup(userId);
-        }
-      }
-
-      this.lockManager?.cleanupStuckLocks();
-      this.rateLimiter.cleanup();
-      this.connectionRateLimiter.cleanup();
-      this.roomRateLimiter.cleanup();
-      this.seatRateLimiter.cleanup();
-      this.cleanupMessageQueues();
-
-    } catch (error) {}
-  }
+  } catch (error) {}
+}
 
   setRoomMute(roomName, isMuted) {
     try {
@@ -1690,18 +1693,24 @@ async cleanupUserFromSeat(room, seatNumber, userId, immediate = true) {
       const occupancyMap = this.seatOccupancy.get(room);
       if (!seatMap || !occupancyMap) return;
       
-      // ✅ Cek occupancy, bukan seatData
+      // ✅ CEK occupancy, bukan seatData
       if (occupancyMap.get(seatNumber) !== userId) return;
       
+      // ✅ CEK: JANGAN hapus jika user masih online
+      const isOnline = await this.isUserStillConnected(userId);
+      if (isOnline) {
+        return; // JANGAN HAPUS!
+      }
+      
+      // ✅ CEK: JANGAN hapus jika dalam grace period
+      if (this._pendingReconnections.has(userId)) {
+        return; // JANGAN HAPUS!
+      }
+      
       if (immediate) {
-        if (this._pendingReconnections.has(userId)) {
-          occupancyMap.set(seatNumber, null);
-          return;
-        }
-        
         // ✅ Hapus occupancy dan seatData
         occupancyMap.set(seatNumber, null);
-        seatMap.set(seatNumber, createEmptySeat()); // Reset ke kosong
+        seatMap.set(seatNumber, createEmptySeat());
         this.clearSeatBuffer(room, seatNumber);
         this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
         this.updateRoomCount(room);
@@ -1712,36 +1721,48 @@ async cleanupUserFromSeat(room, seatNumber, userId, immediate = true) {
 }
 
   scheduleCleanup(userId) {
-    if (!userId) return;
-    try {
-      this.cancelCleanup(userId);
-      
-      const userData = {
-        seatInfo: this.userToSeat.get(userId),
-        currentRoom: this.userCurrentRoom.get(userId),
-        connections: this.userConnections.get(userId)
-      };
-      this._pendingReconnections.set(userId, userData);
-      
-      const timerId = setTimeout(async () => {
-        try {
-          this.disconnectedTimers.delete(userId);
-          this._pendingReconnections.delete(userId);
-          const isStillConnected = await this.isUserStillConnected(userId);
-          if (!isStillConnected) {
-            await this.withLock(`grace-cleanup-${userId}`, async () => {
-              const doubleCheck = await this.isUserStillConnected(userId);
-              if (!doubleCheck) await this.forceUserCleanup(userId);
-            });
-          }
-        } catch {}
-      }, this.gracePeriod);
-      timerId._scheduledTime = Date.now();
-      timerId._userId = userId;
-      this.disconnectedTimers.set(userId, timerId);
-    } catch {}
-  }
-
+  if (!userId) return;
+  try {
+    this.cancelCleanup(userId);
+    
+    const userData = {
+      seatInfo: this.userToSeat.get(userId),
+      currentRoom: this.userCurrentRoom.get(userId),
+      connections: this.userConnections.get(userId)
+    };
+    this._pendingReconnections.set(userId, userData);
+    
+    // ✅ PERPANJANG grace period dari 3 detik menjadi 30 detik
+    const LONGER_GRACE_PERIOD = 5000; // 5 detik
+    
+    const timerId = setTimeout(async () => {
+      try {
+        this.disconnectedTimers.delete(userId);
+        this._pendingReconnections.delete(userId);
+        
+        // ✅ CEK lagi apakah user sudah kembali
+        const isStillConnected = await this.isUserStillConnected(userId);
+        if (!isStillConnected) {
+          // ✅ CEK sekali lagi dengan lock
+          await this.withLock(`grace-cleanup-${userId}`, async () => {
+            const doubleCheck = await this.isUserStillConnected(userId);
+            if (!doubleCheck) {
+              // ✅ CEK terakhir: apakah ada koneksi baru?
+              const finalCheck = this.userConnections.get(userId);
+              if (!finalCheck || finalCheck.size === 0) {
+                await this.forceUserCleanup(userId);
+              }
+            }
+          });
+        }
+      } catch {}
+    }, LONGER_GRACE_PERIOD);
+    
+    timerId._scheduledTime = Date.now();
+    timerId._userId = userId;
+    this.disconnectedTimers.set(userId, timerId);
+  } catch {}
+}
   cancelCleanup(userId) {
     if (!userId) return;
     try {
@@ -2249,74 +2270,15 @@ async cleanupUserFromSeat(room, seatNumber, userId, immediate = true) {
   }
 
   async fullSeatConsistencyCheck() {
-    for (const room of roomList) {
-      const seatMap = this.roomSeats.get(room);
-      const occupancyMap = this.seatOccupancy.get(room);
-      if (!seatMap || !occupancyMap) continue;
-      
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const seatData = seatMap.get(seat);
-        const occupant = occupancyMap.get(seat);
-        
-        if (seatData?.namauser && !occupant && !this._pendingReconnections.has(seatData.namauser)) {
-          occupancyMap.set(seat, seatData.namauser);
-        } else if (!seatData?.namauser && occupant) {
-          occupancyMap.set(seat, null);
-        } else if (seatData?.namauser && occupant && seatData.namauser !== occupant) {
-          const isOccupantOnline = await this.isUserStillConnected(occupant);
-          if (isOccupantOnline) {
-            seatData.namauser = occupant;
-            seatData.lastUpdated = Date.now();
-          } else if (!this._pendingReconnections.has(occupant)) {
-            occupancyMap.set(seat, null);
-          }
-        }
-      }
-    }
-  }
-
+  return; // TIDAK LAKUKAN APAPUN
+}
   sampledSeatConsistencyCheck() {
-    try {
-      const roomsToCheck = [];
-      const roomCount = roomList.length;
-      for (let i = 0; i < 3; i++) roomsToCheck.push(roomList[Math.floor(Math.random() * roomCount)]);
-      for (const room of roomsToCheck) {
-        if (this.getServerLoad() >= 0.8) break;
-        this.validateSeatConsistency(room);
-      }
-    } catch {}
-  }
+  return; // TIDAK LAKUKAN APAPUN
+}
 
   async validateSeatConsistency(room) {
-    try {
-      const seatMap = this.roomSeats.get(room);
-      const occupancyMap = this.seatOccupancy.get(room);
-      if (!seatMap || !occupancyMap) return;
-      for (let seat = 1; seat <= this.MAX_SEATS; seat++) {
-        const occupantId = occupancyMap.get(seat);
-        const seatData = seatMap.get(seat);
-        if (occupantId && (!seatData || !seatData.namauser)) {
-          if (!seatData) seatMap.set(seat, createEmptySeat());
-          else Object.assign(seatData, createEmptySeat());
-          occupancyMap.set(seat, null);
-        } else if (!occupantId && seatData?.namauser) {
-          const isOnline = await this.isUserStillConnected(seatData.namauser);
-          if (isOnline) occupancyMap.set(seat, seatData.namauser);
-          else if (!this._pendingReconnections.has(seatData.namauser)) {
-            Object.assign(seatData, createEmptySeat());
-          }
-        } else if (occupantId && seatData?.namauser && seatData.namauser !== occupantId) {
-          const isOccupantOnline = await this.isUserStillConnected(occupantId);
-          if (isOccupantOnline) {
-            seatData.namauser = occupantId;
-          } else if (!this._pendingReconnections.has(occupantId)) {
-            occupancyMap.set(seat, null);
-            Object.assign(seatData, createEmptySeat());
-          }
-        }
-      }
-    } catch {}
-  }
+  return; // TIDAK LAKUKAN APAPUN
+}
 
   async cleanupDuplicateConnections() {
     try {
