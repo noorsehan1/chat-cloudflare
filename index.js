@@ -1,17 +1,17 @@
-// index.js - ChatServer untuk Durable Object (HIBERNATION API - OPTIMIZED VERSION)
+// index.js - ChatServer untuk Durable Object (HIBERNATION API - FULLY OPTIMIZED)
 import { LowCardGameManager } from "./lowcard.js";
 
 // Constants
 const CONSTANTS = Object.freeze({
   MAX_SEATS: 35,
   MAX_CONNECTIONS_PER_USER: 3,
-  GRACE_PERIOD: 5000,
+  GRACE_PERIOD: 30000, // Dinaikkan jadi 30 detik untuk reconnection
   MAX_MESSAGE_SIZE: 10000,
   MAX_GLOBAL_CONNECTIONS: 500,
-  NUMBER_TICK_INTERVAL: 15 * 60 * 1000, // 15 menit
+  NUMBER_TICK_INTERVAL: 15 * 60 * 1000,
   MAX_NUMBER: 6,
-  CLEANUP_INTERVAL: 10 * 60 * 1000, // 10 menit (pisah dari number tick)
-  MAX_RATE_LIMIT: 300, // Dinaikkan untuk free plan
+  CLEANUP_INTERVAL: 10 * 60 * 1000,
+  MAX_RATE_LIMIT: 300,
   RATE_WINDOW: 60000,
   MAX_USER_IDLE: 30 * 60 * 1000,
   MAX_STORAGE_SIZE: 1000,
@@ -21,13 +21,13 @@ const CONSTANTS = Object.freeze({
   MAX_GIFT_NAME: 100,
   MAX_USERNAME_LENGTH: 50,
   MAX_MESSAGE_LENGTH: 1000,
-  MAX_ACTIVE_CLIENTS_HISTORY: 600, // Dikurangi dari 2000 (sesuai batas koneksi)
+  MAX_ACTIVE_CLIENTS_HISTORY: 600,
   LOCK_TIMEOUT_MS: 5000,
   STORAGE_SAVE_DELAY: 100,
   CACHE_TTL_MS: 30000,
   PROMISE_TIMEOUT_MS: 60000,
   MAX_CONNECTION_AGE_MS: 24 * 60 * 60 * 1000,
-  ALARM_INTERVAL_MS: 5 * 60 * 1000 // 5 menit untuk cek alarm
+  ALARM_INTERVAL_MS: 5 * 60 * 1000
 });
 
 // Room list
@@ -105,7 +105,6 @@ class LockManager {
   }
 
   async acquire(key, timeout = CONSTANTS.LOCK_TIMEOUT_MS) {
-    const startTime = Date.now();
     let attempts = 0;
     
     while (this._locks.has(key) && attempts < 3) {
@@ -437,6 +436,79 @@ export class ChatServer {
     this._initPromise = this._initializeFromStorage();
   }
   
+  // ==================== ATTACHMENT STATE MANAGEMENT ====================
+  async _updateWebSocketAttachment(ws) {
+    if (!ws) return;
+    
+    let seatNumber = null;
+    let currentRoom = null;
+    
+    if (ws.idtarget) {
+      const seatInfo = this.userToSeat.get(ws.idtarget);
+      if (seatInfo) {
+        seatNumber = seatInfo.seat;
+        currentRoom = seatInfo.room;
+      }
+    }
+    
+    const attachment = {
+      idtarget: ws.idtarget,
+      roomname: ws.roomname,
+      seatNumber: seatNumber,
+      currentRoom: currentRoom,
+      connectionTime: ws._connectionTime || Date.now(),
+      isClosing: ws._isClosing || false,
+      ip: ws._ip
+    };
+    
+    try {
+      ws.serializeAttachment(attachment);
+    } catch(e) {}
+  }
+  
+  async _restoreFromAttachment(ws) {
+    let attachment = null;
+    try {
+      attachment = ws.deserializeAttachment();
+    } catch(e) {
+      attachment = {};
+    }
+    
+    // Restore basic properties
+    if (attachment.idtarget) ws.idtarget = attachment.idtarget;
+    if (attachment.roomname) ws.roomname = attachment.roomname;
+    if (attachment.connectionTime) ws._connectionTime = attachment.connectionTime;
+    if (attachment.isClosing) ws._isClosing = attachment.isClosing;
+    if (attachment.ip) ws._ip = attachment.ip;
+    
+    // Restore seat info ke global state
+    if (attachment.idtarget && attachment.seatNumber && attachment.currentRoom) {
+      const storageManager = this.storageManagers.get(attachment.currentRoom);
+      if (storageManager) {
+        const seatData = await storageManager.getSeat(attachment.seatNumber);
+        if (seatData && seatData.namauser === attachment.idtarget) {
+          // Restore ke global state
+          this.userToSeat.set(attachment.idtarget, {
+            room: attachment.currentRoom,
+            seat: attachment.seatNumber
+          });
+          this.userCurrentRoom.set(attachment.idtarget, attachment.currentRoom);
+          
+          // Pastikan ws.roomname sesuai
+          if (!ws.roomname) ws.roomname = attachment.currentRoom;
+          
+          // Kirim state ke client agar kursi terlihat
+          await this.sendAllStateTo(ws, attachment.currentRoom);
+          await this.safeSend(ws, ["numberKursiSaya", attachment.seatNumber]);
+          
+          console.log(`[RESTORE] User ${attachment.idtarget} restored to seat ${attachment.seatNumber} in ${attachment.currentRoom}`);
+        }
+      }
+    }
+    
+    return attachment;
+  }
+  
   // ==================== ALARM API ====================
   async alarm() {
     if (this._isClosing) return;
@@ -445,21 +517,21 @@ export class ChatServer {
     const lastTick = await this.state.storage.get("last_tick_time") || 0;
     const lastCleanup = await this.state.storage.get("last_cleanup_time") || 0;
     
-    // ✅ NUMBER TICK (15 menit sekali) - DIPISAHKAN DARI CLEANUP
+    // NUMBER TICK (15 menit sekali)
     if (now - lastTick >= CONSTANTS.NUMBER_TICK_INTERVAL) {
       await this._safeTick();
       await this.state.storage.put("last_tick_time", now);
       console.log(`[ALARM] Number tick completed: ${this.currentNumber}`);
     }
     
-    // ✅ CLEANUP (10 menit sekali)
+    // CLEANUP (10 menit sekali)
     if (now - lastCleanup >= CONSTANTS.CLEANUP_INTERVAL) {
       await this._periodicCleanup();
       await this.state.storage.put("last_cleanup_time", now);
       console.log(`[ALARM] Cleanup completed`);
     }
     
-    // Schedule alarm berikutnya (5 menit dari sekarang)
+    // Schedule alarm berikutnya
     const nextAlarm = Date.now() + CONSTANTS.ALARM_INTERVAL_MS;
     await this.state.storage.setAlarm(nextAlarm);
     console.log(`[ALARM] Next alarm scheduled for ${new Date(nextAlarm).toISOString()}`);
@@ -467,68 +539,38 @@ export class ChatServer {
   
   // ==================== WEBSOCKET HIBERNATION API ====================
   async webSocketMessage(ws, message) {
-    // Restore attachment state
-    let attachment = null;
-    try {
-      attachment = ws.deserializeAttachment();
-    } catch(e) {
-      attachment = {};
-    }
-    
-    // Restore ke ws object
-    if (attachment.idtarget) ws.idtarget = attachment.idtarget;
-    if (attachment.roomname) ws.roomname = attachment.roomname;
-    if (attachment.connectionTime) ws._connectionTime = attachment.connectionTime;
-    if (attachment.isClosing) ws._isClosing = attachment.isClosing;
-    if (attachment.ip) ws._ip = attachment.ip;
+    // Restore state dari attachment
+    await this._restoreFromAttachment(ws);
     
     // Handle message
     await this.handleMessage(ws, message);
     
-    // Simpan kembali attachment yang sudah diupdate
-    const newAttachment = {
-      idtarget: ws.idtarget,
-      roomname: ws.roomname,
-      connectionTime: ws._connectionTime || Date.now(),
-      isClosing: ws._isClosing || false,
-      ip: ws._ip
-    };
-    
-    try {
-      ws.serializeAttachment(newAttachment);
-    } catch(e) {}
+    // Update attachment setelah perubahan
+    await this._updateWebSocketAttachment(ws);
   }
   
   async webSocketClose(ws, code, reason) {
-    // Restore state dari attachment
-    let attachment = null;
-    try {
-      attachment = ws.deserializeAttachment();
-    } catch(e) {
-      attachment = {};
-    }
+    // Restore state dulu
+    await this._restoreFromAttachment(ws);
     
-    if (attachment.idtarget) ws.idtarget = attachment.idtarget;
-    if (attachment.roomname) ws.roomname = attachment.roomname;
-    if (attachment.ip) ws._ip = attachment.ip;
+    // Simpan ke pending reconnections sebelum cleanup
+    if (ws.idtarget) {
+      const seatInfo = this.userToSeat.get(ws.idtarget);
+      if (seatInfo) {
+        this._pendingReconnections.set(ws.idtarget, {
+          seatInfo: { room: seatInfo.room, seat: seatInfo.seat },
+          currentRoom: seatInfo.room,
+          timestamp: Date.now()
+        });
+      }
+    }
     
     await this.safeWebSocketCleanup(ws);
   }
   
   async webSocketError(ws, error) {
     console.error("WebSocket error:", error);
-    
-    // Restore state dari attachment
-    let attachment = null;
-    try {
-      attachment = ws.deserializeAttachment();
-    } catch(e) {
-      attachment = {};
-    }
-    
-    if (attachment.idtarget) ws.idtarget = attachment.idtarget;
-    if (attachment.roomname) ws.roomname = attachment.roomname;
-    
+    await this._restoreFromAttachment(ws);
     await this.safeWebSocketCleanup(ws);
   }
   
@@ -562,7 +604,7 @@ export class ChatServer {
       await this.state.storage.setAlarm(firstAlarm);
       console.log(`[ALARM] First alarm scheduled for ${new Date(firstAlarm).toISOString()}`);
       
-      // Simpan last tick time
+      // Simpan last tick time dan cleanup time
       await this.state.storage.put("last_tick_time", Date.now());
       await this.state.storage.put("last_cleanup_time", Date.now());
       
@@ -1013,6 +1055,9 @@ export class ChatServer {
           await this.safeSend(ws, ["rooMasuk", seatNum, room]);
           await this.safeSend(ws, ["numberKursiSaya", seatNum]);
           
+          // Update attachment
+          await this._updateWebSocketAttachment(ws);
+          
           return true;
         } else {
           this.userToSeat.delete(ws.idtarget);
@@ -1068,6 +1113,9 @@ export class ChatServer {
       await this.safeSend(ws, ["numberKursiSaya", assignedSeat]);
       await this.safeSend(ws, ["muteTypeResponse", this.muteStatus.get(room), room]);
       
+      // Update attachment
+      await this._updateWebSocketAttachment(ws);
+      
       return true;
       
     } catch (error) {
@@ -1121,6 +1169,9 @@ export class ChatServer {
         this.userToSeat.delete(ws.idtarget);
         this.userCurrentRoom.delete(ws.idtarget);
       }
+      
+      // Update attachment
+      await this._updateWebSocketAttachment(ws);
       
     } catch (error) {
       console.error("Error in cleanupFromRoom:", error);
@@ -1521,6 +1572,7 @@ export class ChatServer {
         ws._connectionTime = Date.now();
         this._addUserConnection(id, ws, ip);
         await this.safeSend(ws, ["joinroomawal"]);
+        await this._updateWebSocketAttachment(ws);
         return;
       }
       
@@ -1553,6 +1605,7 @@ export class ChatServer {
             await this.safeSend(ws, ["numberKursiSaya", seat]);
             
             this._pendingReconnections.delete(id);
+            await this._updateWebSocketAttachment(ws);
             return;
           }
         }
@@ -1578,6 +1631,7 @@ export class ChatServer {
               }
               await this.safeSend(ws, ["muteTypeResponse", this.muteStatus.get(room), room]);
               await this.safeSend(ws, ["numberKursiSaya", seat]);
+              await this._updateWebSocketAttachment(ws);
               return;
             }
           }
@@ -1591,6 +1645,7 @@ export class ChatServer {
       
       this._addUserConnection(id, ws, ip);
       await this.safeSend(ws, ["needJoinRoom"]);
+      await this._updateWebSocketAttachment(ws);
       
     } catch (error) {
       console.error("Error in handleSetIdTarget2:", error);
@@ -1932,6 +1987,9 @@ export class ChatServer {
           this.broadcastToRoom(room, ["kursiBatchUpdate", room, kursiBatchData]);
           await this.updateRoomCount(room);
           
+          // Update attachment
+          await this._updateWebSocketAttachment(ws);
+          
           break;
         }
         
@@ -1951,6 +2009,7 @@ export class ChatServer {
           if (!room || !roomList.includes(room)) return;
           await this.cleanupFromRoom(ws, room);
           await this.safeSend(ws, ["roomLeft", room]);
+          await this._updateWebSocketAttachment(ws);
           break;
         }
         
@@ -2159,7 +2218,7 @@ export class ChatServer {
       const client = pair[0];
       const server = pair[1];
       
-      // ✅ PAKAI HIBERNATION API (BUKAN server.accept())
+      // PAKAI HIBERNATION API
       this.state.acceptWebSocket(server);
       
       // Simpan attachment untuk restore state setelah hibernasi
@@ -2172,6 +2231,8 @@ export class ChatServer {
       const attachment = {
         idtarget: null,
         roomname: null,
+        seatNumber: null,
+        currentRoom: null,
         connectionTime: Date.now(),
         isClosing: false,
         ip: ip
