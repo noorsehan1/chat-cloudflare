@@ -25,9 +25,9 @@ const CONSTANTS = Object.freeze({
   LOCK_TIMEOUT_MS: 5000,
   STORAGE_SAVE_DELAY: 100,
   CACHE_TTL_MS: 30000, // Dinaikkan jadi 30 detik untuk kurangi storage calls
-  PROMISE_TIMEOUT_MS: 30000,
+  PROMISE_TIMEOUT_MS: 60000,
   MAX_CONNECTION_AGE_MS: 24 * 60 * 60 * 1000,
-  ALARM_INTERVAL_MS: 5 * 60 * 1000 // 5 menit
+  ALARM_INTERVAL_MS: 10 * 60 * 1000 // 5 menit
 });
 
 // Room list
