@@ -1,4 +1,4 @@
-// index.js - ChatServer2 untuk Durable Object (HIBERNATION API VERSION - ZERO MEMORY LEAK)
+// index.js - ChatServer untuk Durable Object (HIBERNATION API - OPTIMIZED VERSION)
 import { LowCardGameManager } from "./lowcard.js";
 
 // Constants
@@ -8,10 +8,10 @@ const CONSTANTS = Object.freeze({
   GRACE_PERIOD: 5000,
   MAX_MESSAGE_SIZE: 10000,
   MAX_GLOBAL_CONNECTIONS: 500,
-  NUMBER_TICK_INTERVAL: 15 * 60 * 1000,
+  NUMBER_TICK_INTERVAL: 15 * 60 * 1000, // 15 menit
   MAX_NUMBER: 6,
-  CLEANUP_INTERVAL: 5 * 60 * 1000, // 5 menit (via alarm)
-  MAX_RATE_LIMIT: 100,
+  CLEANUP_INTERVAL: 10 * 60 * 1000, // 10 menit (pisah dari number tick)
+  MAX_RATE_LIMIT: 300, // Dinaikkan untuk free plan
   RATE_WINDOW: 60000,
   MAX_USER_IDLE: 30 * 60 * 1000,
   MAX_STORAGE_SIZE: 1000,
@@ -21,13 +21,13 @@ const CONSTANTS = Object.freeze({
   MAX_GIFT_NAME: 100,
   MAX_USERNAME_LENGTH: 50,
   MAX_MESSAGE_LENGTH: 1000,
-  MAX_ACTIVE_CLIENTS_HISTORY: 2000,
+  MAX_ACTIVE_CLIENTS_HISTORY: 600, // Dikurangi dari 2000 (sesuai batas koneksi)
   LOCK_TIMEOUT_MS: 5000,
   STORAGE_SAVE_DELAY: 100,
-  CACHE_TTL_MS: 30000, // Dinaikkan jadi 30 detik untuk kurangi storage calls
+  CACHE_TTL_MS: 30000,
   PROMISE_TIMEOUT_MS: 60000,
   MAX_CONNECTION_AGE_MS: 24 * 60 * 60 * 1000,
-  ALARM_INTERVAL_MS: 10 * 60 * 1000 // 5 menit
+  ALARM_INTERVAL_MS: 5 * 60 * 1000 // 5 menit untuk cek alarm
 });
 
 // Room list
@@ -377,7 +377,7 @@ class StorageManager {
   }
 }
 
-// ==================== MAIN CHATSERVER2 CLASS ====================
+// ==================== MAIN CHATSERVER CLASS ====================
 export class ChatServer {
   constructor(state, env) {
     this.state = state;
@@ -388,8 +388,6 @@ export class ChatServer {
     this._isClosing = false;
     this._pendingPromises = new Map();
     this._lastCleanupLog = null;
-    this._cleanupScheduled = false;
-    this._currentNumberUpdateScheduled = false;
     
     // Storage managers per room
     this.storageManagers = new Map();
@@ -425,11 +423,9 @@ export class ChatServer {
       this.lowcard = null; 
     }
     
-    // Number ticker (gunakan alarm juga)
+    // Number ticker
     this.currentNumber = 1;
     this.maxNumber = CONSTANTS.MAX_NUMBER;
-    this.intervalMillis = CONSTANTS.NUMBER_TICK_INTERVAL;
-    this._tickRunning = false;
     
     // Initialize storage managers untuk setiap room
     for (const room of roomList) {
@@ -445,40 +441,28 @@ export class ChatServer {
   async alarm() {
     if (this._isClosing) return;
     
-    console.log("[ALARM] Running scheduled cleanup...");
-    await this._periodicCleanup();
-    await this._scheduleNextCleanup();
+    const now = Date.now();
+    const lastTick = await this.state.storage.get("last_tick_time") || 0;
+    const lastCleanup = await this.state.storage.get("last_cleanup_time") || 0;
     
-    // Schedule number tick if needed
-    await this._scheduleNumberTick();
-  }
-  
-  async _scheduleNextCleanup() {
-    if (this._isClosing) return;
-    
-    const alarmTime = Date.now() + CONSTANTS.ALARM_INTERVAL_MS;
-    await this.state.storage.setAlarm(alarmTime);
-    console.log(`[ALARM] Next cleanup scheduled for ${new Date(alarmTime).toISOString()}`);
-  }
-  
-  async _scheduleNumberTick() {
-    if (this._isClosing || this._currentNumberUpdateScheduled) return;
-    
-    // Simpan currentNumber ke storage
-    const firstRoom = roomList[0];
-    const storageManager = this.storageManagers.get(firstRoom);
-    if (storageManager) {
-      const meta = await storageManager.getRoomMeta();
-      meta.currentNumber = this.currentNumber;
-      await storageManager.updateRoomMeta(meta);
+    // ✅ NUMBER TICK (15 menit sekali) - DIPISAHKAN DARI CLEANUP
+    if (now - lastTick >= CONSTANTS.NUMBER_TICK_INTERVAL) {
+      await this._safeTick();
+      await this.state.storage.put("last_tick_time", now);
+      console.log(`[ALARM] Number tick completed: ${this.currentNumber}`);
     }
     
-    this._currentNumberUpdateScheduled = true;
+    // ✅ CLEANUP (10 menit sekali)
+    if (now - lastCleanup >= CONSTANTS.CLEANUP_INTERVAL) {
+      await this._periodicCleanup();
+      await this.state.storage.put("last_cleanup_time", now);
+      console.log(`[ALARM] Cleanup completed`);
+    }
     
-    // Schedule alarm untuk number tick
-    const nextTickTime = Date.now() + this.intervalMillis;
-    await this.state.storage.setAlarm(nextTickTime);
-    console.log(`[ALARM] Next number tick scheduled for ${new Date(nextTickTime).toISOString()}`);
+    // Schedule alarm berikutnya (5 menit dari sekarang)
+    const nextAlarm = Date.now() + CONSTANTS.ALARM_INTERVAL_MS;
+    await this.state.storage.setAlarm(nextAlarm);
+    console.log(`[ALARM] Next alarm scheduled for ${new Date(nextAlarm).toISOString()}`);
   }
   
   // ==================== WEBSOCKET HIBERNATION API ====================
@@ -573,11 +557,14 @@ export class ChatServer {
       
       await this._refreshAllRoomCounts();
       
-      // Schedule alarm untuk cleanup
-      await this._scheduleNextCleanup();
+      // Schedule alarm pertama
+      const firstAlarm = Date.now() + CONSTANTS.ALARM_INTERVAL_MS;
+      await this.state.storage.setAlarm(firstAlarm);
+      console.log(`[ALARM] First alarm scheduled for ${new Date(firstAlarm).toISOString()}`);
       
-      // Schedule number tick
-      await this._scheduleNumberTick();
+      // Simpan last tick time
+      await this.state.storage.put("last_tick_time", Date.now());
+      await this.state.storage.put("last_cleanup_time", Date.now());
       
     } catch (error) {
       console.error("Failed to initialize from storage:", error);
@@ -1429,7 +1416,16 @@ export class ChatServer {
     // 12. CLEANUP RATE LIMITER
     this.rateLimiter.cleanup();
     
-    // 13. UPDATE CURRENT NUMBER TICK
+    // 13. LOG MEMORY STATUS SETIAP JAM
+    if (!this._lastCleanupLog || now - this._lastCleanupLog > 3600000) {
+      const activeReal = this._activeClients.filter(c => c?.readyState === 1).length;
+      console.log(`[MEMORY] Active: ${activeReal}/${this._activeClients.length}, Rooms: ${this.roomClients.size}, Users: ${this.userConnections.size}, Timers: ${this.disconnectedTimers.size}, Pending: ${this._pendingPromises.size}`);
+      this._lastCleanupLog = now;
+    }
+  }
+  
+  // ==================== NUMBER TICK ====================
+  async _safeTick() {
     const newNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
     this.currentNumber = newNumber;
     
@@ -1456,12 +1452,7 @@ export class ChatServer {
       }
     }
     
-    // 14. LOG MEMORY STATUS SETIAP JAM
-    if (!this._lastCleanupLog || now - this._lastCleanupLog > 3600000) {
-      const activeReal = this._activeClients.filter(c => c?.readyState === 1).length;
-      console.log(`[MEMORY] Active: ${activeReal}/${this._activeClients.length}, Rooms: ${this.roomClients.size}, Users: ${this.userConnections.size}, Timers: ${this.disconnectedTimers.size}, Pending: ${this._pendingPromises.size}`);
-      this._lastCleanupLog = now;
-    }
+    console.log(`[TICK] Number updated to ${this.currentNumber}, broadcast to ${notifiedUsers.size} users`);
   }
   
   // ==================== MUTE METHODS ====================
@@ -2115,6 +2106,7 @@ export class ChatServer {
             rooms: await this.getJumlahRoom(),
             uptime: Date.now() - this._startTime,
             hibernation: "enabled",
+            optimized: true,
             memory: {
               activeClientsLength: this._activeClients.length,
               pendingPromises: this._pendingPromises.size,
@@ -2154,7 +2146,7 @@ export class ChatServer {
           return new Response("Shutting down...", { status: 200 });
         }
         
-        return new Response("ChatServer2 Running - Hibernation API + Zero Memory Leak", { status: 200 });
+        return new Response("ChatServer Running - Hibernation API + Optimized for Free Plan", { status: 200 });
       }
       
       // WEBSOCKET CONNECTION - PAKAI HIBERNATION API
@@ -2224,7 +2216,7 @@ export default {
         return chatObj.fetch(req);
       }
       
-      return new Response("ChatServer2 Running - Hibernation API + Zero Memory Leak", {
+      return new Response("ChatServer Running - Hibernation API + Optimized for Free Plan", {
         status: 200,
         headers: { "content-type": "text/plain" }
       });
