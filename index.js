@@ -1,4 +1,4 @@
-// index.js - ChatServer2 untuk Durable Object (ZERO MEMORY LEAK - FINAL VERSION)
+// index.js - ChatServer2 untuk Durable Object (HIBERNATION API VERSION - ZERO MEMORY LEAK)
 import { LowCardGameManager } from "./lowcard.js";
 
 // Constants
@@ -10,8 +10,7 @@ const CONSTANTS = Object.freeze({
   MAX_GLOBAL_CONNECTIONS: 500,
   NUMBER_TICK_INTERVAL: 15 * 60 * 1000,
   MAX_NUMBER: 6,
-  HEARTBEAT_INTERVAL: 30000,
-  CLEANUP_INTERVAL: 30000,
+  CLEANUP_INTERVAL: 5 * 60 * 1000, // 5 menit (via alarm)
   MAX_RATE_LIMIT: 100,
   RATE_WINDOW: 60000,
   MAX_USER_IDLE: 30 * 60 * 1000,
@@ -25,9 +24,10 @@ const CONSTANTS = Object.freeze({
   MAX_ACTIVE_CLIENTS_HISTORY: 2000,
   LOCK_TIMEOUT_MS: 5000,
   STORAGE_SAVE_DELAY: 100,
-  CACHE_TTL_MS: 5000,
+  CACHE_TTL_MS: 30000, // Dinaikkan jadi 30 detik untuk kurangi storage calls
   PROMISE_TIMEOUT_MS: 30000,
-  MAX_CONNECTION_AGE_MS: 24 * 60 * 60 * 1000
+  MAX_CONNECTION_AGE_MS: 24 * 60 * 60 * 1000,
+  ALARM_INTERVAL_MS: 5 * 60 * 1000 // 5 menit
 });
 
 // Room list
@@ -49,7 +49,6 @@ class RateLimiter {
     this.windowMs = windowMs;
     this.maxRequests = maxRequests;
     this.requests = new Map();
-    this._cleanupInterval = setInterval(() => this.cleanup(), 60000);
   }
 
   check(userId) {
@@ -94,10 +93,6 @@ class RateLimiter {
   }
   
   destroy() {
-    if (this._cleanupInterval) {
-      clearInterval(this._cleanupInterval);
-      this._cleanupInterval = null;
-    }
     this.requests.clear();
   }
 }
@@ -383,18 +378,18 @@ class StorageManager {
 }
 
 // ==================== MAIN CHATSERVER2 CLASS ====================
-export class ChatServer {
+export class ChatServer2 {
   constructor(state, env) {
     this.state = state;
     this.env = env;
     this._startTime = Date.now();
     this._initPromise = null;
     this._locks = new LockManager();
-    this._cleanupInterval = null;
-    this._promiseCleanupInterval = null;
     this._isClosing = false;
     this._pendingPromises = new Map();
     this._lastCleanupLog = null;
+    this._cleanupScheduled = false;
+    this._currentNumberUpdateScheduled = false;
     
     // Storage managers per room
     this.storageManagers = new Map();
@@ -430,11 +425,10 @@ export class ChatServer {
       this.lowcard = null; 
     }
     
-    // Number ticker
+    // Number ticker (gunakan alarm juga)
     this.currentNumber = 1;
     this.maxNumber = CONSTANTS.MAX_NUMBER;
     this.intervalMillis = CONSTANTS.NUMBER_TICK_INTERVAL;
-    this.numberTickTimer = null;
     this._tickRunning = false;
     
     // Initialize storage managers untuk setiap room
@@ -445,6 +439,113 @@ export class ChatServer {
     }
     
     this._initPromise = this._initializeFromStorage();
+  }
+  
+  // ==================== ALARM API ====================
+  async alarm() {
+    if (this._isClosing) return;
+    
+    console.log("[ALARM] Running scheduled cleanup...");
+    await this._periodicCleanup();
+    await this._scheduleNextCleanup();
+    
+    // Schedule number tick if needed
+    await this._scheduleNumberTick();
+  }
+  
+  async _scheduleNextCleanup() {
+    if (this._isClosing) return;
+    
+    const alarmTime = Date.now() + CONSTANTS.ALARM_INTERVAL_MS;
+    await this.state.storage.setAlarm(alarmTime);
+    console.log(`[ALARM] Next cleanup scheduled for ${new Date(alarmTime).toISOString()}`);
+  }
+  
+  async _scheduleNumberTick() {
+    if (this._isClosing || this._currentNumberUpdateScheduled) return;
+    
+    // Simpan currentNumber ke storage
+    const firstRoom = roomList[0];
+    const storageManager = this.storageManagers.get(firstRoom);
+    if (storageManager) {
+      const meta = await storageManager.getRoomMeta();
+      meta.currentNumber = this.currentNumber;
+      await storageManager.updateRoomMeta(meta);
+    }
+    
+    this._currentNumberUpdateScheduled = true;
+    
+    // Schedule alarm untuk number tick
+    const nextTickTime = Date.now() + this.intervalMillis;
+    await this.state.storage.setAlarm(nextTickTime);
+    console.log(`[ALARM] Next number tick scheduled for ${new Date(nextTickTime).toISOString()}`);
+  }
+  
+  // ==================== WEBSOCKET HIBERNATION API ====================
+  async webSocketMessage(ws, message) {
+    // Restore attachment state
+    let attachment = null;
+    try {
+      attachment = ws.deserializeAttachment();
+    } catch(e) {
+      attachment = {};
+    }
+    
+    // Restore ke ws object
+    if (attachment.idtarget) ws.idtarget = attachment.idtarget;
+    if (attachment.roomname) ws.roomname = attachment.roomname;
+    if (attachment.connectionTime) ws._connectionTime = attachment.connectionTime;
+    if (attachment.isClosing) ws._isClosing = attachment.isClosing;
+    if (attachment.ip) ws._ip = attachment.ip;
+    
+    // Handle message
+    await this.handleMessage(ws, message);
+    
+    // Simpan kembali attachment yang sudah diupdate
+    const newAttachment = {
+      idtarget: ws.idtarget,
+      roomname: ws.roomname,
+      connectionTime: ws._connectionTime || Date.now(),
+      isClosing: ws._isClosing || false,
+      ip: ws._ip
+    };
+    
+    try {
+      ws.serializeAttachment(newAttachment);
+    } catch(e) {}
+  }
+  
+  async webSocketClose(ws, code, reason) {
+    // Restore state dari attachment
+    let attachment = null;
+    try {
+      attachment = ws.deserializeAttachment();
+    } catch(e) {
+      attachment = {};
+    }
+    
+    if (attachment.idtarget) ws.idtarget = attachment.idtarget;
+    if (attachment.roomname) ws.roomname = attachment.roomname;
+    if (attachment.ip) ws._ip = attachment.ip;
+    
+    await this.safeWebSocketCleanup(ws);
+  }
+  
+  async webSocketError(ws, error) {
+    console.error("WebSocket error:", error);
+    
+    // Restore state dari attachment
+    let attachment = null;
+    try {
+      attachment = ws.deserializeAttachment();
+    } catch(e) {
+      attachment = {};
+    }
+    
+    if (attachment.idtarget) ws.idtarget = attachment.idtarget;
+    if (attachment.roomname) ws.roomname = attachment.roomname;
+    
+    await this.safeWebSocketCleanup(ws);
   }
   
   // ==================== INITIALIZATION ====================
@@ -472,13 +573,15 @@ export class ChatServer {
       
       await this._refreshAllRoomCounts();
       
+      // Schedule alarm untuk cleanup
+      await this._scheduleNextCleanup();
+      
+      // Schedule number tick
+      await this._scheduleNumberTick();
+      
     } catch (error) {
       console.error("Failed to initialize from storage:", error);
     }
-    
-    this.startNumberTickTimer();
-    this._startPeriodicCleanup();
-    this._startPromiseCleanup();
   }
   
   async _clearAllData() {
@@ -723,7 +826,6 @@ export class ChatServer {
       }
     }
     
-    // Kurangi IP count saat disconnect
     if (ws._ip) {
       const count = this._ipConnectionCount.get(ws._ip) || 0;
       if (count <= 1) {
@@ -1041,25 +1143,6 @@ export class ChatServer {
   }
   
   // ==================== CLEANUP METHODS ====================
-  _startPeriodicCleanup() {
-    this._cleanupInterval = setInterval(() => {
-      this._periodicCleanup();
-    }, CONSTANTS.CLEANUP_INTERVAL);
-  }
-  
-  _startPromiseCleanup() {
-    this._promiseCleanupInterval = setInterval(() => {
-      if (this._pendingPromises.size > 100) {
-        const now = Date.now();
-        for (const [promise, timestamp] of this._pendingPromises) {
-          if (now - timestamp > CONSTANTS.PROMISE_TIMEOUT_MS) {
-            this._pendingPromises.delete(promise);
-          }
-        }
-      }
-    }, 10000);
-  }
-  
   scheduleCleanup(userId) {
     if (!userId) return;
     this.cancelCleanup(userId);
@@ -1216,16 +1299,6 @@ export class ChatServer {
         try { ws.close(1000, "Normal closure"); } catch (e) {}
       }
       
-      const listeners = this._wsEventListeners.get(ws);
-      if (listeners) {
-        listeners.forEach(({ event, handler }) => {
-          try {
-            ws.removeEventListener(event, handler);
-          } catch(e) {}
-        });
-        this._wsEventListeners.delete(ws);
-      }
-      
       ws._chatServer = null;
       ws._ip = null;
       ws._connectionTime = null;
@@ -1240,6 +1313,8 @@ export class ChatServer {
   
   async _periodicCleanup() {
     const now = Date.now();
+    
+    console.log("[CLEANUP] Running periodic cleanup...");
     
     // 1. COMPACT ACTIVE CLIENTS
     if (this._activeClients.length > 500) {
@@ -1354,7 +1429,34 @@ export class ChatServer {
     // 12. CLEANUP RATE LIMITER
     this.rateLimiter.cleanup();
     
-    // 13. LOG MEMORY STATUS SETIAP JAM
+    // 13. UPDATE CURRENT NUMBER TICK
+    const newNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
+    this.currentNumber = newNumber;
+    
+    const firstRoom = roomList[0];
+    const storageManager = this.storageManagers.get(firstRoom);
+    if (storageManager) {
+      const meta = await storageManager.getRoomMeta();
+      meta.currentNumber = this.currentNumber;
+      await storageManager.updateRoomMeta(meta);
+    }
+    
+    const message = JSON.stringify(["currentNumber", this.currentNumber]);
+    const notifiedUsers = new Set();
+    
+    for (let i = 0; i < this._activeClients.length; i++) {
+      const client = this._activeClients[i];
+      if (client?.readyState === 1 && client.roomname && !client._isClosing) {
+        if (!notifiedUsers.has(client.idtarget)) {
+          try {
+            client.send(message);
+            notifiedUsers.add(client.idtarget);
+          } catch (e) {}
+        }
+      }
+    }
+    
+    // 14. LOG MEMORY STATUS SETIAP JAM
     if (!this._lastCleanupLog || now - this._lastCleanupLog > 3600000) {
       const activeReal = this._activeClients.filter(c => c?.readyState === 1).length;
       console.log(`[MEMORY] Active: ${activeReal}/${this._activeClients.length}, Rooms: ${this.roomClients.size}, Users: ${this.userConnections.size}, Timers: ${this.disconnectedTimers.size}, Pending: ${this._pendingPromises.size}`);
@@ -1381,60 +1483,6 @@ export class ChatServer {
   getRoomMute(roomName) {
     if (!roomName || !roomList.includes(roomName)) return false;
     return this.muteStatus.get(roomName) || false;
-  }
-  
-  // ==================== NUMBER TICKER ====================
-  startNumberTickTimer() {
-    if (this.numberTickTimer) clearTimeout(this.numberTickTimer);
-    
-    const scheduleNext = () => {
-      if (this._isClosing) return;
-      
-      this.numberTickTimer = setTimeout(async () => {
-        try {
-          await this._safeTick();
-        } catch (error) {
-          console.error("Error in tick:", error);
-        }
-        scheduleNext();
-      }, this.intervalMillis);
-    };
-    
-    scheduleNext();
-  }
-  
-  async _safeTick() {
-    if (this._tickRunning) return;
-    this._tickRunning = true;
-    
-    try {
-      const newNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
-      this.currentNumber = newNumber;
-      
-      const firstRoom = roomList[0];
-      const storageManager = this.storageManagers.get(firstRoom);
-      const meta = await storageManager.getRoomMeta();
-      meta.currentNumber = this.currentNumber;
-      await storageManager.updateRoomMeta(meta);
-      
-      const message = JSON.stringify(["currentNumber", this.currentNumber]);
-      const notifiedUsers = new Set();
-      
-      for (let i = 0; i < this._activeClients.length; i++) {
-        const client = this._activeClients[i];
-        if (client?.readyState === 1 && client.roomname && !client._isClosing) {
-          if (!notifiedUsers.has(client.idtarget)) {
-            try {
-              client.send(message);
-              notifiedUsers.add(client.idtarget);
-            } catch (e) {}
-          }
-        }
-      }
-      
-    } finally {
-      this._tickRunning = false;
-    }
   }
   
   // ==================== MESSAGE HANDLER ====================
@@ -1986,20 +2034,6 @@ export class ChatServer {
     
     console.log("[SHUTDOWN] Starting graceful shutdown...");
     
-    if (this._cleanupInterval) {
-      clearInterval(this._cleanupInterval);
-      this._cleanupInterval = null;
-    }
-    if (this._promiseCleanupInterval) {
-      clearInterval(this._promiseCleanupInterval);
-      this._promiseCleanupInterval = null;
-    }
-    if (this.numberTickTimer) {
-      clearTimeout(this.numberTickTimer);
-      this.numberTickTimer = null;
-    }
-    
-    // Destroy game manager
     if (this.lowcard && typeof this.lowcard.destroy === 'function') {
       try {
         await this.lowcard.destroy();
@@ -2058,7 +2092,6 @@ export class ChatServer {
     this._roomCountsCache.clear();
     this.storageManagers.clear();
     this._pendingPromises.clear();
-    this._wsEventListeners = null;
     
     console.log("[SHUTDOWN] Shutdown complete");
   }
@@ -2081,6 +2114,7 @@ export class ChatServer {
             connections: activeCount,
             rooms: await this.getJumlahRoom(),
             uptime: Date.now() - this._startTime,
+            hibernation: "enabled",
             memory: {
               activeClientsLength: this._activeClients.length,
               pendingPromises: this._pendingPromises.size,
@@ -2120,9 +2154,10 @@ export class ChatServer {
           return new Response("Shutting down...", { status: 200 });
         }
         
-        return new Response("ChatServer2 Running - Zero Memory Leak Version", { status: 200 });
+        return new Response("ChatServer2 Running - Hibernation API + Zero Memory Leak", { status: 200 });
       }
       
+      // WEBSOCKET CONNECTION - PAKAI HIBERNATION API
       const activeConnections = this._activeClients.filter(c => c && c.readyState === 1 && !c._isClosing).length;
       if (activeConnections > CONSTANTS.MAX_GLOBAL_CONNECTIONS) {
         return new Response("Server overloaded", { status: 503 });
@@ -2132,52 +2167,37 @@ export class ChatServer {
       const client = pair[0];
       const server = pair[1];
       
-      try {
-        await server.accept();
-      } catch (acceptError) {
-        return new Response("WebSocket accept failed", { status: 500 });
-      }
+      // ✅ PAKAI HIBERNATION API (BUKAN server.accept())
+      this.state.acceptWebSocket(server);
       
-      const ws = server;
-      ws.roomname = undefined;
-      ws.idtarget = undefined;
-      ws._isClosing = false;
-      ws._connectionTime = Date.now();
-      
+      // Simpan attachment untuk restore state setelah hibernasi
       const cf = request.cf;
-      if (cf?.colo) {
-        ws._ip = request.headers.get("CF-Connecting-IP") || 
-                 request.headers.get("X-Forwarded-For")?.split(",")[0] || 
-                 "unknown";
-      }
+      const ip = cf?.colo ? 
+        request.headers.get("CF-Connecting-IP") || 
+        request.headers.get("X-Forwarded-For")?.split(",")[0] || 
+        "unknown" : null;
       
-      this.clients.add(ws);
-      this._activeClients.push(ws);
-      
-      const listeners = [];
-      
-      const messageHandler = (ev) => {
-        this.handleMessage(ws, ev.data).catch(() => {});
+      const attachment = {
+        idtarget: null,
+        roomname: null,
+        connectionTime: Date.now(),
+        isClosing: false,
+        ip: ip
       };
       
-      const errorHandler = () => {
-        this.safeWebSocketCleanup(ws).catch(() => {});
-      };
+      try {
+        server.serializeAttachment(attachment);
+      } catch(e) {}
       
-      const closeHandler = () => {
-        this.safeWebSocketCleanup(ws).catch(() => {});
-      };
+      // Tambahkan ke active clients
+      server.roomname = null;
+      server.idtarget = null;
+      server._isClosing = false;
+      server._connectionTime = Date.now();
+      server._ip = ip;
       
-      ws.addEventListener("message", messageHandler);
-      ws.addEventListener("error", errorHandler);
-      ws.addEventListener("close", closeHandler);
-      
-      listeners.push(
-        { event: "message", handler: messageHandler },
-        { event: "error", handler: errorHandler },
-        { event: "close", handler: closeHandler }
-      );
-      this._wsEventListeners.set(ws, listeners);
+      this.clients.add(server);
+      this._activeClients.push(server);
       
       return new Response(null, { status: 101, webSocket: client });
       
@@ -2204,7 +2224,7 @@ export default {
         return chatObj.fetch(req);
       }
       
-      return new Response("ChatServer2 Running - Zero Memory Leak Version", {
+      return new Response("ChatServer2 Running - Hibernation API + Zero Memory Leak", {
         status: 200,
         headers: { "content-type": "text/plain" }
       });
