@@ -1,5 +1,5 @@
 // ============================
-// LowCardGameManager (COMPLETELY FIXED - NO MEMORY LEAK, NO CRASH)
+// LowCardGameManager (FIXED VERSION)
 // ============================
 export class LowCardGameManager {
   constructor(chatServer) {
@@ -123,7 +123,7 @@ export class LowCardGameManager {
       
       if (game._botDrawTimeouts) {
         for (const timeout of game._botDrawTimeouts) {
-          if (timeout) clearTimeout(timeout);
+          try { clearTimeout(timeout); } catch (e) {}
         }
         game._botDrawTimeouts.clear();
       }
@@ -351,7 +351,9 @@ export class LowCardGameManager {
       const mozNames = ["moz 1", "moz 2", "moz 3", "moz 4"];
       
       for (let i = 0; i < 4; i++) {
-        const botId = `BOT_MOZ_${room}_${i}_${Date.now()}_${Math.random()}`;
+        // FIXED: Add random suffix to prevent duplicate bot IDs
+        const randomSuffix = Math.random().toString(36).substring(7);
+        const botId = `BOT_MOZ_${room}_${i}_${Date.now()}_${randomSuffix}`;
         const botName = mozNames[i];
         
         if (!game.players) game.players = new Map();
@@ -390,6 +392,10 @@ export class LowCardGameManager {
         }
 
         this._safeBroadcast(room, ["gameLowCardError", "Need at least 2 players", game.hostId]);
+        
+        // FIXED: Clear timers before deleting game
+        this._clearAllTimers(game);
+        
         this.activeGames.delete(room);
         return;
       }
@@ -715,6 +721,7 @@ export class LowCardGameManager {
       
       // VALIDASI LENGKAP
       if (!game.players || game.players.size === 0) {
+        this._clearAllTimers(game);
         this.activeGames.delete(room);
         return;
       }
@@ -730,6 +737,7 @@ export class LowCardGameManager {
       // Validasi numbers
       if (!numbers || typeof numbers.entries !== 'function') {
         this._errorHandler(new Error('Invalid numbers map'), 'evaluateRound');
+        this._clearAllTimers(game);
         this.activeGames.delete(room);
         return;
       }
