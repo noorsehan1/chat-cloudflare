@@ -1102,19 +1102,17 @@ export class ChatServer {
     }
   }
   
-  async handleSetIdTarget2(ws, id, baru, ip = null) {
+ async handleSetIdTarget2(ws, id, baru, ip = null) {
     if (!id || !ws) return;
     try {
+      // ✅ IP BLOCK DIHAPUS - hanya mencatat untuk statistik
       if (ip) {
-        const ipCount = this.userIPs.get(ip) || 0;
-        if (ipCount > 20) {
-          ws.close(1000, "Too many connections from this IP");
-          return;
-        }
-        this.userIPs.set(ip, ipCount + 1);
+        // Catat IP tanpa batasan (hanya untuk monitoring)
+        this.userIPs.set(ip, (this.userIPs.get(ip) || 0) + 1);
         this._ipConnectionCount.set(ip, (this._ipConnectionCount.get(ip) || 0) + 1);
       }
       
+      // ✅ USER BLOCK TETAP AKTIF (1 koneksi per user)
       const existingConnections = this.userConnections.get(id);
       if (existingConnections && existingConnections.size > 0) {
         const oldWs = Array.from(existingConnections)[0];
