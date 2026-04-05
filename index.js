@@ -1,4 +1,4 @@
-// index.js - ChatServer2 dengan Buffer System (TANPA case baru di client)
+// index.js - ChatServer2 dengan Buffer System (FULL FIX - NO MEMORY LEAK)
 import { LowCardGameManager } from "./lowcard.js";
 
 // Constants
@@ -26,8 +26,15 @@ const CONSTANTS = Object.freeze({
   PROMISE_TIMEOUT_MS: 30000,
   MAX_HEAP_SIZE_MB: 512,
   GC_INTERVAL_MS: 5 * 60 * 1000,
-  CHAT_BUFFER_DELAY_MS: 50,      // Buffer 50ms
-  MAX_CHAT_BUFFER_SIZE: 500       // Max pesan dalam buffer
+  CHAT_BUFFER_DELAY_MS: 50,
+  MAX_CHAT_BUFFER_SIZE: 500,
+  MAX_ACTIVE_CLIENTS_LIMIT: 2000,
+  MAX_DISCONNECTED_TIMERS: 1000,
+  MAX_PENDING_RECONNECTIONS: 500,
+  MAX_CLIENTS_SET_SIZE: 5000,
+  MAX_RATE_LIMITER_SIZE: 10000,
+  MAX_ROOM_CLIENTS_LIMIT: 2000,
+  MAX_USER_CONNECTIONS_SIZE: 5000
 });
 
 const roomList = Object.freeze([
@@ -101,6 +108,10 @@ class RateLimiter {
     let data = this.requests.get(userId);
     
     if (!data) {
+      // Batasi ukuran Map
+      if (this.requests.size >= CONSTANTS.MAX_RATE_LIMITER_SIZE) {
+        this._forceCleanup();
+      }
       this.requests.set(userId, { count: 1, windowStart: now });
       return true;
     }
@@ -125,10 +136,14 @@ class RateLimiter {
       }
     }
     
-    if (this.requests.size > 10000) {
+    this._forceCleanup();
+  }
+  
+  _forceCleanup() {
+    if (this.requests.size > CONSTANTS.MAX_RATE_LIMITER_SIZE) {
       const entries = Array.from(this.requests.entries());
       entries.sort((a, b) => a[1].windowStart - b[1].windowStart);
-      const toDelete = entries.slice(0, Math.floor(entries.length * 0.2));
+      const toDelete = entries.slice(0, Math.floor(entries.length * 0.3));
       for (const [userId] of toDelete) {
         this.requests.delete(userId);
       }
@@ -331,16 +346,15 @@ class RoomManager {
   }
 }
 
-// ==================== CHAT BUFFER (Internal Only, No New Case) ====================
+// ==================== CHAT BUFFER ====================
 class ChatBuffer {
   constructor() {
-    this.buffers = new Map(); // room -> { messages: [], timer: null }
+    this.buffers = new Map();
     this.delayMs = CONSTANTS.CHAT_BUFFER_DELAY_MS;
     this.maxSize = CONSTANTS.MAX_CHAT_BUFFER_SIZE;
     this._isDestroyed = false;
   }
   
-  // Tambah pesan ke buffer
   add(room, message, callback) {
     if (this._isDestroyed) {
       callback(message);
@@ -358,20 +372,17 @@ class ChatBuffer {
     
     buffer.messages.push(message);
     
-    // Batasi ukuran buffer - force kirim jika penuh
     if (buffer.messages.length >= this.maxSize) {
       this._flushRoom(room, callback);
       return;
     }
     
-    // Set timer untuk flush
     if (buffer.timer) clearTimeout(buffer.timer);
     buffer.timer = setTimeout(() => {
       this._flushRoom(room, callback);
     }, this.delayMs);
   }
   
-  // Kirim semua pesan dalam buffer untuk satu room (satu-satu)
   _flushRoom(room, callback) {
     const buffer = this.buffers.get(room);
     if (!buffer || buffer.messages.length === 0) return;
@@ -383,13 +394,22 @@ class ChatBuffer {
       buffer.timer = null;
     }
     
-    // Kirim satu-satu ke callback (akan dikirim ke client)
     for (const msg of messages) {
-      callback(msg);
+      try {
+        callback(msg);
+      } catch (e) {
+        // Kembalikan ke buffer jika gagal
+        buffer.messages.unshift(msg);
+        // Set timer untuk retry
+        if (!buffer.timer) {
+          buffer.timer = setTimeout(() => {
+            this._flushRoom(room, callback);
+          }, this.delayMs * 2);
+        }
+      }
     }
   }
   
-  // Flush semua room
   flushAll(callback) {
     for (const room of this.buffers.keys()) {
       this._flushRoom(room, callback);
@@ -438,17 +458,13 @@ export class ChatServer {
     this.disconnectedTimers = new Map();
     this._pendingReconnections = new Map();
     this.userLastSeen = new Map();
-    this.userIPs = new Map();
-    this._ipConnectionCount = new Map();
     
     this.rateLimiter = new RateLimiter();
     this._wsEventListeners = new WeakMap();
     this._cleanupInterval = null;
     
-    // Chat buffer (internal only)
     this.chatBuffer = new ChatBuffer();
     
-    // Game manager
     try { 
       this.lowcard = new LowCardGameManager(this); 
     } catch (error) { 
@@ -456,14 +472,12 @@ export class ChatServer {
       this.lowcard = null; 
     }
     
-    // Number tick
     this.currentNumber = 1;
     this.maxNumber = CONSTANTS.MAX_NUMBER;
     this.intervalMillis = CONSTANTS.NUMBER_TICK_INTERVAL;
     this.numberTickTimer = null;
     this._tickRunning = false;
     
-    // Initialize rooms
     for (const room of roomList) {
       this.roomManagers.set(room, new RoomManager(room));
       this.roomClients.set(room, []);
@@ -593,7 +607,7 @@ export class ChatServer {
     return null;
   }
   
-  _addUserConnection(userId, ws, ip = null) {
+  _addUserConnection(userId, ws) {
     if (!userId || !ws) return;
     
     let userConnections = this.userConnections.get(userId);
@@ -618,9 +632,14 @@ export class ChatServer {
     userConnections.add(ws);
     this.userLastSeen.set(userId, Date.now());
     
-    if (ip) {
-      this._ipConnectionCount.set(ip, (this._ipConnectionCount.get(ip) || 0) + 1);
-      this.userIPs.set(ip, (this.userIPs.get(ip) || 0) + 1);
+    // Batasi ukuran userConnections
+    if (this.userConnections.size > CONSTANTS.MAX_USER_CONNECTIONS_SIZE) {
+      const entries = Array.from(this.userConnections.entries());
+      entries.sort((a, b) => (a[1].size || 0) - (b[1].size || 0));
+      const toDelete = entries.slice(0, Math.floor(entries.length * 0.2));
+      for (const [userId] of toDelete) {
+        this.forceUserCleanup(userId);
+      }
     }
   }
   
@@ -632,16 +651,6 @@ export class ChatServer {
       userConnections.delete(ws);
       if (userConnections.size === 0) this.userConnections.delete(userId);
     }
-    
-    if (ws._ip) {
-      const ipCount = this._ipConnectionCount.get(ws._ip) || 0;
-      if (ipCount <= 1) this._ipConnectionCount.delete(ws._ip);
-      else this._ipConnectionCount.set(ws._ip, ipCount - 1);
-      
-      const userIpCount = this.userIPs.get(ws._ip) || 0;
-      if (userIpCount <= 1) this.userIPs.delete(ws._ip);
-      else this.userIPs.set(ws._ip, userIpCount - 1);
-    }
   }
   
   _removeFromActiveClients(ws) {
@@ -650,9 +659,41 @@ export class ChatServer {
   }
   
   _compactActiveClients() {
-    this._activeClients = this._activeClients.filter(ws => 
-      ws !== null && ws.readyState === 1 && !ws._isClosing
-    );
+    if (this._activeClients.length > CONSTANTS.MAX_ACTIVE_CLIENTS_LIMIT) {
+      this._activeClients = this._activeClients.filter(ws => 
+        ws !== null && ws.readyState === 1 && !ws._isClosing
+      );
+    }
+    
+    // Juga batasi jika masih terlalu besar
+    if (this._activeClients.length > CONSTANTS.MAX_ACTIVE_CLIENTS_LIMIT * 1.5) {
+      this._activeClients = this._activeClients.slice(-CONSTANTS.MAX_ACTIVE_CLIENTS_LIMIT);
+    }
+  }
+  
+  _cleanupClientsSet() {
+    if (this.clients.size > CONSTANTS.MAX_CLIENTS_SET_SIZE) {
+      const toDelete = [];
+      for (const ws of this.clients) {
+        if (!ws || ws.readyState !== 1 || ws._isClosing) {
+          toDelete.push(ws);
+        }
+      }
+      for (const ws of toDelete) {
+        this.clients.delete(ws);
+      }
+    }
+  }
+  
+  _cleanupRoomClients() {
+    for (const [room, clients] of this.roomClients) {
+      if (clients.length > CONSTANTS.MAX_ROOM_CLIENTS_LIMIT) {
+        const filtered = clients.filter(c => 
+          c !== null && c.readyState === 1 && !c._isClosing
+        );
+        this.roomClients.set(room, filtered);
+      }
+    }
   }
   
   _removeFromRoomClients(ws, room) {
@@ -677,20 +718,16 @@ export class ChatServer {
     }
   }
   
-  // ==================== BROADCAST WITH INTERNAL BUFFER (NO NEW CASE) ====================
   broadcastToRoom(room, msg) {
     if (!room || !roomList.includes(room)) return 0;
     
-    // Hanya buffer untuk chat message
     if (msg[0] === "chat") {
-      // Tambahkan ke buffer, akan dikirim setelah delay
       this.chatBuffer.add(room, msg, (bufferedMsg) => {
         this._sendDirectToRoom(room, bufferedMsg);
       });
       return this.getRoomCount(room);
     }
     
-    // Untuk message selain chat, kirim langsung
     return this._sendDirectToRoom(room, msg);
   }
   
@@ -892,11 +929,24 @@ export class ChatServer {
         }
       } catch (error) {
         console.error("Error in scheduleCleanup timer:", error);
+        this.disconnectedTimers.delete(userId);
+        this._pendingReconnections.delete(userId);
       }
     }, CONSTANTS.GRACE_PERIOD);
     
     timerId._scheduledTime = Date.now();
     this.disconnectedTimers.set(userId, timerId);
+    
+    if (this.disconnectedTimers.size > CONSTANTS.MAX_DISCONNECTED_TIMERS) {
+      const entries = Array.from(this.disconnectedTimers.entries());
+      entries.sort((a, b) => (a[1]._scheduledTime || 0) - (b[1]._scheduledTime || 0));
+      const toDelete = entries.slice(0, Math.floor(entries.length * 0.2));
+      for (const [userId, timer] of toDelete) {
+        clearTimeout(timer);
+        this.disconnectedTimers.delete(userId);
+        this._pendingReconnections.delete(userId);
+      }
+    }
   }
   
   cancelCleanup(userId) {
@@ -981,6 +1031,15 @@ export class ChatServer {
             });
           }
           
+          if (this._pendingReconnections.size > CONSTANTS.MAX_PENDING_RECONNECTIONS) {
+            const entries = Array.from(this._pendingReconnections.entries());
+            entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+            const toDelete = entries.slice(0, Math.floor(entries.length * 0.2));
+            for (const [userId] of toDelete) {
+              this._pendingReconnections.delete(userId);
+            }
+          }
+          
           const timerId = setTimeout(async () => {
             try {
               this.disconnectedTimers.delete(userId);
@@ -1012,7 +1071,6 @@ export class ChatServer {
       }
       
       ws._chatServer = null;
-      ws._ip = null;
       ws._connectionTime = null;
       ws.onmessage = null;
       ws.onerror = null;
@@ -1027,19 +1085,23 @@ export class ChatServer {
     const now = Date.now();
     
     try {
-      // Flush semua buffer chat yang tersisa
+      // Flush semua buffer chat
       this.chatBuffer.flushAll((msg) => {
         if (msg[1]) {
           this._sendDirectToRoom(msg[1], msg);
         }
       });
       
-      if (this._activeClients.length > 500) this._compactActiveClients();
+      // Compact semua struktur data
+      this._compactActiveClients();
+      this._cleanupClientsSet();
+      this._cleanupRoomClients();
       
       if (this._activeClients.length > CONSTANTS.MAX_ACTIVE_CLIENTS_HISTORY) {
         this._activeClients = this._activeClients.slice(-CONSTANTS.MAX_ACTIVE_CLIENTS_HISTORY);
       }
       
+      // Cleanup room clients
       for (const [room, clients] of this.roomClients) {
         const filtered = [];
         for (let i = 0; i < clients.length; i++) {
@@ -1053,12 +1115,7 @@ export class ChatServer {
         }
       }
       
-      for (const ws of this.clients) {
-        if (!ws || ws.readyState !== 1 || ws._isClosing) {
-          this.clients.delete(ws);
-        }
-      }
-      
+      // Cleanup user connections
       for (const [userId, connections] of this.userConnections) {
         const alive = new Set();
         for (const conn of connections) {
@@ -1070,6 +1127,7 @@ export class ChatServer {
         else if (alive.size !== connections.size) this.userConnections.set(userId, alive);
       }
       
+      // Cleanup expired timers
       for (const [userId, timer] of this.disconnectedTimers) {
         if (timer._scheduledTime && (now - timer._scheduledTime) > CONSTANTS.GRACE_PERIOD + 5000) {
           clearTimeout(timer);
@@ -1079,32 +1137,21 @@ export class ChatServer {
         }
       }
       
+      // Cleanup expired pending reconnections
       for (const [userId, data] of this._pendingReconnections) {
         if (data.timestamp && (now - data.timestamp) > CONSTANTS.GRACE_PERIOD * 2) {
           this._pendingReconnections.delete(userId);
         }
       }
       
+      // Cleanup idle users (24 jam)
       for (const [userId, lastSeen] of this.userLastSeen) {
         if (now - lastSeen > CONSTANTS.MAX_USER_IDLE) {
           await this.forceUserCleanup(userId);
         }
       }
       
-      if (this.userIPs.size > 10000) {
-        const entries = Array.from(this.userIPs.entries());
-        entries.sort((a, b) => a[1] - b[1]);
-        const toDelete = entries.slice(0, Math.floor(entries.length * 0.3));
-        for (const [ip] of toDelete) this.userIPs.delete(ip);
-      }
-      
-      if (this._ipConnectionCount.size > 5000) {
-        const entries = Array.from(this._ipConnectionCount.entries());
-        entries.sort((a, b) => a[1] - b[1]);
-        const toDelete = entries.slice(0, Math.floor(entries.length * 0.3));
-        for (const [ip] of toDelete) this._ipConnectionCount.delete(ip);
-      }
-      
+      // Refresh room counts periodically
       if (now - this._lastCountUpdate > 30000) {
         this.refreshRoomCounts();
         this._lastCountUpdate = now;
@@ -1112,14 +1159,16 @@ export class ChatServer {
       
       this.rateLimiter.cleanup();
       
+      // Memory pressure check
       if (this.memoryMonitor.check()) {
         await this.forceGlobalCleanup();
       }
       
+      // Periodic logging
       if (!this._lastCleanupLog || now - this._lastCleanupLog > 3600000) {
         const activeReal = this._activeClients.filter(c => c?.readyState === 1).length;
         const bufferStats = this.chatBuffer.getStats();
-        console.log(`[MEMORY] Active: ${activeReal}/${this._activeClients.length}, Users: ${this.userConnections.size}, Timers: ${this.disconnectedTimers.size}, Buffer: ${bufferStats.totalMessages} msgs in ${bufferStats.rooms} rooms`);
+        console.log(`[MEMORY] Active: ${activeReal}/${this._activeClients.length}, Users: ${this.userConnections.size}, Timers: ${this.disconnectedTimers.size}, Buffer: ${bufferStats.totalMessages} msgs in ${bufferStats.rooms} rooms, ClientsSet: ${this.clients.size}`);
         this._lastCleanupLog = now;
       }
     } catch (error) {
@@ -1211,14 +1260,9 @@ export class ChatServer {
     }
   }
   
-  async handleSetIdTarget2(ws, id, baru, ip = null) {
+  async handleSetIdTarget2(ws, id, baru) {
     if (!id || !ws) return;
     try {
-      if (ip) {
-        this.userIPs.set(ip, (this.userIPs.get(ip) || 0) + 1);
-        this._ipConnectionCount.set(ip, (this._ipConnectionCount.get(ip) || 0) + 1);
-      }
-      
       const existingConnections = this.userConnections.get(id);
       if (existingConnections && existingConnections.size > 0) {
         const oldWs = Array.from(existingConnections)[0];
@@ -1242,7 +1286,7 @@ export class ChatServer {
         ws.roomname = undefined;
         ws._isClosing = false;
         ws._connectionTime = Date.now();
-        this._addUserConnection(id, ws, ip);
+        this._addUserConnection(id, ws);
         await this.safeSend(ws, ["joinroomawal"]);
         return;
       }
@@ -1261,7 +1305,7 @@ export class ChatServer {
             ws.roomname = room;
             const clientArray = this.roomClients.get(room);
             if (clientArray && !clientArray.includes(ws)) clientArray.push(ws);
-            this._addUserConnection(id, ws, ip);
+            this._addUserConnection(id, ws);
             this.userToSeat.set(id, { room, seat });
             this.userCurrentRoom.set(id, room);
             await this.sendAllStateTo(ws, room);
@@ -1288,7 +1332,7 @@ export class ChatServer {
               ws.roomname = room;
               const clientArray = this.roomClients.get(room);
               if (clientArray && !clientArray.includes(ws)) clientArray.push(ws);
-              this._addUserConnection(id, ws, ip);
+              this._addUserConnection(id, ws);
               await this.sendAllStateTo(ws, room);
               if (seatData.lastPoint) {
                 await this.safeSend(ws, ["pointUpdated", room, seat, seatData.lastPoint.x, seatData.lastPoint.y, seatData.lastPoint.fast ? 1 : 0]);
@@ -1305,7 +1349,7 @@ export class ChatServer {
         if (seatInfo.room) await this.forceUserCleanup(id);
       }
       
-      this._addUserConnection(id, ws, ip);
+      this._addUserConnection(id, ws);
       await this.safeSend(ws, ["needJoinRoom"]);
     } catch (error) {
       console.error("Error in handleSetIdTarget2:", error);
@@ -1403,7 +1447,7 @@ export class ChatServer {
         }
         
         case "setIdTarget2": {
-          await this.handleSetIdTarget2(ws, data[1], data[2], ws._ip || null); 
+          await this.handleSetIdTarget2(ws, data[1], data[2]); 
           break; 
         }
         
@@ -1530,7 +1574,6 @@ export class ChatServer {
           }
           if (!isPrimary) return;
           
-          // Broadcast dengan buffer internal (akan dikirim setelah delay)
           this.broadcastToRoom(roomname, ["chat", roomname, noImageURL, sanitizedUsername, sanitizedMessage, usernameColor, chatTextColor]);
           break;
         }
@@ -1679,8 +1722,6 @@ export class ChatServer {
       disconnectedTimers: this.disconnectedTimers.size,
       pendingReconnections: this._pendingReconnections.size,
       rateLimiterSize: this.rateLimiter.requests?.size || 0,
-      userIPsSize: this.userIPs.size,
-      ipConnectionCountSize: this._ipConnectionCount.size,
       userToSeatSize: this.userToSeat.size,
       userCurrentRoomSize: this.userCurrentRoom.size,
       userLastSeenSize: this.userLastSeen.size,
@@ -1693,7 +1734,6 @@ export class ChatServer {
     this._isClosing = true;
     console.log("[SHUTDOWN] Starting graceful shutdown...");
     
-    // Flush semua buffer chat sebelum shutdown
     this.chatBuffer.flushAll((msg) => {
       if (msg[1]) {
         this._sendDirectToRoom(msg[1], msg);
@@ -1742,8 +1782,6 @@ export class ChatServer {
     this.disconnectedTimers.clear();
     this._pendingReconnections.clear();
     this.userLastSeen.clear();
-    this.userIPs.clear();
-    this._ipConnectionCount.clear();
     this._roomCountsCache.clear();
     this.roomManagers.clear();
     this._wsEventListeners = null;
@@ -1793,7 +1831,7 @@ export class ChatServer {
           return new Response("Shutting down...", { status: 200 });
         }
         
-        return new Response("ChatServer2 Running - Buffer System (No New Case)", { status: 200 });
+        return new Response("ChatServer2 Running - Buffer System (FULL FIX)", { status: 200 });
       }
       
       const activeConnections = this._activeClients.filter(c => c && c.readyState === 1 && !c._isClosing).length;
@@ -1814,10 +1852,6 @@ export class ChatServer {
       ws.idtarget = undefined;
       ws._isClosing = false;
       ws._connectionTime = Date.now();
-      
-      ws._ip = request.headers.get("CF-Connecting-IP") || 
-               request.headers.get("X-Forwarded-For")?.split(",")[0] || 
-               "unknown";
       
       this.clients.add(ws);
       this._activeClients.push(ws);
@@ -1860,7 +1894,7 @@ export default {
         return chatObj.fetch(req);
       }
       
-      return new Response("ChatServer2 Running - Buffer System (No New Case)", {
+      return new Response("ChatServer2 Running - Buffer System (FULL FIX)", {
         status: 200,
         headers: { "content-type": "text/plain" }
       });
