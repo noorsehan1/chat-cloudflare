@@ -688,6 +688,7 @@ export class ChatServer {
           await this.sendAllStateTo(ws, room);
           await this.safeSend(ws, ["rooMasuk", seatNum, room]);
           await this.safeSend(ws, ["numberKursiSaya", seatNum]);
+          await this.safeSend(ws, ["currentNumber", this.currentNumber]);
           return true;
         } else {
           this.userToSeat.delete(ws.idtarget);
@@ -733,6 +734,7 @@ export class ChatServer {
       await this.sendAllStateTo(ws, room);
       await this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
       await this.safeSend(ws, ["numberKursiSaya", assignedSeat]);
+      await this.safeSend(ws, ["currentNumber", this.currentNumber]);
       
       const roomManager = this.roomManagers.get(room);
       await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
@@ -1065,48 +1067,52 @@ export class ChatServer {
     return this.roomManagers.get(roomName).getMute();
   }
   
- startNumberTickTimer() {
-    if (this.numberTickTimer) clearTimeout(this.numberTickTimer);
-    const scheduleNext = () => {
-        if (this._isClosing) return;
-        this.numberTickTimer = setTimeout(async () => {
-            try {
-                await this._safeTick();
-            } catch (error) {
-                console.error("Error in tick:", error);
-            }
-            scheduleNext();
-        }, this.intervalMillis);
-    };
-    scheduleNext();
-}
+  startNumberTickTimer() {
+    if (this.numberTickTimer) {
+      clearInterval(this.numberTickTimer);
+      this.numberTickTimer = null;
+    }
+    
+    this.numberTickTimer = setInterval(async () => {
+      if (this._isClosing) return;
+      try {
+        await this._safeTick();
+      } catch (error) {
+        console.error("Error in tick:", error);
+      }
+    }, this.intervalMillis);
+    
+    console.log(`[TICK] Timer started with interval: ${this.intervalMillis}ms`);
+  }
   
-async _safeTick() {
+  async _safeTick() {
     if (this._tickRunning || this._isClosing) return;
     this._tickRunning = true;
     try {
-        this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
-        for (const roomManager of this.roomManagers.values()) {
-            roomManager.setCurrentNumber(this.currentNumber);
+      this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
+      for (const roomManager of this.roomManagers.values()) {
+        roomManager.setCurrentNumber(this.currentNumber);
+      }
+      
+      const message = JSON.stringify(["currentNumber", this.currentNumber]);
+      let sentCount = 0;
+      
+      for (const client of this.clients) {
+        if (client?.readyState === 1 && !client._isClosing && client.roomname) {
+          try {
+            client.send(message);
+            sentCount++;
+          } catch (e) {}
         }
-        
-        const message = JSON.stringify(["currentNumber", this.currentNumber]);
-        const notifiedUsers = new Set();
-        for (let i = 0; i < this._activeClients.length; i++) {
-            const client = this._activeClients[i];
-            if (client?.readyState === 1 && client.roomname && !client._isClosing) {
-                if (!notifiedUsers.has(client.idtarget)) {
-                    try {
-                        client.send(message);
-                        notifiedUsers.add(client.idtarget);
-                    } catch (e) {}
-                }
-            }
-        }
+      }
+      
+      if (sentCount > 0) {
+        console.log(`[TICK] Number ${this.currentNumber} sent to ${sentCount} clients`);
+      }
     } finally {
-        this._tickRunning = false;
+      this._tickRunning = false;
     }
-}
+  }
   
  async handleSetIdTarget2(ws, id, baru, ip = null) {
     if (!id || !ws) return;
@@ -1171,6 +1177,7 @@ async _safeTick() {
             }
             await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
             await this.safeSend(ws, ["numberKursiSaya", seat]);
+            await this.safeSend(ws, ["currentNumber", this.currentNumber]);
             this._pendingReconnections.delete(id);
             return;
           }
@@ -1196,6 +1203,7 @@ async _safeTick() {
               }
               await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
               await this.safeSend(ws, ["numberKursiSaya", seat]);
+              await this.safeSend(ws, ["currentNumber", this.currentNumber]);
               return;
             }
           }
@@ -1592,7 +1600,7 @@ async _safeTick() {
     console.log("[SHUTDOWN] Starting graceful shutdown...");
     
     if (this.numberTickTimer) {
-      clearTimeout(this.numberTickTimer);
+      clearInterval(this.numberTickTimer);
       this.numberTickTimer = null;
     }
     if (this._cleanupInterval) {
