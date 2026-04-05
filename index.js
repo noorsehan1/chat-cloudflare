@@ -848,71 +848,77 @@ export class ChatServer {
   }
   
   async safeWebSocketCleanup(ws) {
-    if (!ws) return;
+  if (!ws) return;
+  
+  const userId = ws.idtarget;
+  const room = ws.roomname;
+  
+  try {
+    ws._isClosing = true;
+    this.clients.delete(ws);
+    this._removeFromActiveClients(ws);
     
-    const userId = ws.idtarget;
-    const room = ws.roomname;
-    
-    try {
-      ws._isClosing = true;
-      this.clients.delete(ws);
-      this._removeFromActiveClients(ws);
+    if (userId) {
+      this._removeUserConnection(userId, ws);
       
-      if (userId) {
-        this._removeUserConnection(userId, ws);
+      if (!(await this.isUserStillConnected(userId))) {
+        this.cancelCleanup(userId);
         
-        if (!(await this.isUserStillConnected(userId))) {
-          this.cancelCleanup(userId);
+        const seatInfo = this.userToSeat.get(userId);
+        if (seatInfo && seatInfo.room === room) {
+          // ✅ TAMBAHKAN INI - Update cache saat disconnect
+          const currentCount = this._roomCountsCache.get(room) || 0;
+          const newCount = Math.max(0, currentCount - 1);
+          this._roomCountsCache.set(room, newCount);
+          this.broadcastToRoom(room, ["roomUserCount", room, newCount]);
           
-          const seatInfo = this.userToSeat.get(userId);
-          if (seatInfo && seatInfo.room === room) {
-            this._pendingReconnections.set(userId, {
-              seatInfo: seatInfo,
-              currentRoom: room,
-              timestamp: Date.now()
-            });
-          }
-          
-          const timerId = setTimeout(async () => {
-            try {
-              this.disconnectedTimers.delete(userId);
-              this._pendingReconnections.delete(userId);
-              if (!(await this.isUserStillConnected(userId))) {
-                await this.forceUserCleanup(userId);
-              }
-            } catch (error) {
-              console.error("Error in cleanup timer:", error);
-            }
-          }, CONSTANTS.GRACE_PERIOD);
-          
-          timerId._scheduledTime = Date.now();
-          this.disconnectedTimers.set(userId, timerId);
+          this._pendingReconnections.set(userId, {
+            seatInfo: seatInfo,
+            currentRoom: room,
+            timestamp: Date.now()
+          });
         }
+        
+        const timerId = setTimeout(async () => {
+          try {
+            this.disconnectedTimers.delete(userId);
+            this._pendingReconnections.delete(userId);
+            if (!(await this.isUserStillConnected(userId))) {
+              await this.forceUserCleanup(userId);
+            }
+          } catch (error) {
+            console.error("Error in cleanup timer:", error);
+          }
+        }, CONSTANTS.GRACE_PERIOD);
+        
+        timerId._scheduledTime = Date.now();
+        this.disconnectedTimers.set(userId, timerId);
       }
-      
-      if (room) this._removeFromRoomClients(ws, room);
-      if (ws.readyState === 1) {
-        try { ws.close(1000, "Normal closure"); } catch (e) {}
-      }
-      
-      const listeners = this._wsEventListeners.get(ws);
-      if (listeners) {
-        listeners.forEach(({ event, handler }) => {
-          try { ws.removeEventListener(event, handler); } catch(e) {}
-        });
-        this._wsEventListeners.delete(ws);
-      }
-      
-      ws._chatServer = null;
-      ws._ip = null;
-      ws._connectionTime = null;
-      ws.onmessage = null;
-      ws.onerror = null;
-      ws.onclose = null;
-    } catch (error) {
-      console.error("Error in safeWebSocketCleanup:", error);
     }
+    
+    if (room) this._removeFromRoomClients(ws, room);
+    if (ws.readyState === 1) {
+      try { ws.close(1000, "Normal closure"); } catch (e) {}
+    }
+    
+    const listeners = this._wsEventListeners.get(ws);
+    if (listeners) {
+      listeners.forEach(({ event, handler }) => {
+        try { ws.removeEventListener(event, handler); } catch(e) {}
+      });
+      this._wsEventListeners.delete(ws);
+    }
+    
+    ws._chatServer = null;
+    ws._ip = null;
+    ws._connectionTime = null;
+    ws.onmessage = null;
+    ws.onerror = null;
+    ws.onclose = null;
+  } catch (error) {
+    console.error("Error in safeWebSocketCleanup:", error);
   }
+}
   
   async _periodicCleanup() {
     if (this._isClosing) return;
@@ -1059,48 +1065,56 @@ export class ChatServer {
     return this.roomManagers.get(roomName).getMute();
   }
   
-  startNumberTickTimer() {
-    if (this.numberTickTimer) clearTimeout(this.numberTickTimer);
-    const scheduleNext = () => {
-      if (this._isClosing) return;
-      this.numberTickTimer = setTimeout(async () => {
-        try {
-          await this._safeTick();
-        } catch (error) {
-          console.error("Error in tick:", error);
-        }
-        scheduleNext();
-      }, this.intervalMillis);
-    };
-    scheduleNext();
+ startNumberTickTimer() {
+  if (this.numberTickTimer) {
+    clearTimeout(this.numberTickTimer);
+    this.numberTickTimer = null;
   }
   
-  async _safeTick() {
-    if (this._tickRunning || this._isClosing) return;
-    this._tickRunning = true;
-    try {
-      this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
-      for (const roomManager of this.roomManagers.values()) {
-        roomManager.setCurrentNumber(this.currentNumber);
-      }
-      
-      const message = JSON.stringify(["currentNumber", this.currentNumber]);
-      const notifiedUsers = new Set();
-      for (let i = 0; i < this._activeClients.length; i++) {
-        const client = this._activeClients[i];
-        if (client?.readyState === 1 && client.roomname && !client._isClosing) {
-          if (!notifiedUsers.has(client.idtarget)) {
-            try {
-              client.send(message);
-              notifiedUsers.add(client.idtarget);
-            } catch (e) {}
-          }
+  const tick = async () => {
+    if (this._isClosing) return;
+    await this._safeTick();
+    if (!this._isClosing) {
+      this.numberTickTimer = setTimeout(tick, this.intervalMillis);
+    }
+  };
+  
+  this.numberTickTimer = setTimeout(tick, this.intervalMillis);
+}
+  
+ async _safeTick() {
+  if (this._tickRunning || this._isClosing) return;
+  this._tickRunning = true;
+  try {
+    this.currentNumber = this.currentNumber < this.maxNumber 
+      ? this.currentNumber + 1 
+      : 1;
+    
+    // Update room managers
+    for (const roomManager of this.roomManagers.values()) {
+      roomManager.setCurrentNumber(this.currentNumber);
+    }
+    
+    // ✅ Kirim hanya ke client yang aktif di room
+    const message = JSON.stringify(["currentNumber", this.currentNumber]);
+    const notifiedRooms = new Set();
+    
+    for (const client of this._activeClients) {
+      if (client?.readyState === 1 && client.roomname && !client._isClosing) {
+        // Kirim 1x per user (bisa multiple koneksi)
+        const key = `${client.idtarget}|${client.roomname}`;
+        if (!notifiedRooms.has(key)) {
+          try {
+            client.send(message);
+            notifiedRooms.add(key);
+          } catch(e) {}
         }
       }
-    } finally {
-      this._tickRunning = false;
     }
+  } finally {
+    this._tickRunning = false;
   }
+}
   
  async handleSetIdTarget2(ws, id, baru, ip = null) {
     if (!id || !ws) return;
