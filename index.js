@@ -1066,54 +1066,46 @@ export class ChatServer {
   }
   
  startNumberTickTimer() {
-  if (this.numberTickTimer) {
-    clearTimeout(this.numberTickTimer);
-    this.numberTickTimer = null;
-  }
-  
-  const tick = async () => {
-    if (this._isClosing) return;
-    await this._safeTick();
-    if (!this._isClosing) {
-      this.numberTickTimer = setTimeout(tick, this.intervalMillis);
-    }
-  };
-  
-  this.numberTickTimer = setTimeout(tick, this.intervalMillis);
+    if (this.numberTickTimer) clearTimeout(this.numberTickTimer);
+    const scheduleNext = () => {
+        if (this._isClosing) return;
+        this.numberTickTimer = setTimeout(async () => {
+            try {
+                await this._safeTick();
+            } catch (error) {
+                console.error("Error in tick:", error);
+            }
+            scheduleNext();
+        }, this.intervalMillis);
+    };
+    scheduleNext();
 }
   
- async _safeTick() {
-  if (this._tickRunning || this._isClosing) return;
-  this._tickRunning = true;
-  try {
-    this.currentNumber = this.currentNumber < this.maxNumber 
-      ? this.currentNumber + 1 
-      : 1;
-    
-    // Update room managers
-    for (const roomManager of this.roomManagers.values()) {
-      roomManager.setCurrentNumber(this.currentNumber);
-    }
-    
-    // ✅ Kirim hanya ke client yang aktif di room
-    const message = JSON.stringify(["currentNumber", this.currentNumber]);
-    const notifiedRooms = new Set();
-    
-    for (const client of this._activeClients) {
-      if (client?.readyState === 1 && client.roomname && !client._isClosing) {
-        // Kirim 1x per user (bisa multiple koneksi)
-        const key = `${client.idtarget}|${client.roomname}`;
-        if (!notifiedRooms.has(key)) {
-          try {
-            client.send(message);
-            notifiedRooms.add(key);
-          } catch(e) {}
+async _safeTick() {
+    if (this._tickRunning || this._isClosing) return;
+    this._tickRunning = true;
+    try {
+        this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
+        for (const roomManager of this.roomManagers.values()) {
+            roomManager.setCurrentNumber(this.currentNumber);
         }
-      }
+        
+        const message = JSON.stringify(["currentNumber", this.currentNumber]);
+        const notifiedUsers = new Set();
+        for (let i = 0; i < this._activeClients.length; i++) {
+            const client = this._activeClients[i];
+            if (client?.readyState === 1 && client.roomname && !client._isClosing) {
+                if (!notifiedUsers.has(client.idtarget)) {
+                    try {
+                        client.send(message);
+                        notifiedUsers.add(client.idtarget);
+                    } catch (e) {}
+                }
+            }
+        }
+    } finally {
+        this._tickRunning = false;
     }
-  } finally {
-    this._tickRunning = false;
-  }
 }
   
  async handleSetIdTarget2(ws, id, baru, ip = null) {
