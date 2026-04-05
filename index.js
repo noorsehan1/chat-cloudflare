@@ -642,7 +642,7 @@ export class ChatServer {
       }
       await this.safeSend(ws, ["roomUserCount", room, this.getRoomCount(room)]);
       
-      // ✅ TAMBAHKAN INI
+      // ✅ FIX: Kirim current number saat sendAllStateTo
       await this.safeSend(ws, ["currentNumber", this.currentNumber]);
       
       await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
@@ -692,7 +692,7 @@ export class ChatServer {
           await this.safeSend(ws, ["rooMasuk", seatNum, room]);
           await this.safeSend(ws, ["numberKursiSaya", seatNum]);
           
-          // ✅ TAMBAHKAN INI - Kirim current number saat join
+          // ✅ FIX: Kirim current number saat join room
           await this.safeSend(ws, ["currentNumber", this.currentNumber]);
           
           return true;
@@ -744,7 +744,7 @@ export class ChatServer {
       const roomManager = this.roomManagers.get(room);
       await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
       
-      // ✅ TAMBAHKAN INI - Kirim current number saat join
+      // ✅ FIX: Kirim current number saat join room
       await this.safeSend(ws, ["currentNumber", this.currentNumber]);
       
       return true;
@@ -1116,14 +1116,13 @@ export class ChatServer {
  async handleSetIdTarget2(ws, id, baru, ip = null) {
     if (!id || !ws) return;
     try {
-      // ✅ IP BLOCK DIHAPUS - hanya mencatat untuk statistik
+      // Catat IP untuk statistik (tanpa blokir)
       if (ip) {
-        // Catat IP tanpa batasan (hanya untuk monitoring)
         this.userIPs.set(ip, (this.userIPs.get(ip) || 0) + 1);
         this._ipConnectionCount.set(ip, (this._ipConnectionCount.get(ip) || 0) + 1);
       }
       
-      // ✅ USER BLOCK TETAP AKTIF (1 koneksi per user)
+      // User block: 1 koneksi per user
       const existingConnections = this.userConnections.get(id);
       if (existingConnections && existingConnections.size > 0) {
         const oldWs = Array.from(existingConnections)[0];
@@ -1176,6 +1175,7 @@ export class ChatServer {
             }
             await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
             await this.safeSend(ws, ["numberKursiSaya", seat]);
+            await this.safeSend(ws, ["currentNumber", this.currentNumber]);
             this._pendingReconnections.delete(id);
             return;
           }
@@ -1201,6 +1201,7 @@ export class ChatServer {
               }
               await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
               await this.safeSend(ws, ["numberKursiSaya", seat]);
+              await this.safeSend(ws, ["currentNumber", this.currentNumber]);
               return;
             }
           }
