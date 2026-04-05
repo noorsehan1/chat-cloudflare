@@ -641,7 +641,10 @@ export class ChatServer {
         await this.safeSend(ws, ["allPointsList", room, filteredPoints]);
       }
       await this.safeSend(ws, ["roomUserCount", room, this.getRoomCount(room)]);
+      
+      // ✅ TAMBAHKAN INI
       await this.safeSend(ws, ["currentNumber", this.currentNumber]);
+      
       await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
       if (selfSeat) await this.safeSend(ws, ["numberKursiSaya", selfSeat]);
     } catch (error) {
@@ -688,6 +691,10 @@ export class ChatServer {
           await this.sendAllStateTo(ws, room);
           await this.safeSend(ws, ["rooMasuk", seatNum, room]);
           await this.safeSend(ws, ["numberKursiSaya", seatNum]);
+          
+          // ✅ TAMBAHKAN INI - Kirim current number saat join
+          await this.safeSend(ws, ["currentNumber", this.currentNumber]);
+          
           return true;
         } else {
           this.userToSeat.delete(ws.idtarget);
@@ -736,6 +743,10 @@ export class ChatServer {
       
       const roomManager = this.roomManagers.get(room);
       await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
+      
+      // ✅ TAMBAHKAN INI - Kirim current number saat join
+      await this.safeSend(ws, ["currentNumber", this.currentNumber]);
+      
       return true;
     } catch (error) {
       console.error("Error joining room:", error);
