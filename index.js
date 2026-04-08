@@ -1,4 +1,4 @@
-// index.js - ChatServer2 dengan INSTANT CLEANUP (TANPA GRACE PERIOD) - CLEAN VERSION
+// index.js - ChatServer2 dengan INSTANT CLEANUP (TANPA GRACE PERIOD) - FIXED VERSION
 import { LowCardGameManager } from "./lowcard.js";
 
 // Constants
@@ -710,32 +710,29 @@ export class ChatServer {
     }
   }
   
+  // ========== INSTANT CLEANUP: LANGSUNG HAPUS SAAT TIDAK ADA KONEKSI ==========
   _removeUserConnection(userId, ws) {
     if (!userId || !ws) return;
     
     const userConnections = this.userConnections.get(userId);
     if (userConnections) {
       userConnections.delete(ws);
+      // INSTANT CLEANUP: Langsung hapus semua data user jika tidak ada koneksi tersisa
       if (userConnections.size === 0) {
         this.userConnections.delete(userId);
+        // Langsung cleanup tanpa nunggu interval
+        this.forceUserCleanup(userId).catch(() => {});
       }
     }
   }
   
-  _removeUserConnection(userId, ws) {
-    if (!userId || !ws) return;
-    
-    const userConnections = this.userConnections.get(userId);
-    if (userConnections) {
-        userConnections.delete(ws);
-        // ✅ LANGSUNG HAPUS semua data jika tidak ada koneksi
-        if (userConnections.size === 0) {
-            this.userConnections.delete(userId);
-            // Panggil cleanup langsung
-            this.forceUserCleanup(userId).catch(() => {});
-        }
+  _removeFromActiveClients(ws) {
+    if (this._activeClientsSet.has(ws)) {
+      this._activeClientsSet.delete(ws);
+      const index = this._activeClients.indexOf(ws);
+      if (index > -1) this._activeClients.splice(index, 1);
     }
-}
+  }
   
   _addToActiveClients(ws) {
     if (!this._activeClientsSet.has(ws)) {
@@ -1108,6 +1105,7 @@ export class ChatServer {
     }
   }
   
+  // ========== INSTANT CLEANUP: DIPANGGIL SAAT WEBSOCKET CLOSE/ERROR ==========
   async safeWebSocketCleanup(ws) {
     if (!ws) return;
     if (ws._isCleaningUp) return;
@@ -1117,43 +1115,57 @@ export class ChatServer {
     const room = ws.roomname;
     
     try {
-        ws._isClosing = true;
-        this.clients.delete(ws);
-        this._removeFromActiveClients(ws);
-        
-        // ========== INSTANT CLEANUP ==========
-        if (userId) {
-            // HAPUS LANGSUNG dari room (tanpa nunggu cleanup cycle)
-            const seatInfo = this.userToSeat.get(userId);
-            if (seatInfo && seatInfo.room) {
-                // Hapus kursi
-                this.removeSeatDirect(seatInfo.room, seatInfo.seat);
-                this.broadcastToRoom(seatInfo.room, ["removeKursi", seatInfo.room, seatInfo.seat]);
-                this.updateRoomCount(seatInfo.room);
-            }
-            
-            // Hapus semua mapping user
-            this.userToSeat.delete(userId);
-            this.userCurrentRoom.delete(userId);
-            this.userLastSeen.delete(userId);
-            this.userConnections.delete(userId);  // Hapus semua koneksi
+      ws._isClosing = true;
+      this.clients.delete(ws);
+      this._removeFromActiveClients(ws);
+      
+      // ========== INSTANT CLEANUP - LANGSUNG HAPUS ==========
+      if (userId) {
+        // HAPUS LANGSUNG dari room (tanpa nunggu cleanup cycle)
+        const seatInfo = this.userToSeat.get(userId);
+        if (seatInfo && seatInfo.room) {
+          // Hapus kursi
+          this.removeSeatDirect(seatInfo.room, seatInfo.seat);
+          this.broadcastToRoom(seatInfo.room, ["removeKursi", seatInfo.room, seatInfo.seat]);
+          this.updateRoomCount(seatInfo.room);
         }
         
-        if (room) {
-            this._removeFromRoomClients(ws, room);
+        // Hapus semua mapping user
+        this.userToSeat.delete(userId);
+        this.userCurrentRoom.delete(userId);
+        this.userLastSeen.delete(userId);
+        this.userConnections.delete(userId);
+      }
+      
+      if (room) {
+        this._removeFromRoomClients(ws, room);
+      }
+      
+      // Hapus listeners
+      const listeners = this._activeListeners.get(ws);
+      if (listeners) {
+        for (const { event, handler } of listeners) {
+          try { ws.removeEventListener(event, handler); } catch(e) {}
         }
-        
-        // Tutup koneksi
-        if (ws.readyState === 1) {
-            try { ws.close(1000, "Normal closure"); } catch (e) {}
-        }
-        
+        this._activeListeners.delete(ws);
+      }
+      
+      if (ws._abortController) {
+        try { ws._abortController.abort(); } catch(e) {}
+        ws._abortController = null;
+      }
+      
+      // Tutup koneksi
+      if (ws.readyState === 1) {
+        try { ws.close(1000, "Normal closure"); } catch (e) {}
+      }
+      
     } catch (error) {
-        console.error("Error in safeWebSocketCleanup:", error);
+      console.error("Error in safeWebSocketCleanup:", error);
     } finally {
-        ws._isCleaningUp = null;
+      ws._isCleaningUp = null;
     }
-}
+  }
   
   setRoomMute(roomName, isMuted) {
     if (!roomName || !roomList.includes(roomName)) return false;
