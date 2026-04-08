@@ -722,13 +722,20 @@ export class ChatServer {
     }
   }
   
-  _removeFromActiveClients(ws) {
-    if (this._activeClientsSet.has(ws)) {
-      this._activeClientsSet.delete(ws);
-      const index = this._activeClients.indexOf(ws);
-      if (index > -1) this._activeClients.splice(index, 1);
+  _removeUserConnection(userId, ws) {
+    if (!userId || !ws) return;
+    
+    const userConnections = this.userConnections.get(userId);
+    if (userConnections) {
+        userConnections.delete(ws);
+        // ✅ LANGSUNG HAPUS semua data jika tidak ada koneksi
+        if (userConnections.size === 0) {
+            this.userConnections.delete(userId);
+            // Panggil cleanup langsung
+            this.forceUserCleanup(userId).catch(() => {});
+        }
     }
-  }
+}
   
   _addToActiveClients(ws) {
     if (!this._activeClientsSet.has(ws)) {
@@ -1110,59 +1117,43 @@ export class ChatServer {
     const room = ws.roomname;
     
     try {
-      ws._isClosing = true;
-      this.clients.delete(ws);
-      this._removeFromActiveClients(ws);
-      
-      const listeners = this._activeListeners.get(ws);
-      if (listeners) {
-        for (const { event, handler } of listeners) {
-          try { ws.removeEventListener(event, handler); } catch(e) {}
-        }
-        this._activeListeners.delete(ws);
-      }
-      
-      if (ws._abortController) {
-        try { ws._abortController.abort(); } catch(e) {}
-        ws._abortController = null;
-      }
-      
-      const propsToDelete = [
-        'roomname', 'idtarget', '_isClosing', '_connectionTime', 
-        '_isCleaningUp', '_chatServer', '_lastPing', '_pingTimeout',
-        'username', 'sessionId', '_reconnectAttempts', '_messageQueue',
-        '_lastMessageTime', '_bytesReceived', '_bytesSent', '_abortController'
-      ];
-      
-      for (const prop of propsToDelete) {
-        try { delete ws[prop]; } catch(e) {}
-      }
-      
-      ws.onmessage = null;
-      ws.onerror = null;
-      ws.onclose = null;
-      ws.onopen = null;
-      
-      if (userId) {
-        this._removeUserConnection(userId, ws);
+        ws._isClosing = true;
+        this.clients.delete(ws);
+        this._removeFromActiveClients(ws);
         
-        const stillConnected = await this.isUserStillConnected(userId);
-        if (!stillConnected) {
-          await this.forceUserCleanup(userId);
+        // ========== INSTANT CLEANUP ==========
+        if (userId) {
+            // HAPUS LANGSUNG dari room (tanpa nunggu cleanup cycle)
+            const seatInfo = this.userToSeat.get(userId);
+            if (seatInfo && seatInfo.room) {
+                // Hapus kursi
+                this.removeSeatDirect(seatInfo.room, seatInfo.seat);
+                this.broadcastToRoom(seatInfo.room, ["removeKursi", seatInfo.room, seatInfo.seat]);
+                this.updateRoomCount(seatInfo.room);
+            }
+            
+            // Hapus semua mapping user
+            this.userToSeat.delete(userId);
+            this.userCurrentRoom.delete(userId);
+            this.userLastSeen.delete(userId);
+            this.userConnections.delete(userId);  // Hapus semua koneksi
         }
-      }
-      
-      if (room) this._removeFromRoomClients(ws, room);
-      if (ws.readyState === 1) {
-        try { ws.close(1000, "Normal closure"); } catch (e) {}
-      }
-      
+        
+        if (room) {
+            this._removeFromRoomClients(ws, room);
+        }
+        
+        // Tutup koneksi
+        if (ws.readyState === 1) {
+            try { ws.close(1000, "Normal closure"); } catch (e) {}
+        }
+        
     } catch (error) {
-      console.error("Error in safeWebSocketCleanup:", error);
+        console.error("Error in safeWebSocketCleanup:", error);
     } finally {
-      ws._isCleaningUp = null;
+        ws._isCleaningUp = null;
     }
-  }
+}
   
   setRoomMute(roomName, isMuted) {
     if (!roomName || !roomList.includes(roomName)) return false;
