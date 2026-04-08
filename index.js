@@ -3,45 +3,60 @@ import { LowCardGameManager } from "./lowcard.js";
 
 // Constants
 const CONSTANTS = Object.freeze({
-  MAX_SEATS: 35,
+  // ============ TIDAK DIUBAH (sesuai permintaan) ============
+  MAX_SEATS: 35,                      // ✅ TETAP 35
   MAX_CONNECTIONS_PER_USER: 1,
   GRACE_PERIOD: 5000,
   MAX_MESSAGE_SIZE: 10000,
-  MAX_GLOBAL_CONNECTIONS: 500,
-  NUMBER_TICK_INTERVAL: 15 * 60 * 1000,
-  MAX_NUMBER: 6,
+  NUMBER_TICK_INTERVAL: 15 * 60 * 1000,  // ✅ TETAP 15 menit
+  MAX_NUMBER: 6,                      // ✅ TETAP
   HEARTBEAT_INTERVAL: 30000,
-  CLEANUP_INTERVAL: 30000,
   MAX_RATE_LIMIT: 100,
   RATE_WINDOW: 60000,
-  MAX_USER_IDLE: 24 * 60 * 60 * 1000,
-  MAX_ARRAY_SIZE: 500,
-  MAX_TIMEOUT_MS: 10000,
-  MAX_JSON_DEPTH: 100,
   MAX_GIFT_NAME: 100,
   MAX_USERNAME_LENGTH: 50,
-  MAX_MESSAGE_LENGTH: 1000,
-  MAX_ACTIVE_CLIENTS_HISTORY: 2000,
   LOCK_TIMEOUT_MS: 5000,
   PROMISE_TIMEOUT_MS: 30000,
-  MAX_HEAP_SIZE_MB: 512,
-  GC_INTERVAL_MS: 5 * 60 * 1000,
-  CHAT_BUFFER_DELAY_MS: 50,
-  MAX_CHAT_BUFFER_SIZE: 500,
-  MAX_ACTIVE_CLIENTS_LIMIT: 2000,
-  MAX_DISCONNECTED_TIMERS: 1000,
-  MAX_PENDING_RECONNECTIONS: 500,
-  MAX_CLIENTS_SET_SIZE: 5000,
-  MAX_RATE_LIMITER_SIZE: 10000,
-  MAX_ROOM_CLIENTS_LIMIT: 2000,
-  MAX_USER_CONNECTIONS_SIZE: 5000,
-  MESSAGE_TTL_MS: 30000,
-  BUFFER_ROOM_TTL_MS: 300000,
-  ROOM_MANAGER_IDLE_TIMEOUT: 30 * 60 * 1000,
-  // SAFE CLEANUP CONSTANTS
-  CLEANUP_BATCH_SIZE: 50,        // Process in batches
-  CLEANUP_DELAY_MS: 10,          // Delay between batches
-  MAX_CLEANUP_DURATION_MS: 100   // Max cleanup time per cycle
+  MAX_TIMEOUT_MS: 10000,
+  MAX_JSON_DEPTH: 100,
+  
+  // ============ DIUBAH UNTUK FREE PLAN (120MB) ============
+  // Memory Limit untuk Free Plan
+  MAX_HEAP_SIZE_MB: 120,              // 🔴 UBAH: 512 → 120 (free plan limit)
+  GC_INTERVAL_MS: 10 * 60 * 1000,     // 🔴 UBAH: 5 menit → 10 menit
+  
+  // Connection Limits (dikurangi agar aman di free plan)
+  MAX_GLOBAL_CONNECTIONS: 150,        // 🔴 UBAH: 500 → 150
+  MAX_ACTIVE_CLIENTS_LIMIT: 500,      // 🔴 UBAH: 2000 → 500
+  MAX_ACTIVE_CLIENTS_HISTORY: 500,    // 🔴 UBAH: 2000 → 500
+  MAX_ROOM_CLIENTS_LIMIT: 500,        // 🔴 UBAH: 2000 → 500
+  MAX_CLIENTS_SET_SIZE: 1000,         // 🔴 UBAH: 5000 → 1000
+  
+  // Message & Data Limits (dikurangi)
+  MAX_MESSAGE_LENGTH: 500,            // 🔴 UBAH: 1000 → 500
+  MAX_ARRAY_SIZE: 200,                // 🔴 UBAH: 500 → 200
+  MAX_RATE_LIMITER_SIZE: 2000,        // 🔴 UBAH: 10000 → 2000
+  MAX_USER_CONNECTIONS_SIZE: 1000,    // 🔴 UBAH: 5000 → 1000
+  
+  // Timer & Reconnection Limits
+  CLEANUP_INTERVAL: 60000,            // 🔴 UBAH: 30 detik → 60 detik
+  MAX_DISCONNECTED_TIMERS: 300,       // 🔴 UBAH: 1000 → 300
+  MAX_PENDING_RECONNECTIONS: 150,     // 🔴 UBAH: 500 → 150
+  
+  // TTL (Time To Live) - dipercepat untuk free up memory
+  MAX_USER_IDLE: 12 * 60 * 60 * 1000, // 🔴 UBAH: 24 jam → 12 jam
+  MESSAGE_TTL_MS: 20000,              // 🔴 UBAH: 30 detik → 20 detik
+  BUFFER_ROOM_TTL_MS: 120000,         // 🔴 UBAH: 5 menit → 2 menit
+  ROOM_MANAGER_IDLE_TIMEOUT: 15 * 60 * 1000, // 🔴 UBAH: 30 menit → 15 menit
+  
+  // Chat Buffer (dikurangi)
+  CHAT_BUFFER_DELAY_MS: 100,          // 🔴 UBAH: 50ms → 100ms
+  MAX_CHAT_BUFFER_SIZE: 200,          // 🔴 UBAH: 500 → 200
+  
+  // Safe Cleanup Constants (disesuaikan)
+  CLEANUP_BATCH_SIZE: 30,             // 🔴 UBAH: 50 → 30
+  CLEANUP_DELAY_MS: 10,               // ✅ TETAP
+  MAX_CLEANUP_DURATION_MS: 80         // 🔴 UBAH: 100 → 80
 });
 
 const roomList = Object.freeze([
