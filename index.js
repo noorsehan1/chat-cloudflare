@@ -1,4 +1,4 @@
-// index.js - ChatServer2 dengan INSTANT CLEANUP (TANPA GRACE PERIOD) - FULL VERSION
+// index.js - ChatServer2 dengan INSTANT CLEANUP (TANPA GRACE PERIOD) - CLEAN VERSION
 import { LowCardGameManager } from "./lowcard.js";
 
 // Constants
@@ -553,7 +553,6 @@ export class ChatServer {
     
     this.rateLimiter = new RateLimiter();
     this._cleanupInterval = null;
-    
     this.chatBuffer = new ChatBuffer();
     
     try { 
