@@ -7,7 +7,7 @@ const CONSTANTS = Object.freeze({
   MAX_CONNECTIONS_PER_USER: 1,
   MAX_MESSAGE_SIZE: 10000,
   NUMBER_TICK_INTERVAL: 15 * 60 * 1000,
-  MAX_NUMBER: 5,
+  MAX_NUMBER: 6,
   HEARTBEAT_INTERVAL: 30000,
   MAX_RATE_LIMIT: 100,
   RATE_WINDOW: 60000,
@@ -257,7 +257,7 @@ class RoomManager {
     this.roomName = roomName;
     this.seats = new Map();
     this.muteStatus = false;
-    this.currentNumber = 0;
+    this.currentNumber = 1;
     this.lastActivity = Date.now();
     
     for (let i = 1; i <= CONSTANTS.MAX_SEATS; i++) {
@@ -563,7 +563,7 @@ export class ChatServer {
       this.lowcard = null; 
     }
     
-    this.currentNumber = 0;
+    this.currentNumber = 1;
     this.maxNumber = CONSTANTS.MAX_NUMBER;
     this.intervalMillis = CONSTANTS.NUMBER_TICK_INTERVAL;
     this.numberTickTimer = null;
@@ -1198,7 +1198,7 @@ export class ChatServer {
     if (this._tickRunning || this._isClosing) return;
     this._tickRunning = true;
     try {
-       this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 0;
+      this.currentNumber = this.currentNumber < this.maxNumber ? this.currentNumber + 1 : 1;
       for (const roomManager of this.roomManagers.values()) {
         roomManager.setCurrentNumber(this.currentNumber);
       }
