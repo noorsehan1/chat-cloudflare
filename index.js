@@ -1,4 +1,4 @@
-// index.js - ChatServer2 dengan INSTANT CLEANUP (TANPA GRACE PERIOD) - FIXED VERSION
+// index.js - ChatServer2 dengan INSTANT CLEANUP (TANPA GRACE PERIOD) - MEMORY SAFE VERSION
 import { LowCardGameManager } from "./lowcard.js";
 
 // Constants
@@ -750,6 +750,35 @@ export class ChatServer {
     }
   }
   
+  _cleanupWebSocketListeners(ws) {
+    // Hapus semua event listeners yang terdaftar
+    const listeners = this._activeListeners.get(ws);
+    if (listeners) {
+      for (const { event, handler } of listeners) {
+        try { ws.removeEventListener(event, handler); } catch(e) {}
+      }
+      this._activeListeners.delete(ws);
+    }
+    
+    // Abort controller
+    if (ws._abortController) {
+      try { ws._abortController.abort(); } catch(e) {}
+      ws._abortController = null;
+    }
+    
+    // Nullify semua properti untuk mencegah memory leak
+    const propsToDelete = [
+      'roomname', 'idtarget', '_isClosing', '_connectionTime', 
+      '_isCleaningUp', '_lastPing', '_pingTimeout', 'username', 
+      'sessionId', '_reconnectAttempts', '_messageQueue',
+      '_lastMessageTime', '_bytesReceived', '_bytesSent'
+    ];
+    
+    for (const prop of propsToDelete) {
+      try { delete ws[prop]; } catch(e) {}
+    }
+  }
+  
   async safeSend(ws, msg) {
     try {
       if (!ws || ws.readyState !== 1 || ws._isClosing) return false;
@@ -1141,19 +1170,8 @@ export class ChatServer {
         this._removeFromRoomClients(ws, room);
       }
       
-      // Hapus listeners
-      const listeners = this._activeListeners.get(ws);
-      if (listeners) {
-        for (const { event, handler } of listeners) {
-          try { ws.removeEventListener(event, handler); } catch(e) {}
-        }
-        this._activeListeners.delete(ws);
-      }
-      
-      if (ws._abortController) {
-        try { ws._abortController.abort(); } catch(e) {}
-        ws._abortController = null;
-      }
+      // ========== CLEANUP LISTENERS & PROPERTIES (CEGAH MEMORY LEAK) ==========
+      this._cleanupWebSocketListeners(ws);
       
       // Tutup koneksi
       if (ws.readyState === 1) {
@@ -1239,6 +1257,7 @@ export class ChatServer {
           this._removeFromActiveClients(oldWs);
           if (oldWs.roomname) this._removeFromRoomClients(oldWs, oldWs.roomname);
           this._removeUserConnection(id, oldWs);
+          this._cleanupWebSocketListeners(oldWs);
         }
       }
       
@@ -1668,12 +1687,14 @@ export class ChatServer {
     this._isClosing = true;
     console.log("[SHUTDOWN] Starting graceful shutdown...");
     
+    // Flush chat buffer
     this.chatBuffer.flushAll((msg) => {
       if (msg[1]) {
         this._sendDirectToRoom(msg[1], msg);
       }
     });
     
+    // Stop all timers
     if (this.numberTickTimer) {
       clearTimeout(this.numberTickTimer);
       this.numberTickTimer = null;
@@ -1683,9 +1704,13 @@ export class ChatServer {
       this._cleanupInterval = null;
     }
     
+    // Stop memory monitor
     this.memoryMonitor.stop();
+    
+    // Destroy chat buffer
     this.chatBuffer.destroy();
     
+    // Destroy game manager
     if (this.lowcard && typeof this.lowcard.destroy === 'function') {
       try {
         await this.lowcard.destroy();
@@ -1693,25 +1718,38 @@ export class ChatServer {
     }
     this.lowcard = null;
     
+    // Close all WebSocket connections
     const clientsToClose = [...this._activeClients];
     for (const ws of clientsToClose) {
       if (ws && ws.readyState === 1 && !ws._isClosing) {
-        try { ws.close(1000, "Server shutdown"); } catch(e) {}
+        try { 
+          this._cleanupWebSocketListeners(ws);
+          ws.close(1000, "Server shutdown"); 
+        } catch(e) {}
       }
     }
     
-    if (this.rateLimiter) this.rateLimiter.destroy();
-    for (const roomManager of this.roomManagers.values()) roomManager.destroy();
+    // Destroy rate limiter
+    if (this.rateLimiter) {
+      this.rateLimiter.destroy();
+      this.rateLimiter = null;
+    }
     
+    // Destroy all room managers
+    for (const roomManager of this.roomManagers.values()) {
+      roomManager.destroy();
+    }
+    
+    // Clear all collections
+    this.roomManagers.clear();
+    this.roomClients.clear();
     this.clients.clear();
     this._activeClients = [];
     this._activeClientsSet.clear();
     this.userToSeat.clear();
     this.userCurrentRoom.clear();
     this.userConnections.clear();
-    this.roomClients.clear();
     this.userLastSeen.clear();
-    this.roomManagers.clear();
     this._activeListeners.clear();
     
     console.log("[SHUTDOWN] Shutdown complete");
