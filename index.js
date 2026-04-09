@@ -1,14 +1,14 @@
-// index.js - ChatServer2 untuk SERVER 128MB - FULLY OPTIMIZED
+// index.js - ChatServer2 dengan LowCardGameManager - FULLY FIXED untuk 128MB Server
 import { LowCardGameManager } from "./lowcard.js";
 
 // ==================== CONSTANTS UNTUK 128MB SERVER ====================
 const CONSTANTS = Object.freeze({
   // MEMORY CONFIGURATION (128MB SERVER)
   MAX_HEAP_SIZE_MB: 80,
-  GC_INTERVAL_MS: 5 * 60 * 1000,  // 5 menit
+  GC_INTERVAL_MS: 5 * 60 * 1000,
   
   // BUFFER CONFIGURATION
-  MAX_TOTAL_BUFFER_MESSAGES: 500,
+  MAX_TOTAL_BUFFER_MESSAGES: 200,
   MAX_CHAT_BUFFER_SIZE: 100,
   MESSAGE_TTL_MS: 10000,
   BUFFER_ROOM_TTL_MS: 60000,
@@ -37,7 +37,7 @@ const CONSTANTS = Object.freeze({
   
   // CLEANUP
   CLEANUP_INTERVAL: 30000,
-  MAX_USER_IDLE: 5 * 60 * 1000,  // 5 menit
+  MAX_USER_IDLE: 5 * 60 * 1000,
   ROOM_MANAGER_IDLE_TIMEOUT: 5 * 60 * 1000,
   CLEANUP_BATCH_SIZE: 15,
   CLEANUP_DELAY_MS: 5,
@@ -58,7 +58,7 @@ const CONSTANTS = Object.freeze({
   MAX_JSON_DEPTH: 50,
   MAX_ARRAY_SIZE: 100,
   POINTS_CACHE_MS: 50,
-  ROOM_IDLE_BEFORE_CLEANUP: 1800000,  // 30 menit
+  ROOM_IDLE_BEFORE_CLEANUP: 1800000,
 });
 
 const roomList = Object.freeze([
@@ -128,7 +128,7 @@ function safeParseJSON(str, maxDepth = CONSTANTS.MAX_JSON_DEPTH) {
   }
 }
 
-// ==================== MEMORY MONITOR (UNTUK 128MB) ====================
+// ==================== MEMORY MONITOR ====================
 class MemoryMonitor {
   constructor() {
     this.lastCheck = Date.now();
@@ -657,45 +657,6 @@ class ChatBuffer {
   }
 }
 
-// ==================== LOWCARD GAME MANAGER ====================
-class LowCardGameManagerFixed {
-  constructor() {
-    this.chatServerRef = null;
-    this.games = new Map();
-  }
-  
-  setChatServer(chatServer) {
-    this.chatServerRef = chatServer;
-  }
-  
-  getChatServer() {
-    return this.chatServerRef;
-  }
-  
-  async handleEvent(ws, data) {
-    const chatServer = this.chatServerRef;
-    if (!chatServer) return;
-    // Game logic here (disesuaikan dengan kebutuhan)
-  }
-  
-  isGameActive(room) {
-    return this.games.has(room);
-  }
-  
-  endGame(room) {
-    this.games.delete(room);
-  }
-  
-  cleanupAllGames() {
-    this.games.clear();
-  }
-  
-  destroy() {
-    this.games.clear();
-    this.chatServerRef = null;
-  }
-}
-
 // ==================== MAIN CHATSERVER CLASS ====================
 export class ChatServer {
   constructor(state, env) {
@@ -725,8 +686,14 @@ export class ChatServer {
     this._cleanupInterval = null;
     this.chatBuffer = new ChatBuffer();
     
-    this.lowcard = new LowCardGameManagerFixed();
-    this.lowcard.setChatServer(this);
+    // ========== FIX: INITIALIZE GAME MANAGER DENGAN PARAMETER ==========
+    try {
+      this.lowcard = new LowCardGameManager(this);
+      console.log('[GAME] LowCardGameManager initialized successfully');
+    } catch (error) {
+      console.error('[GAME] Failed to initialize game manager:', error);
+      this.lowcard = null;
+    }
     
     this.currentNumber = 1;
     this.maxNumber = CONSTANTS.MAX_NUMBER;
@@ -745,7 +712,6 @@ export class ChatServer {
     this._startPeriodicCleanup();
     this.memoryMonitor.start();
     
-    // Emergency cleanup untuk 128MB server
     this._emergencyCleanupInterval = setInterval(() => {
       this._emergencyCleanup();
     }, 60000);
@@ -1120,10 +1086,11 @@ export class ChatServer {
           
           this._addUserConnection(ws.idtarget, ws);
           this.userCurrentRoom.set(ws.idtarget, room);
+          await this.sendAllStateTo(ws, room);
           await this.safeSend(ws, ["rooMasuk", seatNum, room]);
           await this.safeSend(ws, ["numberKursiSaya", seatNum]);
-                    await this.sendAllStateTo(ws, room);
-
+          await this.safeSend(ws, ["currentNumber", this.currentNumber]);
+          
           return true;
         } else {
           this.userToSeat.delete(ws.idtarget);
@@ -1164,12 +1131,13 @@ export class ChatServer {
       if (!clientArray.includes(ws)) clientArray.push(ws);
       
       this._addUserConnection(ws.idtarget, ws);
+      await this.sendAllStateTo(ws, room);
       await this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
       await this.safeSend(ws, ["numberKursiSaya", assignedSeat]);
-            await this.sendAllStateTo(ws, room);
-
+      
       const roomManager = this.roomManagers.get(room);
-    
+      await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
+      await this.safeSend(ws, ["currentNumber", this.currentNumber]);
       
       return true;
     } catch (error) {
