@@ -8,4 +8,4 @@ class_name = "ChatServer"
 
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["ChatServer"]
+new_classes = ["ChatServer"]  # ← BUKAN new_sqlite_classes!
