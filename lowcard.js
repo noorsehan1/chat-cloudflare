@@ -4,6 +4,7 @@
 // Logika bot PERSIS seperti kode awal
 // LOGIKA LOWCARD: Yang draw angka TERENDAH yang KALAH (eliminasi)
 // FIXED: Winner detection - User hanya menang jika TIDAK ADA bot tersisa
+// FIXED: 2 user, 1 draw, 1 tidak draw -> LANGSUNG WINNER (tanpa TIME UP!)
 
 const CONSTANTS = {
   GAME_TIMEOUT_HOURS: 1,
@@ -541,6 +542,21 @@ export class LowCardGameManager {
       } else {
         notSubmittedPlayers.push(playerId);
       }
+    }
+    
+    // ========== KASUS KHUSUS: 2 USER, 1 DRAW, 1 TIDAK DRAW ==========
+    // LANGSUNG WINNER, TANPA TIME UP!
+    if (activePlayers.length === 2 && submittedPlayers.length === 1 && notSubmittedPlayers.length === 1) {
+      const winnerId = submittedPlayers[0];
+      const winner = game.players.get(winnerId);
+      const totalCoin = game.betAmount * game.players.size;
+      
+      // Eliminasi yang tidak draw
+      game.eliminated.add(notSubmittedPlayers[0]);
+      
+      this._safeBroadcast(room, ["gameLowCardWinner", winner?.name || winnerId, totalCoin]);
+      this.endGame(room, `${winner?.name} won the game`);
+      return;
     }
     
     const allLosers = [];
