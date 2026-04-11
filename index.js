@@ -1,4 +1,4 @@
-// index.js - ChatServer FINAL - FIXED VERSION
+// index.js - ChatServer FIXED - NO MEMORY LEAK
 import { LowCardGameManager } from "./lowcard.js";
 
 const CONSTANTS = Object.freeze({
@@ -14,6 +14,8 @@ const CONSTANTS = Object.freeze({
   MAX_USER_CONNECTIONS: 500,
   MAX_ROOM_CLIENTS: 300,
   MAX_CHAT_BUFFER_QUEUE: 100,
+  CLEANUP_INTERVAL_MS: 60000,  // 60 detik cleanup
+  IDLE_TIMEOUT_MS: 300000,     // 5 menit idle timeout
 });
 
 const roomList = Object.freeze([
@@ -52,7 +54,6 @@ class SimpleChatBuffer {
   constructor() {
     this.queue = [];
     this.callback = null;
-    this._flushing = false;
   }
   
   setCallback(cb) { this.callback = cb; }
@@ -60,27 +61,19 @@ class SimpleChatBuffer {
   add(room, msg) {
     if (!this.callback) return;
     if (this.queue.length > CONSTANTS.MAX_CHAT_BUFFER_QUEUE) {
-      this.queue = [];
-      return;
+      this.queue.shift();
     }
     this.queue.push({ room, msg, time: Date.now() });
     if (this.queue.length >= CONSTANTS.MAX_TOTAL_BUFFER_MESSAGES) this.flush();
   }
   
   flush() {
-    if (this._flushing || this.queue.length === 0) return;
-    this._flushing = true;
-    
-    try {
-      const now = Date.now();
-      const toSend = this.queue.filter(item => now - item.time < CONSTANTS.MESSAGE_TTL_MS);
-      this.queue = [];
-      
-      for (const item of toSend) {
-        try { this.callback(item.room, item.msg); } catch(e) {}
-      }
-    } finally {
-      this._flushing = false;
+    if (this.queue.length === 0) return;
+    const now = Date.now();
+    const toSend = this.queue.filter(item => now - item.time < CONSTANTS.MESSAGE_TTL_MS);
+    this.queue = [];
+    for (const item of toSend) {
+      try { this.callback(item.room, item.msg); } catch(e) {}
     }
   }
   
@@ -250,7 +243,6 @@ export class ChatServer {
     this._isClosing = false;
     this._lastCleanup = 0;
     this._lastLog = 0;
-    this._errorLogs = [];
     
     this.roomManagers = new Map();
     this.userToSeat = new Map();
@@ -259,6 +251,7 @@ export class ChatServer {
     this.roomClients = new Map();
     this.activeClients = new Set();
     this._activeListeners = new Map();
+    this._idleTracking = new Map();  // Track idle connections
     
     this.chatBuffer = new SimpleChatBuffer();
     this.chatBuffer.setCallback((room, msg) => this._sendToRoom(room, msg));
@@ -285,7 +278,7 @@ export class ChatServer {
     this._tickCounter++;
     if (this._tickCounter % 900 === 0) this._doNumberTick();
     if (this.lowcard && this.lowcard.masterTick) this.lowcard.masterTick();
-    if (this._tickCounter % 30 === 0) this._quickCleanup();
+    if (this._tickCounter % 60 === 0) this._quickCleanup();
     this.chatBuffer.flush();
   }
   
@@ -303,35 +296,57 @@ export class ChatServer {
   
   _quickCleanup() {
     const now = Date.now();
-    if (now - this._lastCleanup < 30000) return;
+    if (now - this._lastCleanup < CONSTANTS.CLEANUP_INTERVAL_MS) return;
     this._lastCleanup = now;
     
-    if (this.userConnections.size > CONSTANTS.MAX_USER_CONNECTIONS) {
-      const entries = Array.from(this.userConnections.entries());
-      entries.sort((a, b) => (a[1]?.size || 0) - (b[1]?.size || 0));
-      const toDelete = entries.slice(0, this.userConnections.size - 400);
-      for (const [userId] of toDelete) {
-        this.userConnections.delete(userId);
-        this._removeUserFromSeat(userId);
+    // Clean up idle connections (no activity for 5 minutes)
+    for (const [ws, lastActive] of this._idleTracking) {
+      if (now - lastActive > CONSTANTS.IDLE_TIMEOUT_MS && ws.readyState === 1) {
+        try { ws.close(1000, "Idle timeout"); } catch(e) {}
+        this._cleanupWebSocket(ws);
       }
     }
     
-    for (const [userId, seatInfo] of this.userToSeat) {
-      if (!this.userConnections.has(userId)) {
-        this.userToSeat.delete(userId);
-        this.userCurrentRoom.delete(userId);
-      }
-    }
-    
+    // Clean up room clients
     for (const [room, clients] of this.roomClients) {
-      const alive = clients.filter(c => c && c.readyState === 1 && c.roomname === room);
+      const alive = [];
+      for (const c of clients) {
+        if (c && c.readyState === 1 && c.roomname === room && this.activeClients.has(c)) {
+          alive.push(c);
+        }
+      }
       if (alive.length !== clients.length) {
         this.roomClients.set(room, alive);
       }
     }
     
+    // Clean up user connections without breaking active ones
+    for (const [userId, conns] of this.userConnections) {
+      const validConns = new Set();
+      for (const c of conns) {
+        if (c && c.readyState === 1 && this.activeClients.has(c)) {
+          validConns.add(c);
+        }
+      }
+      if (validConns.size === 0) {
+        // Don't delete immediately, mark for deletion after delay
+        if (!this._pendingDelete) this._pendingDelete = new Map();
+        if (!this._pendingDelete.has(userId)) {
+          this._pendingDelete.set(userId, now);
+        } else if (now - this._pendingDelete.get(userId) > CONSTANTS.IDLE_TIMEOUT_MS) {
+          this.userConnections.delete(userId);
+          this._removeUserFromSeat(userId);
+          this._pendingDelete.delete(userId);
+        }
+      } else if (validConns.size !== conns.size) {
+        this.userConnections.set(userId, validConns);
+        if (this._pendingDelete) this._pendingDelete.delete(userId);
+      }
+    }
+    
+    // Clean up chat buffer if too large
     if (this.chatBuffer.queue && this.chatBuffer.queue.length > CONSTANTS.MAX_CHAT_BUFFER_QUEUE) {
-      this.chatBuffer.queue = [];
+      this.chatBuffer.queue = this.chatBuffer.queue.slice(-CONSTANTS.MAX_CHAT_BUFFER_QUEUE);
     }
     
     if (this.lowcard) this.lowcard.cleanupStaleGames();
@@ -345,6 +360,7 @@ export class ChatServer {
   _cleanupWebSocket(ws) {
     if (!ws) return;
     
+    // Remove all event listeners
     const listeners = this._activeListeners.get(ws);
     if (listeners) {
       for (const { event, handler } of listeners) {
@@ -353,20 +369,26 @@ export class ChatServer {
       this._activeListeners.delete(ws);
     }
     
+    // Remove from idle tracking
+    this._idleTracking.delete(ws);
+    
     const userId = ws.idtarget;
     const room = ws.roomname;
     
+    // Remove from user connections
     if (userId) {
       const conns = this.userConnections.get(userId);
       if (conns) {
         conns.delete(ws);
         if (conns.size === 0) {
-          this.userConnections.delete(userId);
-          this._removeUserFromSeat(userId, room);
+          // Mark for deletion, don't delete immediately
+          if (!this._pendingDelete) this._pendingDelete = new Map();
+          this._pendingDelete.set(userId, Date.now());
         }
       }
     }
     
+    // Remove from room clients
     if (room) {
       const clients = this.roomClients.get(room);
       if (clients) {
@@ -375,8 +397,10 @@ export class ChatServer {
       }
     }
     
+    // Remove from active clients
     this.activeClients.delete(ws);
     
+    // Clear WebSocket properties
     try {
       delete ws.idtarget;
       delete ws.roomname;
@@ -410,7 +434,7 @@ export class ChatServer {
     
     for (let i = 0; i < batch.length; i++) {
       const client = batch[i];
-      if (client && client.readyState === 1 && client.roomname === room) {
+      if (client && client.readyState === 1 && client.roomname === room && this.activeClients.has(client)) {
         try { client.send(str); sent++; } catch(e) {}
       }
     }
@@ -419,7 +443,7 @@ export class ChatServer {
       const remaining = clients.slice(CONSTANTS.MAX_SEND_PER_TICK);
       setTimeout(() => {
         for (const client of remaining) {
-          if (client && client.readyState === 1 && client.roomname === room) {
+          if (client && client.readyState === 1 && client.roomname === room && this.activeClients.has(client)) {
             try { client.send(str); } catch(e) {}
           }
         }
@@ -446,6 +470,8 @@ export class ChatServer {
       const str = typeof msg === "string" ? msg : safeStringify(msg);
       if (str.length > CONSTANTS.MAX_MESSAGE_SIZE) return false;
       ws.send(str);
+      // Update last activity time
+      this._idleTracking.set(ws, Date.now());
       return true;
     } catch(e) { 
       this._cleanupWebSocket(ws); 
@@ -456,6 +482,19 @@ export class ChatServer {
   async handleJoinRoom(ws, room) {
     if (!ws?.idtarget) return false;
     if (!roomList.includes(room)) return false;
+    
+    // Update activity
+    this._idleTracking.set(ws, Date.now());
+    
+    // If already in same room, just refresh state
+    if (ws.roomname === room) {
+      const seatInfo = this.userToSeat.get(ws.idtarget);
+      if (seatInfo && seatInfo.room === room) {
+        await this._sendRoomState(ws, room);
+        await this.safeSend(ws, ["rooMasuk", seatInfo.seat, room]);
+        return true;
+      }
+    }
     
     try {
       const existing = this.userToSeat.get(ws.idtarget);
@@ -576,6 +615,7 @@ export class ChatServer {
     if (!conns) { conns = new Set(); this.userConnections.set(userId, conns); }
     conns.add(ws);
     this.activeClients.add(ws);
+    this._idleTracking.set(ws, Date.now());
   }
   
   async safeWebSocketCleanup(ws) { 
@@ -584,6 +624,9 @@ export class ChatServer {
   
   async handleSetIdTarget2(ws, id, isNew) {
     if (!id || !ws) return;
+    
+    // Update activity
+    this._idleTracking.set(ws, Date.now());
     
     const oldConns = this.userConnections.get(id);
     if (oldConns) {
@@ -600,6 +643,9 @@ export class ChatServer {
     ws._connectionTime = Date.now();
     this.activeClients.add(ws);
     this._addUserConnection(id, ws);
+    
+    // Remove from pending delete if exists
+    if (this._pendingDelete) this._pendingDelete.delete(id);
     
     const seatInfo = this.userToSeat.get(id);
     if (seatInfo && !isNew) {
@@ -625,6 +671,9 @@ export class ChatServer {
   
   async handleMessage(ws, raw) {
     if (!ws || ws.readyState !== 1) return;
+    
+    // Update activity timestamp
+    this._idleTracking.set(ws, Date.now());
     
     let str = raw;
     if (raw instanceof ArrayBuffer) {
@@ -861,7 +910,9 @@ export class ChatServer {
             roomClients: totalRoomClients,
             activeClients: this.activeClients.size,
             chatBuffer: this.chatBuffer.queue?.length || 0,
-            activeGames: this.lowcard?.activeGames?.size || 0
+            activeGames: this.lowcard?.activeGames?.size || 0,
+            idleTracking: this._idleTracking.size,
+            pendingDelete: this._pendingDelete?.size || 0
           }), { headers: { "content-type": "application/json" } });
         }
         
@@ -894,6 +945,7 @@ export class ChatServer {
       ]);
       
       this.activeClients.add(server);
+      this._idleTracking.set(server, Date.now());
       
       return new Response(null, { status: 101, webSocket: client });
     } catch(e) {
@@ -920,6 +972,8 @@ export class ChatServer {
     this.userConnections.clear();
     this.activeClients.clear();
     this._activeListeners.clear();
+    this._idleTracking.clear();
+    if (this._pendingDelete) this._pendingDelete.clear();
   }
 }
 
