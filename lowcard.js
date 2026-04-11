@@ -2,8 +2,8 @@
 // Timer: 20s registration, 20s draw
 // Notifikasi: 20s, 10s, 5s
 // Logika bot PERSIS seperti kode awal
-// FIXED: Winner detection - jika hanya 1 user tersisa (meskipun masih ada bot), user tetap MENANG
-// gameLowCardWinner dikirim ke SEMUA user di room
+// LOGIKA LOWCARD: Yang draw angka TERENDAH yang KALAH (eliminasi)
+// FIXED: Winner detection - User hanya menang jika TIDAK ADA bot tersisa
 
 const CONSTANTS = {
   GAME_TIMEOUT_HOURS: 1,
@@ -566,14 +566,13 @@ export class LowCardGameManager {
       return;
     }
     
-    // HITUNG LOWEST DARI YANG DRAW
+    // ========== LOGIKA LOWCARD: YANG ANGKA TERENDAH KALAH ==========
     let lowest = 13;
     for (const id of submittedPlayers) {
       const n = game.numbers.get(id);
       if (n < lowest) lowest = n;
     }
     
-    // HITUNG ADA BERAPA YANG DRAW ANGKA TERENDAH
     const lowestPlayers = [];
     for (const id of submittedPlayers) {
       const n = game.numbers.get(id);
@@ -614,18 +613,19 @@ export class LowCardGameManager {
     const remaining = Array.from(game.players.keys())
       .filter(id => !game.eliminated.has(id));
     
-    // CEK APAKAH MASIH ADA USER MANUSIA
     const remainingHumans = remaining.filter(id => this._isHumanPlayer(id));
+    const remainingBots = remaining.filter(id => !this._isHumanPlayer(id));
     const isBotGame = this._isBotGame(game);
     
-    // ========== WINNER DETECTION - DIPERBAIKI ==========
-    // Jika HANYA 1 user manusia yang tersisa (meskipun masih ada bot), user itu MENANG
-    if (remainingHumans.length === 1) {
+    // ========== WINNER DETECTION YANG BENAR ==========
+    // User MENANG hanya jika:
+    // 1. Hanya 1 user manusia yang tersisa
+    // 2. DAN TIDAK ADA BOT yang tersisa
+    if (remainingHumans.length === 1 && remainingBots.length === 0) {
       const winnerId = remainingHumans[0];
       const winner = game.players.get(winnerId);
       const totalCoin = game.betAmount * game.players.size;
       
-      // KIRIM KE SEMUA USER DI ROOM
       this._safeBroadcast(room, ["gameLowCardWinner", winner?.name || winnerId, totalCoin]);
       this.endGame(room, `${winner?.name} won the game`);
       return;
@@ -642,14 +642,14 @@ export class LowCardGameManager {
       return;
     }
     
-    // Jika TIDAK ADA user manusia yang tersisa (tidak ada loser)
+    // Jika TIDAK ADA user manusia yang tersisa
     if (remainingHumans.length === 0) {
       this.endGame(room, "No human players remaining");
       return;
     }
     
-    // JIKA MASIH ADA LEBIH DARI 1 USER MANUSIA
-    if (remainingHumans.length >= 2) {
+    // JIKA MASIH ADA LEBIH DARI 1 USER MANUSIA ATAU MASIH ADA BOT
+    if (remaining.length >= 2) {
       const numbersArr = Array.from(game.numbers.entries()).map(([id, n]) => {
         const player = game.players.get(id);
         const playerTanda = game.tanda.get(id) || "";
