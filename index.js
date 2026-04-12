@@ -1,4 +1,4 @@
-// ==================== CHAT SERVER WITH ASYNC LOCK - OPTIMIZED FOR CLOUDFLARE ====================
+// ==================== CHAT SERVER WITH ASYNC LOCK - FULL COMPLETE ====================
 // index.js
 
 import { LowCardGameManager } from "./lowcard.js";
@@ -1050,6 +1050,78 @@ export class ChatServer {
           await this.safeSend(ws, ["userOnlineStatus", username, isOnline, data[2] ?? ""]);
           break;
         }
+        
+        // ==================== GIFT ====================
+        case "gift": {
+          const [, roomname, sender, receiver, giftName] = data;
+          if (!roomList.includes(roomname)) return;
+          const safeGiftName = (giftName || "").slice(0, CONSTANTS.MAX_GIFT_NAME);
+          this.broadcastToRoom(roomname, ["gift", roomname, sender, receiver, safeGiftName, Date.now()]);
+          break;
+        }
+        
+        // ==================== ROLL ANGKA ====================
+        case "rollangak": {
+          const [, roomname, username, angka] = data;
+          if (!roomList.includes(roomname)) return;
+          this.broadcastToRoom(roomname, ["rollangakBroadcast", roomname, username, angka]);
+          break;
+        }
+        
+        // ==================== MOD WARNING ====================
+        case "modwarning": {
+          const [, roomname] = data;
+          if (!roomList.includes(roomname)) return;
+          this.broadcastToRoom(roomname, ["modwarning", roomname]);
+          break;
+        }
+        
+        // ==================== GET ONLINE USERS ====================
+        case "getOnlineUsers": {
+          const users = [];
+          for (const [userId, connections] of this.userConnections) {
+            for (const conn of connections) {
+              if (conn && conn.readyState === 1 && !conn._isClosing) {
+                users.push(userId);
+                break;
+              }
+            }
+          }
+          await this.safeSend(ws, ["allOnlineUsers", users]);
+          break;
+        }
+        
+        // ==================== SEND NOTIFICATION ====================
+        case "sendnotif": {
+          const [, idtarget, noimageUrl, username, deskripsi] = data;
+          const targetConnections = this.userConnections.get(idtarget);
+          if (targetConnections) {
+            for (const client of targetConnections) {
+              if (client && client.readyState === 1 && !client._isClosing) {
+                await this.safeSend(client, ["notif", noimageUrl, username, deskripsi, Date.now()]);
+                break;
+              }
+            }
+          }
+          break;
+        }
+        
+        // ==================== PRIVATE MESSAGE ====================
+        case "private": {
+          const [, idtarget, noimageUrl, message, sender] = data;
+          const targetConnections = this.userConnections.get(idtarget);
+          if (targetConnections) {
+            for (const client of targetConnections) {
+              if (client && client.readyState === 1 && !client._isClosing) {
+                await this.safeSend(client, ["private", idtarget, noimageUrl, message, Date.now(), sender]);
+                break;
+              }
+            }
+          }
+          break;
+        }
+        
+        // ==================== GAME LOWCARD ====================
         case "gameLowCardStart":
         case "gameLowCardJoin":
         case "gameLowCardNumber":
@@ -1058,9 +1130,12 @@ export class ChatServer {
             try { await this.lowcard.handleEvent(ws, data); } catch (error) {}
           }
           break;
+          
+        // ==================== ON DESTROY ====================
         case "onDestroy":
           await this._forceCleanupWebSocket(ws);
           break;
+          
         default: break;
       }
     } catch (error) {}
