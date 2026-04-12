@@ -1,9 +1,10 @@
 // index.js - ChatServer2 with LowCardGameManager - CLOUDFLARE WORKERS READY
 // OPTIMIZED MEMORY - Target di bawah 128 MB
 // NO RATE LIMIT - No connection limits
-// FIXED: Satu kursi tidak bisa dipakai beberapa user bersamaan (dengan lock)
-// FIXED: User keluar → hapus kursi, User masuk → tidak buat data baru
-// FIXED: HANYA WebSocket yang CLOSED yang dihapus (tidak ada auto cleanup berdasarkan waktu)
+// FIXED: Pemisahan Map seats dan points (tidak bercampur)
+// FIXED: User keluar → hapus tag kursi dan point
+// FIXED: User masuk → buat tag kursi baru
+// FIXED: Room count = jumlah kursi di Map seats
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -51,8 +52,8 @@ const CONSTANTS = Object.freeze({
   CLEANUP_DELAY_MS: 5,
   MAX_CLEANUP_DURATION_MS: 30,
   
-  // WEBSOCKET CLEANUP - HANYA UNTUK YANG CLOSED
-  WS_CLEANUP_INTERVAL_MS: 30000, // 30 detik sekali cek
+  // WEBSOCKET CLEANUP
+  WS_CLEANUP_INTERVAL_MS: 30000,
   
   // TIMER
   NUMBER_TICK_INTERVAL: 15 * 60 * 1000,
@@ -471,89 +472,16 @@ class GlobalChatBuffer {
   }
 }
 
-// ==================== SEAT DATA CLASS ====================
-class SeatData {
-  constructor() {
-    this.noimageUrl = "";
-    this.namauser = "";
-    this.color = "";
-    this.itembawah = 0;
-    this.itematas = 0;
-    this.vip = 0;
-    this.viptanda = 0;
-    this.lastPoint = null;
-    this.lastUpdated = Date.now();
-  }
-  
-  isEmpty() {
-    return !this.namauser || this.namauser === "";
-  }
-  
-  clear() {
-    this.noimageUrl = "";
-    this.namauser = "";
-    this.color = "";
-    this.itembawah = 0;
-    this.itematas = 0;
-    this.vip = 0;
-    this.viptanda = 0;
-    this.lastPoint = null;
-    this.lastUpdated = Date.now();
-  }
-  
-  copyFrom(other) {
-    if (other && typeof other === 'object') {
-      this.noimageUrl = other.noimageUrl?.slice(0, 255) || "";
-      this.namauser = other.namauser?.slice(0, CONSTANTS.MAX_USERNAME_LENGTH) || "";
-      this.color = other.color?.slice(0, 50) || "";
-      this.itembawah = parseInt(other.itembawah) || 0;
-      this.itematas = parseInt(other.itematas) || 0;
-      this.vip = parseInt(other.vip) || 0;
-      this.viptanda = parseInt(other.viptanda) || 0;
-      if (other.lastPoint) {
-        this.lastPoint = {
-          x: other.lastPoint.x,
-          y: other.lastPoint.y,
-          fast: other.lastPoint.fast || false,
-          timestamp: Date.now()
-        };
-      } else {
-        this.lastPoint = null;
-      }
-      this.lastUpdated = Date.now();
-    }
-    return this;
-  }
-  
-  toJSON() {
-    return {
-      noimageUrl: this.noimageUrl,
-      namauser: this.namauser,
-      color: this.color,
-      itembawah: this.itembawah,
-      itematas: this.itematas,
-      vip: this.vip,
-      viptanda: this.viptanda,
-      lastPoint: this.lastPoint ? { ...this.lastPoint } : null,
-      lastUpdated: this.lastUpdated
-    };
-  }
-}
-
 // ==================== ROOM MANAGER ====================
+// PISAHAN Map seats dan points
 class RoomManager {
   constructor(roomName) {
     this.roomName = roomName;
-    this.seats = new Map();
+    this.seats = new Map();        // ONLY data kursi
+    this.points = new Map();       // ONLY data point (posisi cursor)
     this.muteStatus = false;
     this.currentNumber = 1;
     this.lastActivity = Date.now();
-    this._cachedPoints = null;
-    this._pointsCacheTime = 0;
-    
-    for (let i = 1; i <= CONSTANTS.MAX_SEATS; i++) {
-      this.seats.set(i, new SeatData());
-    }
   }
   
   updateActivity() {
@@ -564,131 +492,157 @@ class RoomManager {
     return Date.now() - this.lastActivity > CONSTANTS.ROOM_MANAGER_IDLE_TIMEOUT && this.getOccupiedCount() === 0;
   }
   
-  isSeatOccupied(seatNumber) {
-    if (seatNumber < 1 || seatNumber > CONSTANTS.MAX_SEATS) return true;
-    const seat = this.seats.get(seatNumber);
-    return seat && !seat.isEmpty();
-  }
-  
-  getSeatOwner(seatNumber) {
-    if (seatNumber < 1 || seatNumber > CONSTANTS.MAX_SEATS) return null;
-    const seat = this.seats.get(seatNumber);
-    return seat && !seat.isEmpty() ? seat.namauser : null;
-  }
+  // ============ SEAT METHODS (KURSI) ============
   
   getAvailableSeat() {
     for (let seat = 1; seat <= CONSTANTS.MAX_SEATS; seat++) {
-      const seatData = this.seats.get(seat);
-      if (!seatData || !seatData.namauser || seatData.namauser === "") {
+      if (!this.seats.has(seat)) {
         return seat;
       }
     }
     return null;
   }
   
-  replaceSeat(seatNumber, seatData) {
-    if (seatNumber < 1 || seatNumber > CONSTANTS.MAX_SEATS) return false;
-    const seat = this.seats.get(seatNumber);
-    if (seat) {
-      seat.copyFrom(seatData);
-      this.updateActivity();
-      this._pointsCacheTime = 0;
-      return true;
-    }
-    return false;
-  }
-  
-  replacePoint(seatNumber, point) {
-    if (seatNumber < 1 || seatNumber > CONSTANTS.MAX_SEATS) return false;
-    const seat = this.seats.get(seatNumber);
-    if (seat) {
-      seat.lastPoint = {
-        x: point.x,
-        y: point.y,
-        fast: point.fast || false,
-        timestamp: Date.now()
-      };
-      seat.lastUpdated = Date.now();
-      this.updateActivity();
-      this._pointsCacheTime = 0;
-      return true;
-    }
-    return false;
-  }
-  
-  removeSeat(seatNumber) {
-    if (seatNumber < 1 || seatNumber > CONSTANTS.MAX_SEATS) return false;
-    const seat = this.seats.get(seatNumber);
-    if (seat) {
-      seat.clear();
-      this.updateActivity();
-      this._pointsCacheTime = 0;
-      return true;
-    }
-    return false;
+  addNewSeat(userId) {
+    const newSeatNumber = this.getAvailableSeat();
+    if (!newSeatNumber) return null;
+    
+    this.seats.set(newSeatNumber, {
+      noimageUrl: "",
+      namauser: userId,
+      color: "",
+      itembawah: 0,
+      itematas: 0,
+      vip: 0,
+      viptanda: 0,
+      lastUpdated: Date.now()
+    });
+    
+    this.updateActivity();
+    return newSeatNumber;
   }
   
   getSeat(seatNumber) {
-    if (seatNumber < 1 || seatNumber > CONSTANTS.MAX_SEATS) return null;
-    const seat = this.seats.get(seatNumber);
-    return seat ? seat.toJSON() : null;
+    return this.seats.get(seatNumber) || null;
   }
   
-  getOccupiedSeats() {
-    const occupied = {};
-    for (const [seatNum, seat] of this.seats) {
-      if (!seat.isEmpty()) occupied[seatNum] = seat.namauser;
+  updateSeat(seatNumber, seatData) {
+    if (seatNumber < 1 || seatNumber > CONSTANTS.MAX_SEATS) return false;
+    
+    const existingSeat = this.seats.get(seatNumber);
+    if (existingSeat) {
+      existingSeat.noimageUrl = seatData.noimageUrl || "";
+      existingSeat.namauser = seatData.namauser || "";
+      existingSeat.color = seatData.color || "";
+      existingSeat.itembawah = seatData.itembawah || 0;
+      existingSeat.itematas = seatData.itematas || 0;
+      existingSeat.vip = seatData.vip || 0;
+      existingSeat.viptanda = seatData.viptanda || 0;
+      existingSeat.lastUpdated = Date.now();
+    } else {
+      this.seats.set(seatNumber, {
+        noimageUrl: seatData.noimageUrl || "",
+        namauser: seatData.namauser || "",
+        color: seatData.color || "",
+        itembawah: seatData.itembawah || 0,
+        itematas: seatData.itematas || 0,
+        vip: seatData.vip || 0,
+        viptanda: seatData.viptanda || 0,
+        lastUpdated: Date.now()
+      });
     }
-    return occupied;
+    
+    this.updateActivity();
+    return true;
+  }
+  
+  removeSeat(seatNumber) {
+    const deleted = this.seats.delete(seatNumber);
+    // Point juga ikut dihapus
+    this.points.delete(seatNumber);
+    if (deleted) this.updateActivity();
+    return deleted;
+  }
+  
+  isSeatOccupied(seatNumber) {
+    return this.seats.has(seatNumber);
+  }
+  
+  getSeatOwner(seatNumber) {
+    const seat = this.seats.get(seatNumber);
+    return seat ? seat.namauser : null;
   }
   
   getOccupiedCount() {
-    let count = 0;
-    for (const seat of this.seats.values()) {
-      if (!seat.isEmpty()) count++;
-    }
-    return count;
+    return this.seats.size;
   }
   
   getAllSeatsMeta() {
     const meta = {};
     for (const [seatNum, seat] of this.seats) {
-      if (!seat.isEmpty()) {
-        meta[seatNum] = {
-          noimageUrl: seat.noimageUrl,
-          namauser: seat.namauser,
-          color: seat.color,
-          itembawah: seat.itembawah,
-          itematas: seat.itematas,
-          vip: seat.vip,
-          viptanda: seat.viptanda
-        };
-      }
+      meta[seatNum] = {
+        noimageUrl: seat.noimageUrl,
+        namauser: seat.namauser,
+        color: seat.color,
+        itembawah: seat.itembawah,
+        itematas: seat.itematas,
+        vip: seat.vip,
+        viptanda: seat.viptanda
+      };
     }
     return meta;
   }
   
-  getAllPoints() {
-    if (this._cachedPoints && Date.now() - this._pointsCacheTime < CONSTANTS.POINTS_CACHE_MS) {
-      return this._cachedPoints;
-    }
-    
-    const points = [];
+  getOccupiedSeats() {
+    const occupied = {};
     for (const [seatNum, seat] of this.seats) {
-      if (seat.lastPoint && seat.lastPoint.x !== undefined && !seat.isEmpty()) {
-        points.push({
-          seat: seatNum,
-          x: seat.lastPoint.x,
-          y: seat.lastPoint.y,
-          fast: seat.lastPoint.fast ? 1 : 0
-        });
-      }
+      occupied[seatNum] = seat.namauser;
     }
+    return occupied;
+  }
+  
+  // ============ POINT METHODS ============
+  
+  updatePoint(seatNumber, point) {
+    if (seatNumber < 1 || seatNumber > CONSTANTS.MAX_SEATS) return false;
     
-    this._cachedPoints = points;
-    this._pointsCacheTime = Date.now();
+    this.points.set(seatNumber, {
+      x: point.x,
+      y: point.y,
+      fast: point.fast || false,
+      timestamp: Date.now()
+    });
+    
+    this.updateActivity();
+    return true;
+  }
+  
+  getPoint(seatNumber) {
+    return this.points.get(seatNumber) || null;
+  }
+  
+  getAllPoints() {
+    const points = [];
+    for (const [seatNum, point] of this.points) {
+      points.push({
+        seat: seatNum,
+        x: point.x,
+        y: point.y,
+        fast: point.fast ? 1 : 0
+      });
+    }
     return points;
   }
+  
+  removePoint(seatNumber) {
+    return this.points.delete(seatNumber);
+  }
+  
+  clearAllPoints() {
+    this.points.clear();
+  }
+  
+  // ============ MUTE METHODS ============
   
   setMute(isMuted) {
     this.muteStatus = isMuted === true || isMuted === "true" || isMuted === 1;
@@ -700,6 +654,8 @@ class RoomManager {
     return this.muteStatus;
   }
   
+  // ============ NUMBER METHODS ============
+  
   setCurrentNumber(number) {
     this.currentNumber = number;
     this.updateActivity();
@@ -709,26 +665,25 @@ class RoomManager {
     return this.currentNumber;
   }
   
+  // ============ CLEANUP ============
+  
   compressOldPoints() {
     const now = Date.now();
-    for (const [seatNum, seat] of this.seats) {
-      if (seat.lastPoint && (now - seat.lastPoint.timestamp) > 300000) {
-        seat.lastPoint = null;
+    for (const [seatNum, point] of this.points) {
+      if (point.timestamp && (now - point.timestamp) > 300000) {
+        this.points.delete(seatNum);
       }
     }
   }
   
   destroy() {
-    for (const seat of this.seats.values()) {
-      seat.clear();
-    }
     this.seats.clear();
-    this._cachedPoints = null;
+    this.points.clear();
   }
 }
 
 // ==================== MAIN CHATSERVER CLASS ====================
-export class ChatServer {
+export class ChatServer2 {
   constructor(state, env) {
     this.state = state;
     this.env = env;
@@ -824,8 +779,6 @@ export class ChatServer {
     }
   }
   
-  // ==================== WEBSOCKET CLEANUP - HANYA YANG CLOSED ====================
-  
   _cleanupClosedWebSockets() {
     const zombies = [];
     
@@ -835,8 +788,6 @@ export class ChatServer {
         continue;
       }
       
-      // HANYA hapus jika WebSocket sudah closed
-      // readyState: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
       if (ws.readyState !== 1) {
         zombies.push(ws);
         continue;
@@ -860,14 +811,11 @@ export class ChatServer {
         const cleanedWS = this._cleanupClosedWebSockets();
         
         if (cleanedWS > 0) {
-          // Update room counts setelah cleanup
           for (const room of roomList) {
             this.updateRoomCount(room);
           }
         }
-      } catch (error) {
-        // Silent error
-      }
+      } catch (error) {}
     }, CONSTANTS.WS_CLEANUP_INTERVAL_MS);
   }
   
@@ -895,34 +843,16 @@ export class ChatServer {
     try {
       if (roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS) return null;
       
-      const availableSeat = roomManager.getAvailableSeat();
-      if (!availableSeat) return null;
+      const newSeatNumber = roomManager.addNewSeat(userId);
+      if (!newSeatNumber) return null;
       
-      if (roomManager.isSeatOccupied(availableSeat)) return null;
+      this.userToSeat.set(userId, { room, seat: newSeatNumber });
+      this.userCurrentRoom.set(userId, room);
       
-      const existingSeat = roomManager.getSeat(availableSeat);
+      this.broadcastToRoom(room, ["userOccupiedSeat", room, newSeatNumber, userId]);
+      this.broadcastToRoom(room, ["roomUserCount", room, roomManager.getOccupiedCount()]);
       
-      const seatData = {
-        noimageUrl: existingSeat?.noimageUrl || "",
-        namauser: userId,
-        color: existingSeat?.color || "",
-        itembawah: existingSeat?.itembawah || 0,
-        itematas: existingSeat?.itematas || 0,
-        vip: existingSeat?.vip || 0,
-        viptanda: existingSeat?.viptanda || 0,
-        lastPoint: existingSeat?.lastPoint || null,
-        lastUpdated: Date.now()
-      };
-      
-      if (roomManager.replaceSeat(availableSeat, seatData)) {
-        this.userToSeat.set(userId, { room, seat: availableSeat });
-        this.userCurrentRoom.set(userId, room);
-        
-        this.broadcastToRoom(room, ["userOccupiedSeat", room, availableSeat, userId]);
-        this.broadcastToRoom(room, ["roomUserCount", room, roomManager.getOccupiedCount()]);
-        return availableSeat;
-      }
-      return null;
+      return newSeatNumber;
     } finally {
       this._seatLocks.delete(lockKey);
     }
@@ -943,7 +873,6 @@ export class ChatServer {
     if (this._masterTickRunning) return;
     
     this._masterTickRunning = true;
-    const startTime = Date.now();
     
     try {
       await Promise.race([
@@ -1221,11 +1150,10 @@ export class ChatServer {
     const roomManager = this.roomManagers.get(room);
     if (!roomManager) return false;
     
-    const oldSeat = roomManager.getSeat(seatNumber);
-    const wasOccupied = oldSeat && oldSeat.namauser && oldSeat.namauser !== "";
+    const wasOccupied = roomManager.isSeatOccupied(seatNumber);
     const isOccupied = seatData.namauser && seatData.namauser !== "";
     
-    const success = roomManager.replaceSeat(seatNumber, seatData);
+    const success = roomManager.updateSeat(seatNumber, seatData);
     
     if (success && wasOccupied !== isOccupied) {
       this.broadcastToRoom(room, ["roomUserCount", room, roomManager.getOccupiedCount()]);
@@ -1237,7 +1165,7 @@ export class ChatServer {
     if (seatNumber < 1 || seatNumber > CONSTANTS.MAX_SEATS) return false;
     const roomManager = this.roomManagers.get(room);
     if (!roomManager) return false;
-    return roomManager.replacePoint(seatNumber, point);
+    return roomManager.updatePoint(seatNumber, point);
   }
   
   removeSeatDirect(room, seatNumber) {
@@ -1245,8 +1173,7 @@ export class ChatServer {
     const roomManager = this.roomManagers.get(room);
     if (!roomManager) return false;
     
-    const seatData = roomManager.getSeat(seatNumber);
-    const wasOccupied = seatData && seatData.namauser && seatData.namauser !== "";
+    const wasOccupied = roomManager.isSeatOccupied(seatNumber);
     const success = roomManager.removeSeat(seatNumber);
     
     if (success && wasOccupied) {
@@ -1727,9 +1654,12 @@ export class ChatServer {
               this._addToRoomClients(ws, room);
               this._addUserConnection(id, ws);
               await this.sendAllStateTo(ws, room);
-              if (seatData.lastPoint) {
-                await this.safeSend(ws, ["pointUpdated", room, seat, seatData.lastPoint.x, seatData.lastPoint.y, seatData.lastPoint.fast ? 1 : 0]);
+              
+              const point = roomManager.getPoint(seat);
+              if (point) {
+                await this.safeSend(ws, ["pointUpdated", room, seat, point.x, point.y, point.fast ? 1 : 0]);
               }
+              
               await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
               await this.safeSend(ws, ["numberKursiSaya", seat]);
               await this.safeSend(ws, ["currentNumber", this.currentNumber]);
@@ -2048,7 +1978,6 @@ export class ChatServer {
             itematas: itematas || 0,
             vip: vip || 0,
             viptanda: viptanda || 0,
-            lastPoint: existingSeat?.lastPoint || null,
             lastUpdated: Date.now()
           };
           
@@ -2159,7 +2088,6 @@ export class ChatServer {
       this._safePeriodicCleanup().catch(err => {});
     }, CONSTANTS.CLEANUP_INTERVAL);
     
-    // Start WebSocket specific cleanup
     this._startWebSocketCleanup();
   }
   
@@ -2237,6 +2165,13 @@ export class ChatServer {
     
     const bufferStats = this.chatBuffer.getStats();
     
+    let totalSeats = 0;
+    let totalPoints = 0;
+    for (const rm of this.roomManagers.values()) {
+      totalSeats += rm.seats.size;
+      totalPoints += rm.points.size;
+    }
+    
     return {
       timestamp: Date.now(),
       uptime: Date.now() - this._startTime,
@@ -2250,6 +2185,8 @@ export class ChatServer {
       userToSeatSize: this.userToSeat.size,
       userCurrentRoomSize: this.userCurrentRoom.size,
       chatBuffer: bufferStats,
+      seats: totalSeats,
+      points: totalPoints
     };
   }
   
@@ -2451,8 +2388,8 @@ export class ChatServer {
 export default {
   async fetch(req, env) {
     try {
-      const chatId = env.CHAT_SERVER.idFromName("chat-room");
-      const chatObj = env.CHAT_SERVER.get(chatId);
+      const chatId = env.CHAT_SERVER_2.idFromName("chat-room");
+      const chatObj = env.CHAT_SERVER_2.get(chatId);
       
       if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
         return chatObj.fetch(req);
