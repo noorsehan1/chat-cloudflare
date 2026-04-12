@@ -1395,36 +1395,40 @@ export class ChatServer {
   }
   
   async sendAllStateTo(ws, room, excludeSelfSeat = true) {
-    try {
-      if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room) return;
-      
-      const roomManager = this.roomManagers.get(room);
-      if (!roomManager) return;
-      
-      const allKursiMeta = roomManager.getAllSeatsMeta();
-      const lastPointsData = roomManager.getAllPoints();
-      const seatInfo = this.userToSeat.get(ws.idtarget);
-      const selfSeat = seatInfo?.room === room ? seatInfo.seat : null;
-      
-      let filteredMeta = allKursiMeta;
-      let filteredPoints = lastPointsData;
-      
-      if (excludeSelfSeat && selfSeat) {
-        filteredMeta = {};
-        for (const [seat, data] of Object.entries(allKursiMeta)) {
-          if (parseInt(seat) !== selfSeat) filteredMeta[seat] = data;
-        }
-        filteredPoints = lastPointsData.filter(p => p.seat !== selfSeat);
+  try {
+    if (!ws || ws.readyState !== 1 || !room || ws.roomname !== room) return;
+    
+    const roomManager = this.roomManagers.get(room);
+    if (!roomManager) return;
+    
+    const allKursiMeta = roomManager.getAllSeatsMeta();
+    const lastPointsData = roomManager.getAllPoints();  // ✅ AMBIL SEMUA POIN DARI MAP
+    
+    const seatInfo = this.userToSeat.get(ws.idtarget);
+    const selfSeat = seatInfo?.room === room ? seatInfo.seat : null;
+    
+    let filteredMeta = allKursiMeta;
+    
+    // Hanya kursi yang di-filter (exclude self)
+    if (excludeSelfSeat && selfSeat) {
+      filteredMeta = {};
+      for (const [seat, data] of Object.entries(allKursiMeta)) {
+        if (parseInt(seat) !== selfSeat) filteredMeta[seat] = data;
       }
-      
-      if (Object.keys(filteredMeta).length > 0) {
-        await this.safeSend(ws, ["allUpdateKursiList", room, filteredMeta]);
-      }
-      if (filteredPoints.length > 0) {
-        await this.safeSend(ws, ["allPointsList", room, filteredPoints]);
-      }
-    } catch (error) {}
-  }
+    }
+    
+    // ✅ KIRIM KURSI
+    if (Object.keys(filteredMeta).length > 0) {
+      await this.safeSend(ws, ["allUpdateKursiList", room, filteredMeta]);
+    }
+    
+    // ✅ KIRIM SEMUA POIN LANGSUNG (TANPA FILTER, TANPA EXCLUDE SELF)
+    if (lastPointsData.length > 0) {
+      await this.safeSend(ws, ["allPointsList", room, lastPointsData]);
+    }
+    
+  } catch (error) {}
+}
   
   _validateUserId(userId) {
     if (!userId || typeof userId !== 'string') return false;
