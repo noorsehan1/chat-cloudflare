@@ -35,6 +35,9 @@ const CONSTANTS = Object.freeze({
   
   CLEANUP_BATCH_SIZE: 10,
   ROOM_IDLE_BEFORE_CLEANUP: 15 * 60 * 1000,
+  
+  PM_BATCH_SIZE: 10,
+  PM_BATCH_DELAY_MS: 50,
 });
 
 const roomList = Object.freeze([
@@ -82,6 +85,62 @@ class AsyncLock {
       if (nextResolve) nextResolve();
     }
     if (queue && queue.length === 0) this.waitingQueues.delete(key);
+  }
+}
+
+// ==================== PM BUFFER (QUEUE) ====================
+class PMBuffer {
+  constructor() {
+    this._queue = [];
+    this._isProcessing = false;
+    this._flushCallback = null;
+    this.BATCH_SIZE = CONSTANTS.PM_BATCH_SIZE;
+    this.BATCH_DELAY_MS = CONSTANTS.PM_BATCH_DELAY_MS;
+  }
+  
+  setFlushCallback(callback) {
+    this._flushCallback = callback;
+  }
+  
+  add(targetId, message) {
+    this._queue.push({ targetId, message, timestamp: Date.now() });
+    
+    if (!this._isProcessing) {
+      this._process();
+    }
+  }
+  
+  async _process() {
+    if (this._isProcessing) return;
+    this._isProcessing = true;
+    
+    while (this._queue.length > 0) {
+      const batch = this._queue.splice(0, this.BATCH_SIZE);
+      
+      for (const item of batch) {
+        try {
+          if (this._flushCallback) {
+            await this._flushCallback(item.targetId, item.message);
+          }
+        } catch (e) {}
+      }
+      
+      if (this._queue.length > 0) {
+        await new Promise(resolve => setTimeout(resolve, this.BATCH_DELAY_MS));
+      }
+    }
+    
+    this._isProcessing = false;
+  }
+  
+  getStats() {
+    return { queuedPM: this._queue.length };
+  }
+  
+  async destroy() {
+    this._queue = [];
+    this._isProcessing = false;
+    this._flushCallback = null;
   }
 }
 
@@ -392,6 +451,20 @@ export class ChatServer {
     
     this.chatBuffer = new GlobalChatBuffer();
     this.chatBuffer.setFlushCallback((room, msg, msgId) => this._sendDirectToRoom(room, msg, msgId));
+    
+    // PM Buffer
+    this.pmBuffer = new PMBuffer();
+    this.pmBuffer.setFlushCallback(async (targetId, message) => {
+      const targetConnections = this.userConnections.get(targetId);
+      if (targetConnections) {
+        for (const client of targetConnections) {
+          if (client && client.readyState === 1 && !client._isClosing) {
+            await this.safeSend(client, message);
+            break;
+          }
+        }
+      }
+    });
     
     try {
       this.lowcard = new LowCardGameManager(this);
@@ -1109,15 +1182,16 @@ export class ChatServer {
         // ==================== PRIVATE MESSAGE ====================
         case "private": {
           const [, idtarget, noimageUrl, message, sender] = data;
-          const targetConnections = this.userConnections.get(idtarget);
-          if (targetConnections) {
-            for (const client of targetConnections) {
-              if (client && client.readyState === 1 && !client._isClosing) {
-                await this.safeSend(client, ["private", idtarget, noimageUrl, message, Date.now(), sender]);
-                break;
-              }
-            }
-          }
+          
+          // Validasi dasar
+          if (!idtarget || !sender) return;
+          
+          // Kirim balik ke pengirim (langsung)
+          await this.safeSend(ws, ["private", idtarget, noimageUrl, message, Date.now(), sender]);
+          
+          // Queue PM ke penerima (pakai buffer agar tidak overload)
+          this.pmBuffer.add(idtarget, ["private", idtarget, noimageUrl, message, Date.now(), sender]);
+          
           break;
         }
         
@@ -1165,6 +1239,7 @@ export class ChatServer {
       userToSeatSize: this.userToSeat.size,
       userCurrentRoomSize: this.userCurrentRoom.size,
       chatBuffer: this.chatBuffer.getStats(),
+      pmBuffer: this.pmBuffer.getStats(),
       seats: totalSeats,
       points: totalPoints
     };
@@ -1176,6 +1251,7 @@ export class ChatServer {
     if (this._masterTimer) { clearInterval(this._masterTimer); this._masterTimer = null; }
     await this.chatBuffer.flushAll();
     await this.chatBuffer.destroy();
+    await this.pmBuffer.destroy();
     if (this.lowcard && typeof this.lowcard.destroy === 'function') try { await this.lowcard.destroy(); } catch(e) {}
     this.lowcard = null;
     const clientsToClose = Array.from(this._activeClients);
@@ -1207,8 +1283,12 @@ export class ChatServer {
           let activeCount = 0;
           for (const c of this._activeClients) if (c && c.readyState === 1) activeCount++;
           return new Response(JSON.stringify({ 
-            status: "healthy", connections: activeCount, rooms: this.getJumlahRoom(),
-            uptime: Date.now() - this._startTime, buffer: this.chatBuffer.getStats(),
+            status: "healthy", 
+            connections: activeCount, 
+            rooms: this.getJumlahRoom(),
+            uptime: Date.now() - this._startTime, 
+            buffer: this.chatBuffer.getStats(),
+            pmBuffer: this.pmBuffer.getStats(),
             masterTimer: this._masterTimer ? "running" : "stopped",
           }), { status: 200, headers: { "content-type": "application/json" } });
         }
