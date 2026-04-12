@@ -2,7 +2,8 @@
 // OPTIMIZED MEMORY - Target di bawah 128 MB
 // NO RATE LIMIT - No connection limits
 // FIXED: Satu kursi tidak bisa dipakai beberapa user bersamaan (dengan lock)
-// BUFFER FLUSH: 1 detik (sudah optimal)
+// FIXED: User keluar → hapus kursi, User masuk → tidak buat data baru
+// FIXED: HANYA WebSocket yang CLOSED yang dihapus (tidak ada auto cleanup berdasarkan waktu)
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -42,13 +43,16 @@ const CONSTANTS = Object.freeze({
   MAX_USERNAME_LENGTH: 25,
   MAX_GIFT_NAME: 40,
   
-  // CLEANUP - LEBIH SERING
+  // CLEANUP
   CLEANUP_INTERVAL: 5000,
   MAX_USER_IDLE: 2 * 60 * 1000,
   ROOM_MANAGER_IDLE_TIMEOUT: 3 * 60 * 1000,
   CLEANUP_BATCH_SIZE: 10,
   CLEANUP_DELAY_MS: 5,
   MAX_CLEANUP_DURATION_MS: 30,
+  
+  // WEBSOCKET CLEANUP - HANYA UNTUK YANG CLOSED
+  WS_CLEANUP_INTERVAL_MS: 30000, // 30 detik sekali cek
   
   // TIMER
   NUMBER_TICK_INTERVAL: 15 * 60 * 1000,
@@ -283,11 +287,9 @@ class GlobalChatBuffer {
     return msgId;
   }
   
-  // tick dipanggil setiap 1 detik oleh master timer
   tick(now) {
     if (this._isDestroyed) return;
     
-    // CLEANUP EXPIRED MESSAGES
     if (now - this._lastCleanupTime >= this._cleanupIntervalMs) {
       this._cleanupExpiredMessages(now);
       this._processRetryQueue(now);
@@ -295,7 +297,6 @@ class GlobalChatBuffer {
       this._lastCleanupTime = now;
     }
     
-    // FLUSH LANGSUNG SETIAP 1 DETIK
     this._flush();
   }
   
@@ -502,9 +503,9 @@ class SeatData {
   
   copyFrom(other) {
     if (other && typeof other === 'object') {
-      this.noimageUrl = other.noimageUrl?.slice(0, 255);
-      this.namauser = other.namauser?.slice(0, CONSTANTS.MAX_USERNAME_LENGTH);
-      this.color = other.color?.slice(0, 50);
+      this.noimageUrl = other.noimageUrl?.slice(0, 255) || "";
+      this.namauser = other.namauser?.slice(0, CONSTANTS.MAX_USERNAME_LENGTH) || "";
+      this.color = other.color?.slice(0, 50) || "";
       this.itembawah = parseInt(other.itembawah) || 0;
       this.itematas = parseInt(other.itematas) || 0;
       this.vip = parseInt(other.vip) || 0;
@@ -753,6 +754,7 @@ export class ChatServer {
     
     this._cleanupInterval = null;
     this._memoryCheckInterval = null;
+    this._webSocketCleanupInterval = null;
     
     this.chatBuffer = new GlobalChatBuffer();
     this.chatBuffer.setFlushCallback((room, msg, msgId) => {
@@ -822,6 +824,53 @@ export class ChatServer {
     }
   }
   
+  // ==================== WEBSOCKET CLEANUP - HANYA YANG CLOSED ====================
+  
+  _cleanupClosedWebSockets() {
+    const zombies = [];
+    
+    for (const ws of this._activeClients) {
+      if (!ws) {
+        zombies.push(ws);
+        continue;
+      }
+      
+      // HANYA hapus jika WebSocket sudah closed
+      // readyState: 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
+      if (ws.readyState !== 1) {
+        zombies.push(ws);
+        continue;
+      }
+    }
+    
+    for (const ws of zombies) {
+      this.safeWebSocketCleanup(ws).catch(() => {});
+    }
+    
+    return zombies.length;
+  }
+  
+  _startWebSocketCleanup() {
+    if (this._webSocketCleanupInterval) {
+      clearInterval(this._webSocketCleanupInterval);
+    }
+    
+    this._webSocketCleanupInterval = setInterval(() => {
+      try {
+        const cleanedWS = this._cleanupClosedWebSockets();
+        
+        if (cleanedWS > 0) {
+          // Update room counts setelah cleanup
+          for (const room of roomList) {
+            this.updateRoomCount(room);
+          }
+        }
+      } catch (error) {
+        // Silent error
+      }
+    }, CONSTANTS.WS_CLEANUP_INTERVAL_MS);
+  }
+  
   assignNewSeat(room, userId) {
     const roomManager = this.roomManagers.get(room);
     if (!roomManager) return null;
@@ -840,9 +889,7 @@ export class ChatServer {
     }
     
     const lockKey = `seat_${room}`;
-    if (this._seatLocks.has(lockKey)) {
-      return null;
-    }
+    if (this._seatLocks.has(lockKey)) return null;
     this._seatLocks.add(lockKey);
     
     try {
@@ -851,15 +898,23 @@ export class ChatServer {
       const availableSeat = roomManager.getAvailableSeat();
       if (!availableSeat) return null;
       
-      if (roomManager.isSeatOccupied(availableSeat)) {
-        return null;
-      }
+      if (roomManager.isSeatOccupied(availableSeat)) return null;
       
-      const emptySeat = new SeatData();
-      emptySeat.namauser = userId;
-      emptySeat.lastUpdated = Date.now();
+      const existingSeat = roomManager.getSeat(availableSeat);
       
-      if (roomManager.replaceSeat(availableSeat, emptySeat.toJSON())) {
+      const seatData = {
+        noimageUrl: existingSeat?.noimageUrl || "",
+        namauser: userId,
+        color: existingSeat?.color || "",
+        itembawah: existingSeat?.itembawah || 0,
+        itematas: existingSeat?.itematas || 0,
+        vip: existingSeat?.vip || 0,
+        viptanda: existingSeat?.viptanda || 0,
+        lastPoint: existingSeat?.lastPoint || null,
+        lastUpdated: Date.now()
+      };
+      
+      if (roomManager.replaceSeat(availableSeat, seatData)) {
         this.userToSeat.set(userId, { room, seat: availableSeat });
         this.userCurrentRoom.set(userId, room);
         
@@ -1325,7 +1380,7 @@ export class ChatServer {
     }
     
     const propsToDelete = [
-      'roomname', 'idtarget', '_isClosing', '_connectionTime', 
+      'roomname', 'idtarget', '_isClosing', '_connectionTime',
       '_isCleaningUp', 'username', 'sessionId', '_reconnectAttempts',
       '_messageQueue', '_lastMessageTime', '_bytesReceived', '_bytesSent', '_abortController'
     ];
@@ -1549,6 +1604,8 @@ export class ChatServer {
       this._removeFromRoomClients(ws, room);
       this._removeUserConnection(ws.idtarget, ws);
       ws.roomname = undefined;
+      
+      this.updateRoomCount(room);
     } catch (error) {}
   }
   
@@ -1984,13 +2041,13 @@ export class ChatServer {
           const existingSeat = roomManager.getSeat(seat);
           
           const updatedSeat = {
-            noimageUrl: noimageUrl?.slice(0, 255),
+            noimageUrl: noimageUrl?.slice(0, 255) || "",
             namauser: namauser,
-            color: color,
-            itembawah: itembawah,
-            itematas: itematas,
-            vip: vip,
-            viptanda: viptanda,
+            color: color || "",
+            itembawah: itembawah || 0,
+            itematas: itematas || 0,
+            vip: vip || 0,
+            viptanda: viptanda || 0,
             lastPoint: existingSeat?.lastPoint || null,
             lastUpdated: Date.now()
           };
@@ -2101,6 +2158,9 @@ export class ChatServer {
     this._cleanupInterval = setInterval(() => {
       this._safePeriodicCleanup().catch(err => {});
     }, CONSTANTS.CLEANUP_INTERVAL);
+    
+    // Start WebSocket specific cleanup
+    this._startWebSocketCleanup();
   }
   
   async _safePeriodicCleanup() {
@@ -2209,6 +2269,10 @@ export class ChatServer {
       clearInterval(this._memoryCheckInterval);
       this._memoryCheckInterval = null;
     }
+    if (this._webSocketCleanupInterval) {
+      clearInterval(this._webSocketCleanupInterval);
+      this._webSocketCleanupInterval = null;
+    }
     
     await this.chatBuffer.flushAll();
     
@@ -2306,6 +2370,7 @@ export class ChatServer {
         
         if (url.pathname === "/debug/gc") {
           this._forceMemoryCleanup();
+          this._cleanupClosedWebSockets();
           return new Response("Force cleanup executed", { status: 200 });
         }
         
