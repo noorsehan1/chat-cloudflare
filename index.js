@@ -5,6 +5,7 @@
 // FIXED: User keluar → hapus tag kursi dan point
 // FIXED: User masuk → buat tag kursi baru
 // FIXED: Room count = jumlah kursi di Map seats
+// FIXED: Tidak ada auto-cleanup point (compressOldPoints dihapus)
 
 import { LowCardGameManager } from "./lowcard.js";
 
@@ -667,14 +668,7 @@ class RoomManager {
   
   // ============ CLEANUP ============
   
-  compressOldPoints() {
-    const now = Date.now();
-    for (const [seatNum, point] of this.points) {
-      if (point.timestamp && (now - point.timestamp) > 300000) {
-        this.points.delete(seatNum);
-      }
-    }
-  }
+  // ❌ compressOldPoints() DIHAPUS - tidak ada auto-cleanup point
   
   destroy() {
     this.seats.clear();
@@ -774,9 +768,7 @@ export class ChatServer {
       this._emergencyCleanup();
     }
     
-    for (const roomManager of this.roomManagers.values()) {
-      roomManager.compressOldPoints();
-    }
+    // ❌ compressOldPoints() DIHAPUS - tidak ada auto-cleanup point
   }
   
   _cleanupClosedWebSockets() {
