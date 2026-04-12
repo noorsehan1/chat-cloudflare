@@ -683,7 +683,7 @@ class RoomManager {
 }
 
 // ==================== MAIN CHATSERVER CLASS ====================
-export class ChatServer2 {
+export class ChatServer {
   constructor(state, env) {
     this.state = state;
     this.env = env;
@@ -2388,8 +2388,8 @@ export class ChatServer2 {
 export default {
   async fetch(req, env) {
     try {
-      const chatId = env.CHAT_SERVER_2.idFromName("chat-room");
-      const chatObj = env.CHAT_SERVER_2.get(chatId);
+      const chatId = env.CHAT_SERVER.idFromName("chat-room");
+      const chatObj = env.CHAT_SERVER.get(chatId);
       
       if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
         return chatObj.fetch(req);
