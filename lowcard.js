@@ -1,6 +1,4 @@
-// ============================
-// LowCardGameManager (COMPLETE - FINAL VERSION)
-// ============================
+// ==================== LOWCARDGAMEMANAGER.js - FIXED TIMEOUT CLEANUP ====================
 
 const CONSTANTS = Object.freeze({
   MAX_LOWCARD_GAMES: 50,
@@ -18,12 +16,8 @@ export class LowCardGameManager {
     this.chatServer = chatServer;
     this.activeGames = new Map();
     this._maxGames = CONSTANTS.MAX_LOWCARD_GAMES;
-    this._masterTickInterval = null;
-    this._cleanupInterval = null;
     this._destroyed = false;
     this._errorLogs = [];
-    this._gamesToTick = new Map();
-    this._evalTimeouts = new Map();
     
     this._errorHandler = (error, context) => {
       const errorMsg = error?.message || String(error);
@@ -31,38 +25,40 @@ export class LowCardGameManager {
       if (this._errorLogs.length > 100) this._errorLogs.shift();
       console.error(`[LowCardGame] ${context}:`, errorMsg);
     };
-    
-    this._startMasterTick();
-    
-    this._cleanupInterval = setInterval(() => {
-      if (!this._destroyed) this.cleanupStaleGames();
-    }, CONSTANTS.CLEANUP_INTERVAL_MS);
   }
 
-  _startMasterTick() {
-    if (this._masterTickInterval) return;
+  // ==================== MASTER TICK ====================
+  masterTick() {
+    if (this._destroyed) return;
     
-    this._masterTickInterval = setInterval(() => {
-      if (this._destroyed) return;
-      
-      const gamesToProcess = Array.from(this._gamesToTick.entries());
-      
-      for (const [room, game] of gamesToProcess) {
-        try {
-          const currentGame = this._safeGetGame(room);
-          if (currentGame && currentGame._isActive) {
-            this._onMasterTick(room, currentGame);
-          } else {
-            this._gamesToTick.delete(room);
-          }
-        } catch (error) {
-          this._errorHandler(error, `masterTick ${room}`);
-          this._gamesToTick.delete(room);
+    const now = Date.now();
+    
+    try {
+      for (const [room, game] of this.activeGames) {
+        if (!game || !game._isActive) {
+          this.activeGames.delete(room);
+          continue;
         }
+        this._processGameTick(room, game, now);
       }
-    }, CONSTANTS.MASTER_TICK_INTERVAL_MS);
+    } catch (error) {
+      this._errorHandler(error, 'masterTick');
+    }
+  }
+  
+  _processGameTick(room, game, now) {
+    try {
+      if (game._phase === 'registration') {
+        this._handleRegistrationTick(game, room);
+      } else if (game._phase === 'draw') {
+        this._handleDrawTick(game, room);
+      }
+    } catch (error) {
+      this._errorHandler(error, `processGameTick ${room}`);
+    }
   }
 
+  // ========== SAFE HELPER METHODS ==========
   _safeBroadcast(room, message) {
     try {
       if (this._destroyed) return;
@@ -98,6 +94,7 @@ export class LowCardGameManager {
     }
   }
 
+  // ========== CLEANUP STALE GAMES ==========
   cleanupStaleGames() {
     try {
       if (this._destroyed) return;
@@ -136,24 +133,7 @@ export class LowCardGameManager {
     }
   }
 
-  _clearGameFromTick(game) {
-    if (game && game.room) {
-      this._gamesToTick.delete(game.room);
-    }
-  }
-
-  _clearEvalTimeout(room) {
-    try {
-      const timeout = this._evalTimeouts.get(room);
-      if (timeout) {
-        clearTimeout(timeout);
-        this._evalTimeouts.delete(room);
-      }
-    } catch (error) {
-      this._errorHandler(error, 'clearEvalTimeout');
-    }
-  }
-
+  // ========== GAME UTILITIES ==========
   getRandomCardTanda() {
     try {
       const tandaOptions = ["C1", "C2", "C3", "C4"];
@@ -195,6 +175,7 @@ export class LowCardGameManager {
     }
   }
 
+  // ========== GAME CORE METHODS ==========
   handleEvent(ws, data) {
     try {
       if (this._destroyed || !ws || !data || !Array.isArray(data) || data.length === 0) return;
@@ -274,8 +255,6 @@ export class LowCardGameManager {
         _isActive: true,
         _phase: 'registration',
         _pendingBotDraws: new Map(),
-        _lastTickTime: Date.now(),
-        _initialTimeBroadcastSent: false,
         _hasBroadcastInitial: false,
         _evalTimeout: null
       };
@@ -286,7 +265,6 @@ export class LowCardGameManager {
       });
 
       this.activeGames.set(room, game);
-      this._gamesToTick.set(room, game);
 
       this._safeBroadcast(room, ["gameLowCardStart", game.betAmount]);
       this._safeSend(ws, ["gameLowCardStartSuccess", game.hostName, game.betAmount]);
@@ -294,26 +272,9 @@ export class LowCardGameManager {
     } catch (error) {
       this._errorHandler(error, 'startGame');
       if (game && game.room) {
-        this._gamesToTick.delete(game.room);
+        this.activeGames.delete(game.room);
       }
       this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
-    }
-  }
-
-  _onMasterTick(room, game) {
-    try {
-      if (!game || !game._isActive || this._destroyed) return;
-      
-      const now = Date.now();
-      game._lastTickTime = now;
-      
-      if (game._phase === 'registration') {
-        this._handleRegistrationTick(game, room);
-      } else if (game._phase === 'draw') {
-        this._handleDrawTick(game, room);
-      }
-    } catch (error) {
-      this._errorHandler(error, 'onMasterTick');
     }
   }
 
@@ -367,9 +328,13 @@ export class LowCardGameManager {
           game.evaluationLocked = true;
           this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
           
-          this._clearEvalTimeout(room);
+          // ✅ HAPUS TIMEOUT LAMA SEBELUM BUAT BARU
+          if (game._evalTimeout) {
+            clearTimeout(game._evalTimeout);
+            game._evalTimeout = null;
+          }
           
-          const evalTimeout = setTimeout(() => {
+          game._evalTimeout = setTimeout(() => {
             try {
               const currentGame = this._safeGetGame(room);
               if (currentGame && currentGame._isActive && !this._destroyed) {
@@ -378,11 +343,9 @@ export class LowCardGameManager {
             } catch (evalError) {
               this._errorHandler(evalError, 'evaluateRound timeout');
             } finally {
-              this._evalTimeouts.delete(room);
+              game._evalTimeout = null;
             }
           }, 2000);
-          
-          this._evalTimeouts.set(room, evalTimeout);
           return;
         } else if (game.drawTimeLeft > 0) {
           if (game.drawTimeLeft !== CONSTANTS.DRAW_TIME || game._hasBroadcastInitial === true) {
@@ -394,6 +357,7 @@ export class LowCardGameManager {
       
       game.drawTimeLeft--;
       
+      // Process pending bot draws
       if (game.useBots && game._pendingBotDraws && game._pendingBotDraws.size > 0) {
         const toDraw = [];
         for (const [botId, timeRemaining] of game._pendingBotDraws.entries()) {
@@ -412,15 +376,20 @@ export class LowCardGameManager {
         }
       }
       
+      // Auto evaluate if time runs out
       if (game.drawTimeLeft < 0 && game._phase === 'draw') {
         game.drawTimeExpired = true;
         game._phase = 'evaluating';
         game.evaluationLocked = true;
         this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
         
-        this._clearEvalTimeout(room);
+        // ✅ HAPUS TIMEOUT LAMA SEBELUM BUAT BARU
+        if (game._evalTimeout) {
+          clearTimeout(game._evalTimeout);
+          game._evalTimeout = null;
+        }
         
-        const evalTimeout = setTimeout(() => {
+        game._evalTimeout = setTimeout(() => {
           try {
             const currentGame = this._safeGetGame(room);
             if (currentGame && currentGame._isActive && !this._destroyed) {
@@ -429,11 +398,9 @@ export class LowCardGameManager {
           } catch (evalError) {
             this._errorHandler(evalError, 'evaluateRound timeout');
           } finally {
-            this._evalTimeouts.delete(room);
+            game._evalTimeout = null;
           }
         }, 2000);
-        
-        this._evalTimeouts.set(room, evalTimeout);
       }
     } catch (error) {
       this._errorHandler(error, 'handleDrawTick');
@@ -480,7 +447,6 @@ export class LowCardGameManager {
 
       if (!game.players) {
         this.activeGames.delete(room);
-        this._gamesToTick.delete(room);
         return;
       }
       
@@ -498,7 +464,6 @@ export class LowCardGameManager {
 
         this._safeBroadcast(room, ["gameLowCardError", "Need at least 2 players", game.hostId]);
         
-        this._clearGameFromTick(game);
         this.activeGames.delete(room);
         return;
       }
@@ -507,7 +472,6 @@ export class LowCardGameManager {
       game._phase = 'draw';
       game.drawTimeLeft = CONSTANTS.DRAW_TIME;
       game.drawTimeExpired = false;
-      game._initialTimeBroadcastSent = false;
       game._hasBroadcastInitial = false;
 
       const playersList = Array.from(game.players.values())
@@ -567,9 +531,13 @@ export class LowCardGameManager {
         game.evaluationLocked = true;
         this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
         
-        this._clearEvalTimeout(room);
+        // ✅ HAPUS TIMEOUT LAMA SEBELUM BUAT BARU
+        if (game._evalTimeout) {
+          clearTimeout(game._evalTimeout);
+          game._evalTimeout = null;
+        }
         
-        const evalTimeout = setTimeout(() => {
+        game._evalTimeout = setTimeout(() => {
           try {
             const currentGame = this._safeGetGame(room);
             if (currentGame && currentGame._isActive && !this._destroyed) {
@@ -578,11 +546,9 @@ export class LowCardGameManager {
           } catch (evalError) {
             this._errorHandler(evalError, 'evaluateRound after bot draw');
           } finally {
-            this._evalTimeouts.delete(room);
+            game._evalTimeout = null;
           }
         }, 2000);
-        
-        this._evalTimeouts.set(room, evalTimeout);
       }
     } catch (error) {
       this._errorHandler(error, 'handleBotDraw');
@@ -706,9 +672,13 @@ export class LowCardGameManager {
         game.evaluationLocked = true;
         this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
         
-        this._clearEvalTimeout(room);
+        // ✅ HAPUS TIMEOUT LAMA SEBELUM BUAT BARU
+        if (game._evalTimeout) {
+          clearTimeout(game._evalTimeout);
+          game._evalTimeout = null;
+        }
         
-        const evalTimeout = setTimeout(() => {
+        game._evalTimeout = setTimeout(() => {
           try {
             const currentGame = this._safeGetGame(room);
             if (currentGame && currentGame._isActive && !this._destroyed) {
@@ -717,11 +687,9 @@ export class LowCardGameManager {
           } catch (evalError) {
             this._errorHandler(evalError, 'evaluateRound after submit');
           } finally {
-            this._evalTimeouts.delete(room);
+            game._evalTimeout = null;
           }
         }, 2000);
-        
-        this._evalTimeouts.set(room, evalTimeout);
       }
       
     } catch (error) {
@@ -735,10 +703,13 @@ export class LowCardGameManager {
       const game = this._safeGetGame(room);
       if (!game || !game._isActive || this._destroyed) return;
       
-      this._clearEvalTimeout(room);
+      // ✅ HAPUS TIMEOUT SETELAH EKSEKUSI
+      if (game._evalTimeout) {
+        clearTimeout(game._evalTimeout);
+        game._evalTimeout = null;
+      }
       
       if (!game.players || game.players.size === 0) {
-        this._clearGameFromTick(game);
         this.activeGames.delete(room);
         return;
       }
@@ -762,9 +733,8 @@ export class LowCardGameManager {
       
       // If NO ONE submitted any number - game ends
       if (entries.length === 0) {
-        this._safeBroadcast(room, ["gameLowCardError", "No one submitted Game ended"]);
+        this._safeBroadcast(room, ["gameLowCardError", "Game ended"]);
         this.activeGames.delete(room);
-        this._gamesToTick.delete(room);
         return;
       }
       
@@ -782,7 +752,6 @@ export class LowCardGameManager {
         
         this._safeBroadcast(room, ["gameLowCardWinner", winnerName, totalCoin]);
         this.activeGames.delete(room);
-        this._gamesToTick.delete(room);
         return;
       }
 
@@ -808,7 +777,6 @@ export class LowCardGameManager {
         
         this._safeBroadcast(room, ["gameLowCardWinner", winnerName, totalCoin]);
         this.activeGames.delete(room);
-        this._gamesToTick.delete(room);
         return;
       }
       
@@ -816,7 +784,6 @@ export class LowCardGameManager {
       if (newRemaining.length === 0) {
         this._errorHandler(new Error('Unexpected: all players eliminated'), 'evaluateRound');
         this.activeGames.delete(room);
-        this._gamesToTick.delete(room);
         return;
       }
 
@@ -855,7 +822,6 @@ export class LowCardGameManager {
       game.drawTimeExpired = false;
       game._phase = 'draw';
       game.drawTimeLeft = CONSTANTS.DRAW_TIME;
-      game._initialTimeBroadcastSent = false;
       game._hasBroadcastInitial = false;
       
       if (game.useBots && game.botPlayers) {
@@ -878,7 +844,6 @@ export class LowCardGameManager {
       this._errorHandler(error, 'evaluateRound');
       try {
         this.activeGames.delete(room);
-        this._gamesToTick.delete(room);
       } catch (e) {}
     }
   }
@@ -897,8 +862,11 @@ export class LowCardGameManager {
       
       game._isActive = false;
       
-      this._clearEvalTimeout(room);
-      this._clearGameFromTick(game);
+      // ✅ HAPUS TIMEOUT SEBELUM HAPUS GAME
+      if (game._evalTimeout) {
+        clearTimeout(game._evalTimeout);
+        game._evalTimeout = null;
+      }
       
       if (game.players) {
         game.players.clear();
@@ -940,7 +908,6 @@ export class LowCardGameManager {
       game.drawTimeLeft = null;
       game.room = null;
       game._phase = null;
-      game._initialTimeBroadcastSent = null;
       game._hasBroadcastInitial = null;
       game._evalTimeout = null;
       
@@ -949,12 +916,10 @@ export class LowCardGameManager {
       }
       
       this.activeGames.delete(room);
-      this._gamesToTick.delete(room);
       
     } catch (error) {
       this._errorHandler(error, 'endGame');
       this.activeGames.delete(room);
-      this._gamesToTick.delete(room);
     }
   }
   
@@ -971,16 +936,12 @@ export class LowCardGameManager {
   destroy() {
     this._destroyed = true;
     
-    for (const [room, timeout] of this._evalTimeouts) {
-      try {
-        clearTimeout(timeout);
-      } catch (e) {}
-    }
-    this._evalTimeouts.clear();
-    
-    if (this._masterTickInterval) {
-      clearInterval(this._masterTickInterval);
-      this._masterTickInterval = null;
+    // ✅ HAPUS SEMUA TIMEOUT DARI SEMUA GAME
+    for (const [room, game] of this.activeGames) {
+      if (game && game._evalTimeout) {
+        clearTimeout(game._evalTimeout);
+        game._evalTimeout = null;
+      }
     }
     
     const rooms = Array.from(this.activeGames.keys());
@@ -988,12 +949,6 @@ export class LowCardGameManager {
       this.endGame(room);
     }
     this.activeGames.clear();
-    this._gamesToTick.clear();
-    
-    if (this._cleanupInterval) {
-      clearInterval(this._cleanupInterval);
-      this._cleanupInterval = null;
-    }
     
     this.chatServer = null;
     this._errorLogs = [];
