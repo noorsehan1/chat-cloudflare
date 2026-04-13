@@ -27,7 +27,7 @@ const CONSTANTS = Object.freeze({
   MAX_TOTAL_BUFFER_MESSAGES: 50,
   MESSAGE_TTL_MS: 5000,
   
-  MAX_CONNECTIONS_PER_USER: 1,
+  MAX_CONNECTIONS_PER_USER: 3,
   
   FORCE_CLEANUP_CONNECTIONS: 400,
   FORCE_CLEANUP_GAMES: 8,
@@ -668,109 +668,57 @@ export class ChatServer {
     } finally { release(); }
   }
   
-async _forceCleanupWebSocket(ws) {
-  if (!ws || this._cleaningUp.has(ws)) return;
-  this._cleaningUp.add(ws);
-  
-  const userId = ws.idtarget;
-  const room = ws.roomname;
-  
-  try {
-    ws._isClosing = true;
+  async _forceCleanupWebSocket(ws) {
+    if (!ws || this._cleaningUp.has(ws)) return;
+    this._cleaningUp.add(ws);
+    const userId = ws.idtarget;
+    const room = ws.roomname;
     
-    // Hapus seat jika user memiliki seat di room
-    if (userId && room) {
-      const seatInfo = this.userToSeat.get(userId);
-      if (seatInfo && seatInfo.room === room) {
-        const roomManager = this.roomManagers.get(room);
-        if (roomManager) {
-          const seatData = roomManager.getSeat(seatInfo.seat);
-          if (seatData && seatData.namauser === userId) {
-            await this.safeRemoveSeat(room, seatInfo.seat, userId);
-            this.broadcastToRoom(room, ["removeKursi", room, seatInfo.seat]);
-            this.updateRoomCount(room);
-          }
+    try {
+      ws._isClosing = true;
+      if (userId && room) {
+        const seatInfo = this.userToSeat.get(userId);
+        if (seatInfo && seatInfo.room === room) {
+          await this.safeRemoveSeat(room, seatInfo.seat, userId);
         }
       }
+      if (userId) {
+        this.userToSeat.delete(userId);
+        this.userCurrentRoom.delete(userId);
+        await this._removeUserConnection(userId, ws);
+      }
+      if (room) this._removeFromRoomClients(ws, room);
+      this._cleanupWebSocketListeners(ws);
+      this.clients.delete(ws);
+      this._removeFromActiveClients(ws);
+      this._clientWebSockets.delete(ws);
+      if (ws.readyState === 1) try { ws.close(1000, "User disconnected"); } catch(e) {}
+    } catch (error) {
+      console.error("Force cleanup error:", error);
+    } finally { 
+      this._cleaningUp.delete(ws); 
     }
-    
-    // Hapus dari user mappings
-    if (userId) {
-      this.userToSeat.delete(userId);
-      this.userCurrentRoom.delete(userId);
-      await this._removeUserConnection(userId, ws);
-    }
-    
-    // Hapus dari room clients
-    if (room) {
-      this._removeFromRoomClients(ws, room);
-    }
-    
-    // Bersihkan event listeners
-    this._cleanupWebSocketListeners(ws);
-    
-    // Hapus dari semua collections
-    this.clients.delete(ws);
-    this._removeFromActiveClients(ws);
-    this._clientWebSockets.delete(ws);
-    
-    // Tutup WebSocket jika masih terbuka
-    if (ws.readyState === 1) {
-      try { 
-        ws.close(1000, "User disconnected"); 
-      } catch(e) {}
-    }
-    
-  } catch (error) {
-    console.error("Force cleanup error:", error);
-  } finally {
-    // ✅ KRUSIAL: Selalu hapus dari Set cleaningUp untuk mencegah memory leak
-    this._cleaningUp.delete(ws);
   }
-}
   
   async _cleanupWebSocketOnly(ws) {
-  if (!ws || this._cleaningUp.has(ws)) return;
-  this._cleaningUp.add(ws);
-  
-  const userId = ws.idtarget;
-  const room = ws.roomname;
-  
-  try {
-    ws._isClosing = true;
+    if (!ws || this._cleaningUp.has(ws)) return;
+    this._cleaningUp.add(ws);
+    const userId = ws.idtarget;
+    const room = ws.roomname;
     
-    // Hanya hapus dari room clients
-    if (room) {
-      this._removeFromRoomClients(ws, room);
-    }
-    
-    // Hanya hapus dari user connections
-    if (userId) {
-      await this._removeUserConnection(userId, ws);
-    }
-    
-    // Bersihkan event listeners
-    this._cleanupWebSocketListeners(ws);
-    
-    // Hapus dari collections
-    this.clients.delete(ws);
-    this._removeFromActiveClients(ws);
-    this._clientWebSockets.delete(ws);
-    
-    // Tutup WebSocket jika masih terbuka
-    if (ws.readyState === 1) {
-      try { 
-        ws.close(1000, "Cleanup"); 
-      } catch(e) {}
-    }
-    
-  } catch (error) {
-    console.error("WebSocket only cleanup error:", error);
-  } finally {
-    // ✅ KRUSIAL: Selalu hapus dari Set cleaningUp untuk mencegah memory leak
-    this._cleaningUp.delete(ws);
+    try {
+      ws._isClosing = true;
+      if (room) this._removeFromRoomClients(ws, room);
+      if (userId) await this._removeUserConnection(userId, ws);
+      this._cleanupWebSocketListeners(ws);
+      this.clients.delete(ws);
+      this._removeFromActiveClients(ws);
+      this._clientWebSockets.delete(ws);
+      if (ws.readyState === 1) try { ws.close(1000, "Cleanup"); } catch(e) {}
+    } catch (error) {
+      console.error("WebSocket only cleanup error:", error);
+    } finally { this._cleaningUp.delete(ws); }
   }
-}
   
   _cleanupDeadWebSockets() {
     const zombies = [];
