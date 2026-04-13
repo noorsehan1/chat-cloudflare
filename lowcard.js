@@ -1,4 +1,4 @@
-// ==================== LOWCARDGAMEMANAGER.js - FIXED TIMEOUT CLEANUP ====================
+// ==================== LOWCARDGAMEMANAGER.js - FIXED TIMEOUT CLEANUP (FINAL) ====================
 
 const CONSTANTS = Object.freeze({
   MAX_LOWCARD_GAMES: 50,
@@ -328,7 +328,7 @@ export class LowCardGameManager {
           game.evaluationLocked = true;
           this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
           
-          // ✅ HAPUS TIMEOUT LAMA SEBELUM BUAT BARU
+          // Clear any existing timeout before setting a new one
           if (game._evalTimeout) {
             clearTimeout(game._evalTimeout);
             game._evalTimeout = null;
@@ -343,7 +343,10 @@ export class LowCardGameManager {
             } catch (evalError) {
               this._errorHandler(evalError, 'evaluateRound timeout');
             } finally {
-              game._evalTimeout = null;
+              if (game._evalTimeout) {
+                clearTimeout(game._evalTimeout);
+                game._evalTimeout = null;
+              }
             }
           }, 2000);
           return;
@@ -376,14 +379,13 @@ export class LowCardGameManager {
         }
       }
       
-      // Auto evaluate if time runs out
+      // Auto evaluate if time runs out (safety fallback)
       if (game.drawTimeLeft < 0 && game._phase === 'draw') {
         game.drawTimeExpired = true;
         game._phase = 'evaluating';
         game.evaluationLocked = true;
         this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
         
-        // ✅ HAPUS TIMEOUT LAMA SEBELUM BUAT BARU
         if (game._evalTimeout) {
           clearTimeout(game._evalTimeout);
           game._evalTimeout = null;
@@ -398,7 +400,10 @@ export class LowCardGameManager {
           } catch (evalError) {
             this._errorHandler(evalError, 'evaluateRound timeout');
           } finally {
-            game._evalTimeout = null;
+            if (game._evalTimeout) {
+              clearTimeout(game._evalTimeout);
+              game._evalTimeout = null;
+            }
           }
         }, 2000);
       }
@@ -531,7 +536,6 @@ export class LowCardGameManager {
         game.evaluationLocked = true;
         this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
         
-        // ✅ HAPUS TIMEOUT LAMA SEBELUM BUAT BARU
         if (game._evalTimeout) {
           clearTimeout(game._evalTimeout);
           game._evalTimeout = null;
@@ -546,7 +550,10 @@ export class LowCardGameManager {
           } catch (evalError) {
             this._errorHandler(evalError, 'evaluateRound after bot draw');
           } finally {
-            game._evalTimeout = null;
+            if (game._evalTimeout) {
+              clearTimeout(game._evalTimeout);
+              game._evalTimeout = null;
+            }
           }
         }, 2000);
       }
@@ -672,7 +679,6 @@ export class LowCardGameManager {
         game.evaluationLocked = true;
         this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
         
-        // ✅ HAPUS TIMEOUT LAMA SEBELUM BUAT BARU
         if (game._evalTimeout) {
           clearTimeout(game._evalTimeout);
           game._evalTimeout = null;
@@ -687,7 +693,10 @@ export class LowCardGameManager {
           } catch (evalError) {
             this._errorHandler(evalError, 'evaluateRound after submit');
           } finally {
-            game._evalTimeout = null;
+            if (game._evalTimeout) {
+              clearTimeout(game._evalTimeout);
+              game._evalTimeout = null;
+            }
           }
         }, 2000);
       }
@@ -703,7 +712,7 @@ export class LowCardGameManager {
       const game = this._safeGetGame(room);
       if (!game || !game._isActive || this._destroyed) return;
       
-      // ✅ HAPUS TIMEOUT SETELAH EKSEKUSI
+      // Clear the evaluation timeout now that we are executing
       if (game._evalTimeout) {
         clearTimeout(game._evalTimeout);
         game._evalTimeout = null;
@@ -862,7 +871,7 @@ export class LowCardGameManager {
       
       game._isActive = false;
       
-      // ✅ HAPUS TIMEOUT SEBELUM HAPUS GAME
+      // CRITICAL: Clear any pending timeout before destroying the game
       if (game._evalTimeout) {
         clearTimeout(game._evalTimeout);
         game._evalTimeout = null;
@@ -909,7 +918,6 @@ export class LowCardGameManager {
       game.room = null;
       game._phase = null;
       game._hasBroadcastInitial = null;
-      game._evalTimeout = null;
       
       if (playersList.length > 0) {
         this._safeBroadcast(room, ["gameLowCardEnd", playersList]);
@@ -936,7 +944,7 @@ export class LowCardGameManager {
   destroy() {
     this._destroyed = true;
     
-    // ✅ HAPUS SEMUA TIMEOUT DARI SEMUA GAME
+    // Clear all timeouts from all active games
     for (const [room, game] of this.activeGames) {
       if (game && game._evalTimeout) {
         clearTimeout(game._evalTimeout);
