@@ -993,7 +993,7 @@ export class ChatServer {
           await this.safeSend(ws, ["numberKursiSaya", seatNum]);
           await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
           await this.safeSend(ws, ["currentNumber", this.currentNumber]);
-          await new Promise(resolve => setTimeout(resolve, 50));
+          await new Promise(resolve => setTimeout(resolve, 1000));
           await this.sendAllStateTo(ws, room);
           return true;
         } else { 
@@ -1032,7 +1032,7 @@ export class ChatServer {
       await this.safeSend(ws, ["numberKursiSaya", assignedSeat]);
       await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
       await this.safeSend(ws, ["currentNumber", this.currentNumber]);
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise(resolve => setTimeout(resolve, 1000));
       await this.sendAllStateTo(ws, room);
       return true;
     } catch (error) {
