@@ -1,18 +1,18 @@
-// ==================== LOWCARDGAMEMANAGER.js - 20 DETIK VERSION ====================
+// ==================== LOWCARDGAMEMANAGER.js - 20 DETIK VERSION (FIXED) ====================
 
 const CONSTANTS = Object.freeze({
   MAX_LOWCARD_GAMES: 50,
   GAME_TIMEOUT_HOURS: 6,
   CLEANUP_INTERVAL_MS: 600000,
-  REGISTRATION_TIME: 20,                    // 60 → 20 detik
-  DRAW_TIME: 20,                            // 45 → 20 detik
-  BOT_DRAW_MIN_SECONDS: 2,                  // 3 → 2 detik
-  BOT_DRAW_MAX_SECONDS: 10,                 // 20 → 10 detik
+  REGISTRATION_TIME: 20,                    // 20 detik
+  DRAW_TIME: 20,                            // 20 detik
+  BOT_DRAW_MIN_SECONDS: 2,                  // 2 detik
+  BOT_DRAW_MAX_SECONDS: 10,                 // 10 detik
   MASTER_TICK_INTERVAL_MS: 1000,
-  EVALUATION_DELAY_MS: 3000,                // 5000 → 3000ms
+  EVALUATION_DELAY_MS: 3000,                // 3000ms
   
-  MAX_EVALUATION_TIME_MS: 10000,            // 15000 → 10000ms
-  MAX_DRAW_WAIT_MS: 30000,                  // 60000 → 30000ms
+  MAX_EVALUATION_TIME_MS: 10000,            // 10000ms
+  MAX_DRAW_WAIT_MS: 30000,                  // 30000ms
 });
 
 export class LowCardGameManager {
@@ -104,25 +104,39 @@ export class LowCardGameManager {
       if (!game) return;
       
       game.drawTimeExpired = true;
-      game._phase = 'evaluating';
-      game.evaluationLocked = true;
-      game._evalStartTime = Date.now();
-      
-      this._safeBroadcast(room, ["gameLowCardWait", "Processing results..."]);
-      
-      setTimeout(() => {
-        try {
-          const currentGame = this._safeGetGame(room);
-          if (currentGame && currentGame._isActive && !this._destroyed) {
-            this._evaluateRound(room);
-          }
-        } catch (evalError) {
-          this._errorHandler(evalError, 'forceEvaluateRound');
-        }
-      }, CONSTANTS.EVALUATION_DELAY_MS);
+      this._scheduleEvaluation(room, game);
     } catch (error) {
       this._errorHandler(error, 'forceEvaluateRound');
     }
+  }
+
+  // ==================== FIX #2: Single evaluation scheduler ====================
+  _scheduleEvaluation(room, game) {
+    // Guard: jangan jadwal ulang kalau sudah terkunci
+    if (!game || !game._isActive || game.evaluationLocked || game._phase === 'evaluating') return;
+
+    game._phase = 'evaluating';
+    game.evaluationLocked = true;
+    game._evalStartTime = Date.now();
+
+    this._clearGameTimeouts(game); // clear dulu, baru set baru — cegah leak
+    this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
+
+    game._evalTimeout = setTimeout(() => {
+      try {
+        const currentGame = this._safeGetGame(room);
+        if (currentGame && currentGame._isActive && !this._destroyed) {
+          this._evaluateRound(room);
+        }
+      } catch (e) {
+        this._errorHandler(e, 'scheduleEvaluation');
+      } finally {
+        if (game && game._evalTimeout) {
+          clearTimeout(game._evalTimeout);
+          game._evalTimeout = null;
+        }
+      }
+    }, CONSTANTS.EVALUATION_DELAY_MS);
   }
 
   _safeBroadcast(room, message) {
@@ -367,58 +381,44 @@ export class LowCardGameManager {
     }
   }
 
+  // ==================== FIX #2: Clean _handleDrawTick without duplicate path ====================
   _handleDrawTick(game, room) {
     try {
       const timesToNotify = [20, 15, 10, 5, 0];
-      
+
       if (game.drawStartTime === null && game._phase === 'draw') {
         game.drawStartTime = Date.now();
       }
-      
+
       if (timesToNotify.includes(game.drawTimeLeft)) {
         if (game.drawTimeLeft === 0) {
           this._safeBroadcast(room, ["gameLowCardTimeLeft", "TIME UP!"]);
           game.drawTimeExpired = true;
-          
-          const activePlayers = Array.from(game.players.keys()).filter(id => !game.eliminated.has(id));
+
+          const activePlayers = Array.from(game.players.keys())
+            .filter(id => !game.eliminated.has(id));
           const allDrawn = game.numbers.size === activePlayers.length;
-          
+
           if (!allDrawn) {
-            this._safeBroadcast(room, ["gameLowCardInfo", "Time is up, processing current draws..."]);
+            this._safeBroadcast(room, [
+              "gameLowCardInfo", "Time is up, processing current draws..."
+            ]);
           }
-          
-          game._phase = 'evaluating';
-          game.evaluationLocked = true;
-          game._evalStartTime = Date.now();
-          this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
-          
-          this._clearGameTimeouts(game);
-          game._evalTimeout = setTimeout(() => {
-            try {
-              const currentGame = this._safeGetGame(room);
-              if (currentGame && currentGame._isActive && !this._destroyed) {
-                this._evaluateRound(room);
-              }
-            } catch (evalError) {
-              this._errorHandler(evalError, 'evaluateRound timeout');
-            } finally {
-              if (game && game._evalTimeout) {
-                clearTimeout(game._evalTimeout);
-                game._evalTimeout = null;
-              }
-            }
-          }, CONSTANTS.EVALUATION_DELAY_MS);
-          return;
-        } else if (game.drawTimeLeft > 0) {
+
+          // Satu titik masuk evaluasi, tidak ada path kedua
+          this._scheduleEvaluation(room, game);
+          return; // Penting: cegah decrement lalu masuk blok < 0
+        } else {
           if (game.drawTimeLeft !== CONSTANTS.DRAW_TIME || game._hasBroadcastInitial === true) {
             this._safeBroadcast(room, ["gameLowCardTimeLeft", `${game.drawTimeLeft}s`]);
           }
           game._hasBroadcastInitial = true;
         }
       }
-      
+
       game.drawTimeLeft--;
-      
+
+      // Bot draw countdown
       if (game.useBots && game._pendingBotDraws && game._pendingBotDraws.size > 0) {
         const toDraw = [];
         for (const [botId, timeRemaining] of game._pendingBotDraws.entries()) {
@@ -428,39 +428,21 @@ export class LowCardGameManager {
             game._pendingBotDraws.set(botId, timeRemaining - 1);
           }
         }
-        
         for (const botId of toDraw) {
           game._pendingBotDraws.delete(botId);
-          if (!game.drawTimeExpired && !game.evaluationLocked && !game.eliminated.has(botId) && !game.numbers.has(botId)) {
+          if (
+            !game.drawTimeExpired &&
+            !game.evaluationLocked &&
+            !game.eliminated.has(botId) &&
+            !game.numbers.has(botId)
+          ) {
             this._handleBotDraw(room, botId);
           }
         }
       }
-      
-      if (game.drawTimeLeft < 0 && game._phase === 'draw') {
-        game.drawTimeExpired = true;
-        game._phase = 'evaluating';
-        game.evaluationLocked = true;
-        game._evalStartTime = Date.now();
-        this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
-        
-        this._clearGameTimeouts(game);
-        game._evalTimeout = setTimeout(() => {
-          try {
-            const currentGame = this._safeGetGame(room);
-            if (currentGame && currentGame._isActive && !this._destroyed) {
-              this._evaluateRound(room);
-            }
-          } catch (evalError) {
-            this._errorHandler(evalError, 'evaluateRound timeout');
-          } finally {
-            if (game && game._evalTimeout) {
-              clearTimeout(game._evalTimeout);
-              game._evalTimeout = null;
-            }
-          }
-        }, CONSTANTS.EVALUATION_DELAY_MS);
-      }
+
+      // Blok drawTimeLeft < 0 DIHAPUS - tidak ada lagi path duplikat
+
     } catch (error) {
       this._errorHandler(error, 'handleDrawTick');
     }
@@ -495,6 +477,7 @@ export class LowCardGameManager {
     }
   }
 
+  // ==================== FIX #1: Gunakan userConnections, bukan chatServer.clients ====================
   _closeRegistration(room) {
     try {
       const game = this._safeGetGame(room);
@@ -507,9 +490,11 @@ export class LowCardGameManager {
       const playerCount = game.players.size;
       
       if (playerCount < 2) {
-        if (this.chatServer && this.chatServer.clients) {
-          for (const client of this.chatServer.clients) {
-            if (client && client.idtarget === game.hostId && client.readyState === 1) {
+        // FIX #1: Pakai userConnections yang dikelola dengan benar oleh index.js
+        const hostConnections = this.chatServer?.userConnections?.get(game.hostId);
+        if (hostConnections) {
+          for (const client of hostConnections) {
+            if (client && client.readyState === 1 && !client._isClosing) {
               this._safeSend(client, ["gameLowCardNoJoin", game.hostName, game.betAmount]);
               break;
             }
@@ -569,27 +554,7 @@ export class LowCardGameManager {
       const allDrawn = game.numbers.size === activePlayers.length;
       
       if (!game.evaluationLocked && allDrawn && game._phase !== 'evaluating') {
-        game._phase = 'evaluating';
-        game.evaluationLocked = true;
-        game._evalStartTime = Date.now();
-        this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
-        
-        this._clearGameTimeouts(game);
-        game._evalTimeout = setTimeout(() => {
-          try {
-            const currentGame = this._safeGetGame(room);
-            if (currentGame && currentGame._isActive && !this._destroyed) {
-              this._evaluateRound(room);
-            }
-          } catch (evalError) {
-            this._errorHandler(evalError, 'evaluateRound after bot draw');
-          } finally {
-            if (game && game._evalTimeout) {
-              clearTimeout(game._evalTimeout);
-              game._evalTimeout = null;
-            }
-          }
-        }, CONSTANTS.EVALUATION_DELAY_MS);
+        this._scheduleEvaluation(room, game); // ← bersih, pakai scheduler
       }
     } catch (error) {
       this._errorHandler(error, 'handleBotDraw');
@@ -701,27 +666,7 @@ export class LowCardGameManager {
       const nowAllDrawn = game.numbers.size === newActivePlayers.length;
       
       if (!game.evaluationLocked && nowAllDrawn && game._phase !== 'evaluating') {
-        game._phase = 'evaluating';
-        game.evaluationLocked = true;
-        game._evalStartTime = Date.now();
-        this._safeBroadcast(room, ["gameLowCardWait", "Please wait for results..."]);
-        
-        this._clearGameTimeouts(game);
-        game._evalTimeout = setTimeout(() => {
-          try {
-            const currentGame = this._safeGetGame(room);
-            if (currentGame && currentGame._isActive && !this._destroyed) {
-              this._evaluateRound(room);
-            }
-          } catch (evalError) {
-            this._errorHandler(evalError, 'evaluateRound after submit');
-          } finally {
-            if (game && game._evalTimeout) {
-              clearTimeout(game._evalTimeout);
-              game._evalTimeout = null;
-            }
-          }
-        }, CONSTANTS.EVALUATION_DELAY_MS);
+        this._scheduleEvaluation(room, game); // ← bersih, pakai scheduler
       }
     } catch (error) {
       this._errorHandler(error, 'submitNumber');
