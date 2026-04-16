@@ -1,11 +1,3 @@
-// ==================== CHAT SERVER 2 - FINAL STABLE VERSION ====================
-// name = "chatcloudnew"
-// main = "index.js"
-// compatibility_date = "2026-04-03"
-//
-// Durable Object Binding: CHAT_SERVER_2
-// Class Name: ChatServer2
-
 let LowCardGameManager;
 try {
   LowCardGameManager = (await import("./lowcard.js")).LowCardGameManager;
@@ -457,7 +449,7 @@ class RoomManager {
 }
 
 // ─────────────────────────────────────────────
-// ChatServer2 (Durable Object) - FINAL STABLE
+// ChatServer2 (Durable Object) - FINAL STABLE WITH AUTO RESET
 // ─────────────────────────────────────────────
 export class ChatServer {
   constructor(state, env) {
@@ -500,6 +492,9 @@ export class ChatServer {
       }
     });
 
+    // AUTO RESET DATA PADA SAAT DEPLOY BARU
+    this._resetAllDataOnDeploy();
+
     this.lowcard = null;
     try {
       this.lowcard = new LowCardGameManager(this);
@@ -515,6 +510,91 @@ export class ChatServer {
     this._masterTickCounter = 0;
     this._masterTimer = null;
     this._startMasterTimer();
+  }
+
+  // METHOD UNTUK RESET SEMUA DATA SAAT DEPLOY
+  async _resetAllDataOnDeploy() {
+    // Cek apakah sudah pernah direset sebelumnya
+    const lastResetKey = 'last_deploy_reset_timestamp';
+    const currentTimestamp = Date.now();
+    const lastReset = await this.state.storage.get(lastResetKey);
+    
+    // Jika belum pernah direset atau sudah lewat 1 jam (anggap deploy baru)
+    // Atau jika tidak ada storage (deploy baru)
+    if (!lastReset || (currentTimestamp - lastReset) > 3600000) {
+      console.log("AUTO RESET: Melakukan reset semua data karena deploy baru terdeteksi");
+      
+      // Reset semua collections
+      if (this._activeClients) this._activeClients.clear();
+      if (this.userToSeat) this.userToSeat.clear();
+      if (this.userCurrentRoom) this.userCurrentRoom.clear();
+      if (this.userConnections) this.userConnections.clear();
+      if (this._wsCleaningUp) this._wsCleaningUp.clear();
+      if (this._activeListeners) this._activeListeners.clear();
+      
+      // Reset room managers
+      if (this.roomManagers) {
+        for (const roomManager of this.roomManagers.values()) {
+          if (roomManager && typeof roomManager.destroy === 'function') {
+            roomManager.destroy();
+          }
+        }
+        this.roomManagers.clear();
+      }
+      
+      // Reset room clients
+      if (this.roomClients) {
+        for (const clientSet of this.roomClients.values()) {
+          if (clientSet) clientSet.clear();
+        }
+        this.roomClients.clear();
+      }
+      
+      // Reset buffers
+      if (this.chatBuffer) {
+        await this.chatBuffer.destroy();
+        this.chatBuffer = new GlobalChatBuffer();
+        this.chatBuffer.setFlushCallback((room, msg, msgId) => this._sendDirectToRoom(room, msg, msgId));
+      }
+      
+      if (this.pmBuffer) {
+        await this.pmBuffer.destroy();
+        this.pmBuffer = new PMBuffer();
+        this.pmBuffer.setFlushCallback(async (targetId, message) => {
+          const targetConnections = this.userConnections.get(targetId);
+          if (targetConnections) {
+            for (const client of targetConnections) {
+              if (client && client.readyState === 1 && !client._isClosing && !this._wsCleaningUp.get(client)) {
+                await this.safeSend(client, message);
+                break;
+              }
+            }
+          }
+        });
+      }
+      
+      // Reset game
+      if (this.lowcard && typeof this.lowcard.destroy === 'function') {
+        try { await this.lowcard.destroy(); } catch (e) {}
+        this.lowcard = null;
+        try {
+          this.lowcard = new LowCardGameManager(this);
+        } catch (error) {
+          this.lowcard = null;
+        }
+      }
+      
+      // Reset number
+      this.currentNumber = 1;
+      this._startTime = Date.now();
+      
+      // Simpan timestamp reset
+      await this.state.storage.put(lastResetKey, currentTimestamp);
+      
+      console.log("AUTO RESET: Semua data berhasil direset");
+    } else {
+      console.log("AUTO RESET: Data masih fresh, tidak perlu reset");
+    }
   }
 
   _startMasterTimer() {
@@ -645,7 +725,6 @@ export class ChatServer {
             if (userId && room) {
               const seatInfo = this.userToSeat.get(userId);
               if (seatInfo && seatInfo.room === room) {
-                // Hapus dari userToSeat SEBELUM remove kursi
                 this.userToSeat.delete(userId);
                 this.userCurrentRoom.delete(userId);
                 await this._removeUserSeatAndPointFromRoom(userId, room);
@@ -679,7 +758,6 @@ export class ChatServer {
 
     if (roomManager) {
       const seatData = roomManager.getSeat(seatNumber);
-      // GUARD: Cegah double cleanup jika kursi sudah di-remove
       if (!seatData || seatData.namauser !== userId) {
         return false;
       }
@@ -1096,7 +1174,7 @@ export class ChatServer {
       await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
       await this.safeSend(ws, ["currentNumber", this.currentNumber]);
 
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 1500));
       
       if (!ws || ws.readyState !== 1 || ws._isClosing || this._wsCleaningUp.get(ws)) return true;
 
@@ -1200,7 +1278,6 @@ export class ChatServer {
   async handleMessage(ws, raw) {
     if (!ws || ws.readyState !== 1 || ws._isClosing || this._wsCleaningUp.get(ws)) return;
     
-    // Handle binary messages (jaga-jaga, Cloudflare otomatis handle PING/PONG)
     if (raw instanceof ArrayBuffer) {
       return;
     }
@@ -1489,6 +1566,7 @@ export class ChatServer {
           return new Response(JSON.stringify({
             status: "healthy",
             connections: activeCount,
+            autoResetEnabled: true,
             connectionPressure: `${Math.round((activeCount / CONSTANTS.MAX_GLOBAL_CONNECTIONS) * 100)}%`,
             rooms: this.getJumlahRoom(),
             uptime: Date.now() - this._startTime,
@@ -1505,7 +1583,7 @@ export class ChatServer {
           return new Response(JSON.stringify({ counts, total: Object.values(counts).reduce((a, b) => a + b, 0) }), { headers: { "content-type": "application/json" } });
         }
         if (url.pathname === "/shutdown") { await this.shutdown(); return new Response("Shutting down...", { status: 200 }); }
-        return new Response("ChatServer2 Running - Cloudflare Workers", { status: 200 });
+        return new Response("ChatServer2 Running - Cloudflare Workers (Auto Reset on Deploy)", { status: 200 });
       }
 
       if (this._activeClients.size > CONSTANTS.MAX_GLOBAL_CONNECTIONS) {
@@ -1579,7 +1657,7 @@ export default {
       if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") return chatObj.fetch(req);
       const url = new URL(req.url);
       if (["/health", "/debug/memory", "/debug/roomcounts", "/shutdown"].includes(url.pathname)) return chatObj.fetch(req);
-      return new Response("ChatServer2 Running - Cloudflare Workers", { status: 200, headers: { "content-type": "text/plain" } });
+      return new Response("ChatServer2 Running - Cloudflare Workers (Auto Reset on Deploy)", { status: 200, headers: { "content-type": "text/plain" } });
     } catch (error) {
       return new Response("Server error", { status: 500 });
     }
