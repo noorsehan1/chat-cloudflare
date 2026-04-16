@@ -795,7 +795,7 @@ export class ChatServer {
       await this._addUserConnection(ws.idtarget, ws);
 
       await this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 1500));
       await this.safeSend(ws, ["numberKursiSaya", assignedSeat]);
       await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
       await this.safeSend(ws, ["roomUserCount", room, roomManager.getOccupiedCount()]);
