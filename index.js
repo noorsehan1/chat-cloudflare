@@ -1,4 +1,4 @@
-// ==================== CHAT SERVER 2 - FINAL CLEAN VERSION ====================
+// ==================== CHAT SERVER 2 - FINAL STABLE VERSION ====================
 // name = "chatcloudnew"
 // main = "index.js"
 // compatibility_date = "2026-04-03"
@@ -457,7 +457,7 @@ class RoomManager {
 }
 
 // ─────────────────────────────────────────────
-// ChatServer2 (Durable Object) - FINAL CLEAN VERSION
+// ChatServer2 (Durable Object) - FINAL STABLE
 // ─────────────────────────────────────────────
 export class ChatServer {
   constructor(state, env) {
@@ -645,10 +645,11 @@ export class ChatServer {
             if (userId && room) {
               const seatInfo = this.userToSeat.get(userId);
               if (seatInfo && seatInfo.room === room) {
+                // Hapus dari userToSeat SEBELUM remove kursi
+                this.userToSeat.delete(userId);
+                this.userCurrentRoom.delete(userId);
                 await this._removeUserSeatAndPointFromRoom(userId, room);
               }
-              this.userToSeat.delete(userId);
-              this.userCurrentRoom.delete(userId);
             }
           }
         }
@@ -678,14 +679,17 @@ export class ChatServer {
 
     if (roomManager) {
       const seatData = roomManager.getSeat(seatNumber);
-      if (seatData && seatData.namauser === userId) {
-        roomManager.removeSeat(seatNumber);
-        roomManager.removePoint(seatNumber);
-        this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
-        this.broadcastToRoom(room, ["pointRemoved", room, seatNumber]);
-        this.updateRoomCount(room);
-        return true;
+      // GUARD: Cegah double cleanup jika kursi sudah di-remove
+      if (!seatData || seatData.namauser !== userId) {
+        return false;
       }
+      
+      roomManager.removeSeat(seatNumber);
+      roomManager.removePoint(seatNumber);
+      this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
+      this.broadcastToRoom(room, ["pointRemoved", room, seatNumber]);
+      this.updateRoomCount(room);
+      return true;
     }
     return false;
   }
@@ -1019,7 +1023,7 @@ export class ChatServer {
           await new Promise(resolve => setTimeout(resolve, 50));
           await this.safeSend(ws, ["rooMasuk", seatNum, room]);
           
-          await new Promise(resolve => setTimeout(resolve, 100));
+          await new Promise(resolve => setTimeout(resolve, 1500));
           
           if (!ws || ws.readyState !== 1 || ws._isClosing || this._wsCleaningUp.get(ws)) return true;
           
