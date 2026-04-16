@@ -449,7 +449,7 @@ class RoomManager {
 }
 
 // ─────────────────────────────────────────────
-// ChatServer2 (Durable Object) - FINAL STABLE WITH AUTO RESET
+// ChatServer2 (Durable Object) - FINAL STABLE WITH AUTO RESET & ROOM FIX
 // ─────────────────────────────────────────────
 export class ChatServer {
   constructor(state, env) {
@@ -514,17 +514,13 @@ export class ChatServer {
 
   // METHOD UNTUK RESET SEMUA DATA SAAT DEPLOY
   async _resetAllDataOnDeploy() {
-    // Cek apakah sudah pernah direset sebelumnya
     const lastResetKey = 'last_deploy_reset_timestamp';
     const currentTimestamp = Date.now();
     const lastReset = await this.state.storage.get(lastResetKey);
     
-    // Jika belum pernah direset atau sudah lewat 1 jam (anggap deploy baru)
-    // Atau jika tidak ada storage (deploy baru)
     if (!lastReset || (currentTimestamp - lastReset) > 3600000) {
       console.log("AUTO RESET: Melakukan reset semua data karena deploy baru terdeteksi");
       
-      // Reset semua collections
       if (this._activeClients) this._activeClients.clear();
       if (this.userToSeat) this.userToSeat.clear();
       if (this.userCurrentRoom) this.userCurrentRoom.clear();
@@ -532,7 +528,6 @@ export class ChatServer {
       if (this._wsCleaningUp) this._wsCleaningUp.clear();
       if (this._activeListeners) this._activeListeners.clear();
       
-      // Reset room managers
       if (this.roomManagers) {
         for (const roomManager of this.roomManagers.values()) {
           if (roomManager && typeof roomManager.destroy === 'function') {
@@ -542,7 +537,6 @@ export class ChatServer {
         this.roomManagers.clear();
       }
       
-      // Reset room clients
       if (this.roomClients) {
         for (const clientSet of this.roomClients.values()) {
           if (clientSet) clientSet.clear();
@@ -550,7 +544,6 @@ export class ChatServer {
         this.roomClients.clear();
       }
       
-      // Reset buffers
       if (this.chatBuffer) {
         await this.chatBuffer.destroy();
         this.chatBuffer = new GlobalChatBuffer();
@@ -573,7 +566,6 @@ export class ChatServer {
         });
       }
       
-      // Reset game
       if (this.lowcard && typeof this.lowcard.destroy === 'function') {
         try { await this.lowcard.destroy(); } catch (e) {}
         this.lowcard = null;
@@ -584,11 +576,9 @@ export class ChatServer {
         }
       }
       
-      // Reset number
       this.currentNumber = 1;
       this._startTime = Date.now();
       
-      // Simpan timestamp reset
       await this.state.storage.put(lastResetKey, currentTimestamp);
       
       console.log("AUTO RESET: Semua data berhasil direset");
@@ -809,7 +799,10 @@ export class ChatServer {
 
   async assignNewSeat(room, userId) {
     const roomManager = this.roomManagers.get(room);
-    if (!roomManager || roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS) return null;
+    if (!roomManager) return null;
+    
+    const occupiedCount = roomManager.getOccupiedCount();
+    if (occupiedCount >= CONSTANTS.MAX_SEATS) return null;
 
     const existingSeatInfo = this.userToSeat.get(userId);
     if (existingSeatInfo && existingSeatInfo.room === room) {
@@ -970,7 +963,12 @@ export class ChatServer {
   }
 
   getAllRoomCountsArray() { return roomList.map(room => [room, this.roomManagers.get(room)?.getOccupiedCount() || 0]); }
-  getRoomCount(room) { return this.roomManagers.get(room)?.getOccupiedCount() || 0; }
+  
+  getRoomCount(room) {
+    const roomManager = this.roomManagers.get(room);
+    if (!roomManager) return 0;
+    return roomManager.getOccupiedCount();
+  }
 
   updateRoomCount(room) {
     const count = this.getRoomCount(room);
@@ -1083,9 +1081,14 @@ export class ChatServer {
       const existingSeatInfo = this.userToSeat.get(ws.idtarget);
       const currentRoomBeforeJoin = this.userCurrentRoom.get(ws.idtarget);
 
+      const roomManager = this.roomManagers.get(room);
+      if (!roomManager) {
+        await this.safeSend(ws, ["error", "Room not found"]);
+        return false;
+      }
+
       if (existingSeatInfo && existingSeatInfo.room === room) {
         const seatNum = existingSeatInfo.seat;
-        const roomManager = this.roomManagers.get(room);
         const seatData = roomManager.getSeat(seatNum);
         
         if (seatData && seatData.namauser === ws.idtarget) {
@@ -1137,7 +1140,9 @@ export class ChatServer {
         this._removeFromRoomClients(ws, currentRoomBeforeJoin);
       }
 
-      if (this.getRoomCount(room) >= CONSTANTS.MAX_SEATS) {
+      const occupiedCount = roomManager.getOccupiedCount();
+      
+      if (occupiedCount >= CONSTANTS.MAX_SEATS) {
         await this.safeSend(ws, ["roomFull", room]);
         return false;
       }
@@ -1146,7 +1151,6 @@ export class ChatServer {
       const existingSeat = this.userToSeat.get(ws.idtarget);
       if (existingSeat && existingSeat.room === room) {
         assignedSeat = existingSeat.seat;
-        const roomManager = this.roomManagers.get(room);
         const seatData = roomManager.getSeat(assignedSeat);
         if (!seatData || seatData.namauser !== ws.idtarget) {
           assignedSeat = null;
@@ -1168,19 +1172,19 @@ export class ChatServer {
       this._addToRoomClients(ws, room);
       await this._addUserConnection(ws.idtarget, ws);
 
-      const roomManager = this.roomManagers.get(room);
       await this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
       await this.safeSend(ws, ["numberKursiSaya", assignedSeat]);
       await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
       await this.safeSend(ws, ["currentNumber", this.currentNumber]);
 
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      await new Promise(resolve => setTimeout(resolve, 100));
       
       if (!ws || ws.readyState !== 1 || ws._isClosing || this._wsCleaningUp.get(ws)) return true;
 
       await this.sendAllStateTo(ws, room);
       return true;
     } catch (error) {
+      console.error("Error in _doJoinRoom:", error);
       await this.safeSend(ws, ["error", "Failed to join room"]);
       return false;
     }
@@ -1523,6 +1527,24 @@ export class ChatServer {
     }
   }
 
+  async getRoomDebugInfo() {
+    const info = {};
+    for (const room of roomList) {
+      const roomManager = this.roomManagers.get(room);
+      if (roomManager) {
+        info[room] = {
+          occupiedCount: roomManager.getOccupiedCount(),
+          maxSeats: CONSTANTS.MAX_SEATS,
+          seats: Array.from(roomManager.seats.keys()),
+          muteStatus: roomManager.getMute()
+        };
+      } else {
+        info[room] = { error: "Room manager not found" };
+      }
+    }
+    return info;
+  }
+
   async shutdown() {
     if (this._isClosing) return;
     this._isClosing = true;
@@ -1581,6 +1603,27 @@ export class ChatServer {
           const counts = {};
           for (const room of roomList) counts[room] = this.getRoomCount(room);
           return new Response(JSON.stringify({ counts, total: Object.values(counts).reduce((a, b) => a + b, 0) }), { headers: { "content-type": "application/json" } });
+        }
+        if (url.pathname === "/debug/rooms") {
+          const roomInfo = await this.getRoomDebugInfo();
+          return new Response(JSON.stringify(roomInfo, null, 2), { 
+            status: 200, 
+            headers: { "content-type": "application/json" } 
+          });
+        }
+        if (url.pathname === "/debug/reset-rooms") {
+          for (const room of roomList) {
+            const oldManager = this.roomManagers.get(room);
+            if (oldManager) oldManager.destroy();
+            this.roomManagers.set(room, new RoomManager(room));
+            this.roomClients.set(room, new Set());
+          }
+          this.userToSeat.clear();
+          this.userCurrentRoom.clear();
+          return new Response(JSON.stringify({ success: true, message: "All rooms have been reset" }), { 
+            status: 200, 
+            headers: { "content-type": "application/json" } 
+          });
         }
         if (url.pathname === "/shutdown") { await this.shutdown(); return new Response("Shutting down...", { status: 200 }); }
         return new Response("ChatServer2 Running - Cloudflare Workers (Auto Reset on Deploy)", { status: 200 });
@@ -1656,7 +1699,7 @@ export default {
       const chatObj = env.CHAT_SERVER.get(chatId);
       if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") return chatObj.fetch(req);
       const url = new URL(req.url);
-      if (["/health", "/debug/memory", "/debug/roomcounts", "/shutdown"].includes(url.pathname)) return chatObj.fetch(req);
+      if (["/health", "/debug/memory", "/debug/roomcounts", "/debug/rooms", "/debug/reset-rooms", "/shutdown"].includes(url.pathname)) return chatObj.fetch(req);
       return new Response("ChatServer2 Running - Cloudflare Workers (Auto Reset on Deploy)", { status: 200, headers: { "content-type": "text/plain" } });
     } catch (error) {
       return new Response("Server error", { status: 500 });
