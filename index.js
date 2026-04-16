@@ -1,4 +1,4 @@
-// ==================== CHAT SERVER 2 - FINAL STABLE VERSION ====================
+// ==================== CHAT SERVER 2 - FINAL CLEAN VERSION ====================
 // name = "chatcloudnew"
 // main = "index.js"
 // compatibility_date = "2026-04-03"
@@ -21,7 +21,6 @@ try {
 const CONSTANTS = Object.freeze({
   MASTER_TICK_INTERVAL_MS: 1000,
   NUMBER_TICK_INTERVAL_TICKS: 900,
-  ZOMBIE_CLEANUP_TICKS: 600,
 
   MAX_GLOBAL_CONNECTIONS: 250,
   MAX_ACTIVE_CLIENTS_LIMIT: 250,
@@ -458,9 +457,9 @@ class RoomManager {
 }
 
 // ─────────────────────────────────────────────
-// ChatServer2 (Durable Object) - FINAL STABLE
+// ChatServer2 (Durable Object) - FINAL CLEAN VERSION
 // ─────────────────────────────────────────────
-export class ChatServer2 {
+export class ChatServer {
   constructor(state, env) {
     this.state = state;
     this.env = env;
@@ -534,10 +533,6 @@ export class ChatServer2 {
       }
 
       if (this.chatBuffer) this.chatBuffer.tick(now);
-
-      if (this._masterTickCounter % CONSTANTS.ZOMBIE_CLEANUP_TICKS === 0) {
-        this._cleanupZombieWebSocketsAndData();
-      }
 
       if (this._masterTickCounter % CONSTANTS.FORCE_CLEANUP_MEMORY_TICKS === 0) {
         this._checkConnectionPressure();
@@ -671,81 +666,6 @@ export class ChatServer2 {
     } catch (error) {}
     finally {
       this._wsCleaningUp.delete(ws);
-    }
-  }
-
-  async _cleanupZombieWebSocketsAndData() {
-    if (this._isCleaningUp) return;
-    this._isCleaningUp = true;
-
-    try {
-      const zombies = [];
-      const snapshot = Array.from(this._activeClients);
-      
-      for (const ws of snapshot) {
-        const isDead = !ws || ws.readyState !== 1 || ws._isClosing === true;
-        if (isDead && !this._wsCleaningUp.get(ws)) {
-          zombies.push(ws);
-        }
-      }
-
-      for (const ws of zombies) {
-        await this._forceFullCleanupWebSocket(ws);
-      }
-
-      // Cleanup orphaned users
-      const orphanedUsers = [];
-      const snapshotConnections = Array.from(this.userConnections.entries());
-      for (const [userId, connections] of snapshotConnections) {
-        let hasLiveConnection = false;
-        const snapshotConns = Array.from(connections);
-        for (const conn of snapshotConns) {
-          if (conn && conn.readyState === 1 && !conn._isClosing && !this._wsCleaningUp.get(conn)) {
-            hasLiveConnection = true;
-            break;
-          }
-        }
-        if (!hasLiveConnection) orphanedUsers.push(userId);
-      }
-
-      for (const userId of orphanedUsers) {
-        const seatInfo = this.userToSeat.get(userId);
-        if (seatInfo) {
-          const roomManager = this.roomManagers.get(seatInfo.room);
-          if (roomManager) {
-            const seatData = roomManager.getSeat(seatInfo.seat);
-            if (seatData && seatData.namauser === userId) {
-              roomManager.removeSeat(seatInfo.seat);
-              roomManager.removePoint(seatInfo.seat);
-              this.broadcastToRoom(seatInfo.room, ["removeKursi", seatInfo.room, seatInfo.seat]);
-              this.broadcastToRoom(seatInfo.room, ["pointRemoved", seatInfo.room, seatInfo.seat]);
-              this.updateRoomCount(seatInfo.room);
-            }
-          }
-        }
-        this.userToSeat.delete(userId);
-        this.userCurrentRoom.delete(userId);
-        this.userConnections.delete(userId);
-      }
-
-      // Cleanup room clients
-      const snapshotRooms = Array.from(this.roomClients.entries());
-      for (const [room, clientSet] of snapshotRooms) {
-        const toDelete = [];
-        const snapshotSet = Array.from(clientSet);
-        for (const ws of snapshotSet) {
-          if (!ws || ws.readyState !== 1 || ws.roomname !== room || this._wsCleaningUp.get(ws)) {
-            toDelete.push(ws);
-          }
-        }
-        for (const ws of toDelete) {
-          clientSet.delete(ws);
-        }
-      }
-
-    } catch (error) {}
-    finally {
-      this._isCleaningUp = false;
     }
   }
 
@@ -1276,9 +1196,8 @@ export class ChatServer2 {
   async handleMessage(ws, raw) {
     if (!ws || ws.readyState !== 1 || ws._isClosing || this._wsCleaningUp.get(ws)) return;
     
-    // Handle binary messages (jaga-jaga)
+    // Handle binary messages (jaga-jaga, Cloudflare otomatis handle PING/PONG)
     if (raw instanceof ArrayBuffer) {
-      // Cloudflare Workers otomatis handle PING/PONG, ini hanya untuk jaga-jaga
       return;
     }
     
@@ -1651,8 +1570,8 @@ export class ChatServer2 {
 export default {
   async fetch(req, env) {
     try {
-      const chatId = env.CHAT_SERVER_2.idFromName("chat-room");
-      const chatObj = env.CHAT_SERVER_2.get(chatId);
+      const chatId = env.CHAT_SERVER.idFromName("chat-room");
+      const chatObj = env.CHAT_SERVER.get(chatId);
       if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") return chatObj.fetch(req);
       const url = new URL(req.url);
       if (["/health", "/debug/memory", "/debug/roomcounts", "/shutdown"].includes(url.pathname)) return chatObj.fetch(req);
