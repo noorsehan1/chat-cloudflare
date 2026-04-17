@@ -46,6 +46,8 @@ const CONSTANTS = Object.freeze({
   MESSAGE_RATE_WINDOW_MS: 60000,
   CLEANUP_LOCK_TIMEOUT_MS: 500,
   WS_CLEANING_UP_MAX_AGE_MS: 5000,
+  MAX_RETRY_ATTEMPTS: 3,
+  STALE_MESSAGE_CLEANUP_MS: 120000,
 });
 
 const roomList = Object.freeze([
@@ -68,6 +70,7 @@ class AsyncLock {
     this.locks = new Map();
     this.waitingQueues = new Map();
     this.timeoutMs = timeoutMs;
+    this._stats = { totalWaits: 0, timeouts: 0 };
   }
 
   async acquire(key) {
@@ -80,6 +83,8 @@ class AsyncLock {
       this.waitingQueues.set(key, []);
     }
 
+    this._stats.totalWaits++;
+    
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         const queue = this.waitingQueues.get(key);
@@ -90,6 +95,7 @@ class AsyncLock {
             if (queue.length === 0) this.waitingQueues.delete(key);
           }
         }
+        this._stats.timeouts++;
         reject(new Error(`Lock timeout: ${key}`));
       }, this.timeoutMs);
 
@@ -117,7 +123,12 @@ class AsyncLock {
   getStats() {
     let totalWaiting = 0;
     for (const queue of this.waitingQueues.values()) totalWaiting += queue.length;
-    return { lockedKeys: this.locks.size, waitingCount: totalWaiting };
+    return { 
+      lockedKeys: this.locks.size, 
+      waitingCount: totalWaiting,
+      totalWaits: this._stats.totalWaits,
+      timeouts: this._stats.timeouts
+    };
   }
 }
 
@@ -132,6 +143,7 @@ class PMBuffer {
     this.BATCH_SIZE = CONSTANTS.PM_BATCH_SIZE;
     this.BATCH_DELAY_MS = CONSTANTS.PM_BATCH_DELAY_MS;
     this._isDestroyed = false;
+    this._stats = { totalProcessed: 0, totalDropped: 0 };
   }
 
   setFlushCallback(callback) { this._flushCallback = callback; }
@@ -139,7 +151,8 @@ class PMBuffer {
   add(targetId, message) {
     if (this._isDestroyed) return;
     if (this._queue.length > CONSTANTS.MAX_TOTAL_BUFFER_MESSAGES * 2) {
-      this._queue.shift();
+      const dropped = this._queue.shift();
+      this._stats.totalDropped++;
     }
     this._queue.push({ targetId, message, timestamp: Date.now() });
     if (!this._isProcessing) this._process();
@@ -153,7 +166,10 @@ class PMBuffer {
       const batch = this._queue.splice(0, this.BATCH_SIZE);
       for (const item of batch) {
         try {
-          if (this._flushCallback) await this._flushCallback(item.targetId, item.message);
+          if (this._flushCallback) {
+            await this._flushCallback(item.targetId, item.message);
+            this._stats.totalProcessed++;
+          }
         } catch (e) {}
       }
       if (this._queue.length > 0 && !this._isDestroyed) {
@@ -172,7 +188,12 @@ class PMBuffer {
   }
 
   getStats() {
-    return { queuedPM: this._queue.length, isProcessing: this._isProcessing };
+    return { 
+      queuedPM: this._queue.length, 
+      isProcessing: this._isProcessing,
+      totalProcessed: this._stats.totalProcessed,
+      totalDropped: this._stats.totalDropped
+    };
   }
 
   async destroy() {
@@ -200,6 +221,12 @@ class GlobalChatBuffer {
     this._roomQueueSizes = new Map();
     this.MAX_PER_ROOM = 25;
     this._retryQueue = [];
+    this._stats = { 
+      totalMessages: 0, 
+      totalDropped: 0, 
+      totalRetried: 0,
+      droppedRetries: 0 
+    };
   }
 
   setFlushCallback(callback) { this._flushCallback = callback; }
@@ -216,11 +243,15 @@ class GlobalChatBuffer {
   }
 
   add(room, message) {
-    if (this._isDestroyed) { this._sendImmediate(room, message); return null; }
+    if (this._isDestroyed) { 
+      this._sendImmediate(room, message); 
+      return null; 
+    }
 
     const roomSize = this._roomQueueSizes.get(room) || 0;
     if (roomSize >= this.MAX_PER_ROOM || this._messageQueue.length >= this.maxQueueSize) {
       this._sendImmediate(room, message);
+      this._stats.totalDropped++;
       return null;
     }
 
@@ -228,6 +259,7 @@ class GlobalChatBuffer {
     this._messageQueue.push({ room, message, msgId, timestamp: Date.now() });
     this._totalQueued++;
     this._roomQueueSizes.set(room, roomSize + 1);
+    this._stats.totalMessages++;
     return msgId;
   }
 
@@ -245,6 +277,7 @@ class GlobalChatBuffer {
         if (item) this._decrementRoomSize(item.room);
         this._messageQueue.splice(i, 1);
         this._totalQueued--;
+        this._stats.totalDropped++;
       }
     }
 
@@ -260,18 +293,24 @@ class GlobalChatBuffer {
   }
 
   _processRetryQueue(now) {
-    if (this._retryQueue.length > CONSTANTS.MAX_RETRY_QUEUE_SIZE) {
+    // Hard limit to prevent memory leak
+    if (this._retryQueue.length > CONSTANTS.MAX_RETRY_QUEUE_SIZE * 2) {
+      const dropped = this._retryQueue.length - CONSTANTS.MAX_RETRY_QUEUE_SIZE;
       this._retryQueue = this._retryQueue.slice(0, CONSTANTS.MAX_RETRY_QUEUE_SIZE);
+      this._stats.droppedRetries += dropped;
     }
 
     const remaining = [];
+    let droppedCount = 0;
 
     for (const item of this._retryQueue) {
       if (now < item.nextRetry) {
         remaining.push(item);
         continue;
       }
-      if (item.retries >= 2) {
+      if (item.retries >= CONSTANTS.MAX_RETRY_ATTEMPTS) {
+        droppedCount++;
+        this._stats.totalDropped++;
         continue;
       }
       const sent = this._sendWithCallback(item.room, item.message, item.msgId);
@@ -279,15 +318,24 @@ class GlobalChatBuffer {
         item.retries++;
         item.nextRetry = now + (1000 * Math.pow(2, item.retries));
         remaining.push(item);
+        this._stats.totalRetried++;
       }
     }
 
     this._retryQueue = remaining;
+    if (droppedCount > 0) {
+      this._stats.droppedRetries += droppedCount;
+    }
   }
 
   _sendWithCallback(room, message, msgId) {
     if (!this._flushCallback) return false;
-    try { this._flushCallback(room, message, msgId); return true; } catch (e) { return false; }
+    try { 
+      this._flushCallback(room, message, msgId); 
+      return true; 
+    } catch (e) { 
+      return false; 
+    }
   }
 
   async _flush() {
@@ -313,7 +361,13 @@ class GlobalChatBuffer {
           try {
             this._flushCallback(room, item.message, item.msgId);
           } catch (e) {
-            this._retryQueue.push({ room, message: item.message, msgId: item.msgId, retries: 0, nextRetry: Date.now() + 1000 });
+            this._retryQueue.push({ 
+              room, 
+              message: item.message, 
+              msgId: item.msgId, 
+              retries: 0, 
+              nextRetry: Date.now() + 1000 
+            });
           }
         }
       }
@@ -323,7 +377,9 @@ class GlobalChatBuffer {
   }
 
   _sendImmediate(room, message) {
-    if (this._flushCallback) try { this._flushCallback(room, message, this._generateMsgId()); } catch (e) {}
+    if (this._flushCallback) try { 
+      this._flushCallback(room, message, this._generateMsgId()); 
+    } catch (e) {}
   }
 
   async flushAll() {
@@ -340,7 +396,8 @@ class GlobalChatBuffer {
       retryQueue: this._retryQueue.length,
       totalQueued: this._totalQueued,
       maxQueueSize: this.maxQueueSize,
-      roomQueues: Object.fromEntries(this._roomQueueSizes)
+      roomQueues: Object.fromEntries(this._roomQueueSizes),
+      stats: { ...this._stats }
     };
   }
 
@@ -586,8 +643,12 @@ export class ChatServer {
   }
 
   _sweepMessageCounts() {
-    for (const userId of this._userMessageCount.keys()) {
+    const now = Date.now();
+    for (const [userId, userData] of this._userMessageCount.entries()) {
       if (!this.userConnections.has(userId)) {
+        this._userMessageCount.delete(userId);
+      } else if (now - userData.windowStart > CONSTANTS.MESSAGE_RATE_WINDOW_MS * 2) {
+        // Clean up stale rate limit entries (inactive for 2 minutes)
         this._userMessageCount.delete(userId);
       }
     }
@@ -653,16 +714,21 @@ export class ChatServer {
   async _forceFullCleanupWebSocket(ws) {
     if (!ws) return;
 
+    // Generate cleanup ID early to prevent race conditions
     if (!ws._cleanupId) {
       ws._cleanupId = `ws_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
     }
+
+    // Double-check before acquiring lock
+    if (this._wsCleaningUp.has(ws._cleanupId)) return;
 
     let release = null;
     let didSetCleaningFlag = false;
 
     try {
       release = await this.cleanupLocker.acquire(`cleanup_${ws._cleanupId}`);
-
+      
+      // Double-check after acquiring lock
       if (this._wsCleaningUp.has(ws._cleanupId)) return;
 
       this._wsCleaningUp.set(ws._cleanupId, Date.now());
@@ -727,6 +793,7 @@ export class ChatServer {
         }
       }
 
+      // Clean up listeners immediately
       this._cleanupWebSocketListeners(ws);
       this._activeClients.delete(ws);
 
@@ -737,6 +804,8 @@ export class ChatServer {
       }
 
     } catch (error) {
+      // Log error but don't throw
+      console.error(`Cleanup error for ${ws._cleanupId}:`, error);
     } finally {
       if (release) {
         try { release(); } catch (e) {}
@@ -749,7 +818,6 @@ export class ChatServer {
     }
   }
 
-  // [FIX] assignNewSeat - Now using RoomManager.getAvailableSeat() for consistency
   async assignNewSeat(room, userId) {
     const release = await this.seatLocker.acquire(`room_seat_assign_${room}`);
     try {
@@ -758,11 +826,9 @@ export class ChatServer {
 
       if (roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS) return null;
 
-      // ✅ Use existing method for consistency
       const newSeatNumber = roomManager.getAvailableSeat();
       if (!newSeatNumber) return null;
 
-      // ✅ Use existing updateSeat method
       const success = roomManager.updateSeat(newSeatNumber, {
         noimageUrl: "", 
         namauser: userId, 
@@ -1553,6 +1619,7 @@ export class ChatServer {
         reconnectTimers: this._reconnectTimers.size,
         rateLimitMapSize: this._userMessageCount.size,
         wsCleaningUpSize: this._wsCleaningUp.size,
+        activeListenersSize: this._activeListeners.size,
         asyncLockStats: {
           seat: this.seatLocker.getStats(),
           connection: this.connectionLocker.getStats(),
@@ -1691,10 +1758,12 @@ export class ChatServer {
       };
 
       const errorHandler = () => {
+        this._cleanupWebSocketListeners(ws);
         this._forceFullCleanupWebSocket(ws).catch(() => {});
       };
 
       const closeHandler = () => {
+        this._cleanupWebSocketListeners(ws);
         this._forceFullCleanupWebSocket(ws).catch(() => {});
       };
 
@@ -1793,9 +1862,7 @@ export class ChatServer {
 export default {
   async fetch(req, env) {
     try {
-      // Make sure binding name matches wrangler.toml
-      // If your binding is named "CHAT_SERVER_2", use that
-      const bindingName = "CHAT_SERVER"; // Change this to match your wrangler.toml
+      const bindingName = "CHAT_SERVER";
       const chatId = env[bindingName].idFromName("chat-room");
       const chatObj = env[bindingName].get(chatId);
       
