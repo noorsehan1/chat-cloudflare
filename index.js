@@ -293,7 +293,6 @@ class GlobalChatBuffer {
   }
 
   _processRetryQueue(now) {
-    // Hard limit to prevent memory leak
     if (this._retryQueue.length > CONSTANTS.MAX_RETRY_QUEUE_SIZE * 2) {
       const dropped = this._retryQueue.length - CONSTANTS.MAX_RETRY_QUEUE_SIZE;
       this._retryQueue = this._retryQueue.slice(0, CONSTANTS.MAX_RETRY_QUEUE_SIZE);
@@ -648,7 +647,6 @@ export class ChatServer {
       if (!this.userConnections.has(userId)) {
         this._userMessageCount.delete(userId);
       } else if (now - userData.windowStart > CONSTANTS.MESSAGE_RATE_WINDOW_MS * 2) {
-        // Clean up stale rate limit entries (inactive for 2 minutes)
         this._userMessageCount.delete(userId);
       }
     }
@@ -714,12 +712,10 @@ export class ChatServer {
   async _forceFullCleanupWebSocket(ws) {
     if (!ws) return;
 
-    // Generate cleanup ID early to prevent race conditions
     if (!ws._cleanupId) {
       ws._cleanupId = `ws_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
     }
 
-    // Double-check before acquiring lock
     if (this._wsCleaningUp.has(ws._cleanupId)) return;
 
     let release = null;
@@ -728,7 +724,6 @@ export class ChatServer {
     try {
       release = await this.cleanupLocker.acquire(`cleanup_${ws._cleanupId}`);
       
-      // Double-check after acquiring lock
       if (this._wsCleaningUp.has(ws._cleanupId)) return;
 
       this._wsCleaningUp.set(ws._cleanupId, Date.now());
@@ -793,7 +788,6 @@ export class ChatServer {
         }
       }
 
-      // Clean up listeners immediately
       this._cleanupWebSocketListeners(ws);
       this._activeClients.delete(ws);
 
@@ -804,7 +798,6 @@ export class ChatServer {
       }
 
     } catch (error) {
-      // Log error but don't throw
       console.error(`Cleanup error for ${ws._cleanupId}:`, error);
     } finally {
       if (release) {
@@ -1537,20 +1530,82 @@ export class ChatServer {
           await this.safeSend(ws, ["allOnlineUsers", users]);
           break;
         }
+        
+        // ==================== FIXED SENDNOTIF CASE ====================
         case "sendnotif": {
           const [, idtarget, noimageUrl, username, deskripsi] = data;
+          
+          // Validasi input
+          if (!idtarget || !username) {
+            console.log(`[NOTIF] Invalid data: target=${idtarget}, sender=${username}`);
+            await this.safeSend(ws, ["notifError", "Missing target or sender"]);
+            return;
+          }
+          
+          console.log(`[NOTIF] Attempting to send from ${username} to ${idtarget}: ${deskripsi}`);
+          
+          // Cek koneksi target user
           const targetConnections = this.userConnections.get(idtarget);
-          if (targetConnections) {
-            const snapshotConns = Array.from(targetConnections);
-            for (const client of snapshotConns) {
-              if (client && client.readyState === 1 && !client._isClosing && !this._wsCleaningUp.has(client._cleanupId)) {
-                await this.safeSend(client, ["notif", noimageUrl, username, deskripsi, Date.now()]);
+          
+          if (!targetConnections || targetConnections.size === 0) {
+            console.log(`[NOTIF] User ${idtarget} is offline (no connections)`);
+            await this.safeSend(ws, ["notifError", idtarget, "User is offline"]);
+            return;
+          }
+          
+          // Kirim notifikasi ke semua koneksi target
+          let sent = false;
+          const snapshotConns = Array.from(targetConnections);
+          
+          for (const client of snapshotConns) {
+            if (client && client.readyState === 1 && !client._isClosing && !this._wsCleaningUp.has(client._cleanupId)) {
+              const notifMessage = ["notif", noimageUrl || "", username || "", deskripsi || "", Date.now()];
+              const success = await this.safeSend(client, notifMessage);
+              if (success) {
+                sent = true;
+                console.log(`[NOTIF] Successfully sent to ${idtarget}:`, notifMessage);
+              }
+            }
+          }
+          
+          // Kirim konfirmasi ke pengirim
+          if (sent) {
+            await this.safeSend(ws, ["notifSent", idtarget, username, deskripsi]);
+          } else {
+            console.log(`[NOTIF] Failed to send to ${idtarget} - no active connections`);
+            await this.safeSend(ws, ["notifError", idtarget, "User has no active connections"]);
+          }
+          break;
+        }
+        // ==================== END OF FIXED SENDNOTIF ====================
+        
+        // ==================== CHECK USER CONNECTION CASE ====================
+        case "checkUserConnection": {
+          const [, targetUserId] = data;
+          if (!targetUserId) {
+            await this.safeSend(ws, ["userConnectionStatus", "", false]);
+            return;
+          }
+          
+          const connections = this.userConnections.get(targetUserId);
+          let isConnected = false;
+          
+          if (connections && connections.size > 0) {
+            const snapshotConns = Array.from(connections);
+            for (const conn of snapshotConns) {
+              if (conn && conn.readyState === 1 && !conn._isClosing && !this._wsCleaningUp.has(conn._cleanupId)) {
+                isConnected = true;
                 break;
               }
             }
           }
+          
+          console.log(`[CHECK] User ${targetUserId} is ${isConnected ? 'online' : 'offline'}`);
+          await this.safeSend(ws, ["userConnectionStatus", targetUserId, isConnected]);
           break;
         }
+        // ==================== END OF CHECK CONNECTION ====================
+        
         case "private": {
           const [, idtarget, noimageUrl, message, sender] = data;
           if (!idtarget || !sender) return;
