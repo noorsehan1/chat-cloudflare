@@ -25,6 +25,7 @@
 // [FIX-16] handleJoinRoom: call _forceCleanUserData before join to remove stale data
 // [FIX-17] assignNewSeat: simplified logic, always clean old data before assigning new seat
 // [FIX-18] _doJoinRoom: removed complex redundant checks, only check room full
+// [FIX-19] assignNewSeat: added double-check to prevent duplicate seat assignment
 
 let LowCardGameManager;
 try {
@@ -592,10 +593,7 @@ export class ChatServer {
       if (this.chatBuffer) this.chatBuffer.tick(now);
 
       if (this._masterTickCounter % CONSTANTS.FORCE_CLEANUP_MEMORY_TICKS === 0) {
-        this._checkConnectionPressure().catch(err => {
-          console.error(`_checkConnectionPressure error: ${err?.message || err}`);
-        });
-
+        this._checkConnectionPressure().catch(() => {});
         this._sweepStaleCleanupEntries(now);
         this._sweepMessageCounts();
       }
@@ -604,17 +602,11 @@ export class ChatServer {
         try {
           const result = this.lowcard.masterTick();
           if (result && typeof result.catch === 'function') {
-            result.catch(err => {
-              console.error(`lowcard.masterTick async error: ${err?.message || err}`);
-            });
+            result.catch(() => {});
           }
-        } catch (syncError) {
-          console.error(`lowcard.masterTick sync error: ${syncError?.message || syncError}`);
-        }
+        } catch (syncError) {}
       }
-    } catch (error) {
-      console.error(`Master tick error: ${error?.message || error}`);
-    }
+    } catch (error) {}
   }
 
   _sweepStaleCleanupEntries(now) {
@@ -633,16 +625,13 @@ export class ChatServer {
     }
   }
 
-  // [FIX-15] NEW METHOD: Force clean all user data to prevent stale entries blocking re-join
   _forceCleanUserData(userId) {
     if (!userId) return;
     
-    // Hapus semua tracking data user
     this.userToSeat.delete(userId);
     this.userCurrentRoom.delete(userId);
     this._userMessageCount.delete(userId);
     
-    // Hapus dari reconnect tracking
     this._reconnectingUsers.delete(userId);
     const timer = this._reconnectTimers.get(userId);
     if (timer) {
@@ -650,7 +639,6 @@ export class ChatServer {
       this._reconnectTimers.delete(userId);
     }
     
-    // Cari dan hapus dari semua room (jika ada seat yang tertinggal)
     for (const [room, manager] of this.roomManagers) {
       for (const [seat, data] of manager.seats) {
         if (data.namauser === userId) {
@@ -828,12 +816,31 @@ export class ChatServer {
 
       if (roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS) return null;
 
-      // [FIX-17] Always clean old data before assigning new seat
+      const existingSeatInfo = this.userToSeat.get(userId);
+      if (existingSeatInfo && existingSeatInfo.room === room) {
+        const existingSeat = existingSeatInfo.seat;
+        const seatData = roomManager.getSeat(existingSeat);
+        if (seatData && seatData.namauser === userId) {
+          return existingSeat;
+        }
+      }
+
+      const newSeatNumber = roomManager.getAvailableSeat();
+      if (!newSeatNumber) return null;
+      
+      const seatCheck = roomManager.getSeat(newSeatNumber);
+      if (seatCheck && seatCheck.namauser && seatCheck.namauser !== "") {
+        return null;
+      }
+
       this.userToSeat.delete(userId);
       this.userCurrentRoom.delete(userId);
 
-      const newSeatNumber = roomManager.addNewSeat(userId);
-      if (!newSeatNumber) return null;
+      roomManager.seats.set(newSeatNumber, {
+        noimageUrl: "", namauser: userId, color: "", itembawah: 0,
+        itematas: 0, vip: 0, viptanda: 0, lastUpdated: Date.now()
+      });
+      roomManager.updateActivity();
 
       this.userToSeat.set(userId, { room, seat: newSeatNumber });
       this.userCurrentRoom.set(userId, room);
@@ -847,7 +854,6 @@ export class ChatServer {
     }
   }
 
-  // [FIX-18] Simplified _doJoinRoom - only check room full
   async _doJoinRoom(ws, room) {
     const release = await this.roomLocker.acquire(`room_join_full_${room}`);
     try {
@@ -886,7 +892,6 @@ export class ChatServer {
     }
   }
 
-  // [FIX-16] Modified handleJoinRoom - call _forceCleanUserData before join
   async handleJoinRoom(ws, room) {
     if (!ws?.idtarget) {
       await this.safeSend(ws, ["error", "User ID not set"]);
@@ -897,7 +902,6 @@ export class ChatServer {
       return false;
     }
 
-    // Force clean any stale user data before joining
     this._forceCleanUserData(ws.idtarget);
 
     const userLock = await this.connectionLocker.acquire(`user_join_${ws.idtarget}`);
