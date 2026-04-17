@@ -1,4 +1,4 @@
-// ==================== CHAT SERVER 2 - FULLY FIXED ====================
+// ==================== CHAT SERVER 2 - FULLY FIXED FINAL ====================
 // name = "chatcloudnew"
 // main = "index.js"
 // compatibility_date = "2026-04-03"
@@ -60,6 +60,9 @@ const GAME_ROOMS = Object.freeze([
   "Chikahan Tambayan", "BLUE DYNASTY", "One Side Love", "Heart Lovers"
 ]);
 
+// ─────────────────────────────────────────────
+// AsyncLock
+// ─────────────────────────────────────────────
 class AsyncLock {
   constructor(timeoutMs = 2000) {
     this.locks = new Map();
@@ -118,6 +121,9 @@ class AsyncLock {
   }
 }
 
+// ─────────────────────────────────────────────
+// PMBuffer
+// ─────────────────────────────────────────────
 class PMBuffer {
   constructor() {
     this._queue = [];
@@ -178,6 +184,9 @@ class PMBuffer {
   }
 }
 
+// ─────────────────────────────────────────────
+// GlobalChatBuffer
+// ─────────────────────────────────────────────
 class GlobalChatBuffer {
   constructor() {
     this._messageQueue = [];
@@ -345,6 +354,9 @@ class GlobalChatBuffer {
   }
 }
 
+// ─────────────────────────────────────────────
+// RoomManager
+// ─────────────────────────────────────────────
 class RoomManager {
   constructor(roomName) {
     this.roomName = roomName;
@@ -463,6 +475,9 @@ class RoomManager {
   }
 }
 
+// ─────────────────────────────────────────────
+// ChatServer2 (Durable Object) - FULLY FIXED
+// ─────────────────────────────────────────────
 export class ChatServer {
   constructor(state, env) {
     this.state = state;
@@ -734,6 +749,7 @@ export class ChatServer {
     }
   }
 
+  // [FIX] assignNewSeat - Now using RoomManager.getAvailableSeat() for consistency
   async assignNewSeat(room, userId) {
     const release = await this.seatLocker.acquire(`room_seat_assign_${room}`);
     try {
@@ -742,22 +758,22 @@ export class ChatServer {
 
       if (roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS) return null;
 
-      let newSeatNumber = null;
-      for (let seat = 1; seat <= CONSTANTS.MAX_SEATS; seat++) {
-        const seatData = roomManager.seats.get(seat);
-        if (!seatData || !seatData.namauser || seatData.namauser === "") {
-          newSeatNumber = seat;
-          break;
-        }
-      }
-      
+      // ✅ Use existing method for consistency
+      const newSeatNumber = roomManager.getAvailableSeat();
       if (!newSeatNumber) return null;
 
-      roomManager.seats.set(newSeatNumber, {
-        noimageUrl: "", namauser: userId, color: "", itembawah: 0,
-        itematas: 0, vip: 0, viptanda: 0, lastUpdated: Date.now()
+      // ✅ Use existing updateSeat method
+      const success = roomManager.updateSeat(newSeatNumber, {
+        noimageUrl: "", 
+        namauser: userId, 
+        color: "", 
+        itembawah: 0,
+        itematas: 0, 
+        vip: 0, 
+        viptanda: 0
       });
-      roomManager.updateActivity();
+      
+      if (!success) return null;
 
       this.userToSeat.set(userId, { room, seat: newSeatNumber });
       this.userCurrentRoom.set(userId, room);
@@ -1771,16 +1787,33 @@ export class ChatServer {
   }
 }
 
+// ─────────────────────────────────────────────
+// Worker Export
+// ─────────────────────────────────────────────
 export default {
   async fetch(req, env) {
     try {
-      const chatId = env.CHAT_SERVER.idFromName("chat-room");
-      const chatObj = env.CHAT_SERVER.get(chatId);
-      if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") return chatObj.fetch(req);
+      // Make sure binding name matches wrangler.toml
+      // If your binding is named "CHAT_SERVER_2", use that
+      const bindingName = "CHAT_SERVER"; // Change this to match your wrangler.toml
+      const chatId = env[bindingName].idFromName("chat-room");
+      const chatObj = env[bindingName].get(chatId);
+      
+      if ((req.headers.get("Upgrade") || "").toLowerCase() === "websocket") {
+        return chatObj.fetch(req);
+      }
+      
       const url = new URL(req.url);
-      if (["/health", "/debug/memory", "/debug/roomcounts", "/shutdown", "/reset"].includes(url.pathname)) return chatObj.fetch(req);
-      return new Response("ChatServer2 Running - Cloudflare Workers", { status: 200, headers: { "content-type": "text/plain" } });
+      if (["/health", "/debug/memory", "/debug/roomcounts", "/shutdown", "/reset"].includes(url.pathname)) {
+        return chatObj.fetch(req);
+      }
+      
+      return new Response("ChatServer2 Running - Cloudflare Workers", { 
+        status: 200, 
+        headers: { "content-type": "text/plain" } 
+      });
     } catch (error) {
+      console.error("Worker fetch error:", error);
       return new Response("Server error", { status: 500 });
     }
   }
