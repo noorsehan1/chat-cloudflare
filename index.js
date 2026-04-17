@@ -430,6 +430,7 @@ class RoomManager {
   }
   
   getSeatOwner(seatNumber) { const seat = this.seats.get(seatNumber); return seat ? seat.namauser : null; }
+  
   getOccupiedCount() { 
     let count = 0;
     for (const seat of this.seats.values()) {
@@ -770,9 +771,12 @@ export class ChatServer {
       const roomManager = this.roomManagers.get(room);
       if (!roomManager) return null;
 
-      // Hapus data lama user
-      this.userToSeat.delete(userId);
-      this.userCurrentRoom.delete(userId);
+      // Cek apakah room penuh
+      const isRoomFull = roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS;
+      
+      if (isRoomFull) {
+        return null;
+      }
 
       // Cari kursi kosong
       let newSeatNumber = null;
@@ -817,17 +821,14 @@ export class ChatServer {
         return false;
       }
 
-      // Assign seat
       const assignedSeat = await this.assignNewSeat(room, ws.idtarget);
       if (!assignedSeat) {
         await this.safeSend(ws, ["roomFull", room]);
         return false;
       }
 
-      // Set room ke ws
       ws.roomname = room;
       
-      // Tambahkan ke room clients
       let clientSet = this.roomClients.get(room);
       if (!clientSet) {
         clientSet = new Set();
@@ -835,7 +836,6 @@ export class ChatServer {
       }
       clientSet.add(ws);
 
-      // Tambahkan ke user connections
       let userConnections = this.userConnections.get(ws.idtarget);
       if (!userConnections) {
         userConnections = new Set();
@@ -844,7 +844,6 @@ export class ChatServer {
       userConnections.add(ws);
       this._activeClients.add(ws);
 
-      // Kirim response
       await this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
       await new Promise(resolve => setTimeout(resolve, 500));
       await this.safeSend(ws, ["numberKursiSaya", assignedSeat]);
@@ -869,6 +868,29 @@ export class ChatServer {
     if (!roomList.includes(room)) {
       await this.safeSend(ws, ["error", "Invalid room"]);
       return false;
+    }
+
+    // Cek apakah room penuh
+    const roomManager = this.roomManagers.get(room);
+    const isRoomFull = roomManager && roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS;
+
+    // HANYA jika room TIDAK penuh, baru bersihkan data lama user dari room lain
+    if (!isRoomFull) {
+      // Bersihkan user dari semua room lain
+      for (const [otherRoom, otherManager] of this.roomManagers) {
+        for (const [seatNum, seatData] of otherManager.seats) {
+          if (seatData && seatData.namauser === ws.idtarget) {
+            otherManager.removeSeat(seatNum);
+            otherManager.removePoint(seatNum);
+            this.broadcastToRoom(otherRoom, ["removeKursi", otherRoom, seatNum]);
+            this.updateRoomCount(otherRoom);
+          }
+        }
+      }
+      
+      // Hapus tracking data user
+      this.userToSeat.delete(ws.idtarget);
+      this.userCurrentRoom.delete(ws.idtarget);
     }
 
     return await this._doJoinRoom(ws, room);
