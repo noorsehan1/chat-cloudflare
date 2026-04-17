@@ -809,51 +809,40 @@ export class ChatServer {
   }
 
   async assignNewSeat(room, userId) {
-    const release = await this.seatLocker.acquire(`room_seat_assign_${room}`);
-    try {
-      const roomManager = this.roomManagers.get(room);
-      if (!roomManager) return null;
+  const release = await this.seatLocker.acquire(`room_seat_assign_${room}`);
+  try {
+    const roomManager = this.roomManagers.get(room);
+    if (!roomManager) return null;
 
-      if (roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS) return null;
+    // Cek room penuh
+    if (roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS) return null;
 
-      const existingSeatInfo = this.userToSeat.get(userId);
-      if (existingSeatInfo && existingSeatInfo.room === room) {
-        const existingSeat = existingSeatInfo.seat;
-        const seatData = roomManager.getSeat(existingSeat);
-        if (seatData && seatData.namauser === userId) {
-          return existingSeat;
-        }
-      }
+    // Hapus data lama user
+    this.userToSeat.delete(userId);
+    this.userCurrentRoom.delete(userId);
 
-      const newSeatNumber = roomManager.getAvailableSeat();
-      if (!newSeatNumber) return null;
-      
-      const seatCheck = roomManager.getSeat(newSeatNumber);
-      if (seatCheck && seatCheck.namauser && seatCheck.namauser !== "") {
-        return null;
-      }
+    // Cari kursi kosong
+    const newSeatNumber = roomManager.getAvailableSeat();
+    if (!newSeatNumber) return null;
 
-      this.userToSeat.delete(userId);
-      this.userCurrentRoom.delete(userId);
+    // Assign kursi
+    roomManager.seats.set(newSeatNumber, {
+      noimageUrl: "", namauser: userId, color: "", itembawah: 0,
+      itematas: 0, vip: 0, viptanda: 0, lastUpdated: Date.now()
+    });
+    roomManager.updateActivity();
 
-      roomManager.seats.set(newSeatNumber, {
-        noimageUrl: "", namauser: userId, color: "", itembawah: 0,
-        itematas: 0, vip: 0, viptanda: 0, lastUpdated: Date.now()
-      });
-      roomManager.updateActivity();
+    this.userToSeat.set(userId, { room, seat: newSeatNumber });
+    this.userCurrentRoom.set(userId, room);
 
-      this.userToSeat.set(userId, { room, seat: newSeatNumber });
-      this.userCurrentRoom.set(userId, room);
+    this.broadcastToRoom(room, ["userOccupiedSeat", room, newSeatNumber, userId]);
+    this.broadcastToRoom(room, ["roomUserCount", room, roomManager.getOccupiedCount()]);
 
-      this.broadcastToRoom(room, ["userOccupiedSeat", room, newSeatNumber, userId]);
-      this.broadcastToRoom(room, ["roomUserCount", room, roomManager.getOccupiedCount()]);
-
-      return newSeatNumber;
-    } finally {
-      release();
-    }
+    return newSeatNumber;
+  } finally {
+    release();
   }
-
+}
   async _doJoinRoom(ws, room) {
     const release = await this.roomLocker.acquire(`room_join_full_${room}`);
     try {
