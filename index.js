@@ -12,25 +12,19 @@
 // [FIX-3]  GlobalChatBuffer: _roomQueueSizes zero-entries never removed → unbounded map growth
 // [FIX-4]  cleanupFromRoom: duplicate ["removeKursi"] broadcast (safeRemoveSeat already broadcasts it)
 // [FIX-5]  handleSetIdTarget2: replaced old ws connections NOT removed from roomClients → dead ws refs
-//           accumulate, every room broadcast iterates dead sockets and triggers excess cleanup calls
 // [FIX-6]  _reconnectingUsers: each reconnect stacks a NEW setTimeout without clearing the old one
-//           → timer leak, and the old timer can delete the entry for the NEW reconnect attempt
 // [FIX-7]  _userMessageCount: only cleaned in _forceFullCleanupWebSocket, not in cleanupFromRoom
-//           or in the fast-exit path of handleSetIdTarget2 → unbounded map growth
 // [FIX-8]  _wsCleaningUp: 500ms delete timeout always fires even for the "already cleaning" early-
-//           return path, causing premature deletion while the actual cleanup is still running
 // [FIX-9]  _addUserConnection: old ws removed from userConnections + _activeClients but its entry
-//           in roomClients is left behind → ghost references
 // [FIX-10] _forceFullCleanupWebSocket: userToSeat.delete(userId) + userCurrentRoom.delete(userId)
-//           executed even during reconnect grace period when isInReconnectGrace=true, wiping data
-//           that the reconnecting user needs
 // [FIX-11] _checkConnectionPressure: called in masterTick without catching the returned Promise
 // [FIX-12] _sendDirectToRoom: calls _forceFullCleanupWebSocket inside Promise.resolve().then()
-//           for EVERY failed send on EVERY broadcast tick → cleanup storm on bad connections
-//           Fixed with a per-ws debounce flag (_pendingCleanup)
 // [FIX-13] Periodic sweep of _wsCleaningUp to remove entries older than 5 s (stale after crash)
-// [FIX-14] safeRemoveSeat: does NOT delete userToSeat/userCurrentRoom after successful removal,
-//           causing stale entries that prevent re-joining after a seat is released
+// [FIX-14] safeRemoveSeat: does NOT delete userToSeat/userCurrentRoom after successful removal
+// [FIX-15] _forceCleanUserData: new method to clean stale user data preventing re-join
+// [FIX-16] handleJoinRoom: call _forceCleanUserData before join to remove stale data
+// [FIX-17] assignNewSeat: simplified logic, always clean old data before assigning new seat
+// [FIX-18] _doJoinRoom: removed complex redundant checks, only check room full
 
 let LowCardGameManager;
 try {
@@ -87,7 +81,6 @@ const CONSTANTS = Object.freeze({
 
   CLEANUP_LOCK_TIMEOUT_MS: 500,
 
-  // [FIX-13] how long before a _wsCleaningUp entry is considered stale
   WS_CLEANING_UP_MAX_AGE_MS: 5000,
 });
 
@@ -130,8 +123,6 @@ class AsyncLock {
           const index = queue.findIndex(item => item.resolve === resolve);
           if (index > -1) {
             queue.splice(index, 1);
-            // [FIX-1] Clean empty queue immediately on timeout instead of leaving
-            // an empty array that never gets removed until _release() fires.
             if (queue.length === 0) this.waitingQueues.delete(key);
           }
         }
@@ -156,7 +147,6 @@ class AsyncLock {
       const next = queue.shift();
       if (next) next.resolve();
     }
-    // [FIX-1] Always delete the empty queue (not only when non-null)
     if (!queue || queue.length === 0) this.waitingQueues.delete(key);
   }
 
@@ -222,8 +212,6 @@ class PMBuffer {
   }
 
   async destroy() {
-    // [FIX-2] Flush BEFORE setting _isDestroyed so flushAll() can actually drain the queue.
-    // Original code set _isDestroyed = true first, making flushAll() a no-op and losing queued PMs.
     await this.flushAll();
     this._isDestroyed = true;
     this._queue = [];
@@ -254,8 +242,6 @@ class GlobalChatBuffer {
 
   _generateMsgId() { return `${Date.now()}_${++this._nextMsgId}_${Math.random().toString(36).substr(2, 4)}`; }
 
-  // [FIX-3] Helper: decrement room queue size and delete the entry when it reaches 0
-  // to prevent unbounded map growth with zero-value entries.
   _decrementRoomSize(room) {
     const current = this._roomQueueSizes.get(room) || 0;
     if (current <= 1) {
@@ -292,7 +278,7 @@ class GlobalChatBuffer {
     for (let i = this._messageQueue.length - 1; i >= 0; i--) {
       if (now - this._messageQueue[i].timestamp > this.messageTTL + 1000) {
         const item = this._messageQueue[i];
-        if (item) this._decrementRoomSize(item.room); // [FIX-3]
+        if (item) this._decrementRoomSize(item.room);
         this._messageQueue.splice(i, 1);
         this._totalQueued--;
       }
@@ -302,7 +288,7 @@ class GlobalChatBuffer {
       const toRemove = Math.floor(this._messageQueue.length * 0.3);
       for (let i = 0; i < toRemove; i++) {
         const item = this._messageQueue[i];
-        if (item) this._decrementRoomSize(item.room); // [FIX-3]
+        if (item) this._decrementRoomSize(item.room);
       }
       this._messageQueue.splice(0, toRemove);
       this._totalQueued = this._messageQueue.length;
@@ -348,7 +334,6 @@ class GlobalChatBuffer {
       const batch = this._messageQueue.splice(0);
       this._totalQueued = 0;
 
-      // [FIX-3] Use _decrementRoomSize for accurate cleanup
       for (const item of batch) {
         this._decrementRoomSize(item.room);
       }
@@ -543,14 +528,12 @@ export class ChatServer {
     this.userCurrentRoom = new Map();
     this.userConnections = new Map();
 
-    // Keyed by ws._cleanupId → timestamp when cleanup started
     this._wsCleaningUp = new Map();
     this.roomClients = new Map();
     this._activeListeners = new Map();
 
-    // [FIX-6] Track one timer per userId to avoid stacking timers
-    this._reconnectingUsers = new Map();   // userId → timestamp
-    this._reconnectTimers = new Map();     // userId → timer handle
+    this._reconnectingUsers = new Map();
+    this._reconnectTimers = new Map();
 
     this._userMessageCount = new Map();
 
@@ -609,15 +592,11 @@ export class ChatServer {
       if (this.chatBuffer) this.chatBuffer.tick(now);
 
       if (this._masterTickCounter % CONSTANTS.FORCE_CLEANUP_MEMORY_TICKS === 0) {
-        // [FIX-11] Properly catch the promise returned by the async method
         this._checkConnectionPressure().catch(err => {
           console.error(`_checkConnectionPressure error: ${err?.message || err}`);
         });
 
-        // [FIX-13] Periodically sweep stale _wsCleaningUp entries to prevent map growth
         this._sweepStaleCleanupEntries(now);
-
-        // [FIX-7] Periodically sweep _userMessageCount entries for disconnected users
         this._sweepMessageCounts();
       }
 
@@ -638,8 +617,6 @@ export class ChatServer {
     }
   }
 
-  // [FIX-13] Remove _wsCleaningUp entries that are older than WS_CLEANING_UP_MAX_AGE_MS.
-  // A cleanup should never take more than a few seconds; stale entries indicate a crash mid-cleanup.
   _sweepStaleCleanupEntries(now) {
     for (const [key, timestamp] of this._wsCleaningUp) {
       if (now - timestamp > CONSTANTS.WS_CLEANING_UP_MAX_AGE_MS) {
@@ -648,11 +625,41 @@ export class ChatServer {
     }
   }
 
-  // [FIX-7] Remove rate-limit entries for users who are no longer connected.
   _sweepMessageCounts() {
     for (const userId of this._userMessageCount.keys()) {
       if (!this.userConnections.has(userId)) {
         this._userMessageCount.delete(userId);
+      }
+    }
+  }
+
+  // [FIX-15] NEW METHOD: Force clean all user data to prevent stale entries blocking re-join
+  _forceCleanUserData(userId) {
+    if (!userId) return;
+    
+    // Hapus semua tracking data user
+    this.userToSeat.delete(userId);
+    this.userCurrentRoom.delete(userId);
+    this._userMessageCount.delete(userId);
+    
+    // Hapus dari reconnect tracking
+    this._reconnectingUsers.delete(userId);
+    const timer = this._reconnectTimers.get(userId);
+    if (timer) {
+      clearTimeout(timer);
+      this._reconnectTimers.delete(userId);
+    }
+    
+    // Cari dan hapus dari semua room (jika ada seat yang tertinggal)
+    for (const [room, manager] of this.roomManagers) {
+      for (const [seat, data] of manager.seats) {
+        if (data.namauser === userId) {
+          manager.removeSeat(seat);
+          manager.removePoint(seat);
+          this.broadcastToRoom(room, ["removeKursi", room, seat]);
+          this.updateRoomCount(room);
+          break;
+        }
       }
     }
   }
@@ -722,14 +729,11 @@ export class ChatServer {
     }
 
     let release = null;
-    // [FIX-8] Track whether THIS call actually performed the cleanup so the finally
-    // block only schedules the stale-entry delete when we were the one who set the flag.
     let didSetCleaningFlag = false;
 
     try {
       release = await this.cleanupLocker.acquire(`cleanup_${ws._cleanupId}`);
 
-      // Double-checked locking: check again after acquiring the lock
       if (this._wsCleaningUp.has(ws._cleanupId)) return;
 
       this._wsCleaningUp.set(ws._cleanupId, Date.now());
@@ -761,8 +765,6 @@ export class ChatServer {
             }
           }
 
-          // [FIX-10] Only delete user tracking data when NOT in reconnect grace period.
-          // The original code always deleted these, wiping state needed by the reconnect.
           this.userToSeat.delete(userId);
           this.userCurrentRoom.delete(userId);
         }
@@ -782,12 +784,10 @@ export class ChatServer {
           }
         }
 
-        // [FIX-7] Clean rate-limit data on disconnect
         if (!isInReconnectGrace) {
           this._userMessageCount.delete(userId);
         }
 
-        // [FIX-6] Cancel the reconnect timer only when not in grace period
         if (!isInReconnectGrace) {
           const timer = this._reconnectTimers.get(userId);
           if (timer !== undefined) {
@@ -808,14 +808,10 @@ export class ChatServer {
       }
 
     } catch (error) {
-      // Lock timeout or other error — do not leave the entry set
     } finally {
       if (release) {
         try { release(); } catch (e) {}
       }
-      // [FIX-8] Only schedule deletion when THIS call was the one that set the flag.
-      // The original code scheduled deletion unconditionally, so a concurrent early-
-      // return call would delete the entry while the real cleanup was still running.
       if (didSetCleaningFlag) {
         setTimeout(() => {
           this._wsCleaningUp.delete(ws._cleanupId);
@@ -832,13 +828,9 @@ export class ChatServer {
 
       if (roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS) return null;
 
-      const existingSeatInfo = this.userToSeat.get(userId);
-      if (existingSeatInfo && existingSeatInfo.room === room) {
-        const seatNum = existingSeatInfo.seat;
-        if (roomManager.getSeatOwner(seatNum) === userId) return seatNum;
-        this.userToSeat.delete(userId);
-        this.userCurrentRoom.delete(userId);
-      }
+      // [FIX-17] Always clean old data before assigning new seat
+      this.userToSeat.delete(userId);
+      this.userCurrentRoom.delete(userId);
 
       const newSeatNumber = roomManager.addNewSeat(userId);
       if (!newSeatNumber) return null;
@@ -855,6 +847,7 @@ export class ChatServer {
     }
   }
 
+  // [FIX-18] Simplified _doJoinRoom - only check room full
   async _doJoinRoom(ws, room) {
     const release = await this.roomLocker.acquire(`room_join_full_${room}`);
     try {
@@ -864,31 +857,6 @@ export class ChatServer {
       if (roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS) {
         await this.safeSend(ws, ["roomFull", room]);
         return false;
-      }
-
-      const currentRoomBeforeJoin = this.userCurrentRoom.get(ws.idtarget);
-      if (currentRoomBeforeJoin && currentRoomBeforeJoin !== room) {
-        const oldSeatInfo = this.userToSeat.get(ws.idtarget);
-        if (oldSeatInfo && oldSeatInfo.room === currentRoomBeforeJoin) {
-          let hasOtherConnection = false;
-          const otherConnections = this.userConnections.get(ws.idtarget);
-          if (otherConnections) {
-            const snapshotConns = Array.from(otherConnections);
-            for (const otherWs of snapshotConns) {
-              if (otherWs !== ws && otherWs.roomname === currentRoomBeforeJoin &&
-                otherWs.readyState === 1 && !otherWs._isClosing) {
-                hasOtherConnection = true;
-                break;
-              }
-            }
-          }
-
-          if (!hasOtherConnection) {
-            await this.safeRemoveSeat(currentRoomBeforeJoin, oldSeatInfo.seat, ws.idtarget);
-            // NOTE: safeRemoveSeat already broadcasts ["removeKursi"] — no duplicate needed here
-          }
-        }
-        this._removeFromRoomClients(ws, currentRoomBeforeJoin);
       }
 
       const assignedSeat = await this.assignNewSeat(room, ws.idtarget);
@@ -918,6 +886,7 @@ export class ChatServer {
     }
   }
 
+  // [FIX-16] Modified handleJoinRoom - call _forceCleanUserData before join
   async handleJoinRoom(ws, room) {
     if (!ws?.idtarget) {
       await this.safeSend(ws, ["error", "User ID not set"]);
@@ -927,6 +896,9 @@ export class ChatServer {
       await this.safeSend(ws, ["error", "Invalid room"]);
       return false;
     }
+
+    // Force clean any stale user data before joining
+    this._forceCleanUserData(ws.idtarget);
 
     const userLock = await this.connectionLocker.acquire(`user_join_${ws.idtarget}`);
     try {
@@ -952,7 +924,6 @@ export class ChatServer {
         this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
         this.updateRoomCount(room);
 
-        // [FIX-14] Clean up user tracking data so the user can re-join after seat release
         this.userToSeat.delete(userId);
         this.userCurrentRoom.delete(userId);
       }
@@ -1017,8 +988,6 @@ export class ChatServer {
               oldWs._toBeReplaced = true;
             } catch (e) {}
 
-            // [FIX-9] Remove old ws from roomClients immediately (not just from userConnections),
-            // otherwise every room broadcast will iterate dead socket references.
             if (oldWs.roomname) {
               const oldRoomClients = this.roomClients.get(oldWs.roomname);
               if (oldRoomClients) oldRoomClients.delete(oldWs);
@@ -1028,7 +997,6 @@ export class ChatServer {
             this._activeClients.delete(oldWs);
             this._cleanupWebSocketListeners(oldWs);
 
-            // Schedule the full socket teardown; roomClients is already clean
             const capturedOldWs = oldWs;
             setTimeout(() => {
               if (capturedOldWs && !this._wsCleaningUp.has(capturedOldWs._cleanupId)) {
@@ -1134,8 +1102,6 @@ export class ChatServer {
         client.send(messageStr);
         sentCount++;
       } catch (e) {
-        // [FIX-12] Guard against cleanup storm: only trigger cleanup if not already pending.
-        // Without this guard, every broadcast to a dead socket spawns a new async cleanup task.
         if (!client._pendingCleanup) {
           client._pendingCleanup = true;
           Promise.resolve().then(() => {
@@ -1176,7 +1142,6 @@ export class ChatServer {
       return true;
     } catch (error) {
       if (!ws._pendingCleanup && (error.code === 'ECONNRESET' || error.message?.includes('ECONNRESET') || error.message?.includes('CLOSED'))) {
-        // [FIX-12] Use same _pendingCleanup guard
         ws._pendingCleanup = true;
         this._forceFullCleanupWebSocket(ws).catch(() => {});
       }
@@ -1224,15 +1189,10 @@ export class ChatServer {
     try {
       const seatInfo = this.userToSeat.get(ws.idtarget);
       if (seatInfo && seatInfo.room === room) {
-        // [FIX-4] safeRemoveSeat already broadcasts ["removeKursi"] and ["roomUserCount"].
-        // The original code broadcast ["removeKursi"] a second time immediately after,
-        // causing clients to receive duplicate seat-removal messages.
         await this.safeRemoveSeat(room, seatInfo.seat, ws.idtarget);
-        // No additional broadcastToRoom(["removeKursi"]) here — it was a duplicate.
       }
       this._removeFromRoomClients(ws, room);
       await this._removeUserConnection(ws.idtarget, ws);
-      // [FIX-7] Clean rate-limit data on explicit room leave
       this._userMessageCount.delete(ws.idtarget);
       ws.roomname = undefined;
       this.updateRoomCount(room);
@@ -1249,9 +1209,6 @@ export class ChatServer {
       if (isReconnect) {
         this._reconnectingUsers.set(id, Date.now());
 
-        // [FIX-6] Cancel any previous reconnect expiry timer for this user before starting a new one.
-        // The original code stacked a new setTimeout on each reconnect without clearing the old one,
-        // so the first timer would fire and delete the entry created by the second reconnect.
         const existingTimer = this._reconnectTimers.get(id);
         if (existingTimer !== undefined) clearTimeout(existingTimer);
 
@@ -1295,10 +1252,6 @@ export class ChatServer {
               }
             } catch (e) {}
 
-            // [FIX-5] Remove old ws from roomClients BEFORE clearing from userConnections.
-            // The original code only removed from userConnections and _activeClients, leaving
-            // stale references in roomClients that caused every broadcast to attempt sends to
-            // a closed socket, triggering an avalanche of cleanup calls.
             if (oldWs.roomname) {
               const clientSet = this.roomClients.get(oldWs.roomname);
               if (clientSet) clientSet.delete(oldWs);
@@ -1336,7 +1289,6 @@ export class ChatServer {
             await this.safeSend(ws, ["currentNumber", this.currentNumber]);
             await this.safeSend(ws, ["reconnectSuccess", room, seat]);
 
-            // [FIX-6] Cancel the reconnect grace timer since reconnect succeeded
             const timer = this._reconnectTimers.get(id);
             if (timer !== undefined) {
               clearTimeout(timer);
@@ -1650,7 +1602,6 @@ export class ChatServer {
 
     if (this._masterTimer) { clearInterval(this._masterTimer); this._masterTimer = null; }
 
-    // [FIX-6] Cancel all pending reconnect timers on shutdown
     for (const timer of this._reconnectTimers.values()) {
       clearTimeout(timer);
     }
@@ -1795,7 +1746,6 @@ export class ChatServer {
   }
 
   async _forceResetAllData() {
-    // [FIX-6] Cancel all reconnect timers before resetting
     for (const timer of this._reconnectTimers.values()) {
       clearTimeout(timer);
     }
@@ -1884,4 +1834,4 @@ export default {
       return new Response("Server error", { status: 500 });
     }
   }
-}
+};
