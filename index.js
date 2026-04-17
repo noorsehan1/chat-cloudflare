@@ -2,9 +2,6 @@
 // name = "chatcloudnew"
 // main = "index.js"
 // compatibility_date = "2026-04-03"
-//
-// Durable Object Binding: CHAT_SERVER_2
-// Class Name: ChatServer2
 
 let LowCardGameManager;
 try {
@@ -63,9 +60,6 @@ const GAME_ROOMS = Object.freeze([
   "Chikahan Tambayan", "BLUE DYNASTY", "One Side Love", "Heart Lovers"
 ]);
 
-// ─────────────────────────────────────────────
-// AsyncLock
-// ─────────────────────────────────────────────
 class AsyncLock {
   constructor(timeoutMs = 2000) {
     this.locks = new Map();
@@ -124,9 +118,6 @@ class AsyncLock {
   }
 }
 
-// ─────────────────────────────────────────────
-// PMBuffer
-// ─────────────────────────────────────────────
 class PMBuffer {
   constructor() {
     this._queue = [];
@@ -187,9 +178,6 @@ class PMBuffer {
   }
 }
 
-// ─────────────────────────────────────────────
-// GlobalChatBuffer
-// ─────────────────────────────────────────────
 class GlobalChatBuffer {
   constructor() {
     this._messageQueue = [];
@@ -357,9 +345,6 @@ class GlobalChatBuffer {
   }
 }
 
-// ─────────────────────────────────────────────
-// RoomManager
-// ─────────────────────────────────────────────
 class RoomManager {
   constructor(roomName) {
     this.roomName = roomName;
@@ -380,17 +365,6 @@ class RoomManager {
       }
     }
     return null;
-  }
-
-  addNewSeat(userId) {
-    const newSeatNumber = this.getAvailableSeat();
-    if (!newSeatNumber) return null;
-    this.seats.set(newSeatNumber, {
-      noimageUrl: "", namauser: userId, color: "", itembawah: 0,
-      itematas: 0, vip: 0, viptanda: 0, lastUpdated: Date.now()
-    });
-    this.updateActivity();
-    return newSeatNumber;
   }
 
   getSeat(seatNumber) { return this.seats.get(seatNumber) || null; }
@@ -489,9 +463,6 @@ class RoomManager {
   }
 }
 
-// ─────────────────────────────────────────────
-// ChatServer2 (Durable Object)
-// ─────────────────────────────────────────────
 export class ChatServer {
   constructor(state, env) {
     this.state = state;
@@ -763,22 +734,14 @@ export class ChatServer {
     }
   }
 
-  // ============ METHOD JOIN YANG DIPERBAIKI ============
-  
   async assignNewSeat(room, userId) {
     const release = await this.seatLocker.acquire(`room_seat_assign_${room}`);
     try {
       const roomManager = this.roomManagers.get(room);
       if (!roomManager) return null;
 
-      // Cek apakah room penuh
-      const isRoomFull = roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS;
-      
-      if (isRoomFull) {
-        return null;
-      }
+      if (roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS) return null;
 
-      // Cari kursi kosong
       let newSeatNumber = null;
       for (let seat = 1; seat <= CONSTANTS.MAX_SEATS; seat++) {
         const seatData = roomManager.seats.get(seat);
@@ -790,7 +753,6 @@ export class ChatServer {
       
       if (!newSeatNumber) return null;
 
-      // Assign kursi
       roomManager.seats.set(newSeatNumber, {
         noimageUrl: "", namauser: userId, color: "", itembawah: 0,
         itematas: 0, vip: 0, viptanda: 0, lastUpdated: Date.now()
@@ -815,7 +777,6 @@ export class ChatServer {
       const roomManager = this.roomManagers.get(room);
       if (!roomManager) return false;
 
-      // Cek apakah room penuh
       if (roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS) {
         await this.safeSend(ws, ["roomFull", room]);
         return false;
@@ -870,13 +831,18 @@ export class ChatServer {
       return false;
     }
 
-    // Cek apakah room penuh
     const roomManager = this.roomManagers.get(room);
     const isRoomFull = roomManager && roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS;
 
-    // HANYA jika room TIDAK penuh, baru bersihkan data lama user dari room lain
     if (!isRoomFull) {
-      // Bersihkan user dari semua room lain
+      const oldRoom = ws.roomname;
+      if (oldRoom && oldRoom !== room) {
+        const oldClientSet = this.roomClients.get(oldRoom);
+        if (oldClientSet) {
+          oldClientSet.delete(ws);
+        }
+      }
+
       for (const [otherRoom, otherManager] of this.roomManagers) {
         for (const [seatNum, seatData] of otherManager.seats) {
           if (seatData && seatData.namauser === ws.idtarget) {
@@ -888,7 +854,6 @@ export class ChatServer {
         }
       }
       
-      // Hapus tracking data user
       this.userToSeat.delete(ws.idtarget);
       this.userCurrentRoom.delete(ws.idtarget);
     }
@@ -1806,9 +1771,6 @@ export class ChatServer {
   }
 }
 
-// ─────────────────────────────────────────────
-// Worker Export
-// ─────────────────────────────────────────────
 export default {
   async fetch(req, env) {
     try {
