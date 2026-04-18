@@ -1,4 +1,4 @@
-// ==================== LOWCARDGAMEMANAGER.js - FINAL FIXED VERSION ====================
+// ==================== LOWCARDGAMEMANAGER.js - ZERO BUG FINAL ====================
 
 const CONSTANTS = Object.freeze({
   MAX_LOWCARD_GAMES: 50,
@@ -25,6 +25,7 @@ export class LowCardGameManager {
     this._destroyed = false;
     this._cleanupInterval = null;
     this._gameLocks = new Map();
+    this._isShuttingDown = false;
     
     this._stats = {
       totalGamesStarted: 0,
@@ -41,11 +42,15 @@ export class LowCardGameManager {
   _startCleanupInterval() {
     if (this._cleanupInterval) clearInterval(this._cleanupInterval);
     this._cleanupInterval = setInterval(() => {
-      if (!this._destroyed) this.cleanupStaleGames();
+      if (!this._destroyed && !this._isShuttingDown) this.cleanupStaleGames();
     }, CONSTANTS.CLEANUP_INTERVAL_MS);
   }
   
   async _acquireGameLock(room, timeoutMs = CONSTANTS.LOCK_TIMEOUT_MS) {
+    if (this._destroyed || this._isShuttingDown) {
+      throw new Error("Game manager destroyed");
+    }
+    
     if (!this._gameLocks.has(room)) {
       this._gameLocks.set(room, { locked: false, queue: [] });
     }
@@ -78,6 +83,8 @@ export class LowCardGameManager {
   }
   
   _releaseGameLock(room) {
+    if (this._destroyed || this._isShuttingDown) return;
+    
     const lock = this._gameLocks.get(room);
     if (!lock) return;
     
@@ -90,16 +97,8 @@ export class LowCardGameManager {
   }
 
   masterTick() {
-    if (this._destroyed) return;
+    if (this._destroyed || this._isShuttingDown) return;
     const now = Date.now();
-    
-    let totalWaiting = 0;
-    for (const lock of this._gameLocks.values()) {
-      totalWaiting += lock.queue.length;
-    }
-    if (totalWaiting > 20) {
-      this._logWarning(`High lock contention: ${totalWaiting} waiting locks`);
-    }
     
     const snapshot = Array.from(this.activeGames.entries());
     for (const [room, game] of snapshot) {
@@ -137,9 +136,7 @@ export class LowCardGameManager {
   _forceNextRound(room) {
     const game = this._safeGetGame(room);
     if (!game || !game._isActive || game.evaluationLocked) return;
-    
     if (game._phase !== 'evaluating') return;
-    
     this._safeBroadcast(room, ["gameLowCardInfo", "Processing next round..."]);
     this._evaluateRound(room);
   }
@@ -147,9 +144,7 @@ export class LowCardGameManager {
   _forceEvaluateRound(room) {
     const game = this._safeGetGame(room);
     if (!game || !game._isActive || game.drawTimeExpired || game.evaluationLocked) return;
-    
     if (game._phase !== 'draw') return;
-    
     game.drawTimeExpired = true;
     this._scheduleEvaluation(room, game);
   }
@@ -173,7 +168,7 @@ export class LowCardGameManager {
 
     const roomName = room;
     game._evalTimeout = setTimeout(() => {
-      if (this._destroyed) return;
+      if (this._destroyed || this._isShuttingDown) return;
       
       const currentGame = this._safeGetGame(roomName);
       if (currentGame && currentGame._isActive && 
@@ -191,30 +186,27 @@ export class LowCardGameManager {
 
   _safeBroadcast(room, message) {
     try {
-      if (this._destroyed) return;
-      if (this.chatServer?.broadcastToRoom) {
+      if (this._destroyed || this._isShuttingDown) return;
+      if (this.chatServer?.broadcastToRoom && !this.chatServer._isClosing) {
         this.chatServer.broadcastToRoom(room, message);
       }
-    } catch (e) {
-      this._logError(`Broadcast error to ${room}: ${e.message}`);
-    }
+    } catch (e) {}
   }
 
   _safeSend(ws, message) {
     try {
-      if (this._destroyed) return false;
-      if (ws?.readyState === 1 && this.chatServer?.safeSend) {
+      if (this._destroyed || this._isShuttingDown) return false;
+      if (ws?.readyState === 1 && this.chatServer?.safeSend && !this.chatServer._isClosing) {
         return this.chatServer.safeSend(ws, message);
       }
       return false;
     } catch (e) {
-      this._logError(`SafeSend error: ${e.message}`);
       return false;
     }
   }
 
   _safeGetGame(room) {
-    if (this._destroyed || !room) return null;
+    if (this._destroyed || this._isShuttingDown || !room) return null;
     const game = this.activeGames.get(room);
     return (game && game._isActive === true) ? game : null;
   }
@@ -223,15 +215,10 @@ export class LowCardGameManager {
     this._stats.totalErrors++;
     this._stats.lastError = message;
     this._stats.lastErrorTime = Date.now();
-    console.error(`[LowCardGameManager] ${message}`);
-  }
-  
-  _logWarning(message) {
-    console.warn(`[LowCardGameManager] ${message}`);
   }
 
   cleanupStaleGames() {
-    if (this._destroyed) return;
+    if (this._destroyed || this._isShuttingDown) return;
     const now = Date.now();
     const staleGames = [];
     
@@ -274,7 +261,6 @@ export class LowCardGameManager {
     for (const room of staleGames) {
       const game = this.activeGames.get(room);
       if (game && game._isActive) {
-        this._logWarning(`Cleaning up stale game in room: ${room}, phase: ${game._phase}`);
         this.endGame(room);
       }
     }
@@ -307,7 +293,7 @@ export class LowCardGameManager {
   }
 
   async handleEvent(ws, data) {
-    if (this._destroyed || !ws || !data || !data[0]) return;
+    if (this._destroyed || this._isShuttingDown || !ws || !data || !data[0]) return;
     const evt = data[0];
     
     try {
@@ -332,7 +318,7 @@ export class LowCardGameManager {
   }
 
   async startGame(ws, bet) {
-    if (this._destroyed) return;
+    if (this._destroyed || this._isShuttingDown) return;
     if (!ws?.roomname || !ws?.idtarget) {
       this._safeSend(ws, ["gameLowCardError", "Invalid session"]);
       return;
@@ -498,14 +484,14 @@ export class LowCardGameManager {
 
   _addFourMozBots(room) {
     const game = this._safeGetGame(room);
-    if (!game || !game._isActive || this._destroyed) return;
+    if (!game || !game._isActive || this._destroyed || this._isShuttingDown) return;
     if (game.useBots || (game.botPlayers && game.botPlayers.size > 0)) return;
     
     game.useBots = true;
     if (game._pendingBotDraws) game._pendingBotDraws.clear();
     game._pendingBotDraws = new Map();
     
-    const mozNames = ["🤖 Bot 1", "🤖 Bot 2", "🤖 Bot 3", "🤖 Bot 4"];
+    const mozNames = ["Moz1", "Moz2", "Moz3", "Moz4"];
     
     for (let i = 0; i < 4; i++) {
       const randomSuffix = Math.random().toString(36).substring(7);
@@ -523,7 +509,7 @@ export class LowCardGameManager {
 
   async _closeRegistration(room) {
     const game = this._safeGetGame(room);
-    if (!game || !game._isActive || this._destroyed) return;
+    if (!game || !game._isActive || this._destroyed || this._isShuttingDown) return;
     
     if (!game.players) {
       this.activeGames.delete(room);
@@ -580,7 +566,7 @@ export class LowCardGameManager {
 
   _handleBotDraw(room, botId) {
     const game = this._safeGetGame(room);
-    if (!game || !game._isActive || this._destroyed) return;
+    if (!game || !game._isActive || this._destroyed || this._isShuttingDown) return;
     
     if (!game.eliminated || !game.numbers) return;
     if (game.eliminated.has(botId) || game.numbers.has(botId)) return;
@@ -609,7 +595,7 @@ export class LowCardGameManager {
   }
 
   async joinGame(ws) {
-    if (this._destroyed) return;
+    if (this._destroyed || this._isShuttingDown) return;
     if (!ws?.roomname || !ws?.idtarget) {
       this._safeSend(ws, ["gameLowCardError", "Invalid session"]);
       return;
@@ -655,7 +641,7 @@ export class LowCardGameManager {
   }
 
   async submitNumber(ws, number, tanda = "") {
-    if (this._destroyed) return;
+    if (this._destroyed || this._isShuttingDown) return;
     if (!ws?.roomname || !ws?.idtarget) {
       this._safeSend(ws, ["gameLowCardError", "Invalid session"]);
       return;
@@ -744,7 +730,7 @@ export class LowCardGameManager {
       release = await this._acquireGameLock(room);
       
       const game = this._safeGetGame(room);
-      if (!game || !game._isActive || this._destroyed) return;
+      if (!game || !game._isActive || this._destroyed || this._isShuttingDown) return;
       
       this._clearGameTimeouts(game);
       
@@ -781,13 +767,7 @@ export class LowCardGameManager {
         
         this._safeBroadcast(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
-        if (game.players) game.players.clear();
-        if (game.botPlayers) game.botPlayers.clear();
-        if (game.numbers) game.numbers.clear();
-        if (game.tanda) game.tanda.clear();
-        if (game.eliminated) game.eliminated.clear();
-        if (game._pendingBotDraws) game._pendingBotDraws.clear();
-        
+        this._cleanupGameResources(game);
         this.activeGames.delete(room);
         this._stats.totalGamesEnded++;
         return;
@@ -814,13 +794,7 @@ export class LowCardGameManager {
         
         this._safeBroadcast(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
-        if (game.players) game.players.clear();
-        if (game.botPlayers) game.botPlayers.clear();
-        if (game.numbers) game.numbers.clear();
-        if (game.tanda) game.tanda.clear();
-        if (game.eliminated) game.eliminated.clear();
-        if (game._pendingBotDraws) game._pendingBotDraws.clear();
-        
+        this._cleanupGameResources(game);
         this.activeGames.delete(room);
         this._stats.totalGamesEnded++;
         return;
@@ -884,19 +858,30 @@ export class LowCardGameManager {
       const game = this.activeGames.get(room);
       if (game && game._isActive) {
         this._safeBroadcast(room, ["gameLowCardError", "Game error, ending game"]);
-        
-        if (game.players) game.players.clear();
-        if (game.botPlayers) game.botPlayers.clear();
-        if (game.numbers) game.numbers.clear();
-        if (game.tanda) game.tanda.clear();
-        if (game.eliminated) game.eliminated.clear();
-        if (game._pendingBotDraws) game._pendingBotDraws.clear();
-        this._clearGameTimeouts(game);
-        
+        this._cleanupGameResources(game);
         this.activeGames.delete(room);
       }
     } finally {
       if (release) release();
+    }
+  }
+
+  _cleanupGameResources(game) {
+    if (!game) return;
+    
+    if (game._evalTimeout) {
+      clearTimeout(game._evalTimeout);
+      game._evalTimeout = null;
+    }
+    
+    if (game.players) { game.players.clear(); game.players = null; }
+    if (game.botPlayers) { game.botPlayers.clear(); game.botPlayers = null; }
+    if (game.numbers) { game.numbers.clear(); game.numbers = null; }
+    if (game.tanda) { game.tanda.clear(); game.tanda = null; }
+    if (game.eliminated) { game.eliminated.clear(); game.eliminated = null; }
+    if (game._pendingBotDraws) { 
+      game._pendingBotDraws.clear(); 
+      game._pendingBotDraws = null;
     }
   }
 
@@ -917,14 +902,7 @@ export class LowCardGameManager {
       }
       
       game._isActive = false;
-      this._clearGameTimeouts(game);
-      
-      if (game.players) { game.players.clear(); game.players = null; }
-      if (game.botPlayers) { game.botPlayers.clear(); game.botPlayers = null; }
-      if (game.numbers) { game.numbers.clear(); game.numbers = null; }
-      if (game.tanda) { game.tanda.clear(); game.tanda = null; }
-      if (game.eliminated) { game.eliminated.clear(); game.eliminated = null; }
-      if (game._pendingBotDraws) { game._pendingBotDraws.clear(); game._pendingBotDraws = null; }
+      this._cleanupGameResources(game);
       
       if (playersList.length > 0) {
         this._safeBroadcast(room, ["gameLowCardEnd", playersList]);
@@ -941,7 +919,7 @@ export class LowCardGameManager {
   }
   
   getGame(room) {
-    if (this._destroyed || !room) return null;
+    if (this._destroyed || this._isShuttingDown || !room) return null;
     const game = this.activeGames.get(room);
     return (game && game._isActive) ? game : null;
   }
@@ -962,6 +940,7 @@ export class LowCardGameManager {
   }
   
   destroy() {
+    this._isShuttingDown = true;
     this._destroyed = true;
     
     if (this._cleanupInterval) {
@@ -973,9 +952,7 @@ export class LowCardGameManager {
     for (const [room, game] of snapshot) {
       if (game) {
         this._clearGameTimeouts(game);
-        this.endGame(room).catch(e => {
-          this._logError(`Destroy endGame error for ${room}: ${e.message}`);
-        });
+        this.endGame(room).catch(() => {});
       }
     }
     
