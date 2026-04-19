@@ -742,9 +742,7 @@ export class ChatServer {
 
   _checkMemoryPressure() {
     // Memory pressure detection for 128MB limit
-    if (global.gc) {
-      try { global.gc(); } catch (e) {}
-    }
+    // global.gc not available in Cloudflare Workers - removed
     
     const stats = {
       activeClients: this._activeClients.size,
@@ -966,7 +964,8 @@ export class ChatServer {
 
       ws._isClosing = true;
 
-      if (!isInReconnectGrace && userId && room) {
+      // IMPORTANT: Always clean seat data when user leaves room or disconnects
+      if (userId && room) {
         const seatInfo = this.userToSeat.get(userId);
 
         if (seatInfo && seatInfo.room === room) {
@@ -984,10 +983,13 @@ export class ChatServer {
               this.updateRoomCount(room);
             }
           }
-
-          this.userToSeat.delete(userId);
-          this.userCurrentRoom.delete(userId);
         }
+      }
+
+      // ALWAYS clear userToSeat and userCurrentRoom to prevent stuck state
+      if (userId) {
+        this.userToSeat.delete(userId);
+        this.userCurrentRoom.delete(userId);
       }
 
       if (room) {
@@ -1136,31 +1138,39 @@ export class ChatServer {
       return false;
     }
 
-    const roomManager = this.roomManagers.get(room);
-    const isRoomFull = roomManager && roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS;
+    // CRITICAL FIX: Clear any existing seat/room data before joining new room
+    const oldRoom = ws.roomname;
+    if (oldRoom && oldRoom !== room) {
+      const oldClientSet = this.roomClients.get(oldRoom);
+      if (oldClientSet) {
+        oldClientSet.delete(ws);
+      }
+    }
 
-    if (!isRoomFull) {
-      const oldRoom = ws.roomname;
-      if (oldRoom && oldRoom !== room) {
-        const oldClientSet = this.roomClients.get(oldRoom);
-        if (oldClientSet) {
-          oldClientSet.delete(ws);
+    // Remove user from ANY seat in ANY room to ensure clean state
+    for (const [otherRoom, otherManager] of this.roomManagers) {
+      for (const [seatNum, seatData] of otherManager.seats) {
+        if (seatData && seatData.namauser === ws.idtarget) {
+          otherManager.removeSeat(seatNum);
+          otherManager.removePoint(seatNum);
+          this.broadcastToRoom(otherRoom, ["removeKursi", otherRoom, seatNum]);
+          this.updateRoomCount(otherRoom);
         }
       }
-
-      for (const [otherRoom, otherManager] of this.roomManagers) {
-        for (const [seatNum, seatData] of otherManager.seats) {
-          if (seatData && seatData.namauser === ws.idtarget) {
-            otherManager.removeSeat(seatNum);
-            otherManager.removePoint(seatNum);
-            this.broadcastToRoom(otherRoom, ["removeKursi", otherRoom, seatNum]);
-            this.updateRoomCount(otherRoom);
-          }
-        }
-      }
-      
-      this.userToSeat.delete(ws.idtarget);
-      this.userCurrentRoom.delete(ws.idtarget);
+    }
+    
+    // Clear user mappings
+    this.userToSeat.delete(ws.idtarget);
+    this.userCurrentRoom.delete(ws.idtarget);
+    
+    // Also clear from reconnect tracking
+    if (this._reconnectingUsers.has(ws.idtarget)) {
+      this._reconnectingUsers.delete(ws.idtarget);
+    }
+    const reconnectTimer = this._reconnectTimers.get(ws.idtarget);
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      this._reconnectTimers.delete(ws.idtarget);
     }
 
     return await this._doJoinRoom(ws, room);
@@ -1505,6 +1515,7 @@ export class ChatServer {
       }
 
       if (!isReconnect) {
+        // CRITICAL FIX: Clear all seat data for this user across ALL rooms when starting fresh
         const snapshotRooms = Array.from(this.roomManagers.entries());
         for (const [roomName, roomManager] of snapshotRooms) {
           const snapshotSeats = Array.from(roomManager.seats.entries());
@@ -2021,7 +2032,6 @@ export class ChatServer {
       const server = pair[1];
       const abortController = new AbortController();
 
-      // FIX: accept() is sync, not a Promise
       try {
         server.accept();
       } catch (acceptError) {
