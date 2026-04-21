@@ -38,10 +38,8 @@ const CONSTANTS = Object.freeze({
   CONNECTION_CRITICAL_THRESHOLD_RATIO: 0.90,
   CONNECTION_WARNING_THRESHOLD_RATIO: 0.80,
   FORCE_CLEANUP_MEMORY_TICKS: 45,
-  RECONNECT_GRACE_PERIOD_MS: 10000,
-  SEAT_RELEASE_DELAY_MS: 1000,
+  SEAT_RELEASE_DELAY_MS: 500,
   MAX_RETRY_QUEUE_SIZE: 50,
-  MAX_RECONNECT_STALE_MS: 60000,
   MAX_FLUSH_ITERATIONS: 500,
   MAX_MESSAGES_PER_MINUTE: 45,
   MESSAGE_RATE_WINDOW_MS: 60000,
@@ -607,7 +605,7 @@ class RoomManager {
 }
 
 // ─────────────────────────────────────────────
-// ChatServer2 - 128MB OPTIMIZED
+// ChatServer2 - 128MB OPTIMIZED (NO GRACE PERIOD)
 // ─────────────────────────────────────────────
 export class ChatServer {
   constructor(state, env) {
@@ -631,9 +629,6 @@ export class ChatServer {
     this._wsCleaningUp = new Map();
     this.roomClients = new Map();
     this._activeListeners = new Map();
-
-    this._reconnectingUsers = new Map();
-    this._reconnectTimers = new Map();
 
     this._userMessageCount = new Map();
 
@@ -805,16 +800,6 @@ export class ChatServer {
     for (const client of toDeleteActive) {
       this._activeClients.delete(client);
     }
-    
-    if (this._reconnectTimers.size > 100) {
-      const entries = Array.from(this._reconnectTimers.entries());
-      const toDelete = entries.slice(100);
-      for (const [id, timer] of toDelete) {
-        clearTimeout(timer);
-        this._reconnectTimers.delete(id);
-        this._reconnectingUsers.delete(id);
-      }
-    }
   }
 
   _sweepStaleCleanupEntries(now) {
@@ -955,25 +940,16 @@ export class ChatServer {
         if (seatData && seatData.namauser) {
           const hasActiveConnection = this.userConnections.has(seatData.namauser);
           const hasValidMapping = this.userToSeat.has(seatData.namauser);
-          const isInGracePeriod = this._reconnectingUsers.has(seatData.namauser);
           
-          if (!hasActiveConnection && !hasValidMapping && !isInGracePeriod) {
+          // NO GRACE PERIOD - langsung hapus jika tidak ada koneksi aktif
+          if (!hasActiveConnection || !hasValidMapping) {
             roomManager.removeSeat(seatNum);
             roomManager.removePoint(seatNum);
             this.broadcastToRoom(roomName, ["removeKursi", roomName, seatNum]);
+            this.userToSeat.delete(seatData.namauser);
+            this.userCurrentRoom.delete(seatData.namauser);
             changed = true;
             seatCleanedCount++;
-          } else if (hasValidMapping && !hasActiveConnection && !isInGracePeriod) {
-            const seatAge = now - (seatData.lastUpdated || now);
-            if (seatAge > 120000) {
-              roomManager.removeSeat(seatNum);
-              roomManager.removePoint(seatNum);
-              this.broadcastToRoom(roomName, ["removeKursi", roomName, seatNum]);
-              this.userToSeat.delete(seatData.namauser);
-              this.userCurrentRoom.delete(seatData.namauser);
-              changed = true;
-              seatCleanedCount++;
-            }
           }
         }
       }
@@ -987,7 +963,7 @@ export class ChatServer {
     }
   }
 
-  // ========== METHOD UTAMA UNTUK HAPUS SEMUA DATA USER DARI ROOM ==========
+  // ========== METHOD UNTUK HAPUS SEMUA DATA USER DARI ROOM ==========
   async deleteUserFromRoomCompletely(userId, room) {
     const release = await this.seatLocker.acquire(`delete_user_${userId}_${room}`);
     try {
@@ -1027,6 +1003,7 @@ export class ChatServer {
     }
   }
 
+  // ========== CLEANUP LANGSUNG TANPA GRACE PERIOD ==========
   async _forceFullCleanupWebSocket(ws) {
     if (!ws) return;
 
@@ -1052,7 +1029,7 @@ export class ChatServer {
 
       ws._isClosing = true;
 
-      // LANGSUNG HAPUS SEMUA DATA USER DARI ROOM
+      // LANGSUNG HAPUS SEMUA DATA USER DARI SEMUA ROOM
       if (userId) {
         // Hapus dari SEMUA room
         for (const [roomName, roomManager] of this.roomManagers) {
@@ -1076,14 +1053,6 @@ export class ChatServer {
         this.userCurrentRoom.delete(userId);
         this.userConnections.delete(userId);
         this._userMessageCount.delete(userId);
-        
-        // Hapus reconnect tracking jika ada
-        const timer = this._reconnectTimers.get(userId);
-        if (timer !== undefined) {
-          clearTimeout(timer);
-          this._reconnectTimers.delete(userId);
-        }
-        this._reconnectingUsers.delete(userId);
       }
 
       // Hapus dari room clients
@@ -1111,7 +1080,7 @@ export class ChatServer {
       if (didSetCleaningFlag) {
         setTimeout(() => {
           this._wsCleaningUp.delete(ws._cleanupId);
-        }, 2000);
+        }, CONSTANTS.SEAT_RELEASE_DELAY_MS);
       }
     }
   }
@@ -1326,16 +1295,6 @@ export class ChatServer {
       // HAPUS SEMUA MAPPING USER
       this.userToSeat.delete(ws.idtarget);
       this.userCurrentRoom.delete(ws.idtarget);
-      
-      // HAPUS RECONNECT TRACKING
-      if (this._reconnectingUsers.has(ws.idtarget)) {
-        this._reconnectingUsers.delete(ws.idtarget);
-      }
-      const reconnectTimer = this._reconnectTimers.get(ws.idtarget);
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        this._reconnectTimers.delete(ws.idtarget);
-      }
 
       // JOIN ROOM BARU
       return await this._doJoinRoom(ws, room);
@@ -1651,25 +1610,8 @@ export class ChatServer {
 
     const release = await this.connectionLocker.acquire(`reconnect_${id}`);
     try {
-      const isReconnect = (baru !== true);
-
-      if (isReconnect) {
-        this._reconnectingUsers.set(id, Date.now());
-
-        const existingTimer = this._reconnectTimers.get(id);
-        if (existingTimer !== undefined) clearTimeout(existingTimer);
-
-        const newTimer = setTimeout(() => {
-          if (this._reconnectingUsers.has(id)) {
-            this._reconnectingUsers.delete(id);
-          }
-          this._reconnectTimers.delete(id);
-        }, CONSTANTS.RECONNECT_GRACE_PERIOD_MS);
-
-        this._reconnectTimers.set(id, newTimer);
-      }
-
-      if (!isReconnect) {
+      // LANGSUNG HAPUS SEMUA DATA USER DARI SEMUA ROOM
+      if (baru === true) {
         for (const [roomName, roomManager] of this.roomManagers) {
           let removed = false;
           for (const [seatNum, seatData] of roomManager.seats) {
@@ -1689,6 +1631,7 @@ export class ChatServer {
         this.userCurrentRoom.delete(id);
       }
 
+      // Hapus koneksi lama user
       const existingConnections = this.userConnections.get(id);
       if (existingConnections && existingConnections.size > 0) {
         const oldConnections = Array.from(existingConnections);
@@ -1722,7 +1665,7 @@ export class ChatServer {
 
       const seatInfo = this.userToSeat.get(id);
 
-      if (seatInfo && isReconnect) {
+      if (seatInfo && baru === false) {
         const { room, seat } = seatInfo;
         const roomManager = this.roomManagers.get(room);
 
@@ -1737,13 +1680,6 @@ export class ChatServer {
             await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
             await this.safeSend(ws, ["currentNumber", this.currentNumber]);
             await this.safeSend(ws, ["reconnectSuccess", room, seat]);
-
-            const timer = this._reconnectTimers.get(id);
-            if (timer !== undefined) {
-              clearTimeout(timer);
-              this._reconnectTimers.delete(id);
-            }
-            this._reconnectingUsers.delete(id);
             return;
           }
         }
@@ -2080,8 +2016,6 @@ export class ChatServer {
         pmBuffer: this.pmBuffer ? this.pmBuffer.getStats() : {},
         seats: totalSeats,
         points: totalPoints,
-        reconnectingUsers: this._reconnectingUsers.size,
-        reconnectTimers: this._reconnectTimers.size,
         rateLimitMapSize: this._userMessageCount.size,
         wsCleaningUpSize: this._wsCleaningUp.size,
         activeListenersSize: this._activeListeners.size,
@@ -2103,11 +2037,6 @@ export class ChatServer {
 
     if (this._masterTimer) { clearInterval(this._masterTimer); this._masterTimer = null; }
     if (this._cleanupSweepTimer) { clearInterval(this._cleanupSweepTimer); this._cleanupSweepTimer = null; }
-
-    for (const timer of this._reconnectTimers.values()) {
-      clearTimeout(timer);
-    }
-    this._reconnectTimers.clear();
 
     if (this.chatBuffer) {
       await this.chatBuffer.flushAll();
@@ -2133,8 +2062,6 @@ export class ChatServer {
     this.userConnections.clear();
     this._activeListeners.clear();
     this._wsCleaningUp.clear();
-    this._reconnectingUsers.clear();
-    this._reconnectTimers.clear();
     this._userMessageCount.clear();
     
     this.seatLocker.destroy();
@@ -2240,11 +2167,6 @@ export class ChatServer {
   }
 
   async _forceResetAllData() {
-    for (const timer of this._reconnectTimers.values()) {
-      clearTimeout(timer);
-    }
-    this._reconnectTimers.clear();
-
     const snapshot = Array.from(this._activeClients);
     for (const ws of snapshot) {
       if (ws && ws.readyState === 1 && !ws._isClosing) {
@@ -2262,8 +2184,6 @@ export class ChatServer {
     this.userConnections.clear();
     this._wsCleaningUp.clear();
     this._activeListeners.clear();
-    this._reconnectingUsers.clear();
-    this._reconnectTimers.clear();
     this._userMessageCount.clear();
 
     for (const room of roomList) {
