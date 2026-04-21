@@ -931,7 +931,6 @@ export class ChatServer {
     let cleanedCount = 0;
     let seatCleanedCount = 0;
     
-    // 1. Bersihkan userToSeat yang tidak valid
     for (const [userId, seatInfo] of this.userToSeat) {
       const roomManager = this.roomManagers.get(seatInfo.room);
       if (!roomManager) {
@@ -949,7 +948,6 @@ export class ChatServer {
       }
     }
     
-    // 2. Bersihkan kursi yang tidak memiliki koneksi aktif
     const now = Date.now();
     for (const [roomName, roomManager] of this.roomManagers) {
       let changed = false;
@@ -989,6 +987,46 @@ export class ChatServer {
     }
   }
 
+  // ========== METHOD UTAMA UNTUK HAPUS SEMUA DATA USER DARI ROOM ==========
+  async deleteUserFromRoomCompletely(userId, room) {
+    const release = await this.seatLocker.acquire(`delete_user_${userId}_${room}`);
+    try {
+      const roomManager = this.roomManagers.get(room);
+      if (!roomManager) return false;
+
+      let cleaned = false;
+      
+      // Cari dan hapus kursi user di room ini
+      for (let seatNum = 1; seatNum <= CONSTANTS.MAX_SEATS; seatNum++) {
+        const seatData = roomManager.getSeat(seatNum);
+        if (seatData && seatData.namauser === userId) {
+          roomManager.removeSeat(seatNum);
+          roomManager.removePoint(seatNum);
+          this.broadcastToRoom(room, ["removeKursi", room, seatNum]);
+          cleaned = true;
+          break;
+        }
+      }
+      
+      // Hapus dari mapping
+      if (this.userToSeat.get(userId)?.room === room) {
+        this.userToSeat.delete(userId);
+      }
+      
+      if (this.userCurrentRoom.get(userId) === room) {
+        this.userCurrentRoom.delete(userId);
+      }
+      
+      if (cleaned) {
+        this.updateRoomCount(room);
+      }
+      
+      return cleaned;
+    } finally {
+      release();
+    }
+  }
+
   async _forceFullCleanupWebSocket(ws) {
     if (!ws) return;
 
@@ -1011,19 +1049,21 @@ export class ChatServer {
 
       const userId = ws.idtarget;
       const room = ws.roomname;
-      const isInReconnectGrace = userId && this._reconnectingUsers.has(userId);
 
       ws._isClosing = true;
 
-      if (!isInReconnectGrace && userId) {
+      // LANGSUNG HAPUS SEMUA DATA USER DARI ROOM
+      if (userId) {
+        // Hapus dari SEMUA room
         for (const [roomName, roomManager] of this.roomManagers) {
           let removed = false;
-          for (const [seatNum, seatData] of roomManager.seats) {
+          for (let seatNum = 1; seatNum <= CONSTANTS.MAX_SEATS; seatNum++) {
+            const seatData = roomManager.getSeat(seatNum);
             if (seatData && seatData.namauser === userId) {
               roomManager.removeSeat(seatNum);
               roomManager.removePoint(seatNum);
-              removed = true;
               this.broadcastToRoom(roomName, ["removeKursi", roomName, seatNum]);
+              removed = true;
             }
           }
           if (removed) {
@@ -1031,46 +1071,26 @@ export class ChatServer {
           }
         }
         
+        // Hapus semua mapping user
         this.userToSeat.delete(userId);
         this.userCurrentRoom.delete(userId);
         this.userConnections.delete(userId);
         this._userMessageCount.delete(userId);
         
+        // Hapus reconnect tracking jika ada
         const timer = this._reconnectTimers.get(userId);
         if (timer !== undefined) {
           clearTimeout(timer);
           this._reconnectTimers.delete(userId);
         }
         this._reconnectingUsers.delete(userId);
-      } else if (isInReconnectGrace && userId && room) {
-        for (const [otherRoom, roomManager] of this.roomManagers) {
-          if (otherRoom !== room) {
-            let removed = false;
-            for (const [seatNum, seatData] of roomManager.seats) {
-              if (seatData && seatData.namauser === userId) {
-                roomManager.removeSeat(seatNum);
-                roomManager.removePoint(seatNum);
-                removed = true;
-                this.broadcastToRoom(otherRoom, ["removeKursi", otherRoom, seatNum]);
-              }
-            }
-            if (removed) {
-              this.updateRoomCount(otherRoom);
-            }
-          }
-        }
       }
 
+      // Hapus dari room clients
       if (room) {
         const clientSet = this.roomClients.get(room);
         if (clientSet) clientSet.delete(ws);
-      }
-
-      if (userId) {
-        const userConnSet = this.userConnections.get(userId);
-        if (userConnSet) {
-          userConnSet.delete(ws);
-        }
+        this.updateRoomCount(room);
       }
 
       this._cleanupWebSocketListeners(ws);
@@ -1078,7 +1098,7 @@ export class ChatServer {
 
       if (ws.readyState === 1) {
         try {
-          ws.close(1000, isInReconnectGrace ? "Reconnecting..." : "Cleanup completed");
+          ws.close(1000, "Connection closed");
         } catch (e) {}
       }
 
@@ -1096,70 +1116,103 @@ export class ChatServer {
     }
   }
 
+  async cleanupFromRoom(ws, room) {
+    if (!ws?.idtarget || !ws.roomname) return;
+    
+    try {
+      const userId = ws.idtarget;
+      const roomName = room;
+      
+      // LANGSUNG HAPUS SEMUA DATA USER DARI ROOM
+      await this.deleteUserFromRoomCompletely(userId, roomName);
+      
+      // Hapus dari room clients
+      this._removeFromRoomClients(ws, roomName);
+      
+      // Hapus user connection
+      await this._removeUserConnection(userId, ws);
+      
+      // Hapus rate limit
+      this._userMessageCount.delete(userId);
+      
+      // Clear room reference
+      ws.roomname = undefined;
+      
+      // Update room count
+      this.updateRoomCount(roomName);
+      
+    } catch (error) {
+      console.error(`Cleanup error for user ${ws.idtarget}:`, error);
+    }
+  }
+
   async assignNewSeat(room, userId) {
     const release = await this.seatLocker.acquire(`room_seat_assign_${room}`);
     try {
       const roomManager = this.roomManagers.get(room);
       if (!roomManager) return null;
 
+      // Hapus user dari SEMUA room lain terlebih dahulu
+      for (const [otherRoom, otherManager] of this.roomManagers) {
+        if (otherRoom !== room) {
+          for (let seatNum = 1; seatNum <= CONSTANTS.MAX_SEATS; seatNum++) {
+            const seatData = otherManager.getSeat(seatNum);
+            if (seatData && seatData.namauser === userId) {
+              otherManager.removeSeat(seatNum);
+              otherManager.removePoint(seatNum);
+              this.broadcastToRoom(otherRoom, ["removeKursi", otherRoom, seatNum]);
+              this.updateRoomCount(otherRoom);
+            }
+          }
+        }
+      }
+      
+      // Hapus mapping lama
+      this.userToSeat.delete(userId);
+      this.userCurrentRoom.delete(userId);
+
+      // Cek apakah user sudah punya kursi di room ini
       const existingSeatForUser = this.userToSeat.get(userId);
       if (existingSeatForUser && existingSeatForUser.room === room) {
         const seatData = roomManager.getSeat(existingSeatForUser.seat);
         if (seatData && seatData.namauser === userId) {
           return existingSeatForUser.seat;
-        } else {
-          this.userToSeat.delete(userId);
-          this.userCurrentRoom.delete(userId);
         }
       }
 
-      const existingInOtherRoom = this.userToSeat.get(userId);
-      if (existingInOtherRoom && existingInOtherRoom.room !== room) {
-        const otherRoomManager = this.roomManagers.get(existingInOtherRoom.room);
-        if (otherRoomManager) {
-          otherRoomManager.removeSeat(existingInOtherRoom.seat);
-          otherRoomManager.removePoint(existingInOtherRoom.seat);
-          this.broadcastToRoom(existingInOtherRoom.room, ["removeKursi", existingInOtherRoom.room, existingInOtherRoom.seat]);
-          this.updateRoomCount(existingInOtherRoom.room);
-        }
-        this.userToSeat.delete(userId);
-        this.userCurrentRoom.delete(userId);
-      }
-
+      // Cek apakah room penuh
       if (roomManager.getOccupiedCount() >= CONSTANTS.MAX_SEATS) {
         return null;
       }
 
+      // Cari kursi kosong
       let newSeatNumber = null;
       for (let seat = 1; seat <= CONSTANTS.MAX_SEATS; seat++) {
         const seatData = roomManager.getSeat(seat);
-        const isSeatEmptyInRoom = !seatData || !seatData.namauser || seatData.namauser === "";
+        const isSeatEmpty = !seatData || !seatData.namauser || seatData.namauser === "";
         
-        if (isSeatEmptyInRoom) {
-          let hasZombieMapping = false;
+        if (isSeatEmpty) {
+          // Hapus zombie mapping jika ada
           for (const [uid, seatInfo] of this.userToSeat) {
             if (seatInfo.room === room && seatInfo.seat === seat) {
-              hasZombieMapping = true;
               this.userToSeat.delete(uid);
               this.userCurrentRoom.delete(uid);
-              break;
             }
           }
-          
-          if (!hasZombieMapping) {
-            newSeatNumber = seat;
-            break;
-          }
+          newSeatNumber = seat;
+          break;
         }
       }
       
       if (!newSeatNumber) return null;
 
+      // Verifikasi final
       const finalCheck = roomManager.getSeat(newSeatNumber);
       if (finalCheck && finalCheck.namauser && finalCheck.namauser !== "") {
         return null;
       }
 
+      // Assign kursi baru
       const success = roomManager.updateSeat(newSeatNumber, {
         noimageUrl: "", 
         namauser: userId, 
@@ -1167,14 +1220,17 @@ export class ChatServer {
         itembawah: 0,
         itematas: 0, 
         vip: 0, 
-        viptanda: 0
+        viptanda: 0,
+        lastUpdated: Date.now()
       });
       
       if (!success) return null;
 
+      // Simpan mapping
       this.userToSeat.set(userId, { room, seat: newSeatNumber });
       this.userCurrentRoom.set(userId, room);
 
+      // Broadcast
       this.broadcastToRoom(room, ["userOccupiedSeat", room, newSeatNumber, userId]);
       this.broadcastToRoom(room, ["roomUserCount", room, roomManager.getOccupiedCount()]);
 
@@ -1246,30 +1302,32 @@ export class ChatServer {
 
     const release = await this.roomLocker.acquire(`join_room_${ws.idtarget}`);
     try {
+      // HAPUS DARI ROOM LAMA DULU
       const oldRoom = ws.roomname;
       if (oldRoom) {
-        const oldClientSet = this.roomClients.get(oldRoom);
-        if (oldClientSet) oldClientSet.delete(ws);
+        await this.cleanupFromRoom(ws, oldRoom);
       }
-
+      
+      // HAPUS DARI SEMUA ROOM LAIN
       for (const [otherRoom, otherManager] of this.roomManagers) {
-        let removed = false;
-        for (const [seatNum, seatData] of otherManager.seats) {
-          if (seatData && seatData.namauser === ws.idtarget) {
-            otherManager.removeSeat(seatNum);
-            otherManager.removePoint(seatNum);
-            removed = true;
-            this.broadcastToRoom(otherRoom, ["removeKursi", otherRoom, seatNum]);
+        if (otherRoom !== room) {
+          for (let seatNum = 1; seatNum <= CONSTANTS.MAX_SEATS; seatNum++) {
+            const seatData = otherManager.getSeat(seatNum);
+            if (seatData && seatData.namauser === ws.idtarget) {
+              otherManager.removeSeat(seatNum);
+              otherManager.removePoint(seatNum);
+              this.broadcastToRoom(otherRoom, ["removeKursi", otherRoom, seatNum]);
+              this.updateRoomCount(otherRoom);
+            }
           }
-        }
-        if (removed) {
-          this.updateRoomCount(otherRoom);
         }
       }
       
+      // HAPUS SEMUA MAPPING USER
       this.userToSeat.delete(ws.idtarget);
       this.userCurrentRoom.delete(ws.idtarget);
       
+      // HAPUS RECONNECT TRACKING
       if (this._reconnectingUsers.has(ws.idtarget)) {
         this._reconnectingUsers.delete(ws.idtarget);
       }
@@ -1279,6 +1337,7 @@ export class ChatServer {
         this._reconnectTimers.delete(ws.idtarget);
       }
 
+      // JOIN ROOM BARU
       return await this._doJoinRoom(ws, room);
     } catch (error) {
       console.error(`Join room error for ${ws.idtarget}:`, error);
@@ -1301,10 +1360,8 @@ export class ChatServer {
       const success = roomManager.removeSeat(seatNumber);
       if (success) {
         roomManager.removePoint(seatNumber);
-
         this.broadcastToRoom(room, ["removeKursi", room, seatNumber]);
         this.updateRoomCount(room);
-
         this.userToSeat.delete(userId);
         this.userCurrentRoom.delete(userId);
       }
@@ -1586,21 +1643,6 @@ export class ChatServer {
         await this.safeSend(ws, ["allPointsList", room, lastPointsData]);
       }
 
-    } catch (error) {}
-  }
-
-  async cleanupFromRoom(ws, room) {
-    if (!ws?.idtarget || !ws.roomname) return;
-    try {
-      const seatInfo = this.userToSeat.get(ws.idtarget);
-      if (seatInfo && seatInfo.room === room) {
-        await this.safeRemoveSeat(room, seatInfo.seat, ws.idtarget);
-      }
-      this._removeFromRoomClients(ws, room);
-      await this._removeUserConnection(ws.idtarget, ws);
-      this._userMessageCount.delete(ws.idtarget);
-      ws.roomname = undefined;
-      this.updateRoomCount(room);
     } catch (error) {}
   }
 
