@@ -1,4 +1,4 @@
-// ==================== LOWCARDGAMEMANAGER.js - FINAL FIXED VERSION ====================
+// ==================== LOWCARDGAMEMANAGER.js - CRASH & MEMORY LEAK FIXES ONLY ====================
 
 const CONSTANTS = Object.freeze({
   MAX_LOWCARD_GAMES: 50,
@@ -159,6 +159,10 @@ export class LowCardGameManager {
     if (game._phase !== 'draw') return;
     if (game.evaluationLocked || game._phase === 'evaluating') return;
     
+    // FIX: Cegah double schedule
+    if (game._evalScheduled) return;
+    game._evalScheduled = true;
+    
     if (game._evalTimeout) {
       clearTimeout(game._evalTimeout);
       game._evalTimeout = null;
@@ -175,6 +179,9 @@ export class LowCardGameManager {
     game._evalTimeout = setTimeout(() => {
       if (this._destroyed) return;
       
+      // FIX: Reset flag
+      if (game) game._evalScheduled = false;
+      
       const currentGame = this._safeGetGame(roomName);
       if (currentGame && currentGame._isActive && 
           currentGame.evaluationLocked && 
@@ -182,7 +189,7 @@ export class LowCardGameManager {
         this._evaluateRound(roomName);
       }
       
-      if (game._evalTimeout) {
+      if (game && game._evalTimeout) {
         clearTimeout(game._evalTimeout);
         game._evalTimeout = null;
       }
@@ -275,6 +282,8 @@ export class LowCardGameManager {
       const game = this.activeGames.get(room);
       if (game && game._isActive) {
         this._logWarning(`Cleaning up stale game in room: ${room}, phase: ${game._phase}`);
+        // FIX: Clear timeout sebelum endGame
+        this._clearGameTimeouts(game);
         this.endGame(room);
       }
     }
@@ -386,7 +395,8 @@ export class LowCardGameManager {
         _hasBroadcastInitial: false,
         _evalTimeout: null,
         _evalStartTime: null,
-        drawStartTime: null
+        drawStartTime: null,
+        _evalScheduled: false  // FIX: Flag untuk cegah double evaluation
       };
 
       game.players.set(ws.idtarget, { id: ws.idtarget, name: ws.username || ws.idtarget });
@@ -414,6 +424,9 @@ export class LowCardGameManager {
   _handleRegistrationTick(game, room) {
     if (!game || !game._isActive) return;
     
+    // FIX: Cegah eksekusi jika registration sudah ditutup
+    if (!game.registrationOpen) return;
+    
     const timesToNotify = [20, 15, 10, 5, 0];
     
     if (timesToNotify.includes(game.registrationTimeLeft)) {
@@ -423,20 +436,23 @@ export class LowCardGameManager {
           this._addFourMozBots(room);
         }
         this._closeRegistration(room);
-        return;
+        return;  // FIX: Stop eksekusi setelah close
       } else {
         this._safeBroadcast(room, ["gameLowCardTimeLeft", `${game.registrationTimeLeft}s`]);
       }
     }
     
-    game.registrationTimeLeft--;
-    if (game.registrationTimeLeft < 0 && game.registrationOpen) {
-      this._closeRegistration(room);
+    // FIX: Hanya kurangi jika masih > 0
+    if (game.registrationTimeLeft > 0) {
+      game.registrationTimeLeft--;
     }
   }
 
   _handleDrawTick(game, room) {
     if (!game || !game._isActive) return;
+    
+    // FIX: Cegah eksekusi jika waktu sudah habis
+    if (game.drawTimeExpired) return;
     
     const timesToNotify = [20, 15, 10, 5, 0];
 
@@ -460,7 +476,7 @@ export class LowCardGameManager {
         }
 
         this._scheduleEvaluation(room, game);
-        return;
+        return;  // FIX: Stop eksekusi
       } else {
         if (game.drawTimeLeft !== CONSTANTS.DRAW_TIME || game._hasBroadcastInitial !== true) {
           this._safeBroadcast(room, ["gameLowCardTimeLeft", `${game.drawTimeLeft}s`]);
@@ -469,7 +485,10 @@ export class LowCardGameManager {
       }
     }
 
-    game.drawTimeLeft--;
+    // FIX: Hanya kurangi jika masih > 0
+    if (game.drawTimeLeft > 0) {
+      game.drawTimeLeft--;
+    }
 
     if (game.useBots && game._pendingBotDraws && game._pendingBotDraws.size > 0) {
       const toDraw = [];
@@ -748,6 +767,7 @@ export class LowCardGameManager {
       
       this._clearGameTimeouts(game);
       
+      // FIX: Validasi players exists
       if (!game.players || game.players.size === 0) {
         this.activeGames.delete(room);
         return;
@@ -759,14 +779,18 @@ export class LowCardGameManager {
       const round = game.round || 1;
       const betAmount = game.betAmount || 0;
       
+      // FIX: Validasi entries
       const entries = Array.from(numbers.entries());
-      const activePlayers = Array.from(players.keys()).filter(id => !eliminated.has(id));
-      
       if (entries.length === 0) {
         this._safeBroadcast(room, ["gameLowCardError", "Game ended - no submissions"]);
         this.activeGames.delete(room);
         return;
       }
+      
+      // FIX: Safe access untuk activePlayers
+      const activePlayers = Array.from(players.keys()).filter(id => 
+        eliminated && !eliminated.has(id)
+      );
       
       const submittedIds = new Set(numbers.keys());
       const noSubmit = activePlayers.filter(id => !submittedIds.has(id));
@@ -866,6 +890,7 @@ export class LowCardGameManager {
       game.drawTimeLeft = CONSTANTS.DRAW_TIME;
       game._hasBroadcastInitial = false;
       game.drawStartTime = null;
+      game._evalScheduled = false;  // FIX: Reset flag untuk round berikutnya
       
       if (game.useBots && game.botPlayers) {
         if (game._pendingBotDraws) game._pendingBotDraws.clear();
@@ -885,13 +910,15 @@ export class LowCardGameManager {
       if (game && game._isActive) {
         this._safeBroadcast(room, ["gameLowCardError", "Game error, ending game"]);
         
+        // FIX: Clear timeout sebelum hapus
+        this._clearGameTimeouts(game);
+        
         if (game.players) game.players.clear();
         if (game.botPlayers) game.botPlayers.clear();
         if (game.numbers) game.numbers.clear();
         if (game.tanda) game.tanda.clear();
         if (game.eliminated) game.eliminated.clear();
         if (game._pendingBotDraws) game._pendingBotDraws.clear();
-        this._clearGameTimeouts(game);
         
         this.activeGames.delete(room);
       }
@@ -909,6 +936,14 @@ export class LowCardGameManager {
       const game = this.activeGames.get(room);
       if (!game || !game._isActive) return;
       
+      // FIX: Clear semua timeout sebelum hapus game
+      this._clearGameTimeouts(game);
+      
+      // FIX: Clear pending bot draws
+      if (game._pendingBotDraws) {
+        game._pendingBotDraws.clear();
+      }
+      
       const playersList = [];
       if (game.players) {
         for (const player of game.players.values()) {
@@ -917,7 +952,6 @@ export class LowCardGameManager {
       }
       
       game._isActive = false;
-      this._clearGameTimeouts(game);
       
       if (game.players) { game.players.clear(); game.players = null; }
       if (game.botPlayers) { game.botPlayers.clear(); game.botPlayers = null; }
