@@ -986,88 +986,115 @@ export class ChatServer {
 
   // ========== HANDLE SET ID TARGET 2 (DENGAN RECONNECT LOGIKA) ==========
   async handleSetIdTarget2(ws, id, baru) {
-    if (!id || !ws) return;
+  if (!id || !ws) return;
 
-    const release = await this.connectionLock.acquire();
-    try {
-      // 🔥 FIX: Jika baru === false (RECONNECT), jangan hapus data user!
-      if (baru === true) {
-        // Baru = true: Hapus semua data user (fresh start)
-        await this._cleanupUserCompletely(id);
-      } else {
-        // Baru = false: RECONNECT - Hanya hapus koneksi lama, DATA USER TETAP!
-        const existingConns = this.userConnections.get(id);
-        if (existingConns && existingConns.size > 0) {
-          for (const oldWs of existingConns) {
-            if (oldWs !== ws && oldWs.readyState === 1) {
-              try { 
-                oldWs.close(1000, "Replaced");
-              } catch (e) {}
-            }
-            // Hapus referensi WebSocket lama TAPI JANGAN hapus data user
-            await this._cleanupWebSocketOnly(oldWs);
-          }
-          existingConns.clear();
-        }
-      }
-
-      ws.idtarget = id;
-      ws._isClosing = false;
-
-      let userConns = this.userConnections.get(id);
-      if (!userConns) {
-        userConns = new Set();
-        this.userConnections.set(id, userConns);
-      }
-      userConns.add(ws);
-      this._wsRawSet.add(ws);
-      this._activeClients.add(ws);
-
-      const seatInfo = this.userToSeat.get(id);
-
-      // 🔥 FIX: Untuk reconnect (baru = false), kembalikan user ke kursi lama
-      if (seatInfo && baru === false) {
-        const { room, seat } = seatInfo;
-        const roomManager = this.roomManagers.get(room);
-        if (roomManager) {
-          const seatData = roomManager.getSeat(seat);
-          if (seatData && seatData.namauser === id) {
-            // User masih punya kursi, langsung kembalikan
-            ws.roomname = room;
-            const clientSet = this.roomClients.get(room);
-            if (clientSet) clientSet.add(ws);
-            
-            // Kirim semua state ke user
-            await this.sendAllStateTo(ws, room, true);
-            await this.safeSend(ws, ["numberKursiSaya", seat]);
-            await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
-            await this.safeSend(ws, ["currentNumber", this.currentNumber]);
-            
-            // Kirim point jika ada
-            const point = roomManager.getPoint(seat);
-            if (point) {
-              await this.safeSend(ws, ["pointUpdated", room, seat, point.x, point.y, point.fast ? 1 : 0]);
-            }
-            return;
+  const release = await this.connectionLock.acquire();
+  try {
+    // 🔥 FIX: Bersihkan SEMUA data untuk baru = true
+    if (baru === true) {
+      // 1. Hapus semua data user dari room
+      await this._cleanupUserCompletely(id);
+      
+      // 2. Hapus semua koneksi lama dari userConnections
+      const existingConns = this.userConnections.get(id);
+      if (existingConns) {
+        for (const oldWs of existingConns) {
+          if (oldWs && oldWs !== ws) {
+            this._cleanupWebSocketOnly(oldWs);
           }
         }
-        // Jika kursi tidak valid, hapus mapping
-        this.userToSeat.delete(id);
-        this.userCurrentRoom.delete(id);
+        this.userConnections.delete(id);  // 🔥 HAPUS TOTAL
       }
-
-      // Jika tidak ada seatInfo atau baru === true
-      if (baru === false) {
-        await this.safeSend(ws, ["needJoinRoom"]);
-      } else {
-        await this.safeSend(ws, ["joinroomawal"]);
+      
+      // 3. Hapus dari userToSeat dan userCurrentRoom (sudah di cleanupUserCompletely)
+      // 4. Hapus dari roomClients
+      const oldRoom = this.userCurrentRoom.get(id);
+      if (oldRoom) {
+        const clientSet = this.roomClients.get(oldRoom);
+        if (clientSet) {
+          for (const client of clientSet) {
+            if (client && client.idtarget === id) {
+              clientSet.delete(client);
+            }
+          }
+        }
       }
-    } catch (error) {
-      await this.safeSend(ws, ["error", "Connection failed"]);
-    } finally {
-      release();
+    } else {
+      // Reconnect logic (baru = false)
+      const existingConns = this.userConnections.get(id);
+      if (existingConns && existingConns.size > 0) {
+        for (const oldWs of existingConns) {
+          if (oldWs !== ws && oldWs.readyState === 1) {
+            try { 
+              await this.safeSend(oldWs, ["connectionReplaced", "Reconnecting..."]);
+              oldWs.close(1000, "Replaced");
+            } catch (e) {}
+          }
+          await this._cleanupWebSocketOnly(oldWs);
+        }
+        existingConns.clear();
+      }
     }
+
+    // Set ID target
+    ws.idtarget = id;
+    ws._isClosing = false;
+
+    // Tambah ke userConnections
+    let userConns = this.userConnections.get(id);
+    if (!userConns) {
+      userConns = new Set();
+      this.userConnections.set(id, userConns);
+    }
+    userConns.add(ws);
+    this._wsRawSet.add(ws);
+    this._activeClients.add(ws);
+
+    // Cek apakah user punya seat (untuk reconnect)
+    const seatInfo = this.userToSeat.get(id);
+
+    if (seatInfo && baru === false) {
+      // Reconnect logic - langsung masuk ke kursi lama
+      const { room, seat } = seatInfo;
+      const roomManager = this.roomManagers.get(room);
+      if (roomManager) {
+        const seatData = roomManager.getSeat(seat);
+        if (seatData && seatData.namauser === id) {
+          ws.roomname = room;
+          const clientSet = this.roomClients.get(room);
+          if (clientSet) clientSet.add(ws);
+          
+          await this.sendAllStateTo(ws, room, true);
+          await this.safeSend(ws, ["numberKursiSaya", seat]);
+          await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
+          await this.safeSend(ws, ["currentNumber", this.currentNumber]);
+          await this.safeSend(ws, ["reconnectSuccess", room, seat]);
+          
+          const point = roomManager.getPoint(seat);
+          if (point) {
+            await this.safeSend(ws, ["pointUpdated", room, seat, point.x, point.y, point.fast ? 1 : 0]);
+          }
+          return;
+        }
+      }
+      // Seat tidak valid, hapus mapping
+      this.userToSeat.delete(id);
+      this.userCurrentRoom.delete(id);
+    }
+
+    // Kirim response sesuai mode
+    if (baru === false) {
+      await this.safeSend(ws, ["needJoinRoom"]);
+    } else {
+      await this.safeSend(ws, ["joinroomawal"]);
+    }
+  } catch (error) {
+    console.error(`[SET_ID_TARGET] Error:`, error);
+    await this.safeSend(ws, ["error", "Connection failed"]);
+  } finally {
+    release();
   }
+}
 
   async handleMessage(ws, raw) {
     if (!ws || ws.readyState !== 1 || ws._isClosing) return;
