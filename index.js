@@ -1001,7 +1001,6 @@ export class ChatServer {
           for (const oldWs of existingConns) {
             if (oldWs !== ws && oldWs.readyState === 1) {
               try { 
-                await this.safeSend(oldWs, ["connectionReplaced", "Reconnecting..."]);
                 oldWs.close(1000, "Replaced");
               } catch (e) {}
             }
