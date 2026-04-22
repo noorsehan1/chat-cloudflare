@@ -1019,7 +1019,7 @@ export class ChatServer {
       userConns.add(ws);
 
       await this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 100));
       await this.safeSend(ws, ["numberKursiSaya", assignedSeat]);
       await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
       await this.safeSend(ws, ["roomUserCount", room, roomManager.getOccupiedCount()]);
@@ -1172,33 +1172,37 @@ export class ChatServer {
           if (success && ws.roomname) this.updateRoomCount(ws.roomname);
           break;
         }
- case "chat": {
-  const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
-  
-  if (!ws.roomname) {
-    await this.safeSend(ws, ["chatError", "You are not in any room"]);
-    return;
-  }
-  
-  if (ws.roomname !== roomname) {
-    await this.safeSend(ws, ["chatError", "You are not in this room"]);
-    return;
-  }
-  
-  if (ws.idtarget !== username) {
-    await this.safeSend(ws, ["chatError", "Username mismatch"]);
-    return;
-  }
-  
-  if (!roomList.includes(roomname)) return;
-  
-  // 🔥 CEK MUTE DIHAPUS
-  
-  const sanitizedMessage = message?.slice(0, CONSTANTS.MAX_MESSAGE_LENGTH) || "";
-  if (sanitizedMessage.includes('\0')) return;
-  this.broadcastToRoom(roomname, ["chat", roomname, noImageURL, username, sanitizedMessage, usernameColor, chatTextColor]);
-  break;
-}
+        case "chat": {
+          const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
+          
+          if (!ws.roomname) {
+            await this.safeSend(ws, ["chatError", "You are not in any room"]);
+            return;
+          }
+          
+          if (ws.roomname !== roomname) {
+            await this.safeSend(ws, ["chatError", "You are not in this room"]);
+            return;
+          }
+          
+          if (ws.idtarget !== username) {
+            await this.safeSend(ws, ["chatError", "Username mismatch"]);
+            return;
+          }
+          
+          if (!roomList.includes(roomname)) return;
+          
+          const roomManager = this.roomManagers.get(roomname);
+          if (roomManager && roomManager.getMute() === true) {
+            await this.safeSend(ws, ["chatError", "Room is muted"]);
+            return;
+          }
+          
+          const sanitizedMessage = message?.slice(0, CONSTANTS.MAX_MESSAGE_LENGTH) || "";
+          if (sanitizedMessage.includes('\0')) return;
+          this.broadcastToRoom(roomname, ["chat", roomname, noImageURL, username, sanitizedMessage, usernameColor, chatTextColor]);
+          break;
+        }
         case "updatePoint": {
           const [, room, seat, x, y, fast] = data;
           if (ws.roomname !== room || !roomList.includes(room) || seat < 1 || seat > CONSTANTS.MAX_SEATS) return;
