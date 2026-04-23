@@ -1,4 +1,4 @@
-// ==================== CHAT SERVER 2 - ZERO CRASH POTENTIAL ====================
+// ==================== CHAT SERVER 2 - ZERO CRASH POTENTIAL (FIXED) ====================
 // name = "chatcloudnew"
 // main = "index.js"
 // compatibility_date = "2026-04-13"
@@ -592,7 +592,7 @@ class RoomManager {
 }
 
 // ─────────────────────────────────────────────
-// ChatServer2 (Durable Object) - ZERO CRASH POTENTIAL
+// ChatServer2 (Durable Object) - ZERO CRASH POTENTIAL (FIXED)
 // ─────────────────────────────────────────────
 export class ChatServer {
   constructor(state, env) {
@@ -777,6 +777,12 @@ export class ChatServer {
     ws._isClosing = true;
     
     try {
+      // HAPUS PING INTERVAL JIKA ADA
+      if (ws._pingInterval) {
+        clearInterval(ws._pingInterval);
+        ws._pingInterval = null;
+      }
+      
       const controller = this._wsControllers.get(ws);
       if (controller) {
         controller.abort();
@@ -833,6 +839,11 @@ export class ChatServer {
     ws._isClosing = true;
     
     try {
+      if (ws._pingInterval) {
+        clearInterval(ws._pingInterval);
+        ws._pingInterval = null;
+      }
+      
       const controller = this._wsControllers.get(ws);
       if (controller) {
         controller.abort();
@@ -1159,7 +1170,7 @@ export class ChatServer {
     } catch (error) {}
   }
 
-  // ========== HANDLE JOIN ROOM - ZERO CRASH ==========
+  // ========== HANDLE JOIN ROOM - FIXED RACE CONDITION ==========
   async handleJoinRoom(ws, room) {
     if (!ws?.idtarget) {
       await this.safeSend(ws, ["error", "User ID not set"]);
@@ -1261,12 +1272,45 @@ export class ChatServer {
       }
       userConns.add(ws);
 
+      // FIX: Kirim data user lain TERLEBIH DAHULU (RACE CONDITION FIX)
+      const allSeatsMeta = roomManager.getAllSeatsMeta();
+      const allPoints = roomManager.getAllPoints();
+      const otherSeatsMeta = {};
+      
+      for (const [seat, data] of Object.entries(allSeatsMeta)) {
+        if (parseInt(seat) !== assignedSeat) {
+          otherSeatsMeta[seat] = data;
+        }
+      }
+      
+      if (Object.keys(otherSeatsMeta).length > 0) {
+        await this.safeSend(ws, ["allUpdateKursiList", room, otherSeatsMeta]);
+      }
+      
+      if (allPoints.length > 0) {
+        await this.safeSend(ws, ["allPointsList", room, allPoints]);
+      }
+      
+      await this.safeSend(ws, ["roomUserCount", room, roomManager.getOccupiedCount()]);
       await this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
-      await new Promise(resolve => setTimeout(resolve, 1000));
       await this.safeSend(ws, ["numberKursiSaya", assignedSeat]);
       await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
-      await this.safeSend(ws, ["roomUserCount", room, roomManager.getOccupiedCount()]);
-      await this.sendAllStateTo(ws, room);
+      
+      // Broadcast ke user lain
+      const newSeatData = roomManager.getSeat(assignedSeat);
+      if (newSeatData) {
+        this.broadcastToRoom(room, ["kursiBatchUpdate", room, [[assignedSeat, {
+          noimageUrl: newSeatData.noimageUrl,
+          namauser: newSeatData.namauser,
+          color: newSeatData.color,
+          itembawah: newSeatData.itembawah,
+          itematas: newSeatData.itematas,
+          vip: newSeatData.vip,
+          viptanda: newSeatData.viptanda
+        }]]]);
+      }
+      
+      this.broadcastToRoom(room, ["roomUserCount", room, roomManager.getOccupiedCount()]);
 
       const point = roomManager.getPoint(assignedSeat);
       if (point) {
@@ -1283,7 +1327,7 @@ export class ChatServer {
     }
   }
 
-  // ========== HANDLE SET ID TARGET 2 - ZERO CRASH ==========
+  // ========== HANDLE SET ID TARGET 2 - FIXED TIMEOUT ==========
   async handleSetIdTarget2(ws, id, baru) {
     if (!id || !ws) return;
 
@@ -1296,10 +1340,20 @@ export class ChatServer {
     }
     
     try {
+      // CEK APAKAH WEBSOCKET MASIH HIDUP
+      if (ws.readyState !== 1) {
+        console.log(`[SET_ID] WebSocket already closed for ${id}, skipping`);
+        if (release) release();
+        return;
+      }
+      
       if (baru === true) {
         console.log(`[SET_ID] New user ${id}, cleaning up all old data`);
         
-        await this._cleanupUserCompletely(id);
+        // JANGAN PAKAI AWAIT UNTUK CLEANUP YANG LAMA
+        const cleanupPromise = this._cleanupUserCompletely(id);
+        const timeoutPromise = new Promise(resolve => setTimeout(resolve, 2000));
+        await Promise.race([cleanupPromise, timeoutPromise]);
         
         for (const [room, clientSet] of this.roomClients) {
           if (clientSet) {
@@ -1333,6 +1387,13 @@ export class ChatServer {
           }
           existingConns.clear();
         }
+      }
+
+      // CEK LAGI SEBELUM LANJUT
+      if (ws.readyState !== 1) {
+        console.log(`[SET_ID] WebSocket closed during cleanup for ${id}`);
+        if (release) release();
+        return;
       }
 
       ws.idtarget = id;
@@ -1384,14 +1445,18 @@ export class ChatServer {
       }
     } catch (error) {
       console.error(`[SET_ID_TARGET] Error:`, error);
-      await this.safeSend(ws, ["error", "Connection failed"]);
+      if (ws && ws.readyState === 1) {
+        await this.safeSend(ws, ["error", "Connection failed"]);
+      }
     } finally {
       if (release) release();
     }
   }
 
   async handleMessage(ws, raw) {
-    if (!ws || ws.readyState !== 1 || ws._isClosing) return;
+    if (!ws) return;
+    if (ws.readyState !== 1) return;
+    if (ws._isClosing) return;
     
     if (raw instanceof ArrayBuffer) {
       return;
@@ -1851,6 +1916,20 @@ export class ChatServer {
       // ========== KRITICAL: TRY-CATCH UNTUK server.accept() ==========
       try {
         server.accept();
+        
+        // TAMBAHKAN PING/PONG INTERVAL
+        server._pingInterval = setInterval(() => {
+          if (server.readyState === 1) {
+            try {
+              server.ping();
+            } catch(e) {
+              if (server._pingInterval) clearInterval(server._pingInterval);
+            }
+          } else {
+            if (server._pingInterval) clearInterval(server._pingInterval);
+          }
+        }, 30000);
+        
       } catch (acceptError) {
         try { if (server) server.close(); } catch(e) {}
         try { if (client) client.close(); } catch(e) {}
