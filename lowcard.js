@@ -1,4 +1,4 @@
-// ==================== LOWCARDGAMEMANAGER.js - CRASH FIX ONLY (LOGIKA SAMA PERSIS) ====================
+// ==================== LOWCARDGAMEMANAGER.js - FIXED (GAME BISA START ULANG SETELAH SELESAI) ====================
 
 const CONSTANTS = Object.freeze({
   MAX_LOWCARD_GAMES: 50,
@@ -99,7 +99,6 @@ export class LowCardGameManager {
         lock.locked = false;
       }
       
-      // HAPUS LOCK JIKA TIDAK DIGUNAKAN
       if (!lock.locked && lock.queue.length === 0) {
         this._gameLocks.delete(room);
       }
@@ -121,12 +120,10 @@ export class LowCardGameManager {
         try {
           this._processGameTick(room, game, now);
         } catch(e) {
-          // SILENT - jangan crash, game akan timeout nanti
+          this._forceEndGame(room);
         }
       }
-    } catch (error) {
-      // Silent catch - jangan crash
-    }
+    } catch (error) {}
   }
   
   _processGameTick(room, game, now) {
@@ -152,7 +149,7 @@ export class LowCardGameManager {
         this._handleDrawTick(game, room);
       }
     } catch (error) {
-      // SILENT - jangan crash
+      this._forceEndGame(room);
     }
   }
   
@@ -303,24 +300,40 @@ export class LowCardGameManager {
           continue;
         }
         
-        if (game._createdAt && (now - game._createdAt) > CONSTANTS.MAX_GAME_AGE_MS) {
-          staleGames.push(room);
-          continue;
-        }
-        
+        // FIX: Jika tidak ada pemain, game harus dihapus
         if (!game.players || game.players.size === 0) {
+          console.log(`[CLEANUP] Game in ${room} has no players, force cleaning`);
           staleGames.push(room);
           continue;
         }
         
+        // FIX: Jika game terlalu tua (> 5 menit) tapi belum selesai
+        if (game._createdAt && (now - game._createdAt) > 300000) {
+          console.log(`[CLEANUP] Game in ${room} too old (${now - game._createdAt}ms), force cleaning`);
+          staleGames.push(room);
+          continue;
+        }
+        
+        // FIX: Jika phase evaluating terlalu lama
         if (game._phase === 'evaluating' && game._evalStartTime && 
             (now - game._evalStartTime) > CONSTANTS.MAX_EVALUATION_TIME_MS * 2) {
+          console.log(`[CLEANUP] Game in ${room} stuck in evaluating for ${now - game._evalStartTime}ms`);
           staleGames.push(room);
           continue;
         }
         
+        // FIX: Jika phase draw terlalu lama
         if (game._phase === 'draw' && game.drawStartTime && 
             (now - game.drawStartTime) > CONSTANTS.MAX_DRAW_WAIT_MS * 2) {
+          console.log(`[CLEANUP] Game in ${room} stuck in draw for ${now - game.drawStartTime}ms`);
+          staleGames.push(room);
+          continue;
+        }
+        
+        // FIX: Jika phase registration terlalu lama (> 2 menit)
+        if (game._phase === 'registration' && game._createdAt && 
+            (now - game._createdAt) > 120000) {
+          console.log(`[CLEANUP] Game in ${room} stuck in registration for ${now - game._createdAt}ms`);
           staleGames.push(room);
           continue;
         }
@@ -332,13 +345,12 @@ export class LowCardGameManager {
     } catch (error) {}
   }
 
-  // ========== FUNGSI RANDOM TETAP SAMA, HANYA DITAMBAH TRY-CATCH ==========
   getRandomCardTanda() {
     try {
       const tandaOptions = ["C1", "C2", "C3", "C4"];
       return tandaOptions[Math.floor(Math.random() * tandaOptions.length)];
     } catch(e) {
-      return "C1"; // fallback, jangan crash
+      return "C1";
     }
   }
 
@@ -408,11 +420,28 @@ export class LowCardGameManager {
     try {
       release = await this._acquireGameLock(room);
       
+      // FIX: FORCE CLEANUP JIKA ADA GAME STUCK
       const existingGame = this.activeGames.get(room);
-      if (existingGame && existingGame._isActive) {
-        this._safeSend(ws, ["gameLowCardError", "Game already running in this room"]);
-        if (release) release();
-        return;
+      if (existingGame) {
+        const hasRealPlayers = existingGame.players && existingGame.players.size > 0;
+        const gameAge = Date.now() - (existingGame._createdAt || 0);
+        const isStuck = !hasRealPlayers || gameAge > 300000 || 
+                        (existingGame._phase === 'evaluating' && gameAge > 60000) ||
+                        (existingGame._phase === 'draw' && existingGame.drawStartTime && 
+                         (Date.now() - existingGame.drawStartTime) > 60000);
+        
+        if (isStuck) {
+          console.log(`[GAME] Force cleaning stuck game in ${room}, players: ${hasRealPlayers}, age: ${gameAge}ms, phase: ${existingGame._phase}`);
+          this._clearGameTimeouts(existingGame);
+          this.activeGames.delete(room);
+          this._releaseGameLock(room);
+          if (release) release();
+          release = await this._acquireGameLock(room);
+        } else if (existingGame._isActive) {
+          this._safeSend(ws, ["gameLowCardError", "Game already running in this room"]);
+          if (release) release();
+          return;
+        }
       }
 
       const betAmount = parseInt(bet, 10) || 0;
@@ -858,7 +887,6 @@ export class LowCardGameManager {
       
       this._clearGameTimeouts(game);
       
-      // VALIDASI NULL - TANPA UBAH LOGIKA
       if (!game.players || game.players.size === 0) {
         this.activeGames.delete(room);
         if (release) release();
@@ -887,7 +915,7 @@ export class LowCardGameManager {
       const noSubmit = activePlayers.filter(id => !submittedIds.has(id));
       noSubmit.forEach(id => eliminated.add(id));
 
-      // LOGIKA SAMA PERSIS - TIDAK DIUBAH
+      // JIKA HANYA 1 YANG SUBMIT
       if (entries.length === 1 && noSubmit.length === activePlayers.length - 1) {
         const winnerId = entries[0][0];
         const winnerPlayer = players.get(winnerId);
@@ -897,6 +925,7 @@ export class LowCardGameManager {
         
         this._safeBroadcast(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
+        // CLEANUP TOTAL
         if (game.players) game.players.clear();
         if (game.botPlayers) game.botPlayers.clear();
         if (game.numbers) game.numbers.clear();
@@ -906,6 +935,18 @@ export class LowCardGameManager {
         
         this.activeGames.delete(room);
         this._stats.totalGamesEnded++;
+        
+        // FIX: RELEASE LOCK AGAR GAME BARU BISA START
+        if (this._gameLocks.has(room)) {
+          const lock = this._gameLocks.get(room);
+          if (lock) {
+            for (const waiter of lock.queue) {
+              try { waiter.reject(new Error("Game ended")); } catch(e) {}
+            }
+          }
+          this._gameLocks.delete(room);
+        }
+        
         if (release) release();
         return;
       }
@@ -922,6 +963,7 @@ export class LowCardGameManager {
 
       const newRemaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
 
+      // JIKA HANYA 1 TERSISA - WINNER DITEMUKAN
       if (newRemaining.length === 1) {
         const winnerId = newRemaining[0];
         const winnerPlayer = players.get(winnerId);
@@ -931,6 +973,7 @@ export class LowCardGameManager {
         
         this._safeBroadcast(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
+        // CLEANUP TOTAL
         if (game.players) game.players.clear();
         if (game.botPlayers) game.botPlayers.clear();
         if (game.numbers) game.numbers.clear();
@@ -940,17 +983,32 @@ export class LowCardGameManager {
         
         this.activeGames.delete(room);
         this._stats.totalGamesEnded++;
+        
+        // FIX: RELEASE LOCK AGAR GAME BARU BISA START
+        if (this._gameLocks.has(room)) {
+          const lock = this._gameLocks.get(room);
+          if (lock) {
+            for (const waiter of lock.queue) {
+              try { waiter.reject(new Error("Game ended")); } catch(e) {}
+            }
+          }
+          this._gameLocks.delete(room);
+        }
+        
         if (release) release();
         return;
       }
       
       if (newRemaining.length === 0) {
         this.activeGames.delete(room);
+        if (this._gameLocks.has(room)) {
+          this._gameLocks.delete(room);
+        }
         if (release) release();
         return;
       }
 
-      // BROADCAST HASIL - SAMA PERSIS
+      // BROADCAST HASIL ROUND
       const numbersArr = entries.map(([id, n]) => {
         const player = players.get(id);
         const playerName = player?.name || id;
@@ -989,7 +1047,13 @@ export class LowCardGameManager {
       game._evalScheduled = false;
       game._evalCount = (game._evalCount || 0) + 1;
       
-      // LANJUT TERUS SAMPAI AKHIR - TIDAK DIUBAH
+      // LIMIT ROUND JIKA TERLALU BANYAK
+      if (game._evalCount > 50) {
+        this._forceEndGame(room);
+        if (release) release();
+        return;
+      }
+      
       if (game.useBots && game.botPlayers) {
         if (game._pendingBotDraws) game._pendingBotDraws.clear();
         game._pendingBotDraws = new Map();
@@ -1003,12 +1067,14 @@ export class LowCardGameManager {
       this._safeBroadcast(room, ["gameLowCardNextRound", game.round]);
       
     } catch (e) {
-      // JIKA ERROR, GAME DIEND - TAPI TIDAK CRASH
       console.error(`[EVALUATE] Error: ${e?.message || 'Unknown'}`);
       const game = this.activeGames.get(room);
       if (game) {
         this._clearGameTimeouts(game);
         this.activeGames.delete(room);
+      }
+      if (this._gameLocks.has(room)) {
+        this._gameLocks.delete(room);
       }
     } finally {
       if (release) release();
@@ -1023,6 +1089,10 @@ export class LowCardGameManager {
       
       const game = this.activeGames.get(room);
       if (!game || !game._isActive) {
+        // PASTIKAN TETAP DIHAPUS DARI MAP
+        if (this.activeGames.has(room)) {
+          this.activeGames.delete(room);
+        }
         if (release) release();
         return;
       }
@@ -1042,6 +1112,7 @@ export class LowCardGameManager {
       
       game._isActive = false;
       
+      // CLEANUP SEMUA
       if (game.players) { game.players.clear(); game.players = null; }
       if (game.botPlayers) { game.botPlayers.clear(); game.botPlayers = null; }
       if (game.numbers) { game.numbers.clear(); game.numbers = null; }
@@ -1053,22 +1124,29 @@ export class LowCardGameManager {
         this._safeBroadcast(room, ["gameLowCardEnd", playersList]);
       }
       
+      // HAPUS DARI MAP
       this.activeGames.delete(room);
       this._stats.totalGamesEnded++;
       
+      // HAPUS LOCK
       if (this._gameLocks.has(room)) {
         const lock = this._gameLocks.get(room);
         if (lock) {
           for (const waiter of lock.queue) {
-            try {
-              waiter.reject(new Error("Game ended"));
-            } catch (e) {}
+            try { waiter.reject(new Error("Game ended")); } catch(e) {}
           }
         }
         this._gameLocks.delete(room);
       }
       
-    } catch (e) {} finally {
+    } catch (e) {
+      console.error(`[END_GAME] Error: ${e.message}`);
+      // FORCE HAPUS
+      this.activeGames.delete(room);
+      if (this._gameLocks.has(room)) {
+        this._gameLocks.delete(room);
+      }
+    } finally {
       if (release) release();
     }
   }
@@ -1124,9 +1202,7 @@ export class LowCardGameManager {
       for (const [room, lock] of this._gameLocks.entries()) {
         if (lock) {
           for (const waiter of lock.queue) {
-            try {
-              waiter.reject(new Error("Game manager destroyed"));
-            } catch (e) {}
+            try { waiter.reject(new Error("Game manager destroyed")); } catch(e) {}
           }
           lock.queue = [];
           lock.locked = false;
