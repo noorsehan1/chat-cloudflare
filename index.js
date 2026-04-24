@@ -1,4 +1,4 @@
-// ==================== CHAT SERVER 2 - FINAL FIXED ====================
+// ==================== CHAT SERVER 2 - FINAL PRODUCTION READY ====================
 // name = "chatcloudnew"
 // main = "index.js"
 // compatibility_date = "2026-04-13"
@@ -447,7 +447,6 @@ export class ChatServer {
     try {
       const now = Date.now();
       
-      // Hapus userLastSeen untuk user yang tidak punya koneksi
       for (const [userId, lastSeen] of this.userLastSeen) {
         const hasConnection = this.userConnections.has(userId);
         if (!hasConnection) {
@@ -510,6 +509,7 @@ export class ChatServer {
     }
   }
 
+  // ========== CLEANUP CLOSE APK - LANGSUNG HAPUS SEMUA DATA ==========
   async _cleanupWebSocket(ws) {
     if (!ws || ws._isClosing) return;
     ws._isClosing = true;
@@ -533,6 +533,7 @@ export class ChatServer {
           userConns.delete(ws);
           
           if (userConns.size === 0) {
+            // HAPUS SEMUA DATA USER LANGSUNG
             this.userConnections.delete(userId);
             this.userConnectionVersion.delete(userId);
             this.userLastSeen.delete(userId);
@@ -552,9 +553,10 @@ export class ChatServer {
                   return;
                 }
               }
-              this.userToSeat.delete(userId);
-              this.userCurrentRoom.delete(userId);
             }
+            
+            this.userToSeat.delete(userId);
+            this.userCurrentRoom.delete(userId);
           }
         }
       }
@@ -592,6 +594,28 @@ export class ChatServer {
         const userConns = this.userConnections.get(userId);
         if (userConns) {
           userConns.delete(ws);
+          
+          if (userConns.size === 0) {
+            this.userConnections.delete(userId);
+            this.userConnectionVersion.delete(userId);
+            this.userLastSeen.delete(userId);
+            
+            const seatInfo = this.userToSeat.get(userId);
+            if (seatInfo) {
+              const roomManager = this.roomManagers.get(seatInfo.room);
+              if (roomManager) {
+                const seatData = roomManager.getSeat(seatInfo.seat);
+                if (seatData && seatData.namauser === userId) {
+                  roomManager.removeSeat(seatInfo.seat);
+                  this.broadcastToRoom(seatInfo.room, ["removeKursi", seatInfo.room, seatInfo.seat]);
+                  this.updateRoomCount(seatInfo.room);
+                }
+              }
+            }
+            
+            this.userToSeat.delete(userId);
+            this.userCurrentRoom.delete(userId);
+          }
         }
       }
       
@@ -738,6 +762,7 @@ export class ChatServer {
     }
   }
 
+  // ========== HANDLE JOIN ROOM - HAPUS SEMUA DATA ROOM LAMA ==========
   async handleJoinRoom(ws, room) {
     if (!ws?.idtarget) {
       await this.safeSend(ws, ["error", "User ID not set"]);
@@ -773,6 +798,7 @@ export class ChatServer {
         return false;
       }
       
+      // ========== HAPUS SEMUA DATA DARI ROOM LAMA ==========
       if (oldRoom && oldRoom !== room) {
         const oldRoomManager = this.roomManagers.get(oldRoom);
         if (oldRoomManager) {
@@ -798,6 +824,7 @@ export class ChatServer {
         if (oldClientSet) oldClientSet.delete(ws);
       }
       
+      // ========== MASUK KE ROOM BARU ==========
       const roomManager = this.roomManagers.get(room);
       if (!roomManager) {
         return false;
@@ -859,7 +886,7 @@ export class ChatServer {
       roomRelease();
       roomRelease = null;
       
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 100));
       await this.sendAllStateTo(ws, room, true);
       
       return true;
@@ -873,7 +900,7 @@ export class ChatServer {
     }
   }
 
-  // ========== HANDLE SET ID TARGET 2 - FIXED BUG ==========
+  // ========== HANDLE SET ID TARGET 2 ==========
   async handleSetIdTarget2(ws, id, baru) {
     if (!id || !ws) return;
 
@@ -898,9 +925,7 @@ export class ChatServer {
       this.userLastSeen.set(id, Date.now());
       
       if (baru === true) {
-        // ========== USER BARU - FIXED ==========
-        
-        // Tutup semua koneksi lama user ini
+        // ========== USER BARU ==========
         const oldConns = this.userConnections.get(id);
         if (oldConns) {
           const toClose = Array.from(oldConns);
@@ -914,7 +939,6 @@ export class ChatServer {
           }
         }
         
-        // Hapus semua seat user ini dari semua room
         const roomsToUpdate = [];
         for (const [room, roomManager] of this.roomManagers) {
           let seatToRemove = null;
@@ -930,13 +954,11 @@ export class ChatServer {
           }
         }
         
-        // Hapus semua data user LAMA
         this.userConnections.delete(id);
         this.userConnectionVersion.delete(id);
         this.userToSeat.delete(id);
         this.userCurrentRoom.delete(id);
         
-        // ✅ FIX: Setup koneksi BARU untuk user ini
         ws.idtarget = id;
         ws._isClosing = false;
         
@@ -948,22 +970,19 @@ export class ChatServer {
         userConns.add(ws);
         this._wsRawSet.add(ws);
         
-        // Release lock sebelum broadcast
         const releaseCopy = release;
         release = null;
         releaseCopy();
         
-        // Broadcast penghapusan kursi
         for (const { room, seat } of roomsToUpdate) {
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.updateRoomCount(room);
         }
         
-        // ✅ FIX: Kirim joinroomawal setelah setup selesai
         await this.safeSend(ws, ["joinroomawal"]);
         
       } else {
-        // ========== RECONNECT - PERTAHANKAN SEAT ==========
+        // ========== RECONNECT ==========
         const currentVersion = this.userConnectionVersion.get(id);
         
         if (currentVersion && currentVersion > newVersion) {
@@ -974,7 +993,6 @@ export class ChatServer {
         
         this.userConnectionVersion.set(id, newVersion);
         
-        // Tutup koneksi lama user ini
         const oldConns = this.userConnections.get(id);
         if (oldConns) {
           const toClose = Array.from(oldConns);
@@ -986,7 +1004,6 @@ export class ChatServer {
           }
         }
         
-        // Cek seat user
         const seatInfo = this.userToSeat.get(id);
         
         if (seatInfo) {
