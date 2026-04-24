@@ -715,61 +715,57 @@ export class ChatServer {
     }
   }
 
-  async handleSetIdTarget2(ws, id, baru) {
-    if (!id || !ws) return;
-    try {
-      if (ws.readyState !== 1) {
-        console.log(`[SET_ID] WebSocket closed for ${id}`);
-        return;
-      }
+async handleSetIdTarget2(ws, id, baru) {
+  if (!id || !ws) return;
+  try {
+    if (ws.readyState !== 1) {
+      console.log(`[SET_ID] WebSocket closed for ${id}`);
+      return;
+    }
 
-      console.log(`[SET_ID] Setting up for ${id}, baru=${baru}`);
+    console.log(`[SET_ID] Setting up for ${id}, baru=${baru}`);
 
-      // ─── FIX #3: SNAPSHOT koneksi lama SEBELUM menambah ws baru ───
-      // Bug asal: existingConns adalah referensi ke Set yang sama.
-      // Saat ws baru ditambahkan ke Set itu, iterasi existingConns
-      // akan menutup ws baru itu sendiri → disconnect loop!
-      const existingConns = this.userConnections.get(id);
-      const oldConnSnapshot = existingConns
-        ? new Set(existingConns)  // ← snapshot SEBELUM add ws baru
-        : new Set();
+    const existingConns = this.userConnections.get(id);
+    const oldConnSnapshot = existingConns
+      ? new Set(existingConns)
+      : new Set();
 
-      ws.idtarget = id;
-      ws._isClosing = false;
-      ws._isReplaced = false;
+    ws.idtarget = id;
+    ws._isClosing = false;
+    ws._isReplaced = false;
 
-      // Tambahkan koneksi BARU ke tracking
-      let userConns = this.userConnections.get(id);
-      if (!userConns) {
-        userConns = new Set();
-        this.userConnections.set(id, userConns);
-      }
-      userConns.add(ws);
-      this._wsRawSet.add(ws);
+    let userConns = this.userConnections.get(id);
+    if (!userConns) {
+      userConns = new Set();
+      this.userConnections.set(id, userConns);
+    }
+    userConns.add(ws);
+    
+    // ✅ Tetap di sini juga - Set tidak akan duplikat
+    this._wsRawSet.add(ws); // ← tambahkan juga untuk memastikan
 
-      // ─── FIX #4: Tutup koneksi lama dari snapshot (bukan dari Set live) ───
-      for (const oldWs of oldConnSnapshot) {
-        if (oldWs !== ws && oldWs.readyState === 1) {
-          console.log(`[SET_ID] Closing old connection for ${id}`);
-          oldWs._isReplaced = true;
-          oldWs._isClosing = true;
-          try {
-            oldWs.close(1000, "Replaced by new connection");
-          } catch (e) {}
-        }
-      }
-
-      if (ws.readyState === 1) {
-        await this.safeSend(ws, ["joinroomawal"]);
-      }
-
-    } catch (error) {
-      console.error(`[SET_ID_TARGET] Error:`, error);
-      if (ws && ws.readyState === 1) {
-        await this.safeSend(ws, ["error", "Connection failed"]);
+    for (const oldWs of oldConnSnapshot) {
+      if (oldWs !== ws && oldWs.readyState === 1) {
+        console.log(`[SET_ID] Closing old connection for ${id}`);
+        oldWs._isReplaced = true;
+        oldWs._isClosing = true;
+        try {
+          oldWs.close(1000, "Replaced by new connection");
+        } catch (e) {}
       }
     }
+
+    if (ws.readyState === 1) {
+      await this.safeSend(ws, ["joinroomawal"]);
+    }
+
+  } catch (error) {
+    console.error(`[SET_ID_TARGET] Error:`, error);
+    if (ws && ws.readyState === 1) {
+      await this.safeSend(ws, ["error", "Connection failed"]);
+    }
   }
+}
 
   async handleForceResetUser(ws, userId) {
     if (!userId || userId !== ws.idtarget) {
@@ -1017,74 +1013,73 @@ export class ChatServer {
   }
 
   async fetch(request) {
-    try {
-      const url = new URL(request.url);
-      const upgrade = request.headers.get("Upgrade") || "";
-      if (upgrade.toLowerCase() !== "websocket") {
-        if (url.pathname === "/health") {
-          let activeCount = 0;
-          for (const ws of this._wsRawSet) {
-            if (ws && ws.readyState === 1 && !ws._isClosing) activeCount++;
-          }
-          return new Response(JSON.stringify({
-            status: "healthy",
-            connections: activeCount,
-            rooms: this.getJumlahRoom(),
-            uptime: Date.now() - this._startTime,
-          }), { status: 200, headers: { "content-type": "application/json" } });
+  try {
+    const url = new URL(request.url);
+    const upgrade = request.headers.get("Upgrade") || "";
+    if (upgrade.toLowerCase() !== "websocket") {
+      if (url.pathname === "/health") {
+        let activeCount = 0;
+        for (const ws of this._wsRawSet) {
+          if (ws && ws.readyState === 1 && !ws._isClosing) activeCount++;
         }
-        return new Response("ChatServer Running", { status: 200 });
+        return new Response(JSON.stringify({
+          status: "healthy",
+          connections: activeCount,
+          rooms: this.getJumlahRoom(),
+          uptime: Date.now() - this._startTime,
+        }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      if (this._wsRawSet.size > CONSTANTS.MAX_GLOBAL_CONNECTIONS) {
-        return new Response("Server overloaded", { status: 503 });
-      }
-      let pair;
-      let client;
-      let server;
-      try {
-        pair = new WebSocketPair();
-        client = pair[0];
-        server = pair[1];
-      } catch (e) {
-        return new Response("WebSocket creation failed", { status: 500 });
-      }
-      try {
-        server.accept();
-      } catch (acceptError) {
-        try { if (server) server.close(); } catch(e) {}
-        try { if (client) client.close(); } catch(e) {}
-        return new Response("WebSocket accept failed", { status: 500 });
-      }
-      const ws = server;
-      ws.roomname = undefined;
-      ws.idtarget = undefined;
-      ws._isClosing = false;
-      ws._isReplaced = false;
-
-      const messageHandler = async (ev) => {
-        await this.handleMessage(ws, ev.data);
-      };
-      const errorHandler = async () => {
-        await this._cleanupWebSocket(ws);
-      };
-      const closeHandler = async () => {
-        await this._cleanupWebSocket(ws);
-      };
-
-      ws.addEventListener("message", messageHandler);
-      ws.addEventListener("error", errorHandler);
-      ws.addEventListener("close", closeHandler);
-
-      // ─── TIDAK tambahkan ke _wsRawSet di sini ───
-      // handleSetIdTarget2 yang akan menambahkan setelah id diketahui
-      // Ini mencegah ws tanpa id menumpuk di global set
-
-      return new Response(null, { status: 101, webSocket: client });
-    } catch (error) {
-      console.error(`[FETCH ERROR] ${error?.message || 'Unknown'}`);
-      return new Response("Internal server error", { status: 500 });
+      return new Response("ChatServer Running", { status: 200 });
     }
+    if (this._wsRawSet.size > CONSTANTS.MAX_GLOBAL_CONNECTIONS) {
+      return new Response("Server overloaded", { status: 503 });
+    }
+    let pair;
+    let client;
+    let server;
+    try {
+      pair = new WebSocketPair();
+      client = pair[0];
+      server = pair[1];
+    } catch (e) {
+      return new Response("WebSocket creation failed", { status: 500 });
+    }
+    try {
+      server.accept();
+    } catch (acceptError) {
+      try { if (server) server.close(); } catch(e) {}
+      try { if (client) client.close(); } catch(e) {}
+      return new Response("WebSocket accept failed", { status: 500 });
+    }
+    const ws = server;
+    ws.roomname = undefined;
+    ws.idtarget = undefined;
+    ws._isClosing = false;
+    ws._isReplaced = false;
+
+    // ✅ KEMBALIKAN baris ini - penting untuk accurate counting & shutdown
+    this._wsRawSet.add(ws);
+
+    const messageHandler = async (ev) => {
+      await this.handleMessage(ws, ev.data);
+    };
+    const errorHandler = async () => {
+      await this._cleanupWebSocket(ws);
+    };
+    const closeHandler = async () => {
+      await this._cleanupWebSocket(ws);
+    };
+
+    ws.addEventListener("message", messageHandler);
+    ws.addEventListener("error", errorHandler);
+    ws.addEventListener("close", closeHandler);
+
+    return new Response(null, { status: 101, webSocket: client });
+  } catch (error) {
+    console.error(`[FETCH ERROR] ${error?.message || 'Unknown'}`);
+    return new Response("Internal server error", { status: 500 });
   }
+}
 
   getJumlahRoom() {
     const counts = {};
