@@ -330,7 +330,7 @@ class RoomManager {
   }
 }
 // ─────────────────────────────────────────────
-// ChatServer - SIMPLE CLEAN VERSION (FULL FIXED)
+// ChatServer - MANUAL JOIN ROOM (USER PILIH SENDIRI)
 // ─────────────────────────────────────────────
 export class ChatServer {
   constructor(state, env) {
@@ -377,7 +377,6 @@ export class ChatServer {
     this._startMasterTimer();
   }
 
-  // ─── HELPER: hapus ws dari SEMUA tracking tanpa menyentuh seat ───
   _removeWsFromTracking(ws) {
     try {
       if (ws.roomname) {
@@ -395,7 +394,6 @@ export class ChatServer {
     } catch (e) {}
   }
 
-  // ─── HELPER: cek apakah user punya koneksi AKTIF lain (bukan ws ini) ───
   _hasOtherActiveConnection(userId, excludeWs) {
     const conns = this.userConnections.get(userId);
     if (!conns) return false;
@@ -407,7 +405,6 @@ export class ChatServer {
     return false;
   }
 
-  // ─── GET ROOM COUNT BERDASARKAN WEBSOCKET AKTIF ───
   getRoomCount(room) {
     try {
       const clientSet = this.roomClients.get(room);
@@ -425,7 +422,6 @@ export class ChatServer {
     }
   }
 
-  // ─── UPDATE ROOM COUNT DAN BROADCAST ───
   updateRoomCount(room) {
     try {
       const count = this.getRoomCount(room);
@@ -766,6 +762,7 @@ export class ChatServer {
       }
 
       if (ws.readyState === 1) {
+        // KIRIM JOINROOMAWAL AGAR UI BISA MEMILIH ROOM MANUAL
         await this.safeSend(ws, ["joinroomawal"]);
       }
 
@@ -811,7 +808,11 @@ export class ChatServer {
         case "forceResetUser":
           await this.handleForceResetUser(ws, data[1]);
           break;
-        
+        case "joinRoom": {
+          const success = await this.handleJoinRoom(ws, data[1]);
+          if (success && ws.roomname) this.updateRoomCount(ws.roomname);
+          break;
+        }
         case "chat": {
           const [, roomname, noImageURL, username, message, usernameColor, chatTextColor] = data;
           if (!ws.roomname) return;
@@ -1082,9 +1083,9 @@ export class ChatServer {
       return new Response(null, { status: 101, webSocket: client });
     } catch (error) {
       console.error(`[FETCH ERROR] ${error?.message || 'Unknown'}`);
-      return new Response("Internal server error", { status: 500 });
-    }
+      return new Response("Internal server error", status: 500 });
   }
+}
 
   getJumlahRoom() {
     const counts = {};
