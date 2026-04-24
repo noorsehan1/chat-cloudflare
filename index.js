@@ -423,22 +423,14 @@ export class ChatServer {
     }
   }
 
-  // UPDATE ROOM COUNT DAN BROADCAST KE SEMUA USER DI ROOM
+  // UPDATE ROOM COUNT DAN BROADCAST KE SEMUA USER DI ROOM TERSEBUT
   async updateRoomCount(room) {
     try {
       const count = this.getRoomCount(room);
       console.log(`[ROOM_COUNT] Room ${room} now has ${count} users`);
       
-      // Broadcast ke semua user di room
+      // Broadcast ke semua user di room yang sama
       this.broadcastToRoom(room, ["roomUserCount", room, count]);
-      
-      // Juga update untuk room list di sidebar (opsional)
-      for (const ws of this._wsRawSet) {
-        if (ws && ws.readyState === 1 && !ws._isClosing && ws.roomname !== room) {
-          // Kirim update ke user di room lain untuk update sidebar
-          await this.safeSend(ws, ["roomUserCount", room, count]);
-        }
-      }
       
       return count;
     } catch(e) { 
@@ -472,8 +464,6 @@ export class ChatServer {
           if (seatRemoved) {
             console.log(`[CLEANUP] Removed user ${userId} seat ${seatRemoved} in ${roomName}`);
             this.broadcastToRoom(roomName, ["removeKursi", roomName, seatRemoved]);
-            // UPDATE COUNT SETELAH REMOVE SEAT
-            await this.updateRoomCount(roomName);
           }
         }
       }
@@ -486,7 +476,7 @@ export class ChatServer {
       if (roomName) {
         const clientSet = this.roomClients.get(roomName);
         if (clientSet) clientSet.delete(ws);
-        // UPDATE COUNT SETELAH REMOVE DARI ROOM CLIENTS
+        // UPDATE COUNT UNTUK ROOM YANG DITINGGALKAN
         await this.updateRoomCount(roomName);
       }
 
@@ -629,7 +619,7 @@ export class ChatServer {
       const roomManager = this.roomManagers.get(room);
       if (!roomManager) return;
       
-      // KIRIM ROOM USER COUNT
+      // KIRIM ROOM USER COUNT UNTUK ROOM YANG BARU
       const count = this.getRoomCount(room);
       await this.safeSend(ws, ["roomUserCount", room, count]);
       
@@ -666,7 +656,10 @@ export class ChatServer {
     try {
       const oldRoom = ws.roomname;
       
+      // KELUAR DARI ROOM LAMA DULU
       if (oldRoom && oldRoom !== room) {
+        console.log(`[JOIN_ROOM] User ${ws.idtarget} moving from ${oldRoom} to ${room}`);
+        
         const oldRoomManager = this.roomManagers.get(oldRoom);
         if (oldRoomManager) {
           const oldSeat = oldRoomManager.removeUserCompletely(ws.idtarget);
@@ -681,10 +674,11 @@ export class ChatServer {
         this.userToSeat.delete(ws.idtarget);
         this.userCurrentRoom.delete(ws.idtarget);
         
-        // UPDATE COUNT ROOM LAMA
+        // UPDATE COUNT ROOM LAMA SETELAH USER KELUAR
         await this.updateRoomCount(oldRoom);
       }
 
+      // MASUK KE ROOM BARU
       const roomManager = this.roomManagers.get(room);
       if (!roomManager) return false;
 
@@ -728,20 +722,18 @@ export class ChatServer {
       
       this._wsRawSet.add(ws);
 
+      // KIRIM RESPONSE KE USER
       await this.safeSend(ws, ["rooMasuk", assignedSeat, room]);
       await this.safeSend(ws, ["numberKursiSaya", assignedSeat]);
       await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
       
-      // KIRIM ROOM USER COUNT KE USER YANG BARU MASUK
-      const currentCount = this.getRoomCount(room);
-      await this.safeSend(ws, ["roomUserCount", room, currentCount]);
-      
-      // BROADCAST KE SEMUA USER DI ROOM BAHWA ADA USER BARU
-      this.broadcastToRoom(room, ["userOccupiedSeat", room, assignedSeat, ws.idtarget]);
-      
-      // UPDATE COUNT ROOM DAN BROADCAST KE SEMUA USER
+      // UPDATE COUNT ROOM BARU SETELAH USER MASUK
       await this.updateRoomCount(room);
+      
+      // BROADCAST KE SEMUA USER DI ROOM BARU BAHWA ADA USER BARU
+      this.broadcastToRoom(room, ["userOccupiedSeat", room, assignedSeat, ws.idtarget]);
 
+      // KIRIM STATE ROOM BARU KE USER
       await this.sendAllStateTo(ws, room, true);
       
       return true;
@@ -839,7 +831,10 @@ export class ChatServer {
           break;
         case "joinRoom": {
           const success = await this.handleJoinRoom(ws, data[1]);
-          if (success && ws.roomname) await this.updateRoomCount(ws.roomname);
+          if (success && ws.roomname) {
+            // Update count untuk room yang baru dimasuki
+            await this.updateRoomCount(ws.roomname);
+          }
           break;
         }
         case "chat": {
