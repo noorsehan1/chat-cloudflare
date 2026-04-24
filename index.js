@@ -1,10 +1,7 @@
-// ==================== CHAT SERVER 2 - PRODUCTION READY (FULL FIXED) ====================
+// ==================== CHAT SERVER 2 - FINAL FIXED ====================
 // name = "chatcloudnew"
 // main = "index.js"
 // compatibility_date = "2026-04-13"
-//
-// Durable Object Binding: CHAT_SERVER_2
-// Class Name: ChatServer2
 
 let LowCardGameManager;
 try {
@@ -52,7 +49,7 @@ const GAME_ROOMS = Object.freeze([
 ]);
 
 // ─────────────────────────────────────────────
-// SimpleLock with safe release
+// SimpleLock
 // ─────────────────────────────────────────────
 class SimpleLock {
   constructor(timeoutMs = CONSTANTS.LOCK_TIMEOUT_MS) {
@@ -121,7 +118,7 @@ class SimpleLock {
 }
 
 // ─────────────────────────────────────────────
-// PMBuffer with error handling
+// PMBuffer
 // ─────────────────────────────────────────────
 class PMBuffer {
   constructor() {
@@ -189,7 +186,7 @@ class PMBuffer {
 }
 
 // ─────────────────────────────────────────────
-// GlobalChatBuffer with safe flush
+// GlobalChatBuffer
 // ─────────────────────────────────────────────
 class GlobalChatBuffer {
   constructor() {
@@ -382,7 +379,6 @@ export class ChatServer {
     this._isClosing = false;
     this._alive = true;
 
-    // Locks
     this.roomLock = new SimpleLock();
     this.userLock = new SimpleLock();
     this.connectionLock = new SimpleLock();
@@ -437,7 +433,6 @@ export class ChatServer {
     this._startGarbageCollector();
   }
 
-  // ========== GARBAGE COLLECTOR ==========
   _startGarbageCollector() {
     if (this._gcTimer) clearInterval(this._gcTimer);
     this._gcTimer = setInterval(() => this._runGarbageCollector(), CONSTANTS.GC_INTERVAL_MS);
@@ -452,7 +447,7 @@ export class ChatServer {
     try {
       const now = Date.now();
       
-      // ✅ FIX 1: Hapus userLastSeen untuk user yang tidak punya koneksi
+      // Hapus userLastSeen untuk user yang tidak punya koneksi
       for (const [userId, lastSeen] of this.userLastSeen) {
         const hasConnection = this.userConnections.has(userId);
         if (!hasConnection) {
@@ -460,7 +455,6 @@ export class ChatServer {
         }
       }
       
-      // ✅ FIX 2: Hapus stale connections
       for (const [userId, connections] of this.userConnections) {
         const validConns = [];
         for (const conn of connections) {
@@ -495,7 +489,6 @@ export class ChatServer {
         }
       }
       
-      // ✅ FIX 3: Hapus stale seats
       for (const [room, roomManager] of this.roomManagers) {
         for (const [seat, seatData] of roomManager.seats) {
           if (seatData && now - seatData.lastUpdated > CONSTANTS.STALE_CONNECTION_TIMEOUT_MS) {
@@ -517,7 +510,6 @@ export class ChatServer {
     }
   }
 
-  // ========== CLEANUP WEB SOCKET ==========
   async _cleanupWebSocket(ws) {
     if (!ws || ws._isClosing) return;
     ws._isClosing = true;
@@ -541,7 +533,6 @@ export class ChatServer {
           userConns.delete(ws);
           
           if (userConns.size === 0) {
-            // ✅ FIX: Hapus ALL data user termasuk userLastSeen
             this.userConnections.delete(userId);
             this.userConnectionVersion.delete(userId);
             this.userLastSeen.delete(userId);
@@ -747,7 +738,6 @@ export class ChatServer {
     }
   }
 
-  // ========== HANDLE JOIN ROOM ==========
   async handleJoinRoom(ws, room) {
     if (!ws?.idtarget) {
       await this.safeSend(ws, ["error", "User ID not set"]);
@@ -869,7 +859,7 @@ export class ChatServer {
       roomRelease();
       roomRelease = null;
       
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 100));
       await this.sendAllStateTo(ws, room, true);
       
       return true;
@@ -883,7 +873,7 @@ export class ChatServer {
     }
   }
 
-  // ========== HANDLE SET ID TARGET 2 ==========
+  // ========== HANDLE SET ID TARGET 2 - FIXED BUG ==========
   async handleSetIdTarget2(ws, id, baru) {
     if (!id || !ws) return;
 
@@ -908,6 +898,9 @@ export class ChatServer {
       this.userLastSeen.set(id, Date.now());
       
       if (baru === true) {
+        // ========== USER BARU - FIXED ==========
+        
+        // Tutup semua koneksi lama user ini
         const oldConns = this.userConnections.get(id);
         if (oldConns) {
           const toClose = Array.from(oldConns);
@@ -921,6 +914,7 @@ export class ChatServer {
           }
         }
         
+        // Hapus semua seat user ini dari semua room
         const roomsToUpdate = [];
         for (const [room, roomManager] of this.roomManagers) {
           let seatToRemove = null;
@@ -936,23 +930,40 @@ export class ChatServer {
           }
         }
         
+        // Hapus semua data user LAMA
         this.userConnections.delete(id);
         this.userConnectionVersion.delete(id);
         this.userToSeat.delete(id);
         this.userCurrentRoom.delete(id);
         
+        // ✅ FIX: Setup koneksi BARU untuk user ini
+        ws.idtarget = id;
+        ws._isClosing = false;
+        
+        let userConns = this.userConnections.get(id);
+        if (!userConns) {
+          userConns = new Set();
+          this.userConnections.set(id, userConns);
+        }
+        userConns.add(ws);
+        this._wsRawSet.add(ws);
+        
+        // Release lock sebelum broadcast
         const releaseCopy = release;
         release = null;
         releaseCopy();
         
+        // Broadcast penghapusan kursi
         for (const { room, seat } of roomsToUpdate) {
           this.broadcastToRoom(room, ["removeKursi", room, seat]);
           this.updateRoomCount(room);
         }
         
+        // ✅ FIX: Kirim joinroomawal setelah setup selesai
         await this.safeSend(ws, ["joinroomawal"]);
         
       } else {
+        // ========== RECONNECT - PERTAHANKAN SEAT ==========
         const currentVersion = this.userConnectionVersion.get(id);
         
         if (currentVersion && currentVersion > newVersion) {
@@ -963,6 +974,7 @@ export class ChatServer {
         
         this.userConnectionVersion.set(id, newVersion);
         
+        // Tutup koneksi lama user ini
         const oldConns = this.userConnections.get(id);
         if (oldConns) {
           const toClose = Array.from(oldConns);
@@ -974,6 +986,7 @@ export class ChatServer {
           }
         }
         
+        // Cek seat user
         const seatInfo = this.userToSeat.get(id);
         
         if (seatInfo) {
@@ -1357,10 +1370,7 @@ export class ChatServer {
           return new Response(JSON.stringify({
             status: "healthy",
             connections: activeCount,
-            uptime: Date.now() - this._startTime,
-            userLastSeenSize: this.userLastSeen.size,
-            userConnectionsSize: this.userConnections.size,
-            seatsTotal: Array.from(this.roomManagers.values()).reduce((a, b) => a + b.seats.size, 0)
+            uptime: Date.now() - this._startTime
           }), { status: 200, headers: { "content-type": "application/json" } });
         }
         if (url.pathname === "/shutdown") { await this.shutdown(); return new Response("Shutting down...", { status: 200 }); }
