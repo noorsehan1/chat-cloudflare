@@ -218,10 +218,9 @@ class GlobalChatBuffer {
   _scheduleFlush() {
     if (this._flushScheduled || this._isDestroyed) return;
     this._flushScheduled = true;
-    setImmediate(() => {
-      this._flushScheduled = false;
-      this._flush();
-    });
+    // Langsung flush tanpa setImmediate
+    this._flush();
+    this._flushScheduled = false;
   }
 
   tick(now) {
@@ -459,6 +458,8 @@ export class ChatServer {
     const release = await this.userLock.acquire().catch(() => null);
     if (!release) return;
     
+    let lockReleased = false;
+    
     try {
       const now = Date.now();
       
@@ -484,10 +485,9 @@ export class ChatServer {
               const seatData = roomManager.getSeat(seatInfo.seat);
               if (seatData && seatData.namauser === userId) {
                 roomManager.removeSeat(seatInfo.seat);
-                // Release lock before broadcast to avoid deadlock
-                const releaseCopy = release;
-                release = null;
-                releaseCopy();
+                // Release lock before broadcast
+                release();
+                lockReleased = true;
                 this.broadcastToRoom(seatInfo.room, ["removeKursi", seatInfo.room, seatInfo.seat]);
                 this.updateRoomCount(seatInfo.room);
                 return;
@@ -513,12 +513,12 @@ export class ChatServer {
           }
         }
         
-        if (seatsToRemove.length > 0) {
+        if (seatsToRemove.length > 0 && !lockReleased) {
           for (const seat of seatsToRemove) {
             roomManager.removeSeat(seat);
-            const releaseCopy = release;
-            release = null;
-            releaseCopy();
+            // Release lock before broadcast
+            release();
+            lockReleased = true;
             this.broadcastToRoom(room, ["removeKursi", room, seat]);
             this.updateRoomCount(room);
             return;
@@ -530,7 +530,7 @@ export class ChatServer {
       // Silently fail
     }
     finally {
-      if (release) release();
+      if (!lockReleased) release();
     }
   }
 
@@ -568,6 +568,7 @@ export class ChatServer {
                 const seatData = roomManager.getSeat(seatInfo.seat);
                 if (seatData && seatData.namauser === userId) {
                   roomManager.removeSeat(seatInfo.seat);
+                  // Release lock before broadcast
                   const releaseCopy = release;
                   release = null;
                   releaseCopy();
@@ -842,8 +843,16 @@ export class ChatServer {
           
           if (oldSeat) {
             oldRoomManager.removeSeat(oldSeat);
+            // Release locks before broadcast
+            userRelease();
+            userRelease = null;
+            roomRelease();
+            roomRelease = null;
             this.broadcastToRoom(oldRoom, ["removeKursi", oldRoom, oldSeat]);
             this.updateRoomCount(oldRoom);
+            // Re-acquire locks
+            roomRelease = await this.roomLock.acquire();
+            userRelease = await this.userLock.acquire();
           }
         }
         
@@ -873,8 +882,16 @@ export class ChatServer {
         const oldRoomManager = this.roomManagers.get(existingSeatInfo.room);
         if (oldRoomManager) {
           oldRoomManager.removeSeat(existingSeatInfo.seat);
+          // Release locks before broadcast
+          userRelease();
+          userRelease = null;
+          roomRelease();
+          roomRelease = null;
           this.broadcastToRoom(existingSeatInfo.room, ["removeKursi", existingSeatInfo.room, existingSeatInfo.seat]);
           this.updateRoomCount(existingSeatInfo.room);
+          // Re-acquire locks
+          roomRelease = await this.roomLock.acquire();
+          userRelease = await this.userLock.acquire();
         }
         this.userToSeat.delete(userId);
         this.userCurrentRoom.delete(userId);
@@ -909,14 +926,15 @@ export class ChatServer {
       await this.safeSend(ws, ["muteTypeResponse", roomManager.getMute(), room]);
       await this.safeSend(ws, ["roomUserCount", room, roomManager.getOccupiedCount()]);
       
-      this.broadcastToRoom(room, ["userOccupiedSeat", room, assignedSeat, userId]);
-      
+      // Release locks before broadcast
       userRelease();
       userRelease = null;
       roomRelease();
       roomRelease = null;
       
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      this.broadcastToRoom(room, ["userOccupiedSeat", room, assignedSeat, userId]);
+      
+      await new Promise(resolve => setTimeout(resolve, 100));
       await this.sendAllStateTo(ws, room, true);
       
       return true;
@@ -999,6 +1017,7 @@ export class ChatServer {
         userConns.add(ws);
         this._wsRawSet.add(ws);
         
+        // Release lock before broadcast
         const releaseCopy = release;
         release = null;
         releaseCopy();
@@ -1061,6 +1080,7 @@ export class ChatServer {
               }
               clientSet.add(ws);
               
+              // Release lock before broadcast
               const releaseCopy = release;
               release = null;
               releaseCopy();
