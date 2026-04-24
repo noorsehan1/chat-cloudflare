@@ -762,7 +762,6 @@ export class ChatServer {
       }
 
       if (ws.readyState === 1) {
-        // KIRIM JOINROOMAWAL AGAR UI BISA MEMILIH ROOM MANUAL
         await this.safeSend(ws, ["joinroomawal"]);
       }
 
@@ -1083,9 +1082,9 @@ export class ChatServer {
       return new Response(null, { status: 101, webSocket: client });
     } catch (error) {
       console.error(`[FETCH ERROR] ${error?.message || 'Unknown'}`);
-      return new Response("Internal server error", status: 500 });
+      return new Response("Internal server error", { status: 500 });
+    }
   }
-}
 
   getJumlahRoom() {
     const counts = {};
