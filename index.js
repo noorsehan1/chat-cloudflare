@@ -916,7 +916,7 @@ export class ChatServer {
       roomRelease();
       roomRelease = null;
       
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 1000));
       await this.sendAllStateTo(ws, room, true);
       
       return true;
