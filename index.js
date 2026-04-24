@@ -45,6 +45,14 @@ const GAME_ROOMS = Object.freeze([
   "Chikahan Tambayan", "BLUE DYNASTY", "One Side Love", "Heart Lovers"
 ]);
 
+// 🔥 VERSION OTOMATIS - akan berbeda setiap deploy 🔥
+// Menggunakan timestamp + random untuk memastikan selalu berbeda
+const DEPLOY_VERSION = (() => {
+  const now = Date.now();
+  const random = Math.random().toString(36).substring(2, 8);
+  return `${now}-${random}`;
+})();
+
 class SimpleLock {
   constructor(timeoutMs = CONSTANTS.LOCK_TIMEOUT_MS) {
     this._locked = false;
@@ -377,6 +385,16 @@ export class ChatServer {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    
+    // 🔥🔥🔥 RESET OTOMATIS SETIAP DEPLOY 🔥🔥🔥
+    // Version akan berbeda setiap deploy karena menggunakan Date.now()
+    this._deployVersion = DEPLOY_VERSION;
+    
+    console.log(`[DEPLOY] ═══════════════════════════════════════`);
+    console.log(`[DEPLOY] 🚀 SERVER DEPLOYED WITH VERSION: ${this._deployVersion}`);
+    console.log(`[DEPLOY] 🔥 ALL DATA WILL BE RESET ON THIS DEPLOY`);
+    console.log(`[DEPLOY] ═══════════════════════════════════════`);
+    
     this._startTime = Date.now();
     this._isClosing = false;
     this._masterTickCounter = 0;
@@ -411,10 +429,16 @@ export class ChatServer {
     } catch (error) {
       this.lowcard = null;
     }
+    
+    // 🔥 RESET ALL ROOMS - FRESH DATA EVERY DEPLOY 🔥
     for (const room of roomList) {
       this.roomManagers.set(room, new RoomManager(room));
       this.roomClients.set(room, new Set());
     }
+    
+    console.log(`[DEPLOY] ✅ Initialized ${this.roomManagers.size} rooms with fresh data`);
+    console.log(`[DEPLOY] 📊 Initial room counts:`, this.getJumlahRoom());
+    
     this._startMasterTimer();
   }
 
@@ -1133,9 +1157,17 @@ export class ChatServer {
           }
           return new Response(JSON.stringify({
             status: "healthy",
+            version: this._deployVersion,
             connections: activeCount,
             rooms: this.getJumlahRoom(),
             uptime: Date.now() - this._startTime,
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        // Tambahkan endpoint untuk cek version
+        if (url.pathname === "/version") {
+          return new Response(JSON.stringify({
+            version: this._deployVersion,
+            deployTime: this._startTime
           }), { status: 200, headers: { "content-type": "application/json" } });
         }
         return new Response("ChatServer Running", { status: 200 });
