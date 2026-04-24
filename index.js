@@ -1,4 +1,4 @@
-// ==================== CHAT SERVER 2 - WITH FORCE CLEANUP & ZERO CRASH ====================
+// ==================== CHAT SERVER 2 - ZERO CRASH, NO STORAGE, PERFECT CLEANUP ====================
 // name = "chatcloudnew"
 // main = "index.js"
 // compatibility_date = "2026-04-13"
@@ -499,111 +499,7 @@ export class ChatServer {
     this._masterTickRunning = false;
     this._cleanupRunning = false;
     
-    this._autoResetOnDeploy().catch(() => {});
     this._startMasterTimer();
-  }
-
-  async _autoResetOnDeploy() {
-    try {
-      const currentDeployId = this._generateDeployId();
-      const lastDeployId = await this.state.storage.get("deploy_id") || "";
-      
-      if (lastDeployId !== currentDeployId) {
-        console.log(`[AUTO RESET] New deployment detected! Resetting all data...`);
-        await this.state.storage.put("deploy_id", currentDeployId);
-        await this._forceResetAllData();
-        console.log(`[AUTO RESET] All data has been reset successfully!`);
-      }
-    } catch (error) {
-      console.error(`[AUTO RESET] Error:`, error);
-    }
-  }
-  
-  _generateDeployId() {
-    try {
-      const constantsStr = JSON.stringify({
-        maxSeats: CONSTANTS.MAX_SEATS,
-        maxNumber: CONSTANTS.MAX_NUMBER,
-        roomCount: roomList.length,
-        gameRoomsCount: GAME_ROOMS.length
-      });
-      
-      let hash = 0;
-      for (let i = 0; i < constantsStr.length; i++) {
-        const char = constantsStr.charCodeAt(i);
-        hash = ((hash << 5) - hash) + char;
-        hash = hash & hash;
-      }
-      
-      return `${Math.abs(hash)}_${this._startTime}`;
-    } catch(e) {
-      return `fallback_${Date.now()}`;
-    }
-  }
-  
-  async _forceResetAllData() {
-    try {
-      const snapshot = Array.from(this._wsRawSet);
-      for (const ws of snapshot) {
-        if (ws && ws.readyState === 1 && !ws._isClosing) {
-          try {
-            await this.safeSend(ws, ["serverRestart", "Server is restarting, please reconnect..."]);
-            ws.close(1000, "Server restart");
-          } catch (e) {}
-        }
-        await this._cleanupWebSocket(ws);
-      }
-      
-      this._wsRawSet.clear();
-      this.userToSeat.clear();
-      this.userCurrentRoom.clear();
-      this.userConnections.clear();
-      
-      for (const room of roomList) {
-        if (this.roomManagers.has(room)) {
-          this.roomManagers.get(room).destroy();
-        }
-        this.roomManagers.set(room, new RoomManager(room));
-        this.roomClients.set(room, new Set());
-      }
-      
-      if (this.chatBuffer) {
-        await this.chatBuffer.destroy();
-        this.chatBuffer = new GlobalChatBuffer();
-        this.chatBuffer.setFlushCallback((room, msg) => this._sendDirectToRoom(room, msg));
-      }
-      
-      if (this.pmBuffer) {
-        await this.pmBuffer.destroy();
-        this.pmBuffer = new PMBuffer();
-        this.pmBuffer.setFlushCallback(async (targetId, message) => {
-          try {
-            const targetConnections = this.userConnections.get(targetId);
-            if (targetConnections) {
-              for (const client of targetConnections) {
-                if (client && client.readyState === 1 && !client._isClosing) {
-                  await this.safeSend(client, message);
-                  break;
-                }
-              }
-            }
-          } catch(e) {}
-        });
-      }
-      
-      try {
-        if (this.lowcard && typeof this.lowcard.destroy === 'function') {
-          await this.lowcard.destroy();
-        }
-        this.lowcard = new LowCardGameManager(this);
-      } catch (error) {
-        this.lowcard = null;
-      }
-      
-      this.currentNumber = 1;
-      this._masterTickCounter = 0;
-      this._startTime = Date.now();
-    } catch(e) {}
   }
 
   // ========== CLEANUP WEBSOCKET - ZERO CRASH VERSION ==========
@@ -954,7 +850,6 @@ export class ChatServer {
         } catch(e) {}
       }
     } catch (error) {
-      // ZERO CRASH: hanya log error, tidak throw
       console.error(`[MASTER TICK ERROR] ${error?.message || 'Unknown'}`);
     } finally {
       this._masterTickRunning = false;
@@ -1161,7 +1056,6 @@ export class ChatServer {
     try {
       const oldRoom = ws.roomname;
       
-      // FORCE CLEANUP SEBELUM JOIN ROOM BARU
       if (oldRoom && oldRoom !== room) {
         console.log(`[JOIN_ROOM] Moving user ${ws.idtarget} from room ${oldRoom} to ${room}`);
         
@@ -1227,7 +1121,6 @@ export class ChatServer {
           assignedSeat = seatNum;
           console.log(`[JOIN_ROOM] User ${ws.idtarget} reusing existing seat ${assignedSeat} in ${room}`);
         } else {
-          // Seat tidak valid, hapus dari mapping
           this.userToSeat.delete(ws.idtarget);
           this.userCurrentRoom.delete(ws.idtarget);
         }
@@ -1411,13 +1304,11 @@ export class ChatServer {
             return;
           }
         }
-        // Seat tidak valid, hapus dan treat sebagai user baru
         console.log(`[SET_ID] Seat for ${id} not valid, treating as new user`);
         this.userToSeat.delete(id);
         this.userCurrentRoom.delete(id);
       }
 
-      // Kirim response sesuai tipe user
       if (baru === false) {
         await this.safeSend(ws, ["needJoinRoom"]);
       } else {
@@ -1681,15 +1572,9 @@ export class ChatServer {
         totalPoints += rm.points.size;
       }
 
-      const deployId = await this.state.storage.get("deploy_id") || "first_run";
-
       return {
         timestamp: Date.now(),
         uptime: Date.now() - this._startTime,
-        deployInfo: {
-          currentDeployId: deployId.substring(0, 30) + "...",
-          autoResetEnabled: true
-        },
         activeClients: { total: this._wsRawSet.size, real: activeReal },
         roomClients: { total: totalRoomClients },
         userConnections: this.userConnections.size,
@@ -1707,6 +1592,71 @@ export class ChatServer {
     } catch (error) {
       return { error: "Failed to get stats" };
     }
+  }
+
+  async _forceResetAllData() {
+    try {
+      const snapshot = Array.from(this._wsRawSet);
+      for (const ws of snapshot) {
+        if (ws && ws.readyState === 1 && !ws._isClosing) {
+          try {
+            await this.safeSend(ws, ["serverRestart", "Server is restarting, please reconnect..."]);
+            ws.close(1000, "Server restart");
+          } catch (e) {}
+        }
+        await this._cleanupWebSocket(ws);
+      }
+      
+      this._wsRawSet.clear();
+      this.userToSeat.clear();
+      this.userCurrentRoom.clear();
+      this.userConnections.clear();
+      
+      for (const room of roomList) {
+        if (this.roomManagers.has(room)) {
+          this.roomManagers.get(room).destroy();
+        }
+        this.roomManagers.set(room, new RoomManager(room));
+        this.roomClients.set(room, new Set());
+      }
+      
+      if (this.chatBuffer) {
+        await this.chatBuffer.destroy();
+        this.chatBuffer = new GlobalChatBuffer();
+        this.chatBuffer.setFlushCallback((room, msg) => this._sendDirectToRoom(room, msg));
+      }
+      
+      if (this.pmBuffer) {
+        await this.pmBuffer.destroy();
+        this.pmBuffer = new PMBuffer();
+        this.pmBuffer.setFlushCallback(async (targetId, message) => {
+          try {
+            const targetConnections = this.userConnections.get(targetId);
+            if (targetConnections) {
+              for (const client of targetConnections) {
+                if (client && client.readyState === 1 && !client._isClosing) {
+                  await this.safeSend(client, message);
+                  break;
+                }
+              }
+            }
+          } catch(e) {}
+        });
+      }
+      
+      try {
+        if (this.lowcard && typeof this.lowcard.destroy === 'function') {
+          await this.lowcard.destroy();
+        }
+        this.lowcard = new LowCardGameManager(this);
+      } catch (error) {
+        this.lowcard = null;
+      }
+      
+      this.currentNumber = 1;
+      this._masterTickCounter = 0;
+      this._startTime = Date.now();
+    } catch(e) {}
   }
 
   async shutdown() {
@@ -1751,16 +1701,11 @@ export class ChatServer {
           for (const ws of this._wsRawSet) {
             if (ws && ws.readyState === 1 && !ws._isClosing) activeCount++;
           }
-          const deployId = await this.state.storage.get("deploy_id") || "first_run";
           return new Response(JSON.stringify({
             status: "healthy",
             connections: activeCount,
             rooms: this.getJumlahRoom(),
             uptime: Date.now() - this._startTime,
-            autoReset: {
-              enabled: true,
-              deployId: deployId.substring(0, 20) + "..."
-            },
             chatBuffer: this.chatBuffer ? this.chatBuffer.getStats() : {},
             pmBuffer: this.pmBuffer ? this.pmBuffer.getStats() : {},
             gameStatus: this.lowcard ? this.lowcard.healthCheck() : null
@@ -1796,7 +1741,6 @@ export class ChatServer {
         if (url.pathname === "/shutdown") { await this.shutdown(); return new Response("Shutting down...", { status: 200 }); }
         if (url.pathname === "/reset") { 
           await this._forceResetAllData();
-          await this.state.storage.put("last_reset_time", Date.now());
           return new Response("All data has been reset successfully!", { status: 200 }); 
         }
         if (url.pathname === "/debug/user") {
