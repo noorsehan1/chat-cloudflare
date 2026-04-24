@@ -368,7 +368,7 @@ class RoomManager {
 }
 
 // ─────────────────────────────────────────────
-// ChatServer - SIMPLE CLEAN VERSION
+// ChatServer - SIMPLE CLEAN VERSION (FULL FIXED)
 // ─────────────────────────────────────────────
 export class ChatServer {
   constructor(state, env) {
@@ -425,7 +425,9 @@ export class ChatServer {
   async _cleanupWebSocket(ws) {
     if (!ws || ws._isClosing) return;
     
+    // Jika koneksi ini digantikan oleh koneksi baru, jangan cleanup data user
     if (ws._isReplaced) {
+      console.log(`[CLEANUP] Skipping cleanup for replaced connection: ${ws.idtarget}`);
       ws._isClosing = true;
       this._wsRawSet.delete(ws);
       return;
@@ -437,6 +439,7 @@ export class ChatServer {
       const userId = ws.idtarget;
       const roomName = ws.roomname;
       
+      // Cek apakah masih ada koneksi aktif lain untuk user ini
       let hasOtherConnection = false;
       if (userId) {
         const otherConns = this.userConnections.get(userId);
@@ -450,22 +453,26 @@ export class ChatServer {
         }
       }
       
+      // Hanya hapus seat jika tidak ada koneksi lain
       if (!hasOtherConnection && userId && roomName) {
         const roomManager = this.roomManagers.get(roomName);
         if (roomManager) {
           const seatRemoved = roomManager.removeUserCompletely(userId);
           if (seatRemoved) {
+            console.log(`[CLEANUP] Removed user ${userId} from seat ${seatRemoved} in ${roomName}`);
             this.broadcastToRoom(roomName, ["removeKursi", roomName, seatRemoved]);
             this.updateRoomCount(roomName);
           }
         }
       }
       
+      // Hapus tracking user jika tidak ada koneksi lain
       if (!hasOtherConnection && userId) {
         this.userToSeat.delete(userId);
         this.userCurrentRoom.delete(userId);
       }
       
+      // Hapus WebSocket dari semua tracking
       if (userId) {
         const userConns = this.userConnections.get(userId);
         if (userConns) {
@@ -483,6 +490,7 @@ export class ChatServer {
       
       this._wsRawSet.delete(ws);
       
+      // Tutup koneksi jika masih terbuka
       if (ws.readyState === 1) {
         try { ws.close(1000, "Cleanup done"); } catch(e) {}
       }
@@ -498,6 +506,8 @@ export class ChatServer {
   async _cleanupUserFromAllRooms(userId) {
     if (!userId) return;
     
+    console.log(`[CLEANUP_USER] Removing ${userId} from all rooms`);
+    
     for (const [room, roomManager] of this.roomManagers) {
       const seatRemoved = roomManager.removeUserCompletely(userId);
       if (seatRemoved) {
@@ -508,7 +518,16 @@ export class ChatServer {
     
     this.userToSeat.delete(userId);
     this.userCurrentRoom.delete(userId);
-    this.userConnections.delete(userId);
+    
+    const conns = this.userConnections.get(userId);
+    if (conns) {
+      for (const ws of conns) {
+        if (ws && ws.readyState === 1) {
+          try { ws.close(1000, "Force cleanup"); } catch(e) {}
+        }
+      }
+      this.userConnections.delete(userId);
+    }
   }
 
   _startMasterTimer() {
@@ -761,14 +780,16 @@ export class ChatServer {
         return;
       }
       
-      console.log(`[SET_ID] Setting up for ${id}`);
+      console.log(`[SET_ID] Setting up for ${id}, baru=${baru}`);
+      
+      // Ambil koneksi lama SEBELUM menambah yang baru
+      const existingConns = this.userConnections.get(id);
       
       ws.idtarget = id;
       ws._isClosing = false;
-      ws._isActiveConnection = true;
+      ws._isReplaced = false;
       
-      const existingConns = this.userConnections.get(id);
-      
+      // Tambahkan koneksi baru ke tracking
       let userConns = this.userConnections.get(id);
       if (!userConns) {
         userConns = new Set();
@@ -777,9 +798,11 @@ export class ChatServer {
       userConns.add(ws);
       this._wsRawSet.add(ws);
       
+      // Tutup semua koneksi LAMA (kecuali yang sekarang)
       if (existingConns) {
         for (const oldWs of existingConns) {
           if (oldWs !== ws && oldWs.readyState === 1) {
+            console.log(`[SET_ID] Closing old connection for ${id}`);
             oldWs._isReplaced = true;
             oldWs._isClosing = true;
             try { 
@@ -789,11 +812,7 @@ export class ChatServer {
         }
       }
       
-      if (!ws.roomname) {
-        this.userToSeat.delete(id);
-        this.userCurrentRoom.delete(id);
-      }
-      
+      // Kirim response ke client
       if (ws.readyState === 1) {
         await this.safeSend(ws, ["joinroomawal"]);
       }
@@ -804,6 +823,18 @@ export class ChatServer {
         await this.safeSend(ws, ["error", "Connection failed"]);
       }
     }
+  }
+
+  async handleForceResetUser(ws, userId) {
+    if (!userId || userId !== ws.idtarget) {
+      await this.safeSend(ws, ["error", "Cannot reset another user"]);
+      return;
+    }
+    
+    console.log(`[FORCE_RESET] Resetting user ${userId}`);
+    await this._cleanupUserFromAllRooms(userId);
+    await this.safeSend(ws, ["resetComplete", userId]);
+    await this.safeSend(ws, ["joinroomawal"]);
   }
 
   async handleMessage(ws, raw) {
@@ -828,6 +859,9 @@ export class ChatServer {
       switch (evt) {
         case "setIdTarget2":
           await this.handleSetIdTarget2(ws, data[1], data[2]);
+          break;
+        case "forceResetUser":
+          await this.handleForceResetUser(ws, data[1]);
           break;
         case "joinRoom": {
           const success = await this.handleJoinRoom(ws, data[1]);
