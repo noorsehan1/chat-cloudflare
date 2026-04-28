@@ -39,14 +39,14 @@ const CONSTANTS = Object.freeze({
 
 const roomList = Object.freeze([
   "LowCard 1", "LowCard 2", "Gacor", "General", "Pakistan", "Philippines",
-  "India", "Indonesia", "Birthday Party", "Heart Lovers", "Cat lovers",
+  "India", "LOVE BIRDS", "Birthday Party", "Heart Lovers", "Cat lovers",
   "Chikahan Tambayan", "Lounge Talk", "Noxxeliverothcifsa", "One Side Love",
   "BLUE DYNASTY", "Relax & Chat", "The Chatter Room"
 ]);
 
 const GAME_ROOMS = Object.freeze([
   "LowCard 1", "LowCard 2", "Noxxeliverothcifsa",
-  "Chikahan Tambayan", "BLUE DYNASTY", "One Side Love", "Heart Lovers"
+  "Chikahan Tambayan", "BLUE DYNASTY", "One Side Love", "Heart Lovers","LOVE BIRDS"
 ]);
 
 // ─────────────────────────────────────────────
