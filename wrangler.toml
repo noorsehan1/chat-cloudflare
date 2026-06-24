@@ -1,0 +1,13 @@
+name = "chat-cloudflare"
+main = "index.js"
+compatibility_date = "2024-12-18"
+
+[durable_objects]
+bindings = [
+  { name = "CHAT_SERVER", class_name = "ChatServer" },
+  { name = "GAME_SERVER", class_name = "GameServer" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ChatServer", "GameServer"]
