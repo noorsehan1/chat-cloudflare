@@ -143,6 +143,38 @@ export class GameServer {
     }
   }
   
+  // ==================== GAME STATE SYNC ====================
+  _syncGameState(room, game) {
+    if (!this._isGameRunning(game)) return;
+    
+    const gameState = {
+      room: room,
+      running: true,
+      phase: game._phase || 'idle',
+      round: game.round || 0,
+      betAmount: game.betAmount || 0,
+      registrationOpen: game.registrationOpen || false,
+      players: Array.from(game.players?.values() || []).map(p => p.name),
+      eliminated: Array.from(game.eliminated || []),
+      hostName: game.hostName || '',
+      useBots: game.useBots || false
+    };
+    
+    // Kirim state ke semua client di room
+    this._broadcastToRoom(room, ["gameStateSync", gameState]);
+    
+    // Kirim juga draw state jika ada
+    if (game.numbers && game.numbers.size > 0) {
+      const drawData = [];
+      for (const [id, number] of game.numbers) {
+        const name = game.players?.get(id)?.name || id;
+        const tanda = game.tanda?.get(id) || "";
+        drawData.push({ name, number, tanda });
+      }
+      this._broadcastToRoom(room, ["gameDrawSync", drawData]);
+    }
+  }
+  
   // ==================== STALE CLEANUP - HANYA UNTUK GAME, BUKAN WS ====================
   _cleanupStaleGames() {
     try {
@@ -172,13 +204,6 @@ export class GameServer {
             continue;
           }
         }
-        
-        // ==================== HAPUS SEMUA PEMBERSIHAN WS DI SINI! ====================
-        // TIDAK ADA penghapusan playerWsId
-        // TIDAK ADA penghapusan wsClients
-        // TIDAK ADA penghapusan clientRooms
-        // TIDAK ADA penghapusan wsMap
-        // ========================================================================
       }
       
       // Hapus game yang stale
@@ -188,12 +213,6 @@ export class GameServer {
           this._deleteGame(room, game);
         }
       }
-      
-      // ==================== HAPUS SEMUA PEMBERSIHAN WS DI SINI! ====================
-      // TIDAK ADA pembersihan wsClients
-      // TIDAK ADA pembersihan clientRooms
-      // TIDAK ADA pembersihan wsMap
-      // ============================================================================
       
     } catch(e) {
       // Silent error
@@ -257,9 +276,7 @@ export class GameServer {
       game.eliminated.add(username);
       
       this._broadcastToRoom(room, ["gameLowCardPlayerEliminated", username, "Disconnected"]);
-      
-      // Broadcast updated player list
-      this._broadcastPlayerList(room);
+      this._syncGameState(room, game);
       
       // ============ PERTAHANKAN playerWsId ============
       // JANGAN hapus playerWsId saat player dieliminasi
@@ -295,7 +312,6 @@ export class GameServer {
         game._isActive = false;
         
         this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
-        this._broadcastPlayerList(room);
         this._scheduleGameCleanup(room, game);
         return;
       }
@@ -303,7 +319,6 @@ export class GameServer {
       if (activePlayers.length === 0) {
         game._gameEnded = true;
         game._isActive = false;
-        this._broadcastPlayerList(room);
         this._scheduleGameCleanup(room, game);
       }
     } catch(e) {
@@ -347,6 +362,7 @@ export class GameServer {
     
     const roomGame = this.activeGames.get(roomName);
     if (roomGame && roomGame._isActive && !roomGame._gameEnded) {
+      // Kirim state lengkap ke client
       this._safeSend(ws, ["gameLowCardStatus", {
         room: roomName,
         running: true,
@@ -354,10 +370,21 @@ export class GameServer {
         round: roomGame.round || 0,
         betAmount: roomGame.betAmount || 0,
         registrationOpen: roomGame.registrationOpen || false,
-        players: Array.from(roomGame.players?.values() || []).map(p => p.name)
+        players: Array.from(roomGame.players?.values() || []).map(p => p.name),
+        eliminated: Array.from(roomGame.eliminated || []),
+        hostName: roomGame.hostName || ''
       }]);
-      // Send player list to the newly joined client
-      this._sendPlayerList(ws, roomName);
+      
+      // Jika ada draw data, kirim juga
+      if (roomGame.numbers && roomGame.numbers.size > 0) {
+        const drawData = [];
+        for (const [id, number] of roomGame.numbers) {
+          const name = roomGame.players?.get(id)?.name || id;
+          const tanda = roomGame.tanda?.get(id) || "";
+          drawData.push({ name, number, tanda });
+        }
+        this._safeSend(ws, ["gameDrawSync", drawData]);
+      }
     } else {
       this._safeSend(ws, ["gameLowCardStatus", {
         room: roomName,
@@ -366,7 +393,9 @@ export class GameServer {
         round: 0,
         betAmount: 0,
         registrationOpen: false,
-        players: []
+        players: [],
+        eliminated: [],
+        hostName: ''
       }]);
     }
     
@@ -384,103 +413,6 @@ export class GameServer {
       }
     }
     return result;
-  }
-  
-  // ==================== PLAYER LIST BROADCAST ====================
-  
-  _broadcastPlayerList(room) {
-    try {
-      const game = this.activeGames.get(room);
-      if (!game || !game.players) return;
-      
-      const playerList = Array.from(game.players.entries()).map(([id, player]) => ({
-        id: id,
-        name: player.name,
-        isBot: id.startsWith('BOT_'),
-        isEliminated: game.eliminated?.has(id) || false,
-        hasSubmitted: game.numbers?.has(id) || false,
-        isHost: id === game.hostId,
-        number: game.numbers?.get(id) || null,
-        tanda: game.tanda?.get(id) || null
-      }));
-      
-      const activePlayers = playerList.filter(p => !p.isEliminated);
-      const eliminatedPlayers = playerList.filter(p => p.isEliminated);
-      
-      this._broadcastToRoom(room, ["gameLowCardPlayerList", {
-        players: playerList,
-        activePlayers: activePlayers,
-        eliminatedPlayers: eliminatedPlayers,
-        totalPlayers: playerList.length,
-        activeCount: activePlayers.length,
-        eliminatedCount: eliminatedPlayers.length,
-        phase: game._phase || 'idle',
-        round: game.round || 0,
-        betAmount: game.betAmount || 0,
-        registrationOpen: game.registrationOpen || false,
-        isGameActive: game._isActive && !game._gameEnded
-      }]);
-    } catch(e) {
-      // Silent error
-    }
-  }
-  
-  _sendPlayerList(ws, room) {
-    try {
-      const targetRoom = room || this._getRoomForWs(ws);
-      if (!targetRoom) {
-        this._safeSend(ws, ["gameLowCardError", "Room not found"]);
-        return;
-      }
-      
-      const game = this.activeGames.get(targetRoom);
-      if (!game || !game.players) {
-        this._safeSend(ws, ["gameLowCardPlayerList", { 
-          players: [], 
-          activePlayers: [], 
-          eliminatedPlayers: [], 
-          totalPlayers: 0, 
-          activeCount: 0, 
-          eliminatedCount: 0,
-          phase: 'idle',
-          round: 0,
-          betAmount: 0,
-          registrationOpen: false,
-          isGameActive: false
-        }]);
-        return;
-      }
-      
-      const playerList = Array.from(game.players.entries()).map(([id, player]) => ({
-        id: id,
-        name: player.name,
-        isBot: id.startsWith('BOT_'),
-        isEliminated: game.eliminated?.has(id) || false,
-        hasSubmitted: game.numbers?.has(id) || false,
-        isHost: id === game.hostId,
-        number: game.numbers?.get(id) || null,
-        tanda: game.tanda?.get(id) || null
-      }));
-      
-      const activePlayers = playerList.filter(p => !p.isEliminated);
-      const eliminatedPlayers = playerList.filter(p => p.isEliminated);
-      
-      this._safeSend(ws, ["gameLowCardPlayerList", {
-        players: playerList,
-        activePlayers: activePlayers,
-        eliminatedPlayers: eliminatedPlayers,
-        totalPlayers: playerList.length,
-        activeCount: activePlayers.length,
-        eliminatedCount: eliminatedPlayers.length,
-        phase: game._phase || 'idle',
-        round: game.round || 0,
-        betAmount: game.betAmount || 0,
-        registrationOpen: game.registrationOpen || false,
-        isGameActive: game._isActive && !game._gameEnded
-      }]);
-    } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Failed to get player list"]);
-    }
   }
   
   // ==================== HELPERS ====================
@@ -665,8 +597,7 @@ export class GameServer {
         }
       }
       
-      // Broadcast updated player list after adding bots
-      this._broadcastPlayerList(room);
+      this._syncGameState(room, game);
       
       if (this._isGameRunning(game) && game.players.size >= 2) {
         this._startDrawPhase(room, game);
@@ -674,7 +605,6 @@ export class GameServer {
         game._gameEnded = true;
         game._isActive = false;
         this._broadcastToRoom(room, ["gameLowCardError", "Not enough players"]);
-        this._broadcastPlayerList(room);
         this._scheduleGameCleanup(room, game);
       }
     } catch(e) {
@@ -709,8 +639,7 @@ export class GameServer {
       game._botsAdded = true;
       game.useBots = true;
       
-      // Broadcast updated player list after adding bots
-      this._broadcastPlayerList(room);
+      this._syncGameState(room, game);
     } catch(e) {
       // Silent error
     }
@@ -737,13 +666,11 @@ export class GameServer {
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
             game._gameEnded = true;
             this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
-            this._broadcastPlayerList(room);
             this._scheduleGameCleanup(room, game);
           } else {
             game._gameEnded = true;
             game._isActive = false;
             this._broadcastToRoom(room, ["gameLowCardError", "Not enough players"]);
-            this._broadcastPlayerList(room);
             this._scheduleGameCleanup(room, game);
           }
           return;
@@ -759,9 +686,7 @@ export class GameServer {
       const playersList = this._getActivePlayers(game).map(p => p.name);
       this._broadcastToRoom(room, ["gameLowCardClosed", playersList]);
       this._broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
-      
-      // Broadcast player list at start of draw phase
-      this._broadcastPlayerList(room);
+      this._syncGameState(room, game);
       
       this._startDrawCountdown(room, game);
       
@@ -824,10 +749,8 @@ export class GameServer {
         }
       }
       
-      // Broadcast updated player list after bots forced draw
-      this._broadcastPlayerList(room);
-      
       this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+      this._syncGameState(room, game);
       
       game._evalTimer = setTimeout(() => {
         try {
@@ -890,9 +813,7 @@ export class GameServer {
       
       const botName = game.players.get(botId)?.name || botId;
       this._broadcastToRoom(room, ["gameLowCardPlayerDraw", botName, number, tanda]);
-      
-      // Broadcast updated player list after bot draw
-      this._broadcastPlayerList(room);
+      this._syncGameState(room, game);
       
       const activeIds = this._getActivePlayerIds(game);
       if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired && this._isGameRunning(game)) {
@@ -924,9 +845,7 @@ export class GameServer {
       
       const botName = game.players.get(botId)?.name || botId;
       this._broadcastToRoom(room, ["gameLowCardPlayerDraw", botName, number, tanda]);
-      
-      // Broadcast updated player list after bot draw
-      this._broadcastPlayerList(room);
+      this._syncGameState(room, game);
     } catch(e) {
       // Silent error
     }
@@ -990,7 +909,6 @@ export class GameServer {
         }
         
         this._broadcastToRoom(room, ["gameLowCardError", "No numbers drawn this round"]);
-        this._broadcastPlayerList(room);
         this._scheduleGameCleanup(room, game);
         return;
       }
@@ -1009,7 +927,6 @@ export class GameServer {
         }
         
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
-        this._broadcastPlayerList(room);
         this._scheduleGameCleanup(room, game);
         return;
       }
@@ -1042,7 +959,6 @@ export class GameServer {
         }
         
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
-        this._broadcastPlayerList(room);
         this._scheduleGameCleanup(room, game);
         return;
       }
@@ -1056,7 +972,6 @@ export class GameServer {
         }
         
         this._broadcastToRoom(room, ["gameLowCardError", "All players eliminated"]);
-        this._broadcastPlayerList(room);
         this._scheduleGameCleanup(room, game);
         return;
       }
@@ -1090,8 +1005,7 @@ export class GameServer {
         game._safetyTimer = null;
       }
       
-      // Broadcast updated player list after evaluation
-      this._broadcastPlayerList(room);
+      this._syncGameState(room, game);
       
       if (this._isGameRunning(game) && !game._gameEnded) {
         this._startDrawPhase(room, game);
@@ -1105,7 +1019,6 @@ export class GameServer {
           game._safetyTimer = null;
         }
       }
-      this._broadcastPlayerList(room);
       this._scheduleGameCleanup(room, game);
     }
   }
@@ -1146,11 +1059,9 @@ export class GameServer {
         round: game.round || 0,
         players: Array.from(game.players?.values() || []).map(p => p.name),
         betAmount: game.betAmount || 0,
-        registrationOpen: game.registrationOpen || false
+        registrationOpen: game.registrationOpen || false,
+        eliminated: Array.from(game.eliminated || [])
       }]);
-      
-      // Send player list as well
-      this._sendPlayerList(ws, room);
     } catch(e) {
       this._safeSend(ws, ["gameLowCardError", "Error checking game"]);
     }
@@ -1189,7 +1100,6 @@ export class GameServer {
         if (existingRoomGame.players.has(usernameClean) && !existingRoomGame.eliminated?.has(usernameClean)) {
           this._safeSend(ws, ["gameLowCardInfo", `Game already running`]);
           this._safeSend(ws, ["gameLowCardStartSuccess", existingRoomGame.hostName, existingRoomGame.betAmount]);
-          this._sendPlayerList(ws, room);
           return;
         } else if (existingRoomGame.eliminated?.has(usernameClean)) {
           this._safeSend(ws, ["gameLowCardError", `You are eliminated`]);
@@ -1266,9 +1176,7 @@ export class GameServer {
         
         this._broadcastToRoom(room, ["gameLowCardStart", game.betAmount]);
         this._safeSend(ws, ["gameLowCardStartSuccess", game.hostName, game.betAmount]);
-        
-        // Broadcast initial player list
-        this._broadcastPlayerList(room);
+        this._syncGameState(room, game);
         
         this._startRegistration(room, game);
         
@@ -1350,7 +1258,9 @@ export class GameServer {
             round: game.round || 0,
             betAmount: game.betAmount || 0,
             registrationOpen: game.registrationOpen || false,
-            players: Array.from(game.players?.values() || []).map(p => p.name)
+            players: Array.from(game.players?.values() || []).map(p => p.name),
+            eliminated: Array.from(game.eliminated || []),
+            hostName: game.hostName || ''
           }]);
           
           if (game.numbers.has(usernameClean)) {
@@ -1360,9 +1270,6 @@ export class GameServer {
           }
           
           this._safeSend(ws, ["gameLowCardRejoinComplete", usernameClean]);
-          
-          // Send player list to reconnecting client
-          this._sendPlayerList(ws, room);
           return;
         }
         
@@ -1381,9 +1288,7 @@ export class GameServer {
         
         this._broadcastToRoom(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
         this._safeSend(ws, ["gameLowCardJoinSuccess", usernameClean, game.betAmount]);
-        
-        // Broadcast updated player list to all clients in room
-        this._broadcastPlayerList(room);
+        this._syncGameState(room, game);
         
       } finally {
         this._joinLocks.delete(lockKey);
@@ -1466,9 +1371,7 @@ export class GameServer {
       game.tanda.set(usernameClean, tanda);
       
       this._broadcastToRoom(room, ["gameLowCardPlayerDraw", usernameClean, n, tanda]);
-      
-      // Broadcast updated player list after player submits
-      this._broadcastPlayerList(room);
+      this._syncGameState(room, game);
       
       const activeIds = this._getActivePlayerIds(game);
       if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired && this._isGameRunning(game)) {
@@ -1532,7 +1435,6 @@ export class GameServer {
         if (players.length > 0) {
           this._broadcastToRoom(room, ["gameLowCardEnd", players]);
         }
-        this._broadcastPlayerList(room);
         this._deleteGame(room, game);
       }
     } catch(e) {
@@ -1616,8 +1518,15 @@ export class GameServer {
           await this.checkGameRunning(ws, data[1]);
           break;
           
-        case "gameLowCardGetPlayers":
-          this._sendPlayerList(ws, data[1]);
+        case "requestGameState":
+          // Client request game state sync
+          const gameStateRoom = this._getRoomForWs(ws);
+          if (gameStateRoom) {
+            const game = this.activeGames.get(gameStateRoom);
+            if (game && game._isActive && !game._gameEnded) {
+              this._syncGameState(gameStateRoom, game);
+            }
+          }
           break;
           
         default:
