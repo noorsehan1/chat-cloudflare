@@ -327,21 +327,31 @@ export class GameServer {
       return;
     }
     
+    // ==== HAPUS dari room lama ====
     if (oldRoom) {
+      // Hapus dari viewer room lama
       if (ws.username && this.roomViewers.has(oldRoom)) {
         this.roomViewers.get(oldRoom).delete(ws.username);
         if (this.roomViewers.get(oldRoom).size === 0) {
           this.roomViewers.delete(oldRoom);
         }
       }
+      
+      // Hapus koneksi WS dari room lama
       this._removeClientFromRoom(oldRoom, wsId);
+      
+      // ==== KITA TIDAK MENGHAPUS PLAYER DARI GAME DI ROOM LAMA ====
+      // Game di room lama tetap berjalan dengan player tersebut
+      // Player tetap terdaftar di game room lama
+      // Ini memungkinkan player kembali ke room lama dan melanjutkan game
     }
     
-    // Set username untuk room baru
+    // ==== SET ke room baru ====
+    // Reset username untuk room baru (bisa sama atau berbeda)
     ws.username = username;
     this._addClient(roomName, ws, username);
     
-    // Kirim status game di room baru
+    // Kirim status game di room baru (fresh start)
     this._sendGameStatusToWs(ws, roomName);
     
     // Broadcast ke room baru
@@ -1066,8 +1076,6 @@ export class GameServer {
         }
       }
       
-      // TIDAK ADA validasi cross-room! Game di room ini independen.
-      
       const now = Date.now();
       const lockTime = this._gameLocks.get(room);
       if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
@@ -1235,8 +1243,6 @@ export class GameServer {
           this._safeSend(ws, ["gameLowCardError", "Game is full"]);
           return;
         }
-        
-        // TIDAK ADA validasi cross-room! Game di room ini independen.
         
         game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
         this._ensureSingleConnection(room, usernameClean, ws, wsId);
