@@ -34,6 +34,10 @@ export class GameServer {
     this.wsMap = new Map(); // wsId -> ws
     this.roomViewers = new Map(); // room -> Set(username) - TRACK VIEWERS
     
+    // NEW: Track user connections
+    this.userWsMap = new Map(); // username -> Set(wsId)
+    this.userActiveWs = new Map(); // username -> wsId (yang aktif)
+    
     this._cleanupTimers = new Map();
     
     this._cleanupInterval = setInterval(() => {
@@ -54,6 +58,12 @@ export class GameServer {
       return;
     }
     
+    // HAPUS SEMUA koneksi lama untuk user ini di room yang sama
+    if (username) {
+      this._cleanupUserConnections(username, room, wsId);
+    }
+    
+    // Hapus dari room lama jika ada
     if (this.clientRooms.has(wsId)) {
       const oldRoom = this.clientRooms.get(wsId);
       if (oldRoom !== room) {
@@ -73,13 +83,64 @@ export class GameServer {
     this.clientRooms.set(wsId, room);
     this.wsMap.set(wsId, ws);
     ws.room = room;
+    ws.username = username;
     
-    // Track viewer jika username diberikan
+    // Track user connections
     if (username) {
+      if (!this.userWsMap.has(username)) {
+        this.userWsMap.set(username, new Set());
+      }
+      this.userWsMap.get(username).add(wsId);
+      this.userActiveWs.set(username, wsId);
+      
+      // Track viewer
       if (!this.roomViewers.has(room)) {
         this.roomViewers.set(room, new Set());
       }
       this.roomViewers.get(room).add(username);
+    }
+  }
+  
+  _cleanupUserConnections(username, currentRoom, newWsId) {
+    // Cari semua koneksi user ini di room yang sama
+    const wsIds = this.userWsMap.get(username);
+    if (!wsIds) return;
+    
+    const toRemove = [];
+    for (const wsId of wsIds) {
+      if (wsId === newWsId) continue; // Skip koneksi baru
+      
+      const ws = this.wsMap.get(wsId);
+      if (ws) {
+        // Tutup koneksi lama
+        try {
+          this._safeSend(ws, ["gameLowCardReplaced", "New connection established"]);
+          ws.close(1000, "Replaced by new connection");
+        } catch(e) {}
+        
+        // Hapus dari room
+        const room = this.clientRooms.get(wsId);
+        if (room) {
+          this._removeClientFromRoom(room, wsId);
+        }
+        
+        // Hapus dari semua tracking
+        this.clientRooms.delete(wsId);
+        this.wsMap.delete(wsId);
+        ws.room = null;
+        ws._wsId = null;
+        ws.username = null;
+        toRemove.push(wsId);
+      }
+    }
+    
+    // Hapus dari user tracking
+    for (const wsId of toRemove) {
+      wsIds.delete(wsId);
+    }
+    if (wsIds.size === 0) {
+      this.userWsMap.delete(username);
+      this.userActiveWs.delete(username);
     }
   }
   
@@ -97,9 +158,33 @@ export class GameServer {
     const wsId = this._getWsId(ws);
     if (!wsId) return;
     
+    const username = ws.username;
+    
+    // Hapus dari room
     this._removeClientFromRoom(room, wsId);
     this.clientRooms.delete(wsId);
     this.wsMap.delete(wsId);
+    
+    // Hapus dari user tracking
+    if (username) {
+      const userWsIds = this.userWsMap.get(username);
+      if (userWsIds) {
+        userWsIds.delete(wsId);
+        if (userWsIds.size === 0) {
+          this.userWsMap.delete(username);
+          this.userActiveWs.delete(username);
+        }
+      }
+      
+      // Hapus dari roomViewers
+      if (this.roomViewers.has(room)) {
+        this.roomViewers.get(room).delete(username);
+        if (this.roomViewers.get(room).size === 0) {
+          this.roomViewers.delete(room);
+        }
+      }
+    }
+    
     if (ws) {
       ws.room = null;
       ws._wsId = null;
@@ -142,9 +227,13 @@ export class GameServer {
     // Hapus WS yang disconnected
     if (disconnected.size > 0) {
       for (const wsId of disconnected) {
-        this._removeClientFromRoom(room, wsId);
-        this.clientRooms.delete(wsId);
-        this.wsMap.delete(wsId);
+        const ws = this.wsMap.get(wsId);
+        if (ws) {
+          this._removeClient(room, ws);
+        } else {
+          this._removeClientFromRoom(room, wsId);
+          this.clientRooms.delete(wsId);
+        }
       }
     }
   }
@@ -204,36 +293,10 @@ export class GameServer {
     const game = this.activeGames.get(room);
     if (!game) return newWsId;
     
-    const existingWsId = game.playerWsId.get(username);
+    // HAPUS SEMUA koneksi lama untuk user ini di room ini
+    this._cleanupUserConnections(username, room, newWsId);
     
-    if (!existingWsId) {
-      game.playerWsId.set(username, newWsId);
-      return newWsId;
-    }
-    
-    if (existingWsId === newWsId) {
-      return newWsId;
-    }
-    
-    // ADA koneksi lama, REPLACE!
-    const oldWs = this.wsMap.get(existingWsId);
-    
-    if (oldWs && oldWs.readyState === 1) {
-      this._safeSend(oldWs, ["gameLowCardReplaced", "New connection established"]);
-      try {
-        oldWs.close(1000, "Replaced by new connection");
-      } catch(e) {}
-    }
-    
-    if (oldWs) {
-      this._removeClientFromRoom(room, existingWsId);
-      this.clientRooms.delete(existingWsId);
-      this.wsMap.delete(existingWsId);
-      oldWs.room = null;
-      oldWs._wsId = null;
-      oldWs.username = null;
-    }
-    
+    // Set koneksi baru
     game.playerWsId.set(username, newWsId);
     this._addClient(room, newWs, username);
     
@@ -326,7 +389,7 @@ export class GameServer {
     }
     
     if (oldRoom) {
-      this._removeClientFromRoom(oldRoom, wsId);
+      this._removeClient(oldRoom, ws);
     }
     
     // Tambahkan ke room baru dengan username jika ada
@@ -1513,6 +1576,7 @@ export class GameServer {
           clients: this.clientRooms.size,
           wsMap: this.wsMap.size,
           roomViewers: Array.from(this.roomViewers.entries()).map(([room, viewers]) => ({ room, viewers: Array.from(viewers) })),
+          userConnections: Array.from(this.userWsMap.entries()).map(([user, wsIds]) => ({ user, connections: Array.from(wsIds) })),
           cleanupTimers: this._cleanupTimers.size,
           wsIdCounter: this._wsIdCounter,
           joinLocks: this._joinLocks.size
@@ -1558,18 +1622,26 @@ export class GameServer {
             if (server.room) {
               const room = server.room;
               this._removeClient(server.room, server);
-              
-              // Hapus dari roomViewers
-              if (server.username && this.roomViewers.has(room)) {
-                this.roomViewers.get(room).delete(server.username);
-                if (this.roomViewers.get(room).size === 0) {
-                  this.roomViewers.delete(room);
-                }
-              }
             }
             
-            this.clientRooms.delete(wsId);
-            this.wsMap.delete(wsId);
+            // Hapus dari semua tracking
+            const wsId = this._getWsId(server);
+            if (wsId) {
+              // Hapus dari user tracking jika ada
+              for (const [username, wsIds] of this.userWsMap) {
+                if (wsIds.has(wsId)) {
+                  wsIds.delete(wsId);
+                  if (wsIds.size === 0) {
+                    this.userWsMap.delete(username);
+                    this.userActiveWs.delete(username);
+                  }
+                  break;
+                }
+              }
+              
+              this.clientRooms.delete(wsId);
+              this.wsMap.delete(wsId);
+            }
           } catch(e) {
             // Silent error
           }
@@ -1580,17 +1652,24 @@ export class GameServer {
             if (server.room) {
               const room = server.room;
               this._removeClient(server.room, server);
-              
-              if (server.username && this.roomViewers.has(room)) {
-                this.roomViewers.get(room).delete(server.username);
-                if (this.roomViewers.get(room).size === 0) {
-                  this.roomViewers.delete(room);
-                }
-              }
             }
             
-            this.clientRooms.delete(wsId);
-            this.wsMap.delete(wsId);
+            const wsId = this._getWsId(server);
+            if (wsId) {
+              for (const [username, wsIds] of this.userWsMap) {
+                if (wsIds.has(wsId)) {
+                  wsIds.delete(wsId);
+                  if (wsIds.size === 0) {
+                    this.userWsMap.delete(username);
+                    this.userActiveWs.delete(username);
+                  }
+                  break;
+                }
+              }
+              
+              this.clientRooms.delete(wsId);
+              this.wsMap.delete(wsId);
+            }
           } catch(e) {
             // Silent error
           }
@@ -1629,13 +1708,6 @@ export class GameServer {
       if (ws.room) {
         const room = ws.room;
         this._removeClient(ws.room, ws);
-        
-        if (ws.username && this.roomViewers.has(room)) {
-          this.roomViewers.get(room).delete(ws.username);
-          if (this.roomViewers.get(room).size === 0) {
-            this.roomViewers.delete(room);
-          }
-        }
       }
       
       if (wsId) {
@@ -1659,13 +1731,6 @@ export class GameServer {
       if (ws.room) {
         const room = ws.room;
         this._removeClient(ws.room, ws);
-        
-        if (ws.username && this.roomViewers.has(room)) {
-          this.roomViewers.get(room).delete(ws.username);
-          if (this.roomViewers.get(room).size === 0) {
-            this.roomViewers.delete(room);
-          }
-        }
       }
       
       if (wsId) {
@@ -1703,6 +1768,7 @@ export class GameServer {
       }
       this._cleanupTimers.clear();
       
+      // Tutup semua WebSocket
       for (const [room, wsIds] of this.wsClients) {
         for (const wsId of wsIds) {
           const ws = this.wsMap.get(wsId);
@@ -1718,6 +1784,8 @@ export class GameServer {
       this.clientRooms.clear();
       this.wsMap.clear();
       this.roomViewers.clear();
+      this.userWsMap.clear();
+      this.userActiveWs.clear();
       this._gameLocks.clear();
       this._joinLocks.clear();
       
