@@ -32,11 +32,11 @@ export class GameServer {
     this.wsClients = new Map(); // room -> Set(wsId)
     this.clientRooms = new Map(); // wsId -> room
     this.wsMap = new Map(); // wsId -> ws
-    this.roomViewers = new Map(); // room -> Set(username) - TRACK VIEWERS
+    this.roomViewers = new Map(); // room -> Set(username)
     
-    // NEW: Track user connections
-    this.userWsMap = new Map(); // username -> Set(wsId)
-    this.userActiveWs = new Map(); // username -> wsId (yang aktif)
+    // CRITICAL: Track per user untuk mencegah duplikat
+    this.userConnections = new Map(); // username -> { wsId, ws, room, timestamp }
+    this.connectionLocks = new Map(); // username -> true (sedang proses connect)
     
     this._cleanupTimers = new Map();
     
@@ -51,6 +51,57 @@ export class GameServer {
     return ws ? ws._wsId : null;
   }
   
+  // ==================== CORE: MENCEGAH DUPLIKAT EVENT ====================
+  
+  _lockUserConnection(username) {
+    if (this.connectionLocks.has(username)) {
+      return false; // Sedang diproses
+    }
+    this.connectionLocks.set(username, true);
+    return true;
+  }
+  
+  _unlockUserConnection(username) {
+    this.connectionLocks.delete(username);
+  }
+  
+  _forceCleanupUserConnections(username, excludeWsId = null) {
+    // HAPUS SEMUA koneksi user ini, kecuali yang exclude
+    const conn = this.userConnections.get(username);
+    if (!conn) return;
+    
+    // Jika ada koneksi lama dan bukan yang baru
+    if (excludeWsId === null || conn.wsId !== excludeWsId) {
+      const oldWs = this.wsMap.get(conn.wsId);
+      if (oldWs && oldWs.readyState === 1) {
+        try {
+          // Kirim pesan bahwa koneksi diganti
+          this._safeSend(oldWs, ["gameLowCardReplaced", "New connection established"]);
+          oldWs.close(1000, "Replaced by new connection");
+        } catch(e) {}
+      }
+      
+      // Hapus dari room
+      if (conn.room) {
+        this._removeClientFromRoom(conn.room, conn.wsId);
+      }
+      
+      // Hapus dari semua tracking
+      this.wsMap.delete(conn.wsId);
+      this.clientRooms.delete(conn.wsId);
+      
+      // Hapus dari roomViewers
+      if (conn.room && this.roomViewers.has(conn.room)) {
+        this.roomViewers.get(conn.room).delete(username);
+        if (this.roomViewers.get(conn.room).size === 0) {
+          this.roomViewers.delete(conn.room);
+        }
+      }
+    }
+    
+    this.userConnections.delete(username);
+  }
+  
   _addClient(room, ws, username = null) {
     const wsId = this._getWsId(ws);
     if (!wsId) {
@@ -58,9 +109,31 @@ export class GameServer {
       return;
     }
     
-    // HAPUS SEMUA koneksi lama untuk user ini di room yang sama
+    // KRITIKAL: Jika ada username, force cleanup koneksi lama
     if (username) {
-      this._cleanupUserConnections(username, room, wsId);
+      // Lock untuk mencegah race condition
+      if (!this._lockUserConnection(username)) {
+        // Jika sedang diproses, tunggu sebentar
+        setTimeout(() => {
+          this._addClient(room, ws, username);
+        }, 100);
+        return;
+      }
+      
+      try {
+        // Force cleanup semua koneksi lama
+        this._forceCleanupUserConnections(username, wsId);
+        
+        // Simpan koneksi baru
+        this.userConnections.set(username, {
+          wsId: wsId,
+          ws: ws,
+          room: room,
+          timestamp: Date.now()
+        });
+      } finally {
+        this._unlockUserConnection(username);
+      }
     }
     
     // Hapus dari room lama jika ada
@@ -71,9 +144,10 @@ export class GameServer {
       }
     }
     
+    // Tambahkan ke room baru
     const clients = this.wsClients.get(room);
     if (clients) {
-      clients.delete(wsId);
+      clients.delete(wsId); // Hapus dulu jika ada
     }
     
     if (!this.wsClients.has(room)) {
@@ -85,62 +159,12 @@ export class GameServer {
     ws.room = room;
     ws.username = username;
     
-    // Track user connections
+    // Track viewer
     if (username) {
-      if (!this.userWsMap.has(username)) {
-        this.userWsMap.set(username, new Set());
-      }
-      this.userWsMap.get(username).add(wsId);
-      this.userActiveWs.set(username, wsId);
-      
-      // Track viewer
       if (!this.roomViewers.has(room)) {
         this.roomViewers.set(room, new Set());
       }
       this.roomViewers.get(room).add(username);
-    }
-  }
-  
-  _cleanupUserConnections(username, currentRoom, newWsId) {
-    // Cari semua koneksi user ini di room yang sama
-    const wsIds = this.userWsMap.get(username);
-    if (!wsIds) return;
-    
-    const toRemove = [];
-    for (const wsId of wsIds) {
-      if (wsId === newWsId) continue; // Skip koneksi baru
-      
-      const ws = this.wsMap.get(wsId);
-      if (ws) {
-        // Tutup koneksi lama
-        try {
-          this._safeSend(ws, ["gameLowCardReplaced", "New connection established"]);
-          ws.close(1000, "Replaced by new connection");
-        } catch(e) {}
-        
-        // Hapus dari room
-        const room = this.clientRooms.get(wsId);
-        if (room) {
-          this._removeClientFromRoom(room, wsId);
-        }
-        
-        // Hapus dari semua tracking
-        this.clientRooms.delete(wsId);
-        this.wsMap.delete(wsId);
-        ws.room = null;
-        ws._wsId = null;
-        ws.username = null;
-        toRemove.push(wsId);
-      }
-    }
-    
-    // Hapus dari user tracking
-    for (const wsId of toRemove) {
-      wsIds.delete(wsId);
-    }
-    if (wsIds.size === 0) {
-      this.userWsMap.delete(username);
-      this.userActiveWs.delete(username);
     }
   }
   
@@ -165,15 +189,11 @@ export class GameServer {
     this.clientRooms.delete(wsId);
     this.wsMap.delete(wsId);
     
-    // Hapus dari user tracking
+    // Hapus dari user connections
     if (username) {
-      const userWsIds = this.userWsMap.get(username);
-      if (userWsIds) {
-        userWsIds.delete(wsId);
-        if (userWsIds.size === 0) {
-          this.userWsMap.delete(username);
-          this.userActiveWs.delete(username);
-        }
+      const conn = this.userConnections.get(username);
+      if (conn && conn.wsId === wsId) {
+        this.userConnections.delete(username);
       }
       
       // Hapus dari roomViewers
@@ -198,19 +218,17 @@ export class GameServer {
     return this.clientRooms.get(wsId) || null;
   }
   
-  // ==================== BROADCAST - KE SEMUA WS DALAM ROOM ====================
+  // ==================== BROADCAST ====================
+  
   _broadcastToRoom(room, message) {
     if (this.closing || this.isDestroyed || !room || !message) return;
     
     const wsIds = this.wsClients.get(room);
-    if (!wsIds || wsIds.size === 0) {
-      return;
-    }
+    if (!wsIds || wsIds.size === 0) return;
     
     const msgStr = JSON.stringify(message);
     const disconnected = new Set();
     
-    // Kirim ke SEMUA client di room (termasuk yang tidak bermain)
     for (const wsId of wsIds) {
       const ws = this.wsMap.get(wsId);
       if (ws && ws.readyState === 1) {
@@ -224,7 +242,6 @@ export class GameServer {
       }
     }
     
-    // Hapus WS yang disconnected
     if (disconnected.size > 0) {
       for (const wsId of disconnected) {
         const ws = this.wsMap.get(wsId);
@@ -249,6 +266,7 @@ export class GameServer {
   }
   
   // ==================== STALE CLEANUP ====================
+  
   _cleanupStaleGames() {
     try {
       if (this.isDestroyed) return;
@@ -288,17 +306,27 @@ export class GameServer {
     }
   }
   
-  // ==================== SINGLE CONNECTION MANAGEMENT ====================
+  // ==================== SINGLE CONNECTION ====================
+  
   _ensureSingleConnection(room, username, newWs, newWsId) {
     const game = this.activeGames.get(room);
     if (!game) return newWsId;
     
-    // HAPUS SEMUA koneksi lama untuk user ini di room ini
-    this._cleanupUserConnections(username, room, newWsId);
-    
-    // Set koneksi baru
-    game.playerWsId.set(username, newWsId);
-    this._addClient(room, newWs, username);
+    // Lock dan cleanup koneksi lama
+    if (this._lockUserConnection(username)) {
+      try {
+        this._forceCleanupUserConnections(username, newWsId);
+        game.playerWsId.set(username, newWsId);
+        this._addClient(room, newWs, username);
+      } finally {
+        this._unlockUserConnection(username);
+      }
+    } else {
+      // Jika lock, tunggu dan retry
+      setTimeout(() => {
+        this._ensureSingleConnection(room, username, newWs, newWsId);
+      }, 100);
+    }
     
     return newWsId;
   }
@@ -317,7 +345,6 @@ export class GameServer {
       if (!game.eliminated) game.eliminated = new Set();
       game.eliminated.add(username);
       
-      // BROADCAST ke SEMUA di room
       this._broadcastToRoom(room, ["gameLowCardPlayerEliminated", username, "Disconnected"]);
       
       game.numbers?.delete(username);
@@ -383,7 +410,6 @@ export class GameServer {
     
     if (oldRoom === roomName) {
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
-      // Kirim status game jika ada
       this._sendGameStatusToWs(ws, roomName);
       return;
     }
@@ -392,23 +418,17 @@ export class GameServer {
       this._removeClient(oldRoom, ws);
     }
     
-    // Tambahkan ke room baru dengan username jika ada
     this._addClient(roomName, ws, username);
     ws.username = username;
     
-    // Kirim status game ke user yang baru masuk
     this._sendGameStatusToWs(ws, roomName);
-    
-    // Broadcast ke semua di room bahwa ada user baru (spectator)
     this._broadcastToRoom(roomName, ["roomUserJoined", username || "Anonymous"]);
-    
     this._safeSend(ws, ["switchRoomSuccess", roomName]);
   }
   
   _sendGameStatusToWs(ws, room) {
     const roomGame = this.activeGames.get(room);
     if (roomGame && roomGame._isActive && !roomGame._gameEnded) {
-      // Kirim status lengkap game ke spectator/viewer
       this._safeSend(ws, ["gameLowCardStatus", {
         room: room,
         running: true,
@@ -567,7 +587,6 @@ export class GameServer {
     this._gameLocks.delete(room);
     this._joinLocks.delete(room);
     
-    // BROADCAST ke SEMUA di room bahwa game berakhir
     this._broadcastToRoom(room, ["gameLowCardEnd", []]);
   }
   
@@ -716,7 +735,6 @@ export class GameServer {
       
       const playersList = this._getActivePlayers(game).map(p => p.name);
       
-      // BROADCAST ke SEMUA di room
       this._broadcastToRoom(room, ["gameLowCardClosed", playersList]);
       this._broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
       
@@ -844,7 +862,6 @@ export class GameServer {
       
       const botName = game.players.get(botId)?.name || botId;
       
-      // BROADCAST ke SEMUA di room
       this._broadcastToRoom(room, ["gameLowCardPlayerDraw", botName, number, tanda]);
       
       const activeIds = this._getActivePlayerIds(game);
@@ -1017,7 +1034,6 @@ export class GameServer {
       const loserNames = [...losers].map(id => players.get(id)?.name || id);
       const remainingNames = remaining.map(id => players.get(id)?.name || id);
       
-      // BROADCAST hasil ke SEMUA di room
       this._broadcastToRoom(room, [
         "gameLowCardRoundResult", game.round, numbersArr, loserNames, remainingNames
       ]);
@@ -1207,7 +1223,6 @@ export class GameServer {
         
         this.activeGames.set(room, game);
         
-        // BROADCAST ke SEMUA di room (termasuk spectator)
         this._broadcastToRoom(room, ["gameLowCardStart", game.betAmount, usernameClean]);
         this._safeSend(ws, ["gameLowCardStartSuccess", game.hostName, game.betAmount]);
         
@@ -1317,7 +1332,6 @@ export class GameServer {
         game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
         this._ensureSingleConnection(room, usernameClean, ws, wsId);
         
-        // BROADCAST ke SEMUA di room
         this._broadcastToRoom(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
         this._safeSend(ws, ["gameLowCardJoinSuccess", usernameClean, game.betAmount]);
         
@@ -1401,7 +1415,6 @@ export class GameServer {
       game.numbers.set(usernameClean, n);
       game.tanda.set(usernameClean, tanda);
       
-      // BROADCAST ke SEMUA di room
       this._broadcastToRoom(room, ["gameLowCardPlayerDraw", usernameClean, n, tanda]);
       
       const activeIds = this._getActivePlayerIds(game);
@@ -1576,7 +1589,13 @@ export class GameServer {
           clients: this.clientRooms.size,
           wsMap: this.wsMap.size,
           roomViewers: Array.from(this.roomViewers.entries()).map(([room, viewers]) => ({ room, viewers: Array.from(viewers) })),
-          userConnections: Array.from(this.userWsMap.entries()).map(([user, wsIds]) => ({ user, connections: Array.from(wsIds) })),
+          userConnections: Array.from(this.userConnections.entries()).map(([user, conn]) => ({ 
+            user, 
+            wsId: conn.wsId,
+            room: conn.room,
+            timestamp: conn.timestamp
+          })),
+          connectionLocks: Array.from(this.connectionLocks.keys()),
           cleanupTimers: this._cleanupTimers.size,
           wsIdCounter: this._wsIdCounter,
           joinLocks: this._joinLocks.size
@@ -1621,26 +1640,19 @@ export class GameServer {
           try {
             if (server.room) {
               const room = server.room;
+              const wsId = this._getWsId(server);
+              const username = server.username;
+              
+              // Hapus dari room
               this._removeClient(server.room, server);
-            }
-            
-            // Hapus dari semua tracking
-            const wsId = this._getWsId(server);
-            if (wsId) {
-              // Hapus dari user tracking jika ada
-              for (const [username, wsIds] of this.userWsMap) {
-                if (wsIds.has(wsId)) {
-                  wsIds.delete(wsId);
-                  if (wsIds.size === 0) {
-                    this.userWsMap.delete(username);
-                    this.userActiveWs.delete(username);
-                  }
-                  break;
+              
+              // Hapus dari userConnections jika masih ada
+              if (username) {
+                const conn = this.userConnections.get(username);
+                if (conn && conn.wsId === wsId) {
+                  this.userConnections.delete(username);
                 }
               }
-              
-              this.clientRooms.delete(wsId);
-              this.wsMap.delete(wsId);
             }
           } catch(e) {
             // Silent error
@@ -1651,24 +1663,17 @@ export class GameServer {
           try {
             if (server.room) {
               const room = server.room;
+              const wsId = this._getWsId(server);
+              const username = server.username;
+              
               this._removeClient(server.room, server);
-            }
-            
-            const wsId = this._getWsId(server);
-            if (wsId) {
-              for (const [username, wsIds] of this.userWsMap) {
-                if (wsIds.has(wsId)) {
-                  wsIds.delete(wsId);
-                  if (wsIds.size === 0) {
-                    this.userWsMap.delete(username);
-                    this.userActiveWs.delete(username);
-                  }
-                  break;
+              
+              if (username) {
+                const conn = this.userConnections.get(username);
+                if (conn && conn.wsId === wsId) {
+                  this.userConnections.delete(username);
                 }
               }
-              
-              this.clientRooms.delete(wsId);
-              this.wsMap.delete(wsId);
             }
           } catch(e) {
             // Silent error
@@ -1704,10 +1709,18 @@ export class GameServer {
     try {
       if (!ws) return;
       const wsId = this._getWsId(ws);
+      const username = ws.username;
       
       if (ws.room) {
-        const room = ws.room;
         this._removeClient(ws.room, ws);
+      }
+      
+      // Hapus dari userConnections
+      if (username) {
+        const conn = this.userConnections.get(username);
+        if (conn && conn.wsId === wsId) {
+          this.userConnections.delete(username);
+        }
       }
       
       if (wsId) {
@@ -1727,10 +1740,17 @@ export class GameServer {
     try {
       if (!ws) return;
       const wsId = this._getWsId(ws);
+      const username = ws.username;
       
       if (ws.room) {
-        const room = ws.room;
         this._removeClient(ws.room, ws);
+      }
+      
+      if (username) {
+        const conn = this.userConnections.get(username);
+        if (conn && conn.wsId === wsId) {
+          this.userConnections.delete(username);
+        }
       }
       
       if (wsId) {
@@ -1768,7 +1788,6 @@ export class GameServer {
       }
       this._cleanupTimers.clear();
       
-      // Tutup semua WebSocket
       for (const [room, wsIds] of this.wsClients) {
         for (const wsId of wsIds) {
           const ws = this.wsMap.get(wsId);
@@ -1784,8 +1803,8 @@ export class GameServer {
       this.clientRooms.clear();
       this.wsMap.clear();
       this.roomViewers.clear();
-      this.userWsMap.clear();
-      this.userActiveWs.clear();
+      this.userConnections.clear();
+      this.connectionLocks.clear();
       this._gameLocks.clear();
       this._joinLocks.clear();
       
