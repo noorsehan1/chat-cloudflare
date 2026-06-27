@@ -1,12 +1,12 @@
-// ==================== CHAT SERVER - SIMPLIFIED WITH TICK SYSTEM ====================
+// ==================== CHAT SERVER - SIMPLIFIED VERSION ====================
 
 const C = {
-  NUMBER_CHANGE_TICKS: 90,
+  NUMBER_CHANGE_TICKS: 180,  // 180 ticks × 5 detik = 15 menit
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 500,
   MAX_MESSAGE_SIZE: 5000,
-  CLEANUP_INTERVAL: 30000, // 30 detik
-  TICK_INTERVAL: 5000, // 5 detik
+  CLEANUP_INTERVAL: 30000,   // 30 detik
+  TICK_INTERVAL: 5000,       // 5 detik
 };
 
 const ROOMS = [
@@ -176,14 +176,14 @@ export class ChatServer {
       clearInterval(this._cleanupInterval);
     }
     
-    // Tick untuk update number
+    // Tick untuk update number (setiap 5 detik)
     this._tickInterval = setInterval(() => {
       if (!this.closing && !this.isDestroyed) {
         this._doTick();
       }
     }, C.TICK_INTERVAL);
     
-    // Cleanup untuk dead connections
+    // Cleanup untuk dead connections (setiap 30 detik)
     this._cleanupInterval = setInterval(() => {
       if (!this.closing && !this.isDestroyed) {
         this._doCleanup();
@@ -196,7 +196,7 @@ export class ChatServer {
       this._tickCount++;
       this._lastActivityTime = Date.now();
       
-      // Change number every N ticks
+      // Change number every N ticks (default 180 ticks = 15 menit)
       if (this._tickCount % C.NUMBER_CHANGE_TICKS === 0) {
         this.currentNumber = this.currentNumber < 6 ? this.currentNumber + 1 : 1;
         
@@ -234,16 +234,13 @@ export class ChatServer {
       const toRemove = [];
       
       for (const ws of this.wsSet) {
-        // Check for dead connections
         if (!ws || ws.readyState !== 1 || ws._closing) {
           toRemove.push(ws);
           continue;
         }
         
-        // Optional: Check for inactive connections (tidak ada aktivitas > 5 menit)
-        // Hanya untuk mencegah memory leak, bukan untuk kick user aktif
+        // Hapus koneksi yang tidak aktif > 5 menit
         if (ws._lastActivity && (Date.now() - ws._lastActivity > 300000)) {
-          // 5 menit tidak ada aktivitas
           toRemove.push(ws);
         }
       }
@@ -252,7 +249,7 @@ export class ChatServer {
         try {
           await this.cleanup(ws);
         } catch(e) {
-          // Ignore cleanup errors
+          // Ignore
         }
       }
     } catch(e) {
@@ -303,7 +300,7 @@ export class ChatServer {
     try {
       await this._broadcastToRoom(room, JSON.stringify(msg));
     } catch(e) {
-      // Ignore broadcast errors
+      // Ignore
     }
   }
   
@@ -314,7 +311,7 @@ export class ChatServer {
     
     try {
       ws.send(JSON.stringify(msg));
-      ws._lastActivity = Date.now(); // Update activity timestamp
+      ws._lastActivity = Date.now();
       return true;
     } catch(e) {
       this.cleanup(ws).catch(() => {});
@@ -449,7 +446,6 @@ export class ChatServer {
       return;
     }
     
-    // Update activity timestamp
     ws._lastActivity = Date.now();
     
     if (this._processingMessages.has(ws)) return;
@@ -849,7 +845,6 @@ export class ChatServer {
       return;
     }
     
-    // Clean up existing connections for this user
     const existingConns = this.userConnections.get(username);
     if (existingConns?.size > 0) {
       for (const oldWs of Array.from(existingConns)) {
@@ -944,9 +939,7 @@ export class ChatServer {
     
     this.updateRoomCount(roomName);
     
-    // Schedule delayed state send
-    const timeout = setTimeout(() => {
-      this._pendingTimeouts.delete(timeout);
+    setTimeout(() => {
       try {
         if (ws && ws.readyState === 1 && !this.closing && !this.isDestroyed) {
           this.sendAllStateTo(ws, roomName, true);
@@ -955,8 +948,6 @@ export class ChatServer {
         // Ignore
       }
     }, 1000);
-    
-    this._pendingTimeouts.add(timeout);
     
     return true;
   }
@@ -971,7 +962,6 @@ export class ChatServer {
     try {
       const url = new URL(req.url);
       
-      // Health check
       if (url.pathname === "/health") {
         const roomCounts = {};
         for (const [room, rm] of this.rooms) {
@@ -985,8 +975,6 @@ export class ChatServer {
           wsConnections: this.wsSet.size,
           userCount: this.userConnections.size,
           roomCounts: roomCounts,
-          pendingTimeouts: this._pendingTimeouts.size,
-          cleaningUp: this._cleaningUp.size,
           uptime: Date.now() - this._lastActivityTime
         }), { 
           headers: { 
@@ -996,7 +984,6 @@ export class ChatServer {
         });
       }
       
-      // Status
       if (url.pathname === "/status") {
         return new Response(JSON.stringify({
           alive: true,
@@ -1014,7 +1001,6 @@ export class ChatServer {
         });
       }
       
-      // WebSocket upgrade
       const upgrade = req.headers.get("Upgrade");
       if (upgrade !== "websocket") {
         return new Response("Chat Server - RUNNING", { 
@@ -1025,7 +1011,6 @@ export class ChatServer {
         });
       }
       
-      // Check max connections
       if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
         return new Response("Server full", { status: 503 });
       }
@@ -1040,7 +1025,6 @@ export class ChatServer {
         return new Response("WebSocket acceptance failed", { status: 500 }); 
       }
       
-      // Initialize server WebSocket
       server.username = null;
       server.room = null;
       server.roomname = null;
@@ -1050,7 +1034,6 @@ export class ChatServer {
       server._wsId = Date.now() + Math.random();
       server._lastActivity = Date.now();
       
-      // Add to wsSet
       if (!this.wsSet.has(server)) {
         this.wsSet.add(server);
       }
@@ -1087,7 +1070,6 @@ export class ChatServer {
     this.closing = true;
     this.isDestroyed = true;
     
-    // Clear intervals
     if (this._tickInterval) {
       clearInterval(this._tickInterval);
       this._tickInterval = null;
@@ -1097,13 +1079,11 @@ export class ChatServer {
       this._cleanupInterval = null;
     }
     
-    // Clear all pending timeouts
     for (const timeout of this._pendingTimeouts) {
       clearTimeout(timeout);
     }
     this._pendingTimeouts.clear();
     
-    // Close all connections
     const wsCopy = Array.from(this.wsSet);
     for (const ws of wsCopy) {
       if (ws?.readyState === 1) {
@@ -1121,7 +1101,6 @@ export class ChatServer {
       }
     }
     
-    // Clear all data
     this.wsSet.clear();
     this.userConnections.clear();
     this.userSeat.clear();
