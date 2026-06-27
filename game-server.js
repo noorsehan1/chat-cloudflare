@@ -580,21 +580,27 @@ export class GameServer {
     
     const timer = setInterval(() => {
       try {
-        if (!this._isGameRunning(game) || !game.registrationOpen || timeLeft < 0) {
+        if (!this._isGameRunning(game) || !game.registrationOpen) {
           clearInterval(timer);
           game._registrationTimer = null;
           return;
         }
         
-        if (timeLeft === 0) {
+        // Kurangi timeLeft di awal
+        timeLeft--;
+        
+        // Broadcast di detik-detik tertentu
+        if (timeLeft === 15 || timeLeft === 10 || timeLeft === 5) {
+          this._broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
+        }
+        
+        // Saat timeLeft mencapai 0, tutup registrasi
+        if (timeLeft <= 0) {
           clearInterval(timer);
           game._registrationTimer = null;
           this._broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
           this._closeRegistration(room, game);
-        } else if ([15, 10, 5].includes(timeLeft)) {
-          this._broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
         }
-        timeLeft--;
       } catch(e) {
         clearInterval(timer);
         game._registrationTimer = null;
@@ -736,21 +742,27 @@ export class GameServer {
     
     const timer = setInterval(() => {
       try {
-        if (!this._isGameRunning(game) || game.drawTimeExpired || timeLeft < 0) {
+        if (!this._isGameRunning(game) || game.drawTimeExpired) {
           clearInterval(timer);
           game._drawTimer = null;
           return;
         }
         
-        if (timeLeft === 0) {
+        // Kurangi timeLeft di awal
+        timeLeft--;
+        
+        // Broadcast di detik-detik tertentu
+        if (timeLeft === 15 || timeLeft === 10 || timeLeft === 5) {
+          this._broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
+        }
+        
+        // Saat timeLeft mencapai 0, tutup fase draw
+        if (timeLeft <= 0) {
           clearInterval(timer);
           game._drawTimer = null;
           this._broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
           this._closeDrawPhase(room, game);
-        } else if ([15, 10, 5].includes(timeLeft)) {
-          this._broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
         }
-        timeLeft--;
       } catch(e) {
         clearInterval(timer);
         game._drawTimer = null;
@@ -1008,7 +1020,8 @@ export class GameServer {
             const t = tanda.get(id) || "";
             return `${name}:${n}${t ? `(${t})` : ''}`;
           }),
-          [], // Tidak ada yang tereliminasi          remainingNames,
+          [], // Tidak ada yang tereliminasi
+          remainingNames,
           true // Flag untuk menunjukkan ini seri
         ]);
         
