@@ -965,6 +965,7 @@ export class GameServer {
       const allSame = values.every(v => v === values[0]);
       let losers = [];
       
+      // JIKA SEMUA NILAI SAMA -> TIDAK ADA YANG TERELIMINASI
       if (!allSame && values.length > 0) {
         const lowest = Math.min(...values);
         losers = entries.filter(([, n]) => n === lowest).map(([id]) => id);
@@ -972,8 +973,50 @@ export class GameServer {
           eliminated.add(id);
         }
       }
+      // Jika allSame (semua nilai sama), tidak ada yang dieliminasi
       
       const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
+      
+      // CEK: Jika semua nilai sama (berapapun jumlah pemainnya) -> SERI, lanjut ronde berikutnya
+      if (allSame && remaining.length >= 2) {
+        // Tidak ada eliminasi, lanjut ke ronde berikutnya
+        game._isEvaluating = false;
+        
+        if (game._safetyTimer) {
+          clearTimeout(game._safetyTimer);
+          game._safetyTimer = null;
+        }
+        
+        // Reset untuk ronde berikutnya
+        numbers.clear();
+        tanda.clear();
+        game.round++;
+        game.evaluationLocked = false;
+        game.drawTimeExpired = false;
+        game._phase = 'draw';
+        game.numbers = new Map();
+        game.tanda = new Map();
+        game._botTimeouts = new Set();
+        
+        // Broadcast hasil seri
+        const remainingNames = remaining.map(id => players.get(id)?.name || id);
+        this._broadcastToRoom(room, [
+          "gameLowCardRoundResult", 
+          game.round - 1, 
+          entries.map(([id, n]) => {
+            const name = players.get(id)?.name || id;
+            const t = tanda.get(id) || "";
+            return `${name}:${n}${t ? `(${t})` : ''}`;
+          }),
+          [], // Tidak ada yang tereliminasi          remainingNames,
+          true // Flag untuk menunjukkan ini seri
+        ]);
+        
+        if (this._isGameRunning(game) && !game._gameEnded) {
+          this._startDrawPhase(room, game);
+        }
+        return;
+      }
       
       if (remaining.length === 1 && !game._gameEnded) {
         const winnerId = remaining[0];
