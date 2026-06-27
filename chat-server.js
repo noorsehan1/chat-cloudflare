@@ -1,6 +1,6 @@
 // ==================== CHAT SERVER - STABLE WITH ALARM (NO IDLE KICK) ====================
 
-const C = {
+ const C = {
   NUMBER_CHANGE_TICKS: 90,
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 500,
