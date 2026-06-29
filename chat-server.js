@@ -1,12 +1,11 @@
-// ==================== CHAT SERVER - NO KICK INACTIVE USER ====================
+// ==================== CHAT SERVER - NO MONITORING ====================
 
-  const C = {
-  NUMBER_CHANGE_TICKS: 180,  // 180 ticks × 5 detik = 15 menit
+const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 500,
   MAX_MESSAGE_SIZE: 5000,
-  CLEANUP_INTERVAL: 30000,   // 30 detik
-  TICK_INTERVAL: 5000,       // 5 detik
+  INTERVAL_15_MENIT: 900000,   // 15 MENIT
+  MAX_NUMBER: 6,
 };
 
 const ROOMS = [
@@ -100,7 +99,9 @@ class RoomManager {
   
   getMuted() { return this.muted; }
   
-  setNumber(n) { this.number = n || 1; }
+  setNumber(n) { 
+    this.number = n || 1; 
+  }
   getNumber() { return this.number; }
 
   updatePoint(seat, x, y, fast) {
@@ -149,11 +150,12 @@ export class ChatServer {
     this._isCleaningUp = false;
     this._cleanupInProgress = false;
     
-    // Tick system
-    this._tickCount = 0;
+    // Number system
     this.currentNumber = 1;
-    this._tickInterval = null;
-    this._cleanupInterval = null;
+    this._lastNumberChange = Date.now();
+    
+    // HANYA 1 INTERVAL = 15 MENIT
+    this._mainInterval = null;
     this._lastActivityTime = Date.now();
     
     // Initialize rooms
@@ -162,59 +164,51 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
-    // Start intervals
-    this._startTickSystem();
+    // Start ONLY 1 interval (15 menit)
+    this._startMainInterval();
   }
   
-  // ==================== TICK SYSTEM ====================
+  // ==================== MAIN INTERVAL (15 MENIT) ====================
   
-  _startTickSystem() {
-    if (this._tickInterval) {
-      clearInterval(this._tickInterval);
-    }
-    if (this._cleanupInterval) {
-      clearInterval(this._cleanupInterval);
+  _startMainInterval() {
+    if (this._mainInterval) {
+      clearInterval(this._mainInterval);
     }
     
-    this._tickInterval = setInterval(() => {
+    this._mainInterval = setInterval(() => {
       if (!this.closing && !this.isDestroyed) {
-        this._doTick();
+        this._doMainTask();
       }
-    }, C.TICK_INTERVAL);
-    
-    this._cleanupInterval = setInterval(() => {
-      if (!this.closing && !this.isDestroyed) {
-        this._doCleanup();
-      }
-    }, C.CLEANUP_INTERVAL);
+    }, C.INTERVAL_15_MENIT);
   }
   
-  _doTick() {
+  _doMainTask() {
     try {
-      this._tickCount++;
       this._lastActivityTime = Date.now();
       
-      if (this._tickCount % C.NUMBER_CHANGE_TICKS === 0) {
-        this.currentNumber = this.currentNumber < 6 ? this.currentNumber + 1 : 1;
-        
-        for (const room of this.rooms.values()) {
-          if (room) {
-            room.setNumber(this.currentNumber);
-          }
-        }
-        
-        const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
-        for (const [room, clients] of this.roomClients) {
-          if (clients && clients.size > 0) {
-            this._broadcastToRoom(room, numberMsg).catch(() => {});
-          }
+      // ===== UPDATE NUMBER - CYCLE 1-6 =====
+      this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
+      
+      for (const room of this.rooms.values()) {
+        if (room) {
+          room.setNumber(this.currentNumber);
         }
       }
       
-    } catch(e) {
-      // Silent catch
-    }
+      const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
+      for (const [room, clients] of this.roomClients) {
+        if (clients && clients.size > 0) {
+          this._broadcastToRoom(room, numberMsg).catch(() => {});
+        }
+      }
+      
+      // ===== CLEANUP =====
+      this._doCleanup().catch(() => {});
+      
+    } catch(e) {}
   }
+  
+  // ==================== CLEANUP ====================
   
   async _doCleanup() {
     if (this._cleanupInProgress) return;
@@ -761,7 +755,6 @@ export class ChatServer {
           break;
         }
 
-        // ==================== MOD WARNING ====================
         case "modwarning": {
           const modRoom = args[0];
           if (modRoom && ROOMS_SET.has(modRoom)) {
@@ -951,50 +944,9 @@ export class ChatServer {
     }
     
     try {
-      const url = new URL(req.url);
-      
-      if (url.pathname === "/health") {
-        const roomCounts = {};
-        for (const [room, rm] of this.rooms) {
-          roomCounts[room] = rm?.getCount() || 0;
-        }
-        
-        return new Response(JSON.stringify({
-          status: "alive",
-          tickCount: this._tickCount,
-          currentNumber: this.currentNumber,
-          wsConnections: this.wsSet.size,
-          userCount: this.userConnections.size,
-          roomCounts: roomCounts,
-          uptime: Date.now() - this._lastActivityTime
-        }), { 
-          headers: { 
-            "Content-Type": "application/json",
-            "Cache-Control": "no-cache"
-          } 
-        });
-      }
-      
-      if (url.pathname === "/status") {
-        return new Response(JSON.stringify({
-          alive: true,
-          wsCount: this.wsSet.size,
-          userCount: this.userConnections.size,
-          rooms: this.rooms.size,
-          tickRunning: this._tickInterval !== null,
-          cleanupRunning: this._cleanupInterval !== null,
-          timestamp: Date.now()
-        }), { 
-          headers: { 
-            "Content-Type": "application/json",
-            "Cache-Control": "no-cache"
-          } 
-        });
-      }
-      
       const upgrade = req.headers.get("Upgrade");
       if (upgrade !== "websocket") {
-        return new Response("Chat Server - RUNNING", { 
+        return new Response("Chat Server", { 
           status: 200,
           headers: {
             "Cache-Control": "no-cache"
@@ -1060,13 +1012,9 @@ export class ChatServer {
     this.closing = true;
     this.isDestroyed = true;
     
-    if (this._tickInterval) {
-      clearInterval(this._tickInterval);
-      this._tickInterval = null;
-    }
-    if (this._cleanupInterval) {
-      clearInterval(this._cleanupInterval);
-      this._cleanupInterval = null;
+    if (this._mainInterval) {
+      clearInterval(this._mainInterval);
+      this._mainInterval = null;
     }
     
     for (const timeout of this._pendingTimeouts) {
