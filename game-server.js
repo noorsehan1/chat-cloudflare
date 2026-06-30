@@ -465,7 +465,6 @@ export class GameServer {
       
       if (oldRoom === roomName) {
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
-        this._sendGameStatusToWs(ws, roomName);
         return;
       }
       
@@ -484,7 +483,6 @@ export class GameServer {
         this._updateUserRoomIndex(username, roomName);
       }
       
-      this._sendGameStatusToWs(ws, roomName);
       this._broadcastToRoom(roomName, ["roomUserJoined", username || "Anonymous"]);
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
       
@@ -1691,20 +1689,17 @@ export class GameServer {
         
         if (!game || !game._isActive || game._gameEnded || !game.players) {
           this._safeSend(ws, ["gameLowCardError", "No active game in this room"]);
-          this._sendGameStatusToWs(ws, room);
           return;
         }
         
         if (game._phase === GAME_PHASE.EVALUATING || game._phase === GAME_PHASE.ENDED) {
           this._safeSend(ws, ["gameLowCardError", "Cannot join now"]);
-          this._sendGameStatusToWs(ws, room);
           return;
         }
         
         if (game.players.has(usernameClean)) {
           if (game.eliminated?.has(usernameClean)) {
             this._safeSend(ws, ["gameLowCardError", "You have been eliminated"]);
-            this._sendGameStatusToWs(ws, room);
             return;
           }
           
@@ -1733,13 +1728,11 @@ export class GameServer {
         
         if (!game.registrationOpen) {
           this._safeSend(ws, ["gameLowCardError", "Registration is closed"]);
-          this._sendGameStatusToWs(ws, room);
           return;
         }
         
         if (game.players.size >= CONSTANTS.MAX_PLAYERS_PER_GAME) {
           this._safeSend(ws, ["gameLowCardError", "Game is full"]);
-          this._sendGameStatusToWs(ws, room);
           return;
         }
         
