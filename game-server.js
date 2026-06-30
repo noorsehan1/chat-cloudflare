@@ -487,6 +487,7 @@ export class GameServer {
       this._sendGameStatusToWs(ws, roomName);
       this._broadcastToRoom(roomName, ["roomUserJoined", username || "Anonymous"]);
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
+      
     } catch(e) {
       this._safeSend(ws, ["gameLowCardError", "Failed to switch room"]);
     }
@@ -495,31 +496,29 @@ export class GameServer {
   _sendGameStatusToWs(ws, room) {
     try {
       const roomGame = this.activeGames.get(room);
-      if (roomGame && roomGame._isActive && !roomGame._gameEnded) {
-        this._safeSend(ws, ["gameLowCardStatus", {
-          room: room,
+      if (roomGame && roomGame._isActive && !roomGame._gameEnded && roomGame.players && roomGame.players.size > 0) {
+        this._safeSend(ws, ["gameStatus", {
           running: true,
+          room: room,
           phase: roomGame._phase || 'idle',
           round: roomGame.round || 0,
           betAmount: roomGame.betAmount || 0,
           registrationOpen: roomGame.registrationOpen || false,
           players: Array.from(roomGame.players?.values() || []).map(p => p.name),
           eliminated: Array.from(roomGame.eliminated || []),
-          numbers: Array.from(roomGame.numbers?.entries() || []).map(([name, num]) => ({ name, num })),
           totalPlayers: roomGame.players?.size || 0,
           activePlayers: this._getActivePlayers(roomGame).length
         }]);
       } else {
-        this._safeSend(ws, ["gameLowCardStatus", {
-          room: room,
+        this._safeSend(ws, ["gameStatus", {
           running: false,
+          room: room,
           phase: 'idle',
           round: 0,
           betAmount: 0,
           registrationOpen: false,
           players: [],
           eliminated: [],
-          numbers: [],
           totalPlayers: 0,
           activePlayers: 0
         }]);
@@ -1456,17 +1455,28 @@ export class GameServer {
       }
       
       if (!room) {
-        this._safeSend(ws, ["gameLowCardError", "Room name is required"]);
+        this._safeSend(ws, ["gameStatus", { 
+          running: false,
+          room: "",
+          phase: "idle",
+          round: 0,
+          players: [],
+          betAmount: 0,
+          registrationOpen: false,
+          eliminated: [],
+          totalPlayers: 0,
+          activePlayers: 0
+        }]);
         return;
       }
       
       const game = this.activeGames.get(room);
       
-      if (!game || !game._isActive || game._gameEnded || !game.players) {
+      if (!game || !game._isActive || game._gameEnded || !game.players || game.players.size === 0) {
         this._safeSend(ws, ["gameStatus", { 
           running: false,
           room: room,
-          phase: 'idle',
+          phase: "idle",
           round: 0,
           players: [],
           betAmount: 0,
@@ -1483,15 +1493,27 @@ export class GameServer {
         room: room,
         phase: game._phase || 'idle',
         round: game.round || 0,
-        players: Array.from(game.players?.values() || []).map(p => p.name),
         betAmount: game.betAmount || 0,
         registrationOpen: game.registrationOpen || false,
+        players: Array.from(game.players?.values() || []).map(p => p.name),
         eliminated: Array.from(game.eliminated || []),
         totalPlayers: game.players?.size || 0,
         activePlayers: this._getActivePlayers(game).length
       }]);
+      
     } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Error checking game"]);
+      this._safeSend(ws, ["gameStatus", { 
+        running: false,
+        room: roomname || "",
+        phase: "idle",
+        round: 0,
+        players: [],
+        betAmount: 0,
+        registrationOpen: false,
+        eliminated: [],
+        totalPlayers: 0,
+        activePlayers: 0
+      }]);
     }
   }
   
@@ -1669,17 +1691,20 @@ export class GameServer {
         
         if (!game || !game._isActive || game._gameEnded || !game.players) {
           this._safeSend(ws, ["gameLowCardError", "No active game in this room"]);
+          this._sendGameStatusToWs(ws, room);
           return;
         }
         
         if (game._phase === GAME_PHASE.EVALUATING || game._phase === GAME_PHASE.ENDED) {
           this._safeSend(ws, ["gameLowCardError", "Cannot join now"]);
+          this._sendGameStatusToWs(ws, room);
           return;
         }
         
         if (game.players.has(usernameClean)) {
           if (game.eliminated?.has(usernameClean)) {
             this._safeSend(ws, ["gameLowCardError", "You have been eliminated"]);
+            this._sendGameStatusToWs(ws, room);
             return;
           }
           
@@ -1708,11 +1733,13 @@ export class GameServer {
         
         if (!game.registrationOpen) {
           this._safeSend(ws, ["gameLowCardError", "Registration is closed"]);
+          this._sendGameStatusToWs(ws, room);
           return;
         }
         
         if (game.players.size >= CONSTANTS.MAX_PLAYERS_PER_GAME) {
           this._safeSend(ws, ["gameLowCardError", "Game is full"]);
+          this._sendGameStatusToWs(ws, room);
           return;
         }
         
