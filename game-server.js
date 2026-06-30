@@ -313,7 +313,6 @@ export class GameServer {
     
     if (oldRoom === roomName) {
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
-      // HAPUS: this._sendGameStatusToWs(ws, roomName);
       return;
     }
     
@@ -335,17 +334,9 @@ export class GameServer {
       }
     }
     
-    // HAPUS: this._sendGameStatusToWs(ws, roomName);
     this._broadcastToRoom(roomName, ["roomUserJoined", username || "Anonymous"]);
     this._safeSend(ws, ["switchRoomSuccess", roomName]);
   }
-  
-  // HAPUS METHOD INI (tidak dipakai)
-  /*
-  _sendGameStatusToWs(ws, room) {
-    // ... HAPUS SEMUA ...
-  }
-  */
   
   // ==================== BROADCAST ====================
   
@@ -1157,7 +1148,7 @@ export class GameServer {
   async checkGameRunning(ws, roomname) {
     try {
       if (this.isDestroyed) {
-        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]);
+        this._safeSend(ws, ["gameStatus", { running: false }]);
         return;
       }
       
@@ -1171,36 +1162,48 @@ export class GameServer {
       }
       
       if (!room) {
-        this._safeSend(ws, ["gameLowCardError", "Room name is required"]);
+        this._safeSend(ws, ["gameStatus", { running: false }]);
         return;
       }
       
       const game = this.activeGames.get(room);
       
-      if (!game || !game._isActive || game._gameEnded || !game.players) {
-        this._safeSend(ws, ["gameStatus", { 
-          running: false,
-          room: room
-        }]);
+      // CEK: Game tidak ada
+      if (!game) {
+        this._safeSend(ws, ["gameStatus", { running: false }]);
         return;
       }
       
-      // Kirim status ke client (HANYA jika diminta)
-      this._safeSend(ws, ["gameStatus", { 
-        running: true,
-        phase: game._phase || 'idle',
-        round: game.round || 0,
-        players: Array.from(game.players?.values() || []).map(p => p.name),
-        betAmount: game.betAmount || 0,
-        registrationOpen: game.registrationOpen || false,
-        eliminated: Array.from(game.eliminated || []),
-        totalPlayers: game.players?.size || 0,
-        activePlayers: this._getActivePlayers(game).length,
-        room: room
-      }]);
+      // CEK: Game tidak aktif atau sudah berakhir
+      if (!game._isActive || game._gameEnded || !game.players) {
+        this._safeSend(ws, ["gameStatus", { running: false }]);
+        return;
+      }
+      
+      // CEK: Tidak ada pemain
+      if (game.players.size === 0) {
+        this._safeSend(ws, ["gameStatus", { running: false }]);
+        return;
+      }
+      
+      // CEK: Tidak ada pemain aktif (semua eliminated)
+      const activePlayers = this._getActivePlayers(game);
+      if (activePlayers.length === 0) {
+        this._safeSend(ws, ["gameStatus", { running: false }]);
+        return;
+      }
+      
+      // CEK: Hanya 1 pemain aktif (seharusnya sudah winner)
+      if (activePlayers.length === 1 && game._gameEnded) {
+        this._safeSend(ws, ["gameStatus", { running: false }]);
+        return;
+      }
+      
+      // GAME BERJALAN dengan minimal 2 pemain aktif
+      this._safeSend(ws, ["gameStatus", { running: true }]);
       
     } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Error checking game"]);
+      this._safeSend(ws, ["gameStatus", { running: false }]);
     }
   }
   
