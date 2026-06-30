@@ -10,9 +10,8 @@ const C = {
 
 const ROOMS = [
   "LowCard 1", "LowCard 2", "Gacor", "General", "Pakistan", "Philippines",
-  "India", "LOVE BIRDS", "Birthday Party", "Heart Lovers", "Cat lovers",
-  "Chikahan Tambayan", "Lounge Talk", "Noxxeliverothcifsa", "BESTIES",
-  "BLUE DYNASTY", "Relax & Chat", "The Chatter Room"
+  "India", "LOVE BIRDS", "Birthday Party", "Heart Lovers", "Cat lovers", "Happy Vibes",
+  "Chikahan Tambayan", "Lounge Talk", "Noxxeliverothcifsa", "BESTIES", "Relax & Chat", "The Chatter Room"
 ];
 
 const ROOMS_SET = new Set(ROOMS);
