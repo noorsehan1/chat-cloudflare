@@ -1,4 +1,4 @@
- import { ChatServer } from "./chat-server.js";
+import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
 
 export { ChatServer, GameServer };
@@ -8,15 +8,19 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
     
-    // 🔥 GAME SERVER - handle /game/*
-    if (path.startsWith("/game")) {
+    // ✅ HANYA WEBSOCKET
+    const upgrade = request.headers.get("Upgrade");
+    if (upgrade !== "websocket") {
+      return new Response("WebSocket only", { status: 400 });
+    }
+    
+    // ✅ ROUTING KE DO (semua di memory)
+    if (path === "/game/ws") {
       const id = env.GAME_SERVER.idFromName("main");
       const obj = env.GAME_SERVER.get(id);
       return obj.fetch(request);
     }
     
-    // 🔥 CHAT SERVER - handle SEMUA yang lain (termasuk /, /ws, /chat, /health)
-    // Ini akan menangkap WebSocket upgrade juga
     const id = env.CHAT_SERVER.idFromName("main");
     const obj = env.CHAT_SERVER.get(id);
     return obj.fetch(request);
