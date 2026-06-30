@@ -1,6 +1,6 @@
 // ==================== GAME SERVER - DURABLE OBJECT ====================
 
- const CONSTANTS = {
+const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
   REGISTRATION_TIME_MS: 20000,
   DRAW_TIME_MS: 20000,
@@ -69,12 +69,12 @@ export class GameServer {
     try {
       this._lastActivityTime = Date.now();
       
-      // Broadcast keep-alive ke semua room yang ada game aktif
-      for (const [room, game] of this.activeGames) {
-        if (game && game._isActive && !game._gameEnded) {
-          this._broadcastToRoom(room, ["_keepAlive", Date.now()]);
-        }
-      }
+      // HAPUS: Broadcast keep-alive ke semua room
+      // for (const [room, game] of this.activeGames) {
+      //   if (game && game._isActive && !game._gameEnded) {
+      //     this._broadcastToRoom(room, ["_keepAlive", Date.now()]);
+      //   }
+      // }
       
       // Cleanup game yang sudah selesai
       this._cleanupStaleGames();
@@ -313,7 +313,7 @@ export class GameServer {
     
     if (oldRoom === roomName) {
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
-      this._sendGameStatusToWs(ws, roomName);
+      // HAPUS: this._sendGameStatusToWs(ws, roomName);
       return;
     }
     
@@ -335,43 +335,17 @@ export class GameServer {
       }
     }
     
-    this._sendGameStatusToWs(ws, roomName);
+    // HAPUS: this._sendGameStatusToWs(ws, roomName);
     this._broadcastToRoom(roomName, ["roomUserJoined", username || "Anonymous"]);
     this._safeSend(ws, ["switchRoomSuccess", roomName]);
   }
   
+  // HAPUS METHOD INI (tidak dipakai)
+  /*
   _sendGameStatusToWs(ws, room) {
-    const roomGame = this.activeGames.get(room);
-    if (roomGame && roomGame._isActive && !roomGame._gameEnded) {
-      this._safeSend(ws, ["gameLowCardStatus", {
-        room: room,
-        running: true,
-        phase: roomGame._phase || 'idle',
-        round: roomGame.round || 0,
-        betAmount: roomGame.betAmount || 0,
-        registrationOpen: roomGame.registrationOpen || false,
-        players: Array.from(roomGame.players?.values() || []).map(p => p.name),
-        eliminated: Array.from(roomGame.eliminated || []),
-        numbers: Array.from(roomGame.numbers?.entries() || []).map(([name, num]) => ({ name, num })),
-        totalPlayers: roomGame.players?.size || 0,
-        activePlayers: this._getActivePlayers(roomGame).length
-      }]);
-    } else {
-      this._safeSend(ws, ["gameLowCardStatus", {
-        room: room,
-        running: false,
-        phase: 'idle',
-        round: 0,
-        betAmount: 0,
-        registrationOpen: false,
-        players: [],
-        eliminated: [],
-        numbers: [],
-        totalPlayers: 0,
-        activePlayers: 0
-      }]);
-    }
+    // ... HAPUS SEMUA ...
   }
+  */
   
   // ==================== BROADCAST ====================
   
@@ -1178,7 +1152,7 @@ export class GameServer {
     }
   }
   
-  // ==================== CHECK GAME RUNNING ====================
+  // ==================== CHECK GAME RUNNING (HANYA UNTUK CLIENT JAVA) ====================
   
   async checkGameRunning(ws, roomname) {
     try {
@@ -1204,10 +1178,14 @@ export class GameServer {
       const game = this.activeGames.get(room);
       
       if (!game || !game._isActive || game._gameEnded || !game.players) {
-        this._safeSend(ws, ["gameStatus", { running: false }]);
+        this._safeSend(ws, ["gameStatus", { 
+          running: false,
+          room: room
+        }]);
         return;
       }
       
+      // Kirim status ke client (HANYA jika diminta)
       this._safeSend(ws, ["gameStatus", { 
         running: true,
         phase: game._phase || 'idle',
@@ -1217,8 +1195,10 @@ export class GameServer {
         registrationOpen: game.registrationOpen || false,
         eliminated: Array.from(game.eliminated || []),
         totalPlayers: game.players?.size || 0,
-        activePlayers: this._getActivePlayers(game).length
+        activePlayers: this._getActivePlayers(game).length,
+        room: room
       }]);
+      
     } catch(e) {
       this._safeSend(ws, ["gameLowCardError", "Error checking game"]);
     }
@@ -1412,15 +1392,9 @@ export class GameServer {
           const finalWsId = this._ensureSingleConnection(room, usernameClean, ws, wsId);
           
           this._safeSend(ws, ["gameLowCardRejoinSuccess", usernameClean]);
-          this._safeSend(ws, ["gameLowCardStatus", {
-            room: room,
-            running: true,
-            phase: game._phase || 'idle',
-            round: game.round || 0,
-            betAmount: game.betAmount || 0,
-            registrationOpen: game.registrationOpen || false,
-            players: Array.from(game.players?.values() || []).map(p => p.name)
-          }]);
+          
+          // HAPUS: Kirim status otomatis
+          // this._safeSend(ws, ["gameLowCardStatus", { ... }]);
           
           if (game.numbers.has(usernameClean)) {
             const number = game.numbers.get(usernameClean);
@@ -1674,6 +1648,7 @@ export class GameServer {
           await this.leaveGame(ws, data[1]);
           break;
           
+        // 🔥 HANYA CLIENT JAVA YANG PANGGIL INI
         case "checkGameRunning":
           await this.checkGameRunning(ws, data[1]);
           break;
