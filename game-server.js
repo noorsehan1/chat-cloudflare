@@ -1,6 +1,6 @@
 // ==================== GAME SERVER - DURABLE OBJECT ====================
 
-const CONSTANTS = {
+ const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
   REGISTRATION_TIME_MS: 20000,
   DRAW_TIME_MS: 20000,
@@ -69,12 +69,12 @@ export class GameServer {
     try {
       this._lastActivityTime = Date.now();
       
-      // HAPUS: Broadcast keep-alive ke semua room
-      // for (const [room, game] of this.activeGames) {
-      //   if (game && game._isActive && !game._gameEnded) {
-      //     this._broadcastToRoom(room, ["_keepAlive", Date.now()]);
-      //   }
-      // }
+      // Broadcast keep-alive ke semua room yang ada game aktif
+      for (const [room, game] of this.activeGames) {
+        if (game && game._isActive && !game._gameEnded) {
+          this._broadcastToRoom(room, ["_keepAlive", Date.now()]);
+        }
+      }
       
       // Cleanup game yang sudah selesai
       this._cleanupStaleGames();
@@ -313,6 +313,7 @@ export class GameServer {
     
     if (oldRoom === roomName) {
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
+      this._sendGameStatusToWs(ws, roomName);
       return;
     }
     
@@ -334,8 +335,42 @@ export class GameServer {
       }
     }
     
+    this._sendGameStatusToWs(ws, roomName);
     this._broadcastToRoom(roomName, ["roomUserJoined", username || "Anonymous"]);
     this._safeSend(ws, ["switchRoomSuccess", roomName]);
+  }
+  
+  _sendGameStatusToWs(ws, room) {
+    const roomGame = this.activeGames.get(room);
+    if (roomGame && roomGame._isActive && !roomGame._gameEnded) {
+      this._safeSend(ws, ["gameLowCardStatus", {
+        room: room,
+        running: true,
+        phase: roomGame._phase || 'idle',
+        round: roomGame.round || 0,
+        betAmount: roomGame.betAmount || 0,
+        registrationOpen: roomGame.registrationOpen || false,
+        players: Array.from(roomGame.players?.values() || []).map(p => p.name),
+        eliminated: Array.from(roomGame.eliminated || []),
+        numbers: Array.from(roomGame.numbers?.entries() || []).map(([name, num]) => ({ name, num })),
+        totalPlayers: roomGame.players?.size || 0,
+        activePlayers: this._getActivePlayers(roomGame).length
+      }]);
+    } else {
+      this._safeSend(ws, ["gameLowCardStatus", {
+        room: room,
+        running: false,
+        phase: 'idle',
+        round: 0,
+        betAmount: 0,
+        registrationOpen: false,
+        players: [],
+        eliminated: [],
+        numbers: [],
+        totalPlayers: 0,
+        activePlayers: 0
+      }]);
+    }
   }
   
   // ==================== BROADCAST ====================
@@ -1143,68 +1178,51 @@ export class GameServer {
     }
   }
   
-async checkGameRunning(ws, roomname) {
-  try {
-    const requestId = Date.now() + "_" + Math.random().toString(36).substring(2, 6);
-    
-    if (this.isDestroyed) {
-      this._safeSend(ws, ["gameStatus", { 
-        running: "false",  // ← STRING, bukan boolean
-        _id: requestId
-      }]);
-      return;
-    }
-    
-    let room = roomname;
-    
-    if (!room) {
-      const wsId = this._getWsId(ws);
-      if (wsId && this.clientRooms.has(wsId)) {
-        room = this.clientRooms.get(wsId);
+  // ==================== CHECK GAME RUNNING ====================
+  
+  async checkGameRunning(ws, roomname) {
+    try {
+      if (this.isDestroyed) {
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]);
+        return;
       }
-    }
-    
-    if (!room) {
+      
+      let room = roomname;
+      
+      if (!room) {
+        const wsId = this._getWsId(ws);
+        if (wsId && this.clientRooms.has(wsId)) {
+          room = this.clientRooms.get(wsId);
+        }
+      }
+      
+      if (!room) {
+        this._safeSend(ws, ["gameLowCardError", "Room name is required"]);
+        return;
+      }
+      
+      const game = this.activeGames.get(room);
+      
+      if (!game || !game._isActive || game._gameEnded || !game.players) {
+        this._safeSend(ws, ["gameStatus", { running: false }]);
+        return;
+      }
+      
       this._safeSend(ws, ["gameStatus", { 
-        running: "false",
-        _id: requestId
+        running: true,
+        phase: game._phase || 'idle',
+        round: game.round || 0,
+        players: Array.from(game.players?.values() || []).map(p => p.name),
+        betAmount: game.betAmount || 0,
+        registrationOpen: game.registrationOpen || false,
+        eliminated: Array.from(game.eliminated || []),
+        totalPlayers: game.players?.size || 0,
+        activePlayers: this._getActivePlayers(game).length
       }]);
-      return;
+    } catch(e) {
+      this._safeSend(ws, ["gameLowCardError", "Error checking game"]);
     }
-    
-    const game = this.activeGames.get(room);
-    
-    // CEK SEMUA KONDISI GAME TIDAK BERJALAN
-    if (!game || !game._isActive || game._gameEnded || !game.players || game.players.size === 0) {
-      this._safeSend(ws, ["gameStatus", { 
-        running: "false",
-        _id: requestId
-      }]);
-      return;
-    }
-    
-    const activePlayers = this._getActivePlayers(game);
-    if (activePlayers.length < 2) {
-      this._safeSend(ws, ["gameStatus", { 
-        running: "false",
-        _id: requestId
-      }]);
-      return;
-    }
-    
-    // ✅ GAME BERJALAN
-    this._safeSend(ws, ["gameStatus", { 
-      running: "true",  // ← STRING, bukan boolean
-      _id: requestId
-    }]);
-    
-  } catch(e) {
-    this._safeSend(ws, ["gameStatus", { 
-      running: "false",
-      _id: Date.now() + "_err"
-    }]);
   }
-}
   
   // ==================== PUBLIC METHODS ====================
   
@@ -1394,9 +1412,15 @@ async checkGameRunning(ws, roomname) {
           const finalWsId = this._ensureSingleConnection(room, usernameClean, ws, wsId);
           
           this._safeSend(ws, ["gameLowCardRejoinSuccess", usernameClean]);
-          
-          // HAPUS: Kirim status otomatis
-          // this._safeSend(ws, ["gameLowCardStatus", { ... }]);
+          this._safeSend(ws, ["gameLowCardStatus", {
+            room: room,
+            running: true,
+            phase: game._phase || 'idle',
+            round: game.round || 0,
+            betAmount: game.betAmount || 0,
+            registrationOpen: game.registrationOpen || false,
+            players: Array.from(game.players?.values() || []).map(p => p.name)
+          }]);
           
           if (game.numbers.has(usernameClean)) {
             const number = game.numbers.get(usernameClean);
@@ -1650,7 +1674,6 @@ async checkGameRunning(ws, roomname) {
           await this.leaveGame(ws, data[1]);
           break;
           
-        // 🔥 HANYA CLIENT JAVA YANG PANGGIL INI
         case "checkGameRunning":
           await this.checkGameRunning(ws, data[1]);
           break;
