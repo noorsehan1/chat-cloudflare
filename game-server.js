@@ -494,6 +494,8 @@ export class GameServer {
   _sendGameStatusToWs(ws, room) {
     try {
       const roomGame = this.activeGames.get(room);
+      
+      // === KALAU GAME AKTIF = running: true ===
       if (roomGame && roomGame._isActive && !roomGame._gameEnded && roomGame.players && roomGame.players.size > 0) {
         this._safeSend(ws, ["gameStatus", {
           running: true,
@@ -507,21 +509,38 @@ export class GameServer {
           totalPlayers: roomGame.players?.size || 0,
           activePlayers: this._getActivePlayers(roomGame).length
         }]);
-      } else {
-        this._safeSend(ws, ["gameStatus", {
-          running: false,
-          room: room,
-          phase: 'idle',
-          round: 0,
-          betAmount: 0,
-          registrationOpen: false,
-          players: [],
-          eliminated: [],
-          totalPlayers: 0,
-          activePlayers: 0
-        }]);
+        return;
       }
-    } catch(e) {}
+      
+      // === KALAU GAME TIDAK AKTIF = running: false ===
+      this._safeSend(ws, ["gameStatus", {
+        running: false,
+        room: room,
+        phase: 'idle',
+        round: 0,
+        betAmount: 0,
+        registrationOpen: false,
+        players: [],
+        eliminated: [],
+        totalPlayers: 0,
+        activePlayers: 0
+      }]);
+      
+    } catch(e) {
+      // === ERROR = running: false ===
+      this._safeSend(ws, ["gameStatus", {
+        running: false,
+        room: room || "",
+        phase: 'idle',
+        round: 0,
+        betAmount: 0,
+        registrationOpen: false,
+        players: [],
+        eliminated: [],
+        totalPlayers: 0,
+        activePlayers: 0
+      }]);
+    }
   }
   
   _broadcastToRoom(room, message) {
@@ -1439,7 +1458,18 @@ export class GameServer {
   async checkGameRunning(ws, roomname) {
     try {
       if (this.isDestroyed) {
-        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]);
+        this._safeSend(ws, ["gameStatus", { 
+          running: false,
+          room: roomname || "",
+          phase: "idle",
+          round: 0,
+          players: [],
+          betAmount: 0,
+          registrationOpen: false,
+          eliminated: [],
+          totalPlayers: 0,
+          activePlayers: 0
+        }]);
         return;
       }
       
@@ -1452,6 +1482,7 @@ export class GameServer {
         }
       }
       
+      // === KALAU ROOM KOSONG = running: false ===
       if (!room) {
         this._safeSend(ws, ["gameStatus", { 
           running: false,
@@ -1470,6 +1501,7 @@ export class GameServer {
       
       const game = this.activeGames.get(room);
       
+      // === KALAU GAME TIDAK ADA = running: false ===
       if (!game || !game._isActive || game._gameEnded || !game.players || game.players.size === 0) {
         this._safeSend(ws, ["gameStatus", { 
           running: false,
@@ -1486,6 +1518,7 @@ export class GameServer {
         return;
       }
       
+      // === GAME AKTIF = running: true ===
       this._safeSend(ws, ["gameStatus", { 
         running: true,
         room: room,
@@ -1500,6 +1533,7 @@ export class GameServer {
       }]);
       
     } catch(e) {
+      // === ERROR = running: false ===
       this._safeSend(ws, ["gameStatus", { 
         running: false,
         room: roomname || "",
