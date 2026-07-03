@@ -610,7 +610,6 @@ export class ChatServer {
                 if (oldClients) oldClients.delete(ws);
               }
               
-              this.wsActiveMulti.set(ws, { username: targetUsername, room: roomName });
               const roomClients = this.roomClients.get(roomName);
               if (roomClients && !roomClients.has(ws)) roomClients.add(ws);
               
