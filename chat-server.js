@@ -56,11 +56,9 @@ class RoomManager {
     return seat;
   }
 
-  // ✅ FIX: OVERWRITE TOTAL - TIDAK MENGGABUNGKAN DATA LAMA
   updateSeat(seat, data) {
     if (!this.seats.has(seat) || !data) return false;
     
-    // ✅ LANGSUNG OVERWRITE DENGAN DATA BARU
     this.seats.set(seat, {
       noimageUrl: data.noimageUrl || "",
       namauser: data.namauser || "",
@@ -159,6 +157,10 @@ export class ChatServer {
     this._mainInterval = null;
     this._lastActivityTime = Date.now();
     
+    // ✅ RATE LIMIT
+    this._roomMessageCount = new Map();
+    this._roomMessageReset = new Map();
+    
     for (const room of ROOMS) {
       this.rooms.set(room, new RoomManager(room));
       this.roomClients.set(room, new Set());
@@ -247,40 +249,74 @@ export class ChatServer {
     }
   }
   
-  // ✅ FIX: TANPA setTimeout, TANPA BATCH
+  // ✅ FIX: DENGAN BATCH + MAX CLIENT LIMIT
   _broadcastToRoom(room, msgStr) {
     if (this.closing || this.isDestroyed || !room) return;
     
     const clients = this.roomClients.get(room);
-    if (!clients?.size) return;
+    if (!clients || clients.size === 0) return;
     
-    const toRemove = [];
-    
-    for (const ws of clients) {
-      if (!ws) {
-        toRemove.push(ws);
-        continue;
-      }
+    // ✅ MAX 40 client per broadcast (lebih aman)
+    if (clients.size > 40) {
+      const clientArray = Array.from(clients).slice(0, 40);
+      const toRemove = [];
       
-      try {
-        if (ws.readyState === 1 && !ws._closing && !this._cleaningUp.has(ws)) {
-          ws.send(msgStr);
-        } else {
+      for (const ws of clientArray) {
+        if (!ws) {
+          toRemove.push(ws);
+          continue;
+        }
+        
+        try {
+          if (ws.readyState === 1 && !ws._closing && !this._cleaningUp.has(ws)) {
+            ws.send(msgStr);
+          } else {
+            toRemove.push(ws);
+          }
+        } catch(e) {
           toRemove.push(ws);
         }
-      } catch(e) {
-        toRemove.push(ws);
       }
-    }
-    
-    if (toRemove.length > 0) {
-      for (const ws of toRemove) {
+      
+      if (toRemove.length > 0) {
+        for (const ws of toRemove) {
+          try {
+            clients.delete(ws);
+            if (ws && !this._cleaningUp.has(ws)) {
+              this.cleanup(ws);
+            }
+          } catch(e) {}
+        }
+      }
+    } else {
+      // ✅ Kirim semua (karena < 40)
+      const toRemove = [];
+      for (const ws of clients) {
+        if (!ws) {
+          toRemove.push(ws);
+          continue;
+        }
+        
         try {
-          clients.delete(ws);
-          if (ws && !this._cleaningUp.has(ws)) {
-            this.cleanup(ws);
+          if (ws.readyState === 1 && !ws._closing && !this._cleaningUp.has(ws)) {
+            ws.send(msgStr);
+          } else {
+            toRemove.push(ws);
           }
-        } catch(e) {}
+        } catch(e) {
+          toRemove.push(ws);
+        }
+      }
+      
+      if (toRemove.length > 0) {
+        for (const ws of toRemove) {
+          try {
+            clients.delete(ws);
+            if (ws && !this._cleaningUp.has(ws)) {
+              this.cleanup(ws);
+            }
+          } catch(e) {}
+        }
       }
     }
   }
@@ -623,7 +659,6 @@ export class ChatServer {
             break;
           }
           
-          // ✅ FIX: updateKursi - HANYA PAKAI DATA INPUTAN
           case "updateKursi": {
             try {
               const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
@@ -639,7 +674,6 @@ export class ChatServer {
               this._kursiLocks.set(lockKey, Date.now());
               
               try {
-                // ✅ UPDATE DENGAN DATA INPUTAN SAJA
                 const updated = roomMan.updateSeat(kursiSeat, {
                   noimageUrl: kursiNoimg || "",
                   namauser: kursiName || "",
@@ -661,14 +695,48 @@ export class ChatServer {
             break;
           }
           
+          // ✅ FIX: CHAT DENGAN RATE LIMIT
           case "chat": {
             try {
               const [chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor] = args;
-              if (chatMsg && ROOMS_SET.has(chatRoom)) {
-                const clients = this.roomClients.get(chatRoom);
-                if (!clients || clients.size === 0) break;
-                this._broadcastToRoom(chatRoom, JSON.stringify(["chat", chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor]));
+              
+              if (!chatMsg || !ROOMS_SET.has(chatRoom)) break;
+              
+              // ✅ RATE LIMIT PER ROOM (Max 30 chat per detik)
+              const now = Date.now();
+              const reset = this._roomMessageReset.get(chatRoom) || 0;
+              const count = this._roomMessageCount.get(chatRoom) || 0;
+              
+              if (now > reset) {
+                this._roomMessageReset.set(chatRoom, now + 1000);
+                this._roomMessageCount.set(chatRoom, 1);
+              } else {
+                if (count > 30) {
+                  // Skip jika terlalu banyak chat
+                  break;
+                }
+                this._roomMessageCount.set(chatRoom, count + 1);
               }
+              
+              // ✅ RATE LIMIT PER USER (Max 3 chat per detik)
+              if (!ws._chatTime) ws._chatTime = 0;
+              if (!ws._chatCount) ws._chatCount = 0;
+              
+              if (now - ws._chatTime > 1000) {
+                ws._chatCount = 1;
+                ws._chatTime = now;
+              } else {
+                ws._chatCount++;
+                if (ws._chatCount > 3) {
+                  this.safeSend(ws, ["error", "Too many messages"]);
+                  break;
+                }
+              }
+              
+              const clients = this.roomClients.get(chatRoom);
+              if (!clients || clients.size === 0) break;
+              
+              this._broadcastToRoom(chatRoom, JSON.stringify(["chat", chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor]));
             } catch(e) {}
             break;
           }
@@ -727,10 +795,27 @@ export class ChatServer {
             break;
           }
           
+          // ✅ FIX: GIFT DENGAN RATE LIMIT
           case "gift": {
             try {
               const [giftRoom, giftSender, giftReceiver, giftGiftName] = args;
               if (giftRoom && ROOMS_SET.has(giftRoom)) {
+                // ✅ Rate limit gift (Max 5 per detik per user)
+                const now = Date.now();
+                if (!ws._giftTime) ws._giftTime = 0;
+                if (!ws._giftCount) ws._giftCount = 0;
+                
+                if (now - ws._giftTime > 1000) {
+                  ws._giftCount = 1;
+                  ws._giftTime = now;
+                } else {
+                  ws._giftCount++;
+                  if (ws._giftCount > 5) {
+                    this.safeSend(ws, ["error", "Too many gifts"]);
+                    break;
+                  }
+                }
+                
                 const clients = this.roomClients.get(giftRoom);
                 if (!clients || clients.size === 0) break;
                 this._broadcastToRoom(giftRoom, JSON.stringify(["gift", giftRoom, giftSender, giftReceiver, giftGiftName, Date.now()]));
@@ -739,10 +824,27 @@ export class ChatServer {
             break;
           }
           
+          // ✅ FIX: ROLLANGAK DENGAN RATE LIMIT
           case "rollangak": {
             try {
               const [rollRoom, rollUser, rollAngka] = args;
               if (rollRoom && ROOMS_SET.has(rollRoom)) {
+                // ✅ Rate limit roll (Max 3 per detik per user)
+                const now = Date.now();
+                if (!ws._rollTime) ws._rollTime = 0;
+                if (!ws._rollCount) ws._rollCount = 0;
+                
+                if (now - ws._rollTime > 1000) {
+                  ws._rollCount = 1;
+                  ws._rollTime = now;
+                } else {
+                  ws._rollCount++;
+                  if (ws._rollCount > 3) {
+                    this.safeSend(ws, ["error", "Too many rolls"]);
+                    break;
+                  }
+                }
+                
                 const clients = this.roomClients.get(rollRoom);
                 if (!clients || clients.size === 0) break;
                 this._broadcastToRoom(rollRoom, JSON.stringify(["rollangakBroadcast", rollRoom, rollUser, rollAngka]));
@@ -1098,7 +1200,6 @@ export class ChatServer {
       
       this.updateRoomCount(roomName);
       
-      // ✅ DENGAN DELAY 1000ms (AMAN - NON-BLOCKING)
       setTimeout(() => {
         try {
           if (ws && ws.readyState === 1 && !this.closing && !this.isDestroyed) {
