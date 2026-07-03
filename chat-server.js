@@ -56,20 +56,21 @@ class RoomManager {
     return seat;
   }
 
+  // ✅ FIX: OVERWRITE TOTAL - TIDAK MENGGABUNGKAN DATA LAMA
   updateSeat(seat, data) {
     if (!this.seats.has(seat) || !data) return false;
-    const old = this.seats.get(seat);
-    if (!old) return false;
     
+    // ✅ LANGSUNG OVERWRITE DENGAN DATA BARU
     this.seats.set(seat, {
-      noimageUrl: data.noimageUrl !== undefined ? data.noimageUrl : old.noimageUrl,
-      namauser: data.namauser !== undefined ? data.namauser : old.namauser,
-      color: data.color !== undefined ? data.color : old.color,
-      itembawah: data.itembawah !== undefined ? data.itembawah : old.itembawah,
-      itematas: data.itematas !== undefined ? data.itematas : old.itematas,
-      vip: data.vip !== undefined ? data.vip : old.vip,
-      viptanda: data.viptanda !== undefined ? data.viptanda : old.viptanda,
+      noimageUrl: data.noimageUrl || "",
+      namauser: data.namauser || "",
+      color: data.color || "",
+      itembawah: data.itembawah || 0,
+      itematas: data.itematas || 0,
+      vip: data.vip || 0,
+      viptanda: data.viptanda || 0
     });
+    
     return true;
   }
 
@@ -127,7 +128,6 @@ class RoomManager {
   }
 }
 
-// ✅ EXPORT CLASS ChatServer
 export class ChatServer {
   constructor(state, env) {
     this.state = state;
@@ -247,6 +247,7 @@ export class ChatServer {
     }
   }
   
+  // ✅ FIX: TANPA setTimeout, TANPA BATCH
   _broadcastToRoom(room, msgStr) {
     if (this.closing || this.isDestroyed || !room) return;
     
@@ -622,6 +623,7 @@ export class ChatServer {
             break;
           }
           
+          // ✅ FIX: updateKursi - HANYA PAKAI DATA INPUTAN
           case "updateKursi": {
             try {
               const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
@@ -637,14 +639,15 @@ export class ChatServer {
               this._kursiLocks.set(lockKey, Date.now());
               
               try {
+                // ✅ UPDATE DENGAN DATA INPUTAN SAJA
                 const updated = roomMan.updateSeat(kursiSeat, {
-                  noimageUrl: kursiNoimg, 
-                  namauser: kursiName, 
-                  color: kursiColor,
-                  itembawah: kursiBawah, 
-                  itematas: kursiAtas, 
-                  vip: kursiVip, 
-                  viptanda: kursiVt
+                  noimageUrl: kursiNoimg || "",
+                  namauser: kursiName || "",
+                  color: kursiColor || "",
+                  itembawah: kursiBawah || 0,
+                  itematas: kursiAtas || 0,
+                  vip: kursiVip || 0,
+                  viptanda: kursiVt || 0
                 });
                 
                 if (updated) {
@@ -1031,7 +1034,7 @@ export class ChatServer {
     }
   }
   
-async _handleJoinInternal(ws, roomName, username) {
+  async _handleJoinInternal(ws, roomName, username) {
     const oldRoom = ws.room;
     
     if (oldRoom && oldRoom !== roomName) {
@@ -1095,7 +1098,7 @@ async _handleJoinInternal(ws, roomName, username) {
       
       this.updateRoomCount(roomName);
       
-      // ✅ DENGAN DELAY 1000ms
+      // ✅ DENGAN DELAY 1000ms (AMAN - NON-BLOCKING)
       setTimeout(() => {
         try {
           if (ws && ws.readyState === 1 && !this.closing && !this.isDestroyed) {
@@ -1107,7 +1110,7 @@ async _handleJoinInternal(ws, roomName, username) {
     } catch(e) {}
     
     return true;
-}
+  }
   
   async fetch(req) {
     if (this.closing || this.isDestroyed) {
