@@ -40,6 +40,12 @@ export class GameServer {
     
     this._cleanupTimers = new Map();
     
+    // ✅ RATE LIMIT
+    this._gameActionCount = new Map();
+    this._gameActionReset = new Map();
+    this._roomBroadcastCount = new Map();
+    this._roomBroadcastReset = new Map();
+    
     this._mainInterval = setInterval(() => {
       if (!this.closing && !this.isDestroyed) {
         try {
@@ -337,16 +343,37 @@ export class GameServer {
     }
   }
   
+  // ✅ FIX: _broadcastToRoom DENGAN RATE LIMIT & MAX CLIENT
   _broadcastToRoom(room, message) {
     if (this.closing || this.isDestroyed || !room || !message) return;
     
     const wsIds = this.wsClients.get(room);
     if (!wsIds || wsIds.size === 0) return;
     
+    // ✅ RATE LIMIT PER ROOM (Max 100 broadcast per detik)
+    const now = Date.now();
+    const reset = this._roomBroadcastReset.get(room) || 0;
+    const count = this._roomBroadcastCount.get(room) || 0;
+    
+    if (now > reset) {
+      this._roomBroadcastReset.set(room, now + 1000);
+      this._roomBroadcastCount.set(room, 1);
+    } else {
+      if (count > 100) {
+        return;
+      }
+      this._roomBroadcastCount.set(room, count + 1);
+    }
+    
     const msgStr = JSON.stringify(message);
     const disconnected = new Set();
     
-    for (const wsId of wsIds) {
+    // ✅ MAX 30 CLIENT PER BROADCAST
+    const wsIdArray = Array.from(wsIds);
+    const maxClients = Math.min(wsIdArray.length, 30);
+    
+    for (let i = 0; i < maxClients; i++) {
+      const wsId = wsIdArray[i];
       const ws = this.wsMap.get(wsId);
       if (ws && ws.readyState === 1) {
         try {
@@ -1101,6 +1128,7 @@ export class GameServer {
     }
   }
   
+  // ✅ FIX: startGame DENGAN RATE LIMIT
   async startGame(ws, bet, username) {
     try {
       if (this.isDestroyed) {
@@ -1114,6 +1142,23 @@ export class GameServer {
       }
       
       const usernameClean = username.trim();
+      
+      // ✅ RATE LIMIT PER USER (Max 3 start game per menit)
+      const now = Date.now();
+      const key = `start_${usernameClean}`;
+      const reset = this._gameActionReset.get(key) || 0;
+      const count = this._gameActionCount.get(key) || 0;
+      
+      if (now > reset) {
+        this._gameActionReset.set(key, now + 60000);
+        this._gameActionCount.set(key, 1);
+      } else {
+        if (count > 3) {
+          this._safeSend(ws, ["gameLowCardError", "Too many game starts, please wait"]);
+          return;
+        }
+        this._gameActionCount.set(key, count + 1);
+      }
       
       const existingGames = this._findAllGamesByUsername(usernameClean);
       if (existingGames.length > 0) {
@@ -1141,7 +1186,6 @@ export class GameServer {
         }
       }
       
-      const now = Date.now();
       const lockTime = this._gameLocks.get(room);
       if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
         this._safeSend(ws, ["gameLowCardError", "Game is starting, please wait"]);
@@ -1230,6 +1274,7 @@ export class GameServer {
     }
   }
   
+  // ✅ FIX: joinGame DENGAN RATE LIMIT
   async joinGame(ws, username) {
     try {
       if (this.isDestroyed) {
@@ -1244,6 +1289,23 @@ export class GameServer {
       
       const usernameClean = username.trim();
       const wsId = this._getWsId(ws);
+      
+      // ✅ RATE LIMIT PER USER (Max 5 join per menit)
+      const now = Date.now();
+      const key = `join_${usernameClean}`;
+      const reset = this._gameActionReset.get(key) || 0;
+      const count = this._gameActionCount.get(key) || 0;
+      
+      if (now > reset) {
+        this._gameActionReset.set(key, now + 60000);
+        this._gameActionCount.set(key, 1);
+      } else {
+        if (count > 5) {
+          this._safeSend(ws, ["gameLowCardError", "Too many join attempts, please wait"]);
+          return;
+        }
+        this._gameActionCount.set(key, count + 1);
+      }
       
       const room = this._getRoomForWs(ws);
       if (!room) {
@@ -1325,6 +1387,7 @@ export class GameServer {
     }
   }
   
+  // ✅ FIX: submitNumber DENGAN RATE LIMIT
   async submitNumber(ws, number, tanda, username) {
     try {
       if (this.isDestroyed) {
@@ -1339,6 +1402,22 @@ export class GameServer {
       
       const usernameClean = username.trim();
       const wsId = this._getWsId(ws);
+      
+      // ✅ RATE LIMIT PER USER (Max 3 submit per detik)
+      const now = Date.now();
+      if (!ws._submitTime) ws._submitTime = 0;
+      if (!ws._submitCount) ws._submitCount = 0;
+      
+      if (now - ws._submitTime > 1000) {
+        ws._submitCount = 1;
+        ws._submitTime = now;
+      } else {
+        ws._submitCount++;
+        if (ws._submitCount > 3) {
+          this._safeSend(ws, ["gameLowCardError", "Too many submissions, slow down!"]);
+          return;
+        }
+      }
       
       const room = this._getRoomForWs(ws);
       if (!room) {
@@ -1754,6 +1833,10 @@ export class GameServer {
       this.connectionLocks.clear();
       this._gameLocks.clear();
       this._joinLocks.clear();
+      this._gameActionCount.clear();
+      this._gameActionReset.clear();
+      this._roomBroadcastCount.clear();
+      this._roomBroadcastReset.clear();
       
       for (const [room, game] of this.activeGames) {
         this._deleteGame(room, game);
