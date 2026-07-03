@@ -1,4 +1,4 @@
-// ==================== GAME SERVER - TANPA RATE LIMIT ====================
+// ==================== GAME SERVER - DENGAN HIBERNASI ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -45,8 +45,6 @@ export class GameServer {
     this._roomBroadcastReset = new Map();
     
     // ❌ HAPUS RATE LIMIT GAME ACTION
-    // this._gameActionCount = new Map();
-    // this._gameActionReset = new Map();
     
     this._cleanupInterval = setInterval(() => {
       if (!this.closing && !this.isDestroyed) {
@@ -66,6 +64,8 @@ export class GameServer {
     try {
       const toRemove = [];
       for (const [wsId, ws] of this.wsMap) {
+        // ✅ HANYA HAPUS KONEKSI MATI (BUKAN IDLE)
+        // HIBERNASI SUDAH HANDLE IDLE
         if (!ws || ws.readyState !== 1 || ws._closing) {
           toRemove.push(wsId);
         }
@@ -1129,8 +1129,6 @@ export class GameServer {
       
       const usernameClean = username.trim();
       
-      // ❌ HAPUS RATE LIMIT START GAME
-      
       const existingGames = this._findAllGamesByUsername(usernameClean);
       if (existingGames.length > 0) {
         this._safeSend(ws, ["gameLowCardInfo", `You are currently playing`]);
@@ -1262,8 +1260,6 @@ export class GameServer {
       const usernameClean = username.trim();
       const wsId = this._getWsId(ws);
       
-      // ❌ HAPUS RATE LIMIT JOIN GAME
-      
       const room = this._getRoomForWs(ws);
       if (!room) {
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
@@ -1359,8 +1355,6 @@ export class GameServer {
       
       const usernameClean = username.trim();
       const wsId = this._getWsId(ws);
-      
-      // ❌ HAPUS RATE LIMIT SUBMIT NUMBER
       
       const room = this._getRoomForWs(ws);
       if (!room) {
@@ -1596,8 +1590,10 @@ export class GameServer {
         
         server._timeoutId = timeoutId;
         
+        // ✅ HIBERNASI: WebSocket bisa tidur saat tidak aktif
+        // DO tidak aktif saat WS diam → Wall Time TIDAK BERJALAN!
         try { 
-          this.state.acceptWebSocket(server); 
+          this.state.acceptWebSocket(server);
         } catch(e) { 
           clearTimeout(timeoutId);
           return new Response("WebSocket acceptance failed", { status: 500 }); 
@@ -1669,6 +1665,8 @@ export class GameServer {
   }
   
   async webSocketMessage(ws, msg) {
+    // ✅ DO AKTIF OTOMATIS SAAT ADA PESAN
+    // Setelah selesai, DO hibernasi lagi
     try {
       if (!ws || ws._closing || this.closing || this.isDestroyed) return;
       if (!ws._wsId) return;
