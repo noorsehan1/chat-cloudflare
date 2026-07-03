@@ -1031,7 +1031,7 @@ export class ChatServer {
     }
   }
   
-  async _handleJoinInternal(ws, roomName, username) {
+async _handleJoinInternal(ws, roomName, username) {
     const oldRoom = ws.room;
     
     if (oldRoom && oldRoom !== roomName) {
@@ -1095,14 +1095,19 @@ export class ChatServer {
       
       this.updateRoomCount(roomName);
       
-      if (ws && ws.readyState === 1 && !this.closing && !this.isDestroyed) {
-        this.sendAllStateTo(ws, roomName, true);
-      }
+      // ✅ DENGAN DELAY 1000ms
+      setTimeout(() => {
+        try {
+          if (ws && ws.readyState === 1 && !this.closing && !this.isDestroyed) {
+            this.sendAllStateTo(ws, roomName, true);
+          }
+        } catch(e) {}
+      }, 1000);
       
     } catch(e) {}
     
     return true;
-  }
+}
   
   async fetch(req) {
     if (this.closing || this.isDestroyed) {
