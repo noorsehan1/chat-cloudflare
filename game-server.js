@@ -1,4 +1,4 @@
-// ==================== GAME SERVER - ZERO WALL TIME ====================
+// ==================== GAME SERVER - WALL TIME 0 ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -15,13 +15,8 @@ const CONSTANTS = {
   MAX_PLAYERS_PER_GAME: 45,
   GAME_CLEANUP_DELAY_MS: 5000,
   BATCH_SIZE: 20,
-  MAX_RETRIES: 3,
-  RETRY_DELAY_MS: 50,
-  MAX_CONNECTION_AGE_MS: 300000,
-  CLEANUP_CHUNK_SIZE: 25,
-  MAX_GAME_AGE_MS: 600000,
-  HEARTBEAT_INTERVAL_MS: 30000,
-  CLEANUP_INTERVAL_MS: 60000,
+  MAX_RETRIES: 5,
+  RETRY_DELAY_MS: 100,
 };
 
 export class GameServer {
@@ -31,58 +26,48 @@ export class GameServer {
     this.closing = false;
     this.isDestroyed = false;
     
-    // Game state
     this.activeGames = new Map();
     this._maxGames = CONSTANTS.MAX_LOWCARD_GAMES;
     this._gameLocks = new Map();
     this._joinLocks = new Map();
     
-    // WebSocket state
     this._wsIdCounter = 0;
     this.wsClients = new Map();
     this.clientRooms = new Map();
     this.wsMap = new Map();
     this.roomViewers = new Map();
     
-    // Connection state
     this.userConnections = new Map();
     this.connectionLocks = new Map();
+    
     this._cleanupTimers = new Map();
-    this._cleaningUp = false;
+    this._cleaningUp = false; // ✅ FIX: Added cleanup flag
     
-    // ✅ NON-BLOCKING HEARTBEAT - 30 seconds
-    this._heartbeatInterval = setInterval(() => {
+    // ✅ FIX: 1 INTERVAL (60 DETIK) with cleanup
+    this._mainInterval = setInterval(() => {
       if (!this.closing && !this.isDestroyed) {
-        this._sendHeartbeats();
+        try {
+          this._doMainTask();
+          this._cleanupStaleGames(); // ✅ FIX: Added stale game cleanup
+          this._cleanupDeadConnections();
+        } catch(e) {
+          // Silent error
+        }
       }
-    }, CONSTANTS.HEARTBEAT_INTERVAL_MS);
-    
-    // ✅ NON-BLOCKING CLEANUP - 60 seconds
-    this._cleanupInterval = setInterval(() => {
-      if (!this.closing && !this.isDestroyed) {
-        this._performCleanup();
-      }
-    }, CONSTANTS.CLEANUP_INTERVAL_MS);
+    }, 60000);
     
     this._lastActivityTime = Date.now();
-    this._stats = {
-      totalConnections: 0,
-      totalGames: 0,
-      totalMessages: 0,
-      lastCleanup: Date.now()
-    };
   }
   
-  // ==================== HEARTBEAT (NON-BLOCKING) ====================
+  // ==================== KEEP-ALIVE (NON-BLOCKING) ====================
   
-  _sendHeartbeats() {
+  _doMainTask() {
     try {
       this._lastActivityTime = Date.now();
       
-      // ✅ Use forEach with microtask to avoid blocking
+      // ✅ FIX: Non-blocking - use microtask queue
       for (const [room, game] of this.activeGames) {
         if (game && game._isActive && !game._gameEnded) {
-          // ✅ Non-blocking - schedule in microtask
           queueMicrotask(() => {
             if (!this.closing && !this.isDestroyed) {
               this._broadcastToRoom(room, ["_keepAlive", Date.now()]);
@@ -91,86 +76,63 @@ export class GameServer {
         }
       }
     } catch(e) {
-      // Silent
+      // Silent error
     }
   }
   
-  // ==================== CLEANUP (CHUNKED) ====================
-  
-  _performCleanup() {
-    if (this._cleaningUp) return;
-    this._cleaningUp = true;
-    this._stats.lastCleanup = Date.now();
-    
-    try {
-      // ✅ Cleanup stale games
-      this._cleanupStaleGames();
-      
-      // ✅ Cleanup dead connections (chunked)
-      this._cleanupDeadConnections();
-      
-    } catch(e) {
-      // Silent
-    } finally {
-      this._cleaningUp = false;
-    }
-  }
+  // ==================== CLEANUP STALE GAMES (NEW) ====================
   
   _cleanupStaleGames() {
     try {
       const now = Date.now();
-      const toRemove = [];
-      
       for (const [room, game] of this.activeGames) {
-        // ✅ Game ended or inactive for too long
-        if (game._gameEnded || !game._isActive) {
-          if (game._createdAt && (now - game._createdAt) > CONSTANTS.MAX_GAME_AGE_MS) {
-            toRemove.push(room);
-          }
-        }
-        // ✅ Stuck in registration
-        if (game._phase === 'registration' && (now - game._createdAt) > 60000) {
+        // Game stuck in registration > 60 seconds
+        if (game._phase === 'registration' && game._createdAt && (now - game._createdAt) > 60000) {
           this._closeRegistration(room, game);
         }
-        // ✅ Stuck in draw
-        if (game._phase === 'draw' && game._drawTimer && (now - game._createdAt) > 90000) {
+        // Game stuck in draw > 90 seconds
+        if (game._phase === 'draw' && game._createdAt && (now - game._createdAt) > 90000) {
           this._closeDrawPhase(room, game);
         }
-      }
-      
-      for (const room of toRemove) {
-        const game = this.activeGames.get(room);
-        if (game) {
+        // Game ended but not cleaned up
+        if (game._gameEnded && game._createdAt && (now - game._createdAt) > 300000) {
+          this._scheduleGameCleanup(room, game);
+        }
+        // Game inactive > 10 minutes
+        if (!game._isActive && game._createdAt && (now - game._createdAt) > 600000) {
           this._scheduleGameCleanup(room, game);
         }
       }
     } catch(e) {}
   }
   
+  // ==================== CLEANUP DEAD CONNECTIONS (CHUNKED) ====================
+  
   _cleanupDeadConnections() {
+    // ✅ FIX: Prevent overlap
+    if (this._cleaningUp) return;
+    this._cleaningUp = true;
+    
     try {
       const toRemove = [];
-      const now = Date.now();
-      
-      // ✅ Collect dead connections
       for (const [wsId, ws] of this.wsMap) {
-        const isDead = !ws || 
-                      ws.readyState !== 1 || 
-                      ws._closing ||
-                      (ws._createdAt && (now - ws._createdAt) > CONSTANTS.MAX_CONNECTION_AGE_MS);
-        
-        if (isDead) {
+        if (!ws || ws.readyState !== 1 || ws._closing) {
           toRemove.push(wsId);
         }
       }
       
-      if (toRemove.length === 0) return;
+      if (toRemove.length === 0) {
+        this._cleaningUp = false;
+        return;
+      }
       
-      // ✅ Process in chunks (non-blocking)
-      const chunkSize = CONSTANTS.CLEANUP_CHUNK_SIZE || 25;
-      
+      // ✅ FIX: Process in chunks
+      const chunkSize = 25;
       const processChunk = (index) => {
-        if (index >= toRemove.length) return;
+        if (index >= toRemove.length) {
+          this._cleaningUp = false;
+          return;
+        }
         
         const chunk = toRemove.slice(index, index + chunkSize);
         
@@ -184,7 +146,6 @@ export class GameServer {
             this.clientRooms.delete(wsId);
             this.wsMap.delete(wsId);
             
-            // ✅ Cleanup user connection
             for (const [username, conn] of this.userConnections) {
               if (conn.wsId === wsId) {
                 this.userConnections.delete(username);
@@ -194,15 +155,15 @@ export class GameServer {
           }
         }
         
-        // ✅ Process next chunk asynchronously
-        if (index + chunkSize < toRemove.length) {
-          setImmediate(() => processChunk(index + chunkSize));
-        }
+        // Process next chunk asynchronously
+        setImmediate(() => processChunk(index + chunkSize));
       };
       
       processChunk(0);
       
-    } catch(e) {}
+    } catch(e) {
+      this._cleaningUp = false;
+    }
   }
   
   // ==================== WEB SOCKET MANAGEMENT ====================
@@ -215,7 +176,7 @@ export class GameServer {
     if (this.connectionLocks.has(username)) {
       return false;
     }
-    this.connectionLocks.set(username, Date.now());
+    this.connectionLocks.set(username, true);
     return true;
   }
   
@@ -226,11 +187,12 @@ export class GameServer {
   _forceCleanupUserConnections(username, excludeWsId = null) {
     const conn = this.userConnections.get(username);
     if (!conn) {
+      // ✅ FIX: Release lock if no connection
       this._unlockUserConnection(username);
       return;
     }
     
-    // ✅ RELEASE LOCK if excluded
+    // ✅ FIX: Release lock if excluded
     if (excludeWsId !== null && conn.wsId === excludeWsId) {
       this._unlockUserConnection(username);
       return;
@@ -259,21 +221,22 @@ export class GameServer {
     }
     
     this.userConnections.delete(username);
+    // ✅ FIX: Always release lock
     this._unlockUserConnection(username);
   }
   
-  // ==================== ADD/REMOVE CLIENT ====================
+  // ==================== ADD/REMOVE CLIENT (WITH RETRY) ====================
   
   _addClient(room, ws, username = null, isNewConnection = false, retryCount = 0) {
     const wsId = this._getWsId(ws);
     if (!wsId) {
-      this._safeSend(ws, ["gameLowCardError", "Connection error"]);
+      this._safeSend(ws, ["gameLowCardError", "Connection error, please reconnect"]);
       return;
     }
     
-    // ✅ MAX RETRY LIMIT
+    // ✅ FIX: Retry limit
     if (retryCount > CONSTANTS.MAX_RETRIES) {
-      this._safeSend(ws, ["gameLowCardError", "Connection timeout"]);
+      this._safeSend(ws, ["gameLowCardError", "Connection timeout, please try again"]);
       return;
     }
     
@@ -313,7 +276,6 @@ export class GameServer {
       }
     }
     
-    // ✅ Remove from old room
     if (this.clientRooms.has(wsId)) {
       const oldRoom = this.clientRooms.get(wsId);
       if (oldRoom !== room) {
@@ -321,7 +283,6 @@ export class GameServer {
       }
     }
     
-    // ✅ Add to new room
     const clients = this.wsClients.get(room);
     if (clients) {
       clients.delete(wsId);
@@ -335,7 +296,6 @@ export class GameServer {
     this.wsMap.set(wsId, ws);
     ws.room = room;
     ws.username = username;
-    ws._lastActivity = Date.now();
     
     if (username) {
       if (!this.roomViewers.has(room)) {
@@ -343,8 +303,6 @@ export class GameServer {
       }
       this.roomViewers.get(room).add(username);
     }
-    
-    this._stats.totalConnections++;
   }
   
   _removeClientFromRoom(room, wsId) {
@@ -394,12 +352,13 @@ export class GameServer {
     return this.clientRooms.get(wsId) || null;
   }
   
-  // ==================== SINGLE CONNECTION ====================
+  // ==================== SINGLE CONNECTION (WITH RETRY) ====================
   
   _ensureSingleConnection(room, username, newWs, newWsId, retryCount = 0) {
     const game = this.activeGames.get(room);
     if (!game) return newWsId;
     
+    // ✅ FIX: Retry limit
     if (retryCount > CONSTANTS.MAX_RETRIES) {
       return newWsId;
     }
@@ -497,7 +456,7 @@ export class GameServer {
     }
   }
   
-  // ==================== OPTIMIZED BROADCAST ====================
+  // ==================== BROADCAST (OPTIMIZED) ====================
   
   _broadcastToRoom(room, message) {
     if (this.closing || this.isDestroyed || !room || !message) return;
@@ -510,7 +469,6 @@ export class GameServer {
     const wsIdArray = Array.from(wsIds);
     const disconnected = new Set();
     
-    // ✅ Send in batches
     for (let i = 0; i < wsIdArray.length; i += BATCH_SIZE) {
       const batch = wsIdArray.slice(i, i + BATCH_SIZE);
       
@@ -519,7 +477,6 @@ export class GameServer {
         if (ws && ws.readyState === 1) {
           try {
             ws.send(msgStr);
-            this._stats.totalMessages++;
           } catch(e) {
             disconnected.add(wsId);
           }
@@ -529,7 +486,7 @@ export class GameServer {
       }
     }
     
-    // ✅ Cleanup disconnected async
+    // ✅ FIX: Use setImmediate instead of setTimeout
     if (disconnected.size > 0) {
       setImmediate(() => {
         for (const wsId of disconnected) {
@@ -549,7 +506,6 @@ export class GameServer {
     if (!ws || ws.readyState !== 1) return false;
     try {
       ws.send(JSON.stringify(message));
-      this._stats.totalMessages++;
       return true;
     } catch(e) {
       return false;
@@ -823,10 +779,9 @@ export class GameServer {
       const maxBotsToAdd = Math.min(count, CONSTANTS.MAX_BOTS_PER_GAME - existingBotCount);
       
       for (let i = 0; i < maxBotsToAdd; i++) {
-        // ✅ UNIQUE BOT ID
-        const timestamp = Date.now();
+        // ✅ FIX: Unique bot ID with random suffix
         const random = Math.random().toString(36).substring(2, 6);
-        const botId = `BOT_${room}_${i}_${timestamp}_${random}`;
+        const botId = `BOT_${room}_${i}_${Date.now()}_${random}`;
         const botName = botNames[(existingBotCount + i) % botNames.length];
         
         if (!game.players.has(botId)) {
@@ -1030,6 +985,7 @@ export class GameServer {
       if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired && this._isGameRunning(game)) {
         game.evaluationLocked = true;
         this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+        // ✅ FIX: Only schedule if not already evaluating
         if (!game._isEvaluating) {
           game._evalTimer = setTimeout(() => {
             try {
@@ -1403,7 +1359,6 @@ export class GameServer {
         game.playerWsId.set(usernameClean, wsId);
         
         this.activeGames.set(room, game);
-        this._stats.totalGames++;
         
         this._addClient(room, ws, usernameClean, false);
         
@@ -1603,6 +1558,7 @@ export class GameServer {
       if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired && this._isGameRunning(game)) {
         game.evaluationLocked = true;
         this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+        // ✅ FIX: Only schedule if not already evaluating
         if (!game._isEvaluating) {
           game._evalTimer = setTimeout(() => {
             try {
@@ -1782,7 +1738,6 @@ export class GameServer {
         server.room = null;
         server._createdAt = Date.now();
         server.username = null;
-        server._lastActivity = Date.now();
         
         server.addEventListener("message", async (event) => {
           try {
@@ -1921,18 +1876,11 @@ export class GameServer {
       this.closing = true;
       this.isDestroyed = true;
       
-      // ✅ Stop intervals
-      if (this._heartbeatInterval) {
-        clearInterval(this._heartbeatInterval);
-        this._heartbeatInterval = null;
+      if (this._mainInterval) {
+        clearInterval(this._mainInterval);
+        this._mainInterval = null;
       }
       
-      if (this._cleanupInterval) {
-        clearInterval(this._cleanupInterval);
-        this._cleanupInterval = null;
-      }
-      
-      // ✅ Cleanup all games
       for (const [room, game] of this.activeGames) {
         this._cleanupGame(game);
       }
@@ -1942,7 +1890,6 @@ export class GameServer {
       }
       this._cleanupTimers.clear();
       
-      // ✅ Close all WebSockets
       for (const [room, wsIds] of this.wsClients) {
         for (const wsId of wsIds) {
           const ws = this.wsMap.get(wsId);
@@ -1954,7 +1901,6 @@ export class GameServer {
         }
       }
       
-      // ✅ Clear all maps
       this.wsClients.clear();
       this.clientRooms.clear();
       this.wsMap.clear();
@@ -1968,33 +1914,6 @@ export class GameServer {
         this._deleteGame(room, game);
       }
       this.activeGames.clear();
-      
     } catch(e) {}
-  }
-  
-  // ==================== STATS ====================
-  
-  getStats() {
-    return {
-      ...this._stats,
-      activeGames: this.activeGames.size,
-      activeConnections: this.wsMap.size,
-      activeRooms: this.wsClients.size,
-      memory: this._getMemoryUsage(),
-      uptime: Date.now() - this._lastActivityTime
-    };
-  }
-  
-  _getMemoryUsage() {
-    try {
-      if (typeof performance !== 'undefined' && performance.memory) {
-        return {
-          used: Math.round(performance.memory.usedJSHeapSize / 1024 / 1024),
-          total: Math.round(performance.memory.totalJSHeapSize / 1024 / 1024),
-          limit: Math.round(performance.memory.jsHeapSizeLimit / 1024 / 1024)
-        };
-      }
-    } catch(e) {}
-    return null;
   }
 }
