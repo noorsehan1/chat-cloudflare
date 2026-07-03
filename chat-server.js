@@ -1,4 +1,4 @@
-// ==================== CHAT SERVER - FULL CODE ====================
+// ==================== CHAT SERVER - DENGAN HIBERNASI ====================
 
 const C = {
   MAX_SEATS: 45,
@@ -211,6 +211,7 @@ export class ChatServer {
       const toRemove = [];
       
       // ✅ HANYA HAPUS KONEKSI YANG SUDAH MATI
+      // TIDAK ADA IDLE TIMEOUT - USER DIAM TETAP ONLINE (HIBERNASI)
       for (const ws of this.wsSet) {
         try {
           if (!ws || ws.readyState !== 1 || ws._closing) {
@@ -610,6 +611,7 @@ export class ChatServer {
                 if (oldClients) oldClients.delete(ws);
               }
               
+              this.wsActiveMulti.set(ws, { username: targetUsername, room: roomName });
               const roomClients = this.roomClients.get(roomName);
               if (roomClients && !roomClients.has(ws)) roomClients.add(ws);
               
@@ -1202,8 +1204,10 @@ export class ChatServer {
       
       server._timeoutId = timeoutId;
       
+      // ✅ HIBERNASI: WebSocket bisa tidur saat tidak aktif
+      // DO tidak aktif saat WS diam → Wall Time TIDAK BERJALAN!
       try { 
-        this.state.acceptWebSocket(server); 
+        this.state.acceptWebSocket(server);
       } catch(e) { 
         clearTimeout(timeoutId);
         return new Response("WebSocket acceptance failed", { status: 500 }); 
@@ -1229,6 +1233,8 @@ export class ChatServer {
   }
   
   async webSocketMessage(ws, msg) { 
+    // ✅ DO AKTIF OTOMATIS SAAT ADA PESAN
+    // Setelah selesai, DO hibernasi lagi
     if (!ws || ws._closing || this._cleaningUp.has(ws) || this.closing || this.isDestroyed) return;
     try {
       await this.handleMessage(ws, msg);
