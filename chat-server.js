@@ -1,4 +1,4 @@
-// ==================== CHAT SERVER - FULL CLASS ====================
+// ==================== CHAT SERVER - FULL CODE ====================
 
 const C = {
   MAX_SEATS: 45,
@@ -189,14 +189,13 @@ export class ChatServer {
           
           const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
           
-          // ✅ HANYA BROADCAST KE ROOM YANG ADA CLIENT
+          // ✅ BROADCAST KE ROOM YANG ADA CLIENT
           for (const [room, clients] of this.roomClients) {
             if (clients && clients.size > 0) {
               this._broadcastToRoom(room, numberMsg);
             }
           }
           
-          // ✅ CLEANUP - HANYA HAPUS KONEKSI MATI (BUKAN IDLE)
           this._doCleanup();
           
         } catch(e) {}
@@ -212,7 +211,6 @@ export class ChatServer {
       const toRemove = [];
       
       // ✅ HANYA HAPUS KONEKSI YANG SUDAH MATI
-      // TIDAK ADA IDLE TIMEOUT - USER DIAM TETAP ONLINE
       for (const ws of this.wsSet) {
         try {
           if (!ws || ws.readyState !== 1 || ws._closing) {
@@ -249,18 +247,17 @@ export class ChatServer {
     }
   }
   
-  // ✅ HEMAT DO - MAX 10 CLIENT PER BROADCAST
+  // ✅ BROADCAST KE SEMUA CLIENT
   _broadcastToRoom(room, msgStr) {
     if (this.closing || this.isDestroyed || !room) return;
     
     const clients = this.roomClients.get(room);
     if (!clients || clients.size === 0) return;
     
-    // ✅ MAX 10 CLIENT PER BROADCAST (HEMAT DO)
-    const clientArray = Array.from(clients).slice(0, 10);
     const toRemove = [];
     
-    for (const ws of clientArray) {
+    // ✅ KIRIM KE SEMUA CLIENT DI ROOM
+    for (const ws of clients) {
       if (!ws) {
         toRemove.push(ws);
         continue;
@@ -277,6 +274,7 @@ export class ChatServer {
       }
     }
     
+    // ✅ CLEANUP KONEKSI MATI
     if (toRemove.length > 0) {
       for (const ws of toRemove) {
         try {
@@ -663,14 +661,14 @@ export class ChatServer {
             break;
           }
           
-          // ✅ CHAT DENGAN RATE LIMIT RENDAH
+          // ✅ CHAT - TANPA ERROR MESSAGE
           case "chat": {
             try {
               const [chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor] = args;
               
               if (!chatMsg || !ROOMS_SET.has(chatRoom)) break;
               
-              // ✅ RATE LIMIT PER ROOM (Max 10 chat per detik)
+              // ✅ RATE LIMIT PER ROOM (Max 10 chat per detik) - TANPA ERROR
               const now = Date.now();
               const reset = this._roomMessageReset.get(chatRoom) || 0;
               const count = this._roomMessageCount.get(chatRoom) || 0;
@@ -685,7 +683,7 @@ export class ChatServer {
                 this._roomMessageCount.set(chatRoom, count + 1);
               }
               
-              // ✅ RATE LIMIT PER USER (Max 2 chat per detik)
+              // ✅ RATE LIMIT PER USER (Max 2 chat per detik) - TANPA ERROR
               if (!ws._chatTime) ws._chatTime = 0;
               if (!ws._chatCount) ws._chatCount = 0;
               
@@ -695,7 +693,6 @@ export class ChatServer {
               } else {
                 ws._chatCount++;
                 if (ws._chatCount > 2) {
-                  this.safeSend(ws, ["error", "Too many messages"]);
                   break;
                 }
               }
@@ -762,7 +759,7 @@ export class ChatServer {
             break;
           }
           
-          // ✅ GIFT DENGAN RATE LIMIT
+          // ✅ GIFT - TANPA ERROR MESSAGE
           case "gift": {
             try {
               const [giftRoom, giftSender, giftReceiver, giftGiftName] = args;
@@ -777,7 +774,6 @@ export class ChatServer {
                 } else {
                   ws._giftCount++;
                   if (ws._giftCount > 3) {
-                    this.safeSend(ws, ["error", "Too many gifts"]);
                     break;
                   }
                 }
@@ -790,7 +786,7 @@ export class ChatServer {
             break;
           }
           
-          // ✅ ROLLANGAK DENGAN RATE LIMIT
+          // ✅ ROLLANGAK - TANPA ERROR MESSAGE
           case "rollangak": {
             try {
               const [rollRoom, rollUser, rollAngka] = args;
@@ -805,7 +801,6 @@ export class ChatServer {
                 } else {
                   ws._rollCount++;
                   if (ws._rollCount > 2) {
-                    this.safeSend(ws, ["error", "Too many rolls"]);
                     break;
                   }
                 }
