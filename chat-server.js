@@ -1,10 +1,10 @@
-// ==================== CHAT SERVER - DENGAN ALARM ====================
+// ==================== CHAT SERVER - ALARM 10 DETIK ====================
 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 500,
   MAX_MESSAGE_SIZE: 5000,
-  ALARM_15_MENIT: 900000,  // ✅ 15 MENIT
+  ALARM_10_DETIK: 10000,  // ✅ 10 DETIK
   MAX_NUMBER: 6,
   BATCH_SIZE: 20,
 };
@@ -164,18 +164,15 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
-    // ✅ SET ALARM PERTAMA (15 MENIT)
-    // DO akan tidur dan alarm akan membangunkannya
-    this.state.storage.setAlarm(Date.now() + C.ALARM_15_MENIT);
+    // ✅ SET ALARM PERTAMA (10 DETIK)
+    this.state.storage.setAlarm(Date.now() + C.ALARM_10_DETIK);
   }
   
-  // ✅ ALARM HANDLER - DIPANGGIL OTOMATIS SETIAP 15 MENIT
+  // ✅ ALARM HANDLER - DIPANGGIL SETIAP 10 DETIK
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
     try {
-      // ⏱️ DO AKTIF (mulai dihitung)
-      
       // ✅ UPDATE NUMBER
       this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
       
@@ -197,13 +194,10 @@ export class ChatServer {
       // ✅ CLEANUP
       this._doCleanup();
       
-      // ⏱️ DO SELESAI AKTIF (berhenti dihitung)
-      
     } catch(e) {}
     
-    // ✅ SET ALARM BERIKUTNYA (15 MENIT LAGI)
-    // DO akan tidur setelah ini
-    this.state.storage.setAlarm(Date.now() + C.ALARM_15_MENIT);
+    // ✅ SET ALARM BERIKUTNYA (10 DETIK LAGI)
+    this.state.storage.setAlarm(Date.now() + C.ALARM_10_DETIK);
   }
   
   _doCleanup() {
@@ -213,7 +207,6 @@ export class ChatServer {
     try {
       const toRemove = [];
       
-      // ✅ HANYA HAPUS KONEKSI YANG SUDAH MATI
       for (const ws of this.wsSet) {
         try {
           if (!ws || ws.readyState !== 1 || ws._closing) {
@@ -1205,7 +1198,6 @@ export class ChatServer {
       
       server._timeoutId = timeoutId;
       
-      // ✅ HIBERNASI: WebSocket bisa tidur saat tidak aktif
       try { 
         this.state.acceptWebSocket(server);
       } catch(e) { 
