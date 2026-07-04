@@ -1,10 +1,10 @@
-// ==================== CHAT SERVER - DENGAN HIBERNASI ====================
+// ==================== CHAT SERVER - DENGAN ALARM ====================
 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 500,
   MAX_MESSAGE_SIZE: 5000,
-  INTERVAL_15_MENIT: 900000,
+  ALARM_15_MENIT: 900000,  // ✅ 15 MENIT
   MAX_NUMBER: 6,
   BATCH_SIZE: 20,
 };
@@ -159,48 +159,51 @@ export class ChatServer {
     this._roomMessageCount = new Map();
     this._roomMessageReset = new Map();
     
-    // ✅ 1 INTERVAL SAJA (15 MENIT)
-    this._mainInterval = null;
-    
     for (const room of ROOMS) {
       this.rooms.set(room, new RoomManager(room));
       this.roomClients.set(room, new Set());
     }
     
-    this._startMainInterval();
+    // ✅ SET ALARM PERTAMA (15 MENIT)
+    // DO akan tidur dan alarm akan membangunkannya
+    this.state.storage.setAlarm(Date.now() + C.ALARM_15_MENIT);
   }
   
-  _startMainInterval() {
-    if (this._mainInterval) {
-      clearInterval(this._mainInterval);
-    }
+  // ✅ ALARM HANDLER - DIPANGGIL OTOMATIS SETIAP 15 MENIT
+  async alarm() {
+    if (this.closing || this.isDestroyed) return;
     
-    this._mainInterval = setInterval(() => {
-      if (!this.closing && !this.isDestroyed) {
-        try {
-          // ✅ UPDATE NUMBER
-          this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
-          
-          for (const room of this.rooms.values()) {
-            if (room) {
-              room.setNumber(this.currentNumber);
-            }
-          }
-          
-          const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
-          
-          // ✅ BROADCAST KE ROOM YANG ADA CLIENT
-          for (const [room, clients] of this.roomClients) {
-            if (clients && clients.size > 0) {
-              this._broadcastToRoom(room, numberMsg);
-            }
-          }
-          
-          this._doCleanup();
-          
-        } catch(e) {}
+    try {
+      // ⏱️ DO AKTIF (mulai dihitung)
+      
+      // ✅ UPDATE NUMBER
+      this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
+      
+      for (const room of this.rooms.values()) {
+        if (room) {
+          room.setNumber(this.currentNumber);
+        }
       }
-    }, C.INTERVAL_15_MENIT);
+      
+      const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
+      
+      // ✅ BROADCAST KE ROOM YANG ADA CLIENT
+      for (const [room, clients] of this.roomClients) {
+        if (clients && clients.size > 0) {
+          this._broadcastToRoom(room, numberMsg);
+        }
+      }
+      
+      // ✅ CLEANUP
+      this._doCleanup();
+      
+      // ⏱️ DO SELESAI AKTIF (berhenti dihitung)
+      
+    } catch(e) {}
+    
+    // ✅ SET ALARM BERIKUTNYA (15 MENIT LAGI)
+    // DO akan tidur setelah ini
+    this.state.storage.setAlarm(Date.now() + C.ALARM_15_MENIT);
   }
   
   _doCleanup() {
@@ -211,7 +214,6 @@ export class ChatServer {
       const toRemove = [];
       
       // ✅ HANYA HAPUS KONEKSI YANG SUDAH MATI
-      // TIDAK ADA IDLE TIMEOUT - USER DIAM TETAP ONLINE (HIBERNASI)
       for (const ws of this.wsSet) {
         try {
           if (!ws || ws.readyState !== 1 || ws._closing) {
@@ -248,34 +250,38 @@ export class ChatServer {
     }
   }
   
-  // ✅ BROADCAST KE SEMUA CLIENT
+  // ✅ BROADCAST DENGAN BATCH (10 CLIENT PER BATCH)
   _broadcastToRoom(room, msgStr) {
     if (this.closing || this.isDestroyed || !room) return;
     
     const clients = this.roomClients.get(room);
     if (!clients || clients.size === 0) return;
     
+    const clientArray = Array.from(clients);
+    const BATCH_SIZE = 10;
     const toRemove = [];
     
-    // ✅ KIRIM KE SEMUA CLIENT DI ROOM
-    for (const ws of clients) {
-      if (!ws) {
-        toRemove.push(ws);
-        continue;
-      }
+    for (let i = 0; i < clientArray.length; i += BATCH_SIZE) {
+      const batch = clientArray.slice(i, i + BATCH_SIZE);
       
-      try {
-        if (ws.readyState === 1 && !ws._closing && !this._cleaningUp.has(ws)) {
-          ws.send(msgStr);
-        } else {
+      for (const ws of batch) {
+        if (!ws) {
+          toRemove.push(ws);
+          continue;
+        }
+        
+        try {
+          if (ws.readyState === 1 && !ws._closing && !this._cleaningUp.has(ws)) {
+            ws.send(msgStr);
+          } else {
+            toRemove.push(ws);
+          }
+        } catch(e) {
           toRemove.push(ws);
         }
-      } catch(e) {
-        toRemove.push(ws);
       }
     }
     
-    // ✅ CLEANUP KONEKSI MATI
     if (toRemove.length > 0) {
       for (const ws of toRemove) {
         try {
@@ -662,14 +668,12 @@ export class ChatServer {
             break;
           }
           
-          // ✅ CHAT - TANPA ERROR MESSAGE
           case "chat": {
             try {
               const [chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor] = args;
               
               if (!chatMsg || !ROOMS_SET.has(chatRoom)) break;
               
-              // ✅ RATE LIMIT PER ROOM (Max 10 chat per detik) - TANPA ERROR
               const now = Date.now();
               const reset = this._roomMessageReset.get(chatRoom) || 0;
               const count = this._roomMessageCount.get(chatRoom) || 0;
@@ -684,7 +688,6 @@ export class ChatServer {
                 this._roomMessageCount.set(chatRoom, count + 1);
               }
               
-              // ✅ RATE LIMIT PER USER (Max 2 chat per detik) - TANPA ERROR
               if (!ws._chatTime) ws._chatTime = 0;
               if (!ws._chatCount) ws._chatCount = 0;
               
@@ -760,7 +763,6 @@ export class ChatServer {
             break;
           }
           
-          // ✅ GIFT - TANPA ERROR MESSAGE
           case "gift": {
             try {
               const [giftRoom, giftSender, giftReceiver, giftGiftName] = args;
@@ -787,7 +789,6 @@ export class ChatServer {
             break;
           }
           
-          // ✅ ROLLANGAK - TANPA ERROR MESSAGE
           case "rollangak": {
             try {
               const [rollRoom, rollUser, rollAngka] = args;
@@ -1205,7 +1206,6 @@ export class ChatServer {
       server._timeoutId = timeoutId;
       
       // ✅ HIBERNASI: WebSocket bisa tidur saat tidak aktif
-      // DO tidak aktif saat WS diam → Wall Time TIDAK BERJALAN!
       try { 
         this.state.acceptWebSocket(server);
       } catch(e) { 
@@ -1233,8 +1233,6 @@ export class ChatServer {
   }
   
   async webSocketMessage(ws, msg) { 
-    // ✅ DO AKTIF OTOMATIS SAAT ADA PESAN
-    // Setelah selesai, DO hibernasi lagi
     if (!ws || ws._closing || this._cleaningUp.has(ws) || this.closing || this.isDestroyed) return;
     try {
       await this.handleMessage(ws, msg);
@@ -1259,11 +1257,6 @@ export class ChatServer {
     if (this.isDestroyed) return;
     this.closing = true;
     this.isDestroyed = true;
-    
-    if (this._mainInterval) {
-      clearInterval(this._mainInterval);
-      this._mainInterval = null;
-    }
     
     this._joinLocks.clear();
     this._kursiLocks.clear();
