@@ -1,10 +1,11 @@
-// ==================== CHAT SERVER - ALARM 10 DETIK ====================
+// ==================== CHAT SERVER - ALARM 10 DETIK, NUMBER 90 TIK ====================
 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 500,
   MAX_MESSAGE_SIZE: 5000,
-  ALARM_10_DETIK: 10000,  // ✅ 10 DETIK
+  ALARM_10_DETIK: 10000,
+  NUMBER_UPDATE_TIK: 90,  // ✅ 90 TIK = 15 MENIT
   MAX_NUMBER: 6,
   BATCH_SIZE: 20,
 };
@@ -153,7 +154,7 @@ export class ChatServer {
     this._kursiLocks = new Map();
     
     this.currentNumber = 1;
-    this._lastNumberChange = Date.now();
+    this._tikCounter = 0;  // ✅ COUNTER TIK (0-89)
     
     // ✅ RATE LIMIT
     this._roomMessageCount = new Map();
@@ -173,25 +174,33 @@ export class ChatServer {
     if (this.closing || this.isDestroyed) return;
     
     try {
-      // ✅ UPDATE NUMBER
-      this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
+      // ✅ TAMBAH TIK
+      this._tikCounter++;
       
-      for (const room of this.rooms.values()) {
-        if (room) {
-          room.setNumber(this.currentNumber);
+      // ✅ CEK APAKAH SUDAH 90 TIK?
+      if (this._tikCounter >= C.NUMBER_UPDATE_TIK) {
+        // ✅ UPDATE NUMBER
+        this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
+        
+        for (const room of this.rooms.values()) {
+          if (room) {
+            room.setNumber(this.currentNumber);
+          }
         }
+        
+        const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
+        
+        for (const [room, clients] of this.roomClients) {
+          if (clients && clients.size > 0) {
+            this._broadcastToRoom(room, numberMsg);
+          }
+        }
+        
+        // ✅ RESET COUNTER
+        this._tikCounter = 0;
       }
       
-      const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
-      
-      // ✅ BROADCAST KE ROOM YANG ADA CLIENT
-      for (const [room, clients] of this.roomClients) {
-        if (clients && clients.size > 0) {
-          this._broadcastToRoom(room, numberMsg);
-        }
-      }
-      
-      // ✅ CLEANUP
+      // ✅ CLEANUP TETAP JALAN
       this._doCleanup();
       
     } catch(e) {}
