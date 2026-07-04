@@ -1,4 +1,4 @@
-// ==================== GAME SERVER - DENGAN ALARM 10 DETIK ====================
+// ==================== GAME SERVER - CLEANUP 15 MENIT (90 TIK) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -15,7 +15,8 @@ const CONSTANTS = {
   MAX_PLAYERS_PER_GAME: 45,
   GAME_CLEANUP_DELAY_MS: 5000,
   BATCH_SIZE: 20,
-  ALARM_10_DETIK: 10000,  // ✅ 10 DETIK
+  ALARM_10_DETIK: 10000,
+  CLEANUP_TIK: 90,  // ✅ 90 TIK = 15 MENIT
 };
 
 export class GameServer {
@@ -45,10 +46,8 @@ export class GameServer {
     this._roomBroadcastCount = new Map();
     this._roomBroadcastReset = new Map();
     
-    // ❌ HAPUS RATE LIMIT GAME ACTION
-    
-    // ❌ HAPUS INTERVAL - PAKAI ALARM
-    // this._cleanupInterval = setInterval(...)
+    // ✅ COUNTER UNTUK CLEANUP 15 MENIT (90 TIK)
+    this._tikCounter = 0;
     
     this._lastActivityTime = Date.now();
     
@@ -56,24 +55,29 @@ export class GameServer {
     this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
   }
   
-  // ✅ ALARM HANDLER - DIPANGGIL SETIAP 10 DETIK
+  // ✅ ALARM 10 DETIK, CLEANUP 15 MENIT (90 TIK)
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
     try {
-      // ✅ CLEANUP STALE GAMES
-      this._cleanupStaleGames();
+      // ✅ TAMBAH TIK
+      this._tikCounter++;
       
-      // ✅ CLEANUP DEAD CONNECTIONS
-      this._cleanupDeadConnections();
+      // ✅ CEK APAKAH SUDAH 90 TIK (15 MENIT)?
+      if (this._tikCounter >= CONSTANTS.CLEANUP_TIK) {
+        // ✅ LAKUKAN CLEANUP
+        this._cleanupStaleGames();
+        this._cleanupDeadConnections();
+        
+        // ✅ RESET COUNTER
+        this._tikCounter = 0;
+      }
       
     } catch(e) {}
     
     // ✅ SET ALARM BERIKUTNYA (10 DETIK LAGI)
     this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
   }
-  
-  // ❌ TIDAK ADA _doMainTask (keep-alive dihapus)
   
   _cleanupDeadConnections() {
     try {
@@ -1686,7 +1690,6 @@ export class GameServer {
   }
   
   async webSocketMessage(ws, msg) {
-    // ✅ DO AKTIF OTOMATIS SAAT ADA PESAN
     try {
       if (!ws || ws._closing || this.closing || this.isDestroyed) return;
       if (!ws._wsId) return;
