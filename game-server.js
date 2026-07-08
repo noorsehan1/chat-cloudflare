@@ -591,6 +591,8 @@ export class GameServer {
   }
   
   _startRegistration(room, game) {
+    if (game) game._lastActiveTime = Date.now();
+    
     if (!this._isGameRunning(game) || !game.registrationOpen) {
       if (game && !game._gameEnded) {
         game._isActive = true;
@@ -640,6 +642,8 @@ export class GameServer {
   _closeRegistration(room, game) {
     try {
       if (!game) return;
+      
+      game._lastActiveTime = Date.now();
       
       if (game._closingRegistration) return;
       game._closingRegistration = true;
@@ -717,6 +721,8 @@ export class GameServer {
         }
       }
       
+      if (game) game._lastActiveTime = Date.now();
+      
       if (!this._isGameRunning(game)) {
         if (game && !game._gameEnded) {
           game._isActive = true;
@@ -764,6 +770,8 @@ export class GameServer {
   _startDrawPhase(room, game) {
     try {
       if (!game) return;
+      
+      game._lastActiveTime = Date.now();
       
       if (game._startingDrawPhase) return;
       game._startingDrawPhase = true;
@@ -1001,6 +1009,8 @@ export class GameServer {
   _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game) return;
+      
+      game._lastActiveTime = Date.now();
       
       if (game._gameEnded || !game.players) return;
       if (!game._isActive) {
@@ -1390,6 +1400,7 @@ export class GameServer {
           _safetyTimer: null,
           _isEvaluating: false,
           _createdAt: Date.now(),
+          _lastActiveTime: Date.now(),
           playerWsId: new Map(),
           _startLockId: now,
           _closingRegistration: false,
@@ -1479,6 +1490,8 @@ export class GameServer {
           return;
         }
         
+        if (game) game._lastActiveTime = Date.now();
+        
         if (!game._isActive && !game._gameEnded) {
           game._isActive = true;
         }
@@ -1564,6 +1577,8 @@ export class GameServer {
         this._safeSend(ws, ["gameLowCardError", "No active game"]);
         return;
       }
+      
+      if (game) game._lastActiveTime = Date.now();
       
       if (game.players.has(usernameClean)) {
         if (game.eliminated?.has(usernameClean)) {
@@ -1968,9 +1983,47 @@ export class GameServer {
   _cleanupStaleGames() {
     try {
       const now = Date.now();
+      
       for (const [room, game] of this.activeGames) {
-        if (!game._isActive || game._gameEnded) {
-          if (game._createdAt && (now - game._createdAt) > 600000) {
+        // Skip jika game sudah dijadwalkan cleanup
+        if (this._cleanupTimers.has(room)) continue;
+        
+        // Skip game yang sudah ended - ditangani oleh _scheduleGameCleanup()
+        if (game._gameEnded === true) {
+          continue;
+        }
+        
+        // CASE: Game tidak aktif (stuck) - coba recovery
+        if (!game._isActive) {
+          const lastActive = game._lastActiveTime || game._createdAt || now;
+          if ((now - lastActive) > 300000) { // 5 menit
+            // Coba recovery
+            game._isActive = true;
+            game._lastActiveTime = now;
+            this._broadcastToRoom(room, ["gameLowCardRecovered", "Game recovered from stuck state"]);
+            
+            // Lanjutkan phase yang sesuai
+            if (game._phase === 'registration' && game.registrationOpen) {
+              this._startRegistration(room, game);
+            } else if (game._phase === 'draw' && !game.drawTimeExpired) {
+              this._startDrawPhase(room, game);
+            } else if (game._phase === 'idle' || !game._phase) {
+              if (game.players && game.players.size >= 2) {
+                this._startDrawPhase(room, game);
+              }
+            }
+          }
+          continue;
+        }
+        
+        // CASE: Game aktif tapi tidak ada aktivitas > 15 menit
+        if (game._isActive && !game._gameEnded) {
+          const lastActive = game._lastActiveTime || game._createdAt || now;
+          if ((now - lastActive) > 900000) { // 15 menit
+            // Force end game karena tidak ada aktivitas
+            this._broadcastToRoom(room, ["gameLowCardError", "Game ended due to inactivity"]);
+            game._gameEnded = true;
+            game._isActive = false;
             this._scheduleGameCleanup(room, game);
           }
         }
