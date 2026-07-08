@@ -1,6 +1,6 @@
 // ==================== GAME SERVER - FULL CODE (FINAL WITH DOUBLE START PROTECTION) ====================
 
-const CONSTANTS = {
+ const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
   REGISTRATION_TIME_MS: 20000,
   DRAW_TIME_MS: 20000,
