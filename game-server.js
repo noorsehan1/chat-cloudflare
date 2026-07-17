@@ -248,13 +248,16 @@ export class GameServer {
   }
   
   async _getQuestionsForUser(language) {
+    // 1. CEK APAKAH BAHASA DIDUKUNG TRIVIA API
     if (this._isLanguageSupportedByTrivia(language)) {
+      // Coba ambil dari API
       let questions = await this._fetchQuestionsFromAPI(language);
       if (questions && questions.length > 0) {
         return { source: 'api', questions: questions };
       }
     }
     
+    // 2. BAHASA TIDAK DIDUKUNG ATAU API GAGAL → PAKAI TRANSLATE
     const englishQuestions = await this._fetchQuestionsFromAPI('en');
     if (!englishQuestions || englishQuestions.length === 0) {
       return { source: 'none', questions: null };
@@ -264,6 +267,7 @@ export class GameServer {
       return { source: 'api', questions: englishQuestions };
     }
     
+    // 3. TRANSLATE KE BAHASA USER
     const translatedQuestions = [];
     for (const q of englishQuestions) {
       try {
@@ -293,6 +297,17 @@ export class GameServer {
       const englishQuestions = await this._fetchQuestionsFromAPI('en');
       if (englishQuestions && englishQuestions.length > 0) {
         this.quizQuestionCache['en'] = englishQuestions;
+      }
+      
+      // Preload bahasa yang didukung API
+      const supportedLangs = ['de', 'es', 'fr', 'it', 'ja', 'ko', 'pt', 'ru', 'zh'];
+      for (const lang of supportedLangs) {
+        try {
+          const questions = await this._fetchQuestionsFromAPI(lang);
+          if (questions && questions.length > 0) {
+            this.quizQuestionCache[lang] = questions;
+          }
+        } catch(e) {}
       }
     } catch(e) {}
   }
@@ -770,7 +785,6 @@ export class GameServer {
     const wsIds = this.wsClients.get(QUIZ_ROOM);
     if (!wsIds) return;
     
-    // ✅ SOAL SAMA UNTUK SEMUA USER
     for (const wsId of wsIds) {
       const ws = this.wsMap.get(wsId);
       if (ws && ws.readyState === 1) {
@@ -779,8 +793,35 @@ export class GameServer {
         let finalQuestion = question;
         let finalOptions = options;
         
-        // ✅ HANYA TERJEMAHKAN, BUKAN GANTI SOAL
-        if (lang !== 'en' && !this.translateLimitReached) {
+        // CEK: apakah bahasa didukung Trivia?
+        if (this._isLanguageSupportedByTrivia(lang)) {
+          // Jika didukung, coba ambil dari cache bahasa tersebut
+          if (this.quizQuestionCache[lang] && this.quizQuestionCache[lang].length > 0) {
+            // Gunakan soal dari cache bahasa tersebut (tidak perlu translate)
+            const cachedQuestions = this.quizQuestionCache[lang];
+            const randomIndex = Math.floor(Math.random() * cachedQuestions.length);
+            const q = cachedQuestions[randomIndex];
+            finalQuestion = q.question;
+            finalOptions = q.options;
+          } else {
+            // Jika belum ada cache, ambil dari API
+            const result = await this._getQuestionsForUser(lang);
+            if (result && result.questions && result.questions.length > 0) {
+              if (result.source === 'api') {
+                // Dari API langsung
+                const randomIndex = Math.floor(Math.random() * result.questions.length);
+                const q = result.questions[randomIndex];
+                finalQuestion = q.question;
+                finalOptions = q.options;
+              } else {
+                // Dari translate
+                finalQuestion = await this._translateText(question, lang);
+                finalOptions = await this._translateOptions(options, lang);
+              }
+            }
+          }
+        } else {
+          // BAHASA TIDAK DIDUKUNG TRIVIA → PAKAI TRANSLATE
           finalQuestion = await this._translateText(question, lang);
           finalOptions = await this._translateOptions(options, lang);
         }
@@ -1493,20 +1534,17 @@ export class GameServer {
       const clients = this.wsClients.get(QUIZ_ROOM);
       if (!clients || clients.size === 0) return;
       
-      // ✅ 1 SOAL UNTUK SEMUA USER
       const questions = this.quizQuestionCache['en'];
       if (!questions || questions.length === 0) return;
       
       const randomIndex = Math.floor(Math.random() * questions.length);
       const q = questions[randomIndex];
       
-      // ✅ SIMPAN SEBAGAI CURRENT QUESTION (GLOBAL)
       this.currentQuestion = q;
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
       
-      // ✅ KIRIM KE SEMUA USER
       this._broadcastQuizQuestion(q.question, q.options);
       
       setTimeout(() => {
