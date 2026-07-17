@@ -1,2570 +1,2394 @@
-package valfsocket.websocketvalf;
-
-import android.app.Activity;
-import android.graphics.Color;
-import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
-import android.os.Build;
-import android.os.Handler;
-import android.os.Looper;
-import android.os.SystemClock;
-import android.view.Gravity;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.FrameLayout;
-import android.widget.TextView;
-import android.widget.Toast;
-import com.google.appinventor.components.annotations.SimpleEvent;
-import com.google.appinventor.components.annotations.SimpleFunction;
-import com.google.appinventor.components.runtime.AndroidNonvisibleComponent;
-import com.google.appinventor.components.runtime.ComponentContainer;
-import com.google.appinventor.components.runtime.EventDispatcher;
-import com.google.appinventor.components.runtime.util.YailList;
-import okhttp3.*;
-import org.json.JSONArray;
-import org.json.JSONException;
-import org.json.JSONObject;
-
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-
-public class Websocketvalf extends AndroidNonvisibleComponent {
-
-    // ==================== CHAT SERVER ====================
-    private final Activity activity;
-    private final TextView reconnectButton;
-    private WebSocket webSocket;
-    private final OkHttpClient client;
-    private final ComponentContainer container;
-    private String serverUrl = "";
-    private int mySeatNumber = -1;
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private Handler pointHandler;
-    private Handler kursiHandler;
-    private String myIdTarget = "";
-    private String roomnama = "";
-    private android.animation.ValueAnimator pulseAnimator;
-    private TextView text;
-    private Toast toast;
-
-    private final Handler pingHandler = new Handler(Looper.getMainLooper());
-    private Runnable pingRunnable;
-    private int pingReconnectCount = 0;
-    private final int MAX_PING_RECONNECT = 2;
-
-    private final AtomicBoolean isReconnecting = new AtomicBoolean(false);
-    private final AtomicBoolean isManualDisconnect = new AtomicBoolean(false);
-    private final AtomicBoolean isConnecting = new AtomicBoolean(false);
-    private final AtomicBoolean shouldReconnect = new AtomicBoolean(true);
-    private final AtomicBoolean isConnected = new AtomicBoolean(false);
-    private final AtomicBoolean isHandlingConnectionLoss = new AtomicBoolean(false);
-
-    private boolean fastkursi = false;
-    private boolean minimize = false;
-
-    private final Handler statusTimeoutHandler = new Handler(Looper.getMainLooper());
-    private Runnable statusTimeoutRunnable;
-    private int hasReceivedStatusResponse = 0;
-
-    private final Object webSocketLock = new Object();
-
-    private final ConcurrentLinkedQueue<Runnable> messageQueue = new ConcurrentLinkedQueue<>();
-    private final Handler messageHandler = new Handler(Looper.getMainLooper());
-
-    private long lastConnectionAttempt = 0;
-    private final long MIN_CONNECTION_INTERVAL = 3000;
-    private final AtomicBoolean isCleaningUp = new AtomicBoolean(false);
-    private String activeTargetId = "";
-
-    // ==================== GAME SERVER ====================
-    private WebSocket gameWebSocket;
-    private final AtomicBoolean isGameConnected = new AtomicBoolean(false);
-    private String gameRoom = "";
-    private String gameUsername = "";
-    private String gameId = "";
-    private String gameServerUrl = "";
-    private int reconnectAttempts = 0;
-    private static final int MAX_RECONNECT_ATTEMPTS = 5;
-    private final Runnable messageProcessor = new Runnable() {
-        private int processedCount = 0;
-        private static final int MAX_PER_BATCH = 20;
-
-        @Override
-        public void run() {
-            Runnable task;
-            long startTime = SystemClock.uptimeMillis();
-            processedCount = 0;
-
-            while ((task = messageQueue.poll()) != null
-                    && processedCount < MAX_PER_BATCH
-                    && (SystemClock.uptimeMillis() - startTime) < 200) {
-                task.run();
-                processedCount++;
-            }
-
-            if (!messageQueue.isEmpty()) {
-                messageHandler.postDelayed(this, 16);
-            }
-        }
-    };
-
-    public Websocketvalf(ComponentContainer container) {
-        super(container.$form());
-        this.container = container;
-        this.activity = container.$context();
-
-        this.pointHandler = new Handler(Looper.getMainLooper());
-        this.kursiHandler = new Handler(Looper.getMainLooper());
-
-        this.client = new OkHttpClient.Builder()
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(0, TimeUnit.MILLISECONDS)
-                .writeTimeout(30, TimeUnit.SECONDS)
-                .pingInterval(20, TimeUnit.SECONDS)
-                .retryOnConnectionFailure(true)
-                .build();
-
-        OnAndroidVersionDetected(Build.VERSION.SDK_INT);
-
-        reconnectButton = new TextView(activity);
-        reconnectButton.setText("Click to Reconnect");
-        reconnectButton.setVisibility(View.GONE);
-        reconnectButton.setTextColor(Color.WHITE);
-        reconnectButton.setTypeface(null, Typeface.BOLD);
-        reconnectButton.setGravity(Gravity.CENTER);
-        reconnectButton.setTextSize(14);
-        reconnectButton.setPadding(dpToPx(16), dpToPx(6), dpToPx(16), dpToPx(6));
-
-        GradientDrawable bgDrawable = new GradientDrawable();
-        bgDrawable.setColor(Color.parseColor("#ff0080"));
-        bgDrawable.setCornerRadius(dpToPx(4));
-        reconnectButton.setBackground(bgDrawable);
-
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT
-        );
-        params.gravity = Gravity.CENTER;
-
-        View rootView = activity.findViewById(android.R.id.content);
-        if (rootView instanceof ViewGroup) {
-            ((ViewGroup) rootView).addView(reconnectButton, params);
-        }
-
-        reconnectButton.setOnClickListener(v -> {
-            stopPulseAnimation();
-            reconnectButton.setVisibility(View.GONE);
-            pingReconnectCount = 0;
-            isManualDisconnect.set(false);
-            shouldReconnect.set(true);
-            startReconnectProcess();
-        });
-
-        isConnecting.set(false);
-        isReconnecting.set(false);
-        isManualDisconnect.set(false);
-        shouldReconnect.set(true);
-        isConnected.set(false);
-        initSlowNetworkToast();
-    }
-
-    private int dpToPx(int dp) {
-        return Math.round(dp * activity.getResources().getDisplayMetrics().density);
-    }
-
-    private void initSlowNetworkToast() {
-        if (toast != null) return;
-        text = new TextView(activity);
-        text.setTextColor(Color.WHITE);
-        text.setTypeface(null, Typeface.BOLD);
-        text.setTextSize(14);
-        text.setGravity(Gravity.CENTER);
-        text.setPadding(dpToPx(16), dpToPx(6), dpToPx(16), dpToPx(6));
-        text.setShadowLayer(0, 2, 2, Color.BLACK);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(Color.parseColor("#ff0080"));
-        bg.setCornerRadius(dpToPx(4));
-        text.setBackground(bg);
-        toast = new Toast(activity);
-        toast.setView(text);
-        toast.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL, 0, dpToPx(100));
-        toast.setDuration(Toast.LENGTH_SHORT);
-    }
-
-    public void showSlowNetworkToast(String message) {
-        if (toast == null) initSlowNetworkToast();
-        if (message != null) {
-            text.setText(message);
-            toast.show();
-        }
-    }
-
-    // ==================== CHAT METHODS ====================
-
-    @SimpleFunction
-    public void startReconnectProcess() {
-        if (isManualDisconnect.get() || isConnected.get() || isCleaningUp.get()) {
-            return;
-        }
-
-        if (!isReconnecting.compareAndSet(false, true)) {
-            return;
-        }
-
-        if (pingRunnable != null) {
-            pingHandler.removeCallbacks(pingRunnable);
-            pingRunnable = null;
-        }
-
-        pingReconnectCount = 0;
-
-        pingRunnable = new Runnable() {
-            @Override
-            public void run() {
-                if (isManualDisconnect.get() || isConnected.get() || isCleaningUp.get()) {
-                    stopReconnectProcess();
-                    return;
-                }
-
-                pingReconnectCount++;
-                if (pingReconnectCount <= MAX_PING_RECONNECT) {
-                    mainHandler.postDelayed(() -> {
-                        if (!isManualDisconnect.get() && !isConnected.get() && !isCleaningUp.get()) {
-                            Connect(serverUrl);
-                        }
-                    }, 1000);
-
-                    showSlowNetworkToast("Network error, reconnecting...");
-
-                    pingHandler.postDelayed(this, 4000);
-                } else {
-                    stopReconnectProcess();
-                    mainHandler.post(() -> {
-                        if (!isCleaningUp.get()) {
-                            reconnectButton.setVisibility(View.VISIBLE);
-                            startPulseAnimation();
-                            OnMaxReconnectAttemptsReached(pingReconnectCount);
-                        }
-                    });
-                }
-            }
-        };
-
-        pingHandler.post(pingRunnable);
-        OnReconnectStarted();
-    }
-
-    public void stopReconnectProcess() {
-        isReconnecting.set(false);
-        if (pingRunnable != null) {
-            pingHandler.removeCallbacks(pingRunnable);
-            pingRunnable = null;
-        }
-        pingHandler.removeCallbacksAndMessages(null);
-        pingReconnectCount = 0;
-        OnReconnectStopped();
-    }
-
-    public void onConnected() {
-        isHandlingConnectionLoss.set(false);
-        isConnecting.set(false);
-        isConnected.set(true);
-        isReconnecting.set(false);
-
-        stopReconnectProcess();
-        cleanupStatusTimeout();
-
-        pingHandler.removeCallbacksAndMessages(null);
-
-        mainHandler.post(() -> {
-            reconnectButton.setVisibility(View.GONE);
-            stopPulseAnimation();
-            pingReconnectCount = 0;
-            OnReconnectSuccess(roomnama != null ? roomnama : "");
-        });
-    }
-
-    public void onDisconnected() {
-        isConnected.set(false);
-        isConnecting.set(false);
-    }
-
-    @SimpleFunction
-    public void checkRoomStatusWithTimeout() {
-        this.minimize = false;
-        SendIsInRoom();
-        hasReceivedStatusResponse = 0;
-
-        cleanupStatusTimeout();
-        statusTimeoutRunnable = new Runnable() {
-            @Override
-            public void run() {
-                int status = hasReceivedStatusResponse;
-                if (status == 0) {
-                    handleConnectionLoss("Connection failed");
-                } else if (status == 2) {
-                    sendJoinRoom();
-                }
-            }
-        };
-
-        statusTimeoutHandler.postDelayed(statusTimeoutRunnable, 3000);
-    }
-
-    @SimpleFunction
-    public void ClearMessageQueue() {
-        messageQueue.clear();
-        messageHandler.removeCallbacks(messageProcessor);
-        OnMessageQueueCleared();
-    }
-
-    @SimpleEvent
-    public void OnMessageQueueCleared() {
-        EventDispatcher.dispatchEvent(this, "OnMessageQueueCleared");
-    }
-
-    @SimpleEvent
-    public void OnSlowNetworkDetected(String reason) {
-        EventDispatcher.dispatchEvent(this, "OnSlowNetworkDetected", reason != null ? reason : "");
-    }
-
-    @SimpleFunction
-    public void SendIsInRoom() {
-        JSONArray arr = new JSONArray();
-        arr.put("isInRoom");
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void WebsocketsetMinimize(boolean value) {
-        this.minimize = value;
-        OnMinimizeStateChanged(value);
-    }
-
-    @SimpleFunction
-    public String ParseStartCommand(String input) {
-        if (input == null || input.trim().isEmpty()) return "";
-
-        input = input.trim();
-
-        if (input.contains("'")) {
-            return "";
-        }
-
-        String[] parts = input.split("\\s+");
-
-        if (parts.length < 2) return "";
-        if (!parts[0].equalsIgnoreCase(".start")) return "";
-
-        try {
-            int bet = Integer.parseInt(parts[1]);
-            if (bet == 0 || bet >= 100) {
-                return String.valueOf(bet);
-            } else {
-                return "min";
-            }
-        } catch (NumberFormatException e) {
-            return "";
-        }
-    }
-
-    private void startPulseAnimation() {
-        if (pulseAnimator != null && pulseAnimator.isRunning()) return;
-        pulseAnimator = android.animation.ValueAnimator.ofFloat(1f, 1.1f, 1f);
-        pulseAnimator.setDuration(1000);
-        pulseAnimator.setRepeatCount(android.animation.ValueAnimator.INFINITE);
-        pulseAnimator.addUpdateListener(animation -> {
-            float scale = (float) animation.getAnimatedValue();
-            reconnectButton.setScaleX(scale);
-            reconnectButton.setScaleY(scale);
-        });
-        pulseAnimator.start();
-        OnPulseAnimationStarted();
-    }
-
-    private void stopPulseAnimation() {
-        if (pulseAnimator != null) {
-            pulseAnimator.cancel();
-            pulseAnimator.removeAllUpdateListeners();
-            reconnectButton.setScaleX(1f);
-            reconnectButton.setScaleY(1f);
-            pulseAnimator = null;
-            OnPulseAnimationStopped();
-        }
-    }
-
-    @SimpleFunction
-    public void SetIdTarget(String id, String roomname) {
-        if (id == null) id = "";
-        if (roomname == null) roomname = "";
-        myIdTarget = id;
-        this.roomnama = roomname;
-
-        JSONArray arr = new JSONArray();
-        arr.put("setIdTarget");
-        arr.put(id);
-        arr.put(roomname);
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void SetIdTarget2(String id, boolean baru) {
-        if (id == null) id = "";
-        myIdTarget = id;
-        JSONArray arr = new JSONArray();
-        arr.put("setIdTarget2");
-        arr.put(id);
-        arr.put(baru);
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void Connect(String url) {
-        cleanupStatusTimeout();
-        if (url == null || url.isEmpty()) {
-            isConnecting.set(false);
-            return;
-        }
-
-        serverUrl = url;
-
-        if (!isConnecting.compareAndSet(false, true)) {
-            return;
-        }
-
-        try {
-            Request request = new Request.Builder().url(url).build();
-            client.newWebSocket(request, new WebSocketListenerImpl());
-        } catch (IllegalArgumentException e) {
-            isConnecting.set(false);
-        } catch (Exception e) {
-            isConnecting.set(false);
-        }
-    }
-
-    @SimpleFunction
-    public void SendOnDestroy() {
-        if (!isConnected.get()) return;
-
-        JSONArray arr = new JSONArray();
-        arr.put("onDestroy");
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void Disconnect() {
-        isManualDisconnect.set(true);
-        shouldReconnect.set(false);
-        isCleaningUp.set(true);
-
-        SendOnDestroy();
-        DisconnectGame();
-        mainHandler.postDelayed(() -> {
-            synchronized (webSocketLock) {
-                if (webSocket != null) {
-                    try {
-                        webSocket.close(1000, "Permanent logout");
-                    } catch (Exception ignored) {}
-                    webSocket = null;
-                }
-            }
-
-            cleanup();
-            isCleaningUp.set(false);
-        }, 300);
-    }
-
-    @SimpleFunction
-    public void ForceReconnect() {
-        isManualDisconnect.set(false);
-        shouldReconnect.set(true);
-        isCleaningUp.set(false);
-
-        synchronized (webSocketLock) {
-            if (webSocket != null) {
-                try {
-                    webSocket.close(1000, "Force reconnect");
-                } catch (Exception ignored) {}
-                webSocket = null;
-            }
-        }
-
-        onDisconnected();
-        stopReconnectProcess();
-        cleanupStatusTimeout();
-        startReconnectProcess();
-    }
-
-    @SimpleFunction
-    public void SendChat(String roomname, String noImageURL, String username, String message, String usernameColor, String chatTextColor) {
-        if (roomname == null) roomname = "";
-        if (noImageURL == null) noImageURL = "";
-        if (username == null) username = "";
-        if (message == null) message = "";
-        if (usernameColor == null) usernameColor = "";
-        if (chatTextColor == null) chatTextColor = "";
-
-        JSONArray arr = new JSONArray();
-        arr.put("chat");
-        arr.put(roomname);
-        arr.put(noImageURL);
-        arr.put(username);
-        arr.put(message);
-        arr.put(usernameColor);
-        arr.put(chatTextColor);
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void SendPrivate(String idtarget, String noimageUrl, String message, String sender) {
-        if (idtarget == null) idtarget = "";
-        if (noimageUrl == null) noimageUrl = "";
-        if (message == null) message = "";
-        if (sender == null) sender = "";
-
-        JSONArray arr = new JSONArray();
-        arr.put("private");
-        arr.put(idtarget);
-        arr.put(noimageUrl);
-        arr.put(message);
-        arr.put(sender);
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void Sendnotif(String idtarget, String noimageUrl, String username, String deskripsi) {
-        if (idtarget == null) idtarget = "";
-        if (noimageUrl == null) noimageUrl = "";
-        if (username == null) username = "";
-        if (deskripsi == null) deskripsi = "";
-
-        JSONArray arr = new JSONArray();
-        arr.put("sendnotif");
-        arr.put(idtarget);
-        arr.put(noimageUrl);
-        arr.put(username);
-        arr.put(deskripsi);
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void SendNotifWithDelay(YailList onlineUsers, String noimageUrl, String username, String deskripsi) {
-        if (onlineUsers == null || onlineUsers.size() == 0) {
-            OnNotificationBatchCompleted(0, 0);
-            return;
-        }
-
-        if (noimageUrl == null) noimageUrl = "";
-        if (username == null) username = "";
-        if (deskripsi == null) deskripsi = "";
-
-        final Object[] usersArray = onlineUsers.toArray();
-        final int total = usersArray.length;
-        final int[] sentCount = {0};
-
-        for (int i = 0; i < usersArray.length; i++) {
-            final int index = i;
-            String finalNoimageUrl = noimageUrl;
-            String finalUsername = username;
-            String finalDeskripsi = deskripsi;
-            mainHandler.postDelayed(() -> {
-                String userId = usersArray[index] == null ? "" : usersArray[index].toString();
-                if (!userId.isEmpty()) {
-                    Sendnotif(userId, finalNoimageUrl, finalUsername, finalDeskripsi);
-                    sentCount[0]++;
-                }
-
-                if (sentCount[0] == total) {
-                    OnNotificationBatchCompleted(total, total);
-                }
-            }, index * 50L);
-        }
-    }
-
-    @SimpleFunction
-    public void RemoveKursiAndPoint(String roomName, int seatNumber) {
-        if (roomName == null) roomName = "";
-        JSONArray arr = new JSONArray();
-        arr.put("removeKursiAndPoint");
-        arr.put(roomName);
-        arr.put(seatNumber);
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void resetlallrom() {
-        JSONArray arr = new JSONArray();
-        arr.put("resetRoom");
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void updatePoint(String roomname, String seat, float x, float y, String fast) {
-        if (roomname == null) roomname = "";
-        if (seat == null) seat = "-1";
-        if (fast == null) fast = "0";
-
-        try {
-            int seatInt = Integer.parseInt(seat);
-            int fastInt = Integer.parseInt(fast);
-
-            if (seatInt >= 0) {
-                JSONArray arr = new JSONArray();
-                arr.put("updatePoint");
-                arr.put(roomname);
-                arr.put(seatInt);
-                arr.put(x);
-                arr.put(y);
-                arr.put(fastInt);
-                sendJson(arr.toString());
-            }
-        } catch (NumberFormatException e) {
-            // Silent fail
-        } catch (JSONException e) {
-            // Silent fail
-        }
-    }
-
-    @SimpleFunction
-    public void updateKursi(String roomname, String seat, String noimageUrl, String namauser,
-                            String color, String itembawah, String itematas, String vip, String viptanda) {
-        if (roomname == null) roomname = "";
-        if (seat == null) seat = "-1";
-        if (noimageUrl == null) noimageUrl = "";
-        if (namauser == null) namauser = "";
-        if (color == null) color = "";
-        if (itembawah == null) itembawah = "0";
-        if (itematas == null) itematas = "0";
-        if (vip == null) vip = "0";
-        if (viptanda == null) viptanda = "0";
-
-        try {
-            int seatInt = Integer.parseInt(seat);
-            int itembawahInt = Integer.parseInt(itembawah);
-            int itematasInt = Integer.parseInt(itematas);
-            int vipInt = Integer.parseInt(vip);
-            int viptandaInt = Integer.parseInt(viptanda);
-
-            if (seatInt >= 0) {
-                JSONArray arr = new JSONArray();
-                arr.put("updateKursi");
-                arr.put(roomname);
-                arr.put(seatInt);
-                arr.put(noimageUrl);
-                arr.put(namauser);
-                arr.put(color);
-                arr.put(itembawahInt);
-                arr.put(itematasInt);
-                arr.put(vipInt);
-                arr.put(viptandaInt);
-                sendJson(arr.toString());
-            }
-        } catch (NumberFormatException e) {
-            // Silent fail
-        }
-    }
-
-    @SimpleFunction
-    public void SendModwarning() {
-        if (isConnected.get() && roomnama != null && !roomnama.isEmpty()) {
-            JSONArray arr = new JSONArray();
-            arr.put("modwarning");
-            arr.put(roomnama);
-            sendJson(arr.toString());
-        }
-    }
-
-    @SimpleFunction
-    public void JoinRoom(String roomname) {
-        if (roomname == null) roomname = "";
-        this.roomnama = roomname;
-
-        if (isConnected.get() && myIdTarget != null && !myIdTarget.isEmpty()) {
-            sendJoinRoom();
-        }
-    }
-
-    private void sendJoinRoom() {
-        if (isConnected.get() && roomnama != null && !roomnama.isEmpty()) {
-            JSONArray arr = new JSONArray();
-            arr.put("joinRoom");
-            arr.put(roomnama);
-            sendJson(arr.toString());
-        }
-    }
-
-    @SimpleFunction
-    public void RequestOnlineALLUsersList() {
-        JSONArray arr = new JSONArray();
-        arr.put("getOnlineUsers");
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void IsUserOnline(String userId, String tanda) {
-        if (userId == null) userId = "";
-        if (tanda == null) tanda = "";
-
-        JSONArray arr = new JSONArray();
-        arr.put("isUserOnline");
-        arr.put(userId);
-        arr.put(tanda);
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void GetAllRoomsUserCount() {
-        JSONArray arr = new JSONArray();
-        arr.put("getAllRoomsUserCount");
-        sendJson(arr.toString());
-    }
-
-    private boolean sendJson(String jsonStr) {
-        if (jsonStr == null || jsonStr.isEmpty()) {
-            OnSlowNetworkDetected("Cannot send empty message");
-            return false;
-        }
-
-        if (!isConnected.get()) {
-            OnSlowNetworkDetected("Not connected to server. Please check network.");
-            return false;
-        }
-
-        if (isReconnecting.get() || isCleaningUp.get()) {
-            OnSlowNetworkDetected("Reconnecting, message queued but not sent");
-            return false;
-        }
-
-        synchronized (webSocketLock) {
-            if (webSocket == null) {
-                OnSlowNetworkDetected("WebSocket is null. Connection lost.");
-                isConnected.set(false);
-                return false;
-            }
-
-            try {
-                boolean sent = webSocket.send(jsonStr);
-                if (!sent) {
-                    OnSlowNetworkDetected("Message failed to send. Network problem.");
-                }
-                return sent;
-            } catch (IllegalStateException e) {
-                OnSlowNetworkDetected("WebSocket closed. " + e.getMessage());
-                synchronized (webSocketLock) {
-                    webSocket = null;
-                }
-                isConnected.set(false);
-                return false;
-            } catch (Exception e) {
-                OnSlowNetworkDetected("Send error: " + e.getMessage());
-                return false;
-            }
-        }
-    }
-
-    @SimpleFunction
-    public void GetNumber() {
-        JSONArray arr = new JSONArray();
-        arr.put("getCurrentNumber");
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void SendGift(String sender, String receiver, String giftName) {
-        if (sender == null) sender = "";
-        if (receiver == null) receiver = "";
-        if (giftName == null) giftName = "";
-
-        if (isConnected.get() && roomnama != null && !roomnama.isEmpty()) {
-            JSONArray arr = new JSONArray();
-            arr.put("gift");
-            arr.put(roomnama);
-            arr.put(sender);
-            arr.put(receiver);
-            arr.put(giftName);
-            sendJson(arr.toString());
-        }
-    }
-
-    // ==================== GAME METHODS ====================
-
-    @SimpleFunction
-    public void GameLowCardStart(int betAmount, String username) {
-        if (username == null) username = "";
-
-        if (isGameConnected.get() && gameWebSocket != null) {
-            JSONArray arr = new JSONArray();
-            arr.put("gameLowCardStart");
-            arr.put(betAmount);
-            arr.put(username);
-            sendGameJson(arr.toString());
-            return;
-        }
-        if (isConnected.get()) {
-            JSONArray arr = new JSONArray();
-            arr.put("gameLowCardStart");
-            arr.put(betAmount);
-            arr.put(username);
-            sendJson(arr.toString());
-        }
-    }
-
-    @SimpleFunction
-    public void GameLowCardJoin(String username) {
-        if (username == null) username = "";
-
-        if (isGameConnected.get() && gameWebSocket != null) {
-            JSONArray arr = new JSONArray();
-            arr.put("gameLowCardJoin");
-            arr.put(username);
-            sendGameJson(arr.toString());
-            return;
-        }
-        if (isConnected.get()) {
-            JSONArray arr = new JSONArray();
-            arr.put("gameLowCardJoin");
-            arr.put(username);
-            sendJson(arr.toString());
-        }
-    }
-
-    @SimpleFunction
-    public void GameLowCardNumber(int number, String tanda, String username) {
-        if (tanda == null) tanda = "";
-        if (username == null) username = "";
-
-        if (isGameConnected.get() && gameWebSocket != null) {
-            JSONArray arr = new JSONArray();
-            arr.put("gameLowCardNumber");
-            arr.put(number);
-            arr.put(tanda);
-            arr.put(username);
-            sendGameJson(arr.toString());
-            return;
-        }
-        if (isConnected.get()) {
-            JSONArray arr = new JSONArray();
-            arr.put("gameLowCardNumber");
-            arr.put(number);
-            arr.put(tanda);
-            arr.put(username);
-            sendJson(arr.toString());
-        }
-    }
-
-    @SimpleFunction
-    public void CheckGameRunning(String roomname) {
-        if (roomname == null || roomname.isEmpty()) {
-            return;
-        }
-
-        if (isGameConnected.get() && gameWebSocket != null) {
-            JSONArray arr = new JSONArray();
-            arr.put("checkGameRunning");
-            arr.put(roomname);
-            sendGameJson(arr.toString());
-            return;
-        }
-        if (isConnected.get()) {
-            JSONArray arr = new JSONArray();
-            arr.put("checkGameRunning");
-            arr.put(roomname);
-            sendJson(arr.toString());
-        }
-    }
-
-    @SimpleFunction
-    public void ConnectGame(String baseUrl) {
-        this.gameServerUrl = baseUrl;
-
-        String url = baseUrl + "/game/ws";
-
-        Request request = new Request.Builder().url(url).build();
-        gameWebSocket = client.newWebSocket(request, new GameWebSocketListener());
-    }
-
-    @SimpleFunction
-    public void GameSwitchRoom(String room) {
-        if (gameWebSocket != null) {
-            JSONArray message = new JSONArray();
-            message.put("switchRoom");
-            message.put(room);
-            sendGameJson(message.toString());
-        }
-    }
-
-    @SimpleFunction
-    public void DisconnectGame() {
-        isGameConnected.set(false);
-        reconnectAttempts = 0;
-        if (gameWebSocket != null) {
-            try {
-                gameWebSocket.close(1000, "Disconnect");
-            } catch (Exception e) {}
-            gameWebSocket = null;
-        }
-    }
-
-    @SimpleFunction
-    public void GameLowCardLeave() {
-        if (!isGameConnected.get() || gameWebSocket == null) return;
-        if (gameUsername == null || gameUsername.isEmpty()) return;
-
-        try {
-            JSONArray arr = new JSONArray();
-            arr.put("gameLowCardLeave");
-            arr.put(gameUsername);
-            arr.put(roomnama);
-            sendGameJson(arr.toString());
-        } catch (Exception e) {
-            OnGameError("Failed to send leave: " + e.getMessage());
-        }
-    }
-
-    private boolean sendGameJson(String jsonStr) {
-        if (!isGameConnected.get() || gameWebSocket == null) return false;
-        try {
-            gameWebSocket.send(jsonStr);
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    // ==================== QUIZ METHODS ====================
-
-    @SimpleFunction
-    public void SubmitQuizAnswer(String username, String answer) {
-        if (username == null || username.isEmpty()) {
-            OnQuizError("Username is required");
-            return;
-        }
-        if (answer == null || answer.isEmpty()) {
-            OnQuizError("Answer is required");
-            return;
-        }
-
-        String answerUpper = answer.toUpperCase().trim();
+// ==================== GAME SERVER - FULL CLASS ====================
+
+const CONSTANTS = {
+  MAX_LOWCARD_GAMES: 10,
+  REGISTRATION_TIME_MS: 20000,
+  DRAW_TIME_MS: 20000,
+  EVALUATION_DELAY_MS: 2000,
+  MAX_BOTS_PER_GAME: 4,
+  MAX_BET: 100000,
+  BOT_DRAW_MIN_SECONDS: 2,
+  BOT_DRAW_MAX_SECONDS: 15,
+  MAX_BOT_DRAWS_PER_ROUND: 4,
+  EVALUATION_TIMEOUT_MS: 30000,
+  START_LOCK_DURATION_MS: 3000,
+  MAX_PLAYERS_PER_GAME: 45,
+  GAME_CLEANUP_DELAY_MS: 5000,
+  BATCH_SIZE: 20,
+  ALARM_10_DETIK: 10000,
+  CLEANUP_TIK: 90,
+  STALE_GAME_TIMEOUT_MS: 600000,
+  STUCK_DRAW_TIMEOUT_MS: 60000,
+  STUCK_REGISTRATION_TIMEOUT_MS: 30000,
+  QUIZ_INTERVAL_MS: 15000,
+};
+
+const QUIZ_ROOM = "LowCard 2";
+
+export class GameServer {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.closing = false;
+    this.isDestroyed = false;
+    
+    this.activeGames = new Map();
+    this._maxGames = CONSTANTS.MAX_LOWCARD_GAMES;
+    this._gameLocks = new Map();
+    this._joinLocks = new Map();
+    this._switchLocks = new Map();
+    
+    this._wsIdCounter = 0;
+    this.wsClients = new Map();
+    this.clientRooms = new Map();
+    this.wsMap = new Map();
+    this.roomViewers = new Map();
+    this.userConnections = new Map();
+    this.connectionLocks = new Map();
+    this._cleanupTimers = new Map();
+    this._roomBroadcastCount = new Map();
+    this._roomBroadcastReset = new Map();
+    this._tikCounter = 0;
+    this._gameStartFlags = new Map();
+    
+    this.quizQuestions = [];
+    this.quizAnswered = new Set();
+    this.quizHasWinner = false;
+    this.quizWinner = null;
+    this.quizTimer = null;
+    this.isQuizRunning = false;
+    this.currentQuestion = null;
+    this.quizQuestionPool = [];
+    this.isFetching = false;
+    
+    this.quizQuestionCache = [];
+    this.userCountry = new Map();
+    this.userLanguage = new Map();
+    this.languageDetected = new Map();
+    
+    this._preloadQuestions();
+    this._startQuizLoop();
+    
+    this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
+  }
+  
+  // ==================== ALARM & CLEANUP ====================
+  
+  async alarm() {
+    if (this.closing || this.isDestroyed) return;
+    
+    try {
+      this._tikCounter++;
+      
+      if (this._tikCounter % 6 === 0) {
+        this._checkStuckGames();
+      }
+      
+      if (this._tikCounter >= CONSTANTS.CLEANUP_TIK) {
+        this._cleanupStaleGames();
+        this._cleanupDeadConnections();
+        this._cleanupStaleBroadcastCounters();
+        this._cleanupStaleSwitchLocks();
+        this._tikCounter = 0;
+      }
+      
+    } catch(e) {}
+    
+    try {
+      this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
+    } catch(e) {}
+  }
+  
+  _checkStuckGames() {
+    try {
+      const now = Date.now();
+      for (const [room, game] of this.activeGames) {
+        if (!game._isActive || game._gameEnded) continue;
         
-        if (!answerUpper.matches("[ABCD]")) {
-            OnQuizError("Invalid answer! Use A, B, C, or D");
-            return;
+        if (game._phase === 'draw' && game._drawPhaseStart) {
+          if ((now - game._drawPhaseStart) > CONSTANTS.STUCK_DRAW_TIMEOUT_MS) {
+            this._broadcastToRoom(room, ["gameLowCardError", "Game stuck, forcing evaluation..."]);
+            this._closeDrawPhase(room, game);
+          }
         }
-
-        if (isGameConnected.get() && gameWebSocket != null) {
-            try {
-                JSONArray arr = new JSONArray();
-                arr.put("submitQuizAnswer");
-                arr.put(username);
-                arr.put(answerUpper);
-                sendGameJson(arr.toString());
-                return;
-            } catch (Exception e) {
-                OnQuizError("Failed to send: " + e.getMessage());
+        
+        if (game._phase === 'registration' && game.registrationOpen) {
+          if (game._createdAt && (now - game._createdAt) > CONSTANTS.STUCK_REGISTRATION_TIMEOUT_MS) {
+            this._broadcastToRoom(room, ["gameLowCardError", "Registration timeout"]);
+            this._closeRegistration(room, game);
+          }
+        }
+        
+        if (game._phase !== 'registration' && !game.registrationOpen) {
+          const activePlayers = this._getActivePlayers(game);
+          if (activePlayers.length === 0 && !game._gameEnded) {
+            game._gameEnded = true;
+            game._isActive = false;
+            game._endTime = Date.now();
+            this._broadcastToRoom(room, ["gameLowCardEnd", []]);
+            this._scheduleGameCleanup(room, game);
+          }
+        }
+      }
+    } catch(e) {}
+  }
+  
+  _cleanupStaleGames() {
+    try {
+      const now = Date.now();
+      for (const [room, game] of this.activeGames) {
+        if (game._isActive === true && !game._gameEnded) {
+          continue;
+        }
+        
+        if (game._gameEnded === true) {
+          const endTime = game._endTime || game._createdAt || now;
+          if ((now - endTime) > CONSTANTS.STALE_GAME_TIMEOUT_MS) {
+            this._scheduleGameCleanup(room, game);
+          }
+          continue;
+        }
+        
+        if (game._isActive === false && !game._gameEnded) {
+          if (game._createdAt && (now - game._createdAt) > 300000) {
+            game._gameEnded = true;
+            game._endTime = now;
+            this._scheduleGameCleanup(room, game);
+          }
+        }
+      }
+    } catch(e) {}
+  }
+  
+  _cleanupStaleBroadcastCounters() {
+    try {
+      const now = Date.now();
+      for (const [room, resetTime] of this._roomBroadcastReset) {
+        if ((now - resetTime) > 60000) {
+          this._roomBroadcastCount.delete(room);
+          this._roomBroadcastReset.delete(room);
+        }
+      }
+    } catch(e) {}
+  }
+  
+  _cleanupStaleSwitchLocks() {
+    try {
+      const now = Date.now();
+      for (const [key, time] of this._switchLocks) {
+        if ((now - time) > 5000) {
+          this._switchLocks.delete(key);
+        }
+      }
+    } catch(e) {}
+  }
+  
+  _cleanupDeadConnections() {
+    try {
+      const toRemove = [];
+      for (const [wsId, ws] of this.wsMap) {
+        if (!ws || ws.readyState !== 1 || ws._closing) {
+          toRemove.push(wsId);
+        }
+      }
+      
+      for (const wsId of toRemove) {
+        const ws = this.wsMap.get(wsId);
+        if (ws) {
+          const room = this.clientRooms.get(wsId);
+          if (room) {
+            this._removeClientFromRoom(room, wsId);
+          }
+          this.clientRooms.delete(wsId);
+          this.wsMap.delete(wsId);
+          
+          this.userCountry.delete(wsId);
+          this.userLanguage.delete(wsId);
+          this.languageDetected.delete(wsId);
+          
+          for (const [username, conn] of this.userConnections) {
+            if (conn.wsId === wsId) {
+              this.userConnections.delete(username);
+              break;
             }
+          }
         }
-
-        if (isConnected.get()) {
-            try {
-                JSONArray arr = new JSONArray();
-                arr.put("submitQuizAnswer");
-                arr.put(username);
-                arr.put(answerUpper);
-                sendJson(arr.toString());
-                return;
-            } catch (Exception e) {
-                OnQuizError("Failed to send: " + e.getMessage());
+      }
+    } catch(e) {}
+  }
+  
+  // ==================== WEB SOCKET HELPERS ====================
+  
+  _getWsId(ws) {
+    return ws ? ws._wsId : null;
+  }
+  
+  _getRoomForWs(ws) {
+    if (!ws) return null;
+    return ws.room || ws.roomname || null;
+  }
+  
+  _ensureRoomConsistency(ws) {
+    const wsId = this._getWsId(ws);
+    if (!wsId) return null;
+    
+    let room = this._getRoomForWs(ws);
+    if (!room) return null;
+    
+    const clientRoom = this.clientRooms.get(wsId);
+    
+    if (clientRoom && clientRoom !== room) {
+      room = clientRoom;
+      ws.room = room;
+      ws.roomname = room;
+    }
+    
+    if (!this.wsClients.has(room)) {
+      this.wsClients.set(room, new Set());
+    }
+    if (!this.wsClients.get(room).has(wsId)) {
+      this.wsClients.get(room).add(wsId);
+      this.clientRooms.set(wsId, room);
+    }
+    
+    return room;
+  }
+  
+  _lockUserConnection(username) {
+    if (this.connectionLocks.has(username)) {
+      return false;
+    }
+    this.connectionLocks.set(username, true);
+    return true;
+  }
+  
+  _unlockUserConnection(username) {
+    this.connectionLocks.delete(username);
+  }
+  
+  _forceCleanupUserConnections(username, excludeWsId = null) {
+    const conn = this.userConnections.get(username);
+    if (!conn) return;
+    
+    if (excludeWsId !== null && conn.wsId === excludeWsId) {
+      return;
+    }
+    
+    const oldWs = this.wsMap.get(conn.wsId);
+    if (oldWs && oldWs.readyState === 1) {
+      try {
+        this._safeSend(oldWs, ["gameLowCardReplaced", "New connection established"]);
+        oldWs.close(1000, "Replaced by new connection");
+      } catch(e) {}
+    }
+    
+    if (conn.room) {
+      this._removeClientFromRoom(conn.room, conn.wsId);
+    }
+    
+    this.wsMap.delete(conn.wsId);
+    this.clientRooms.delete(conn.wsId);
+    
+    this.userCountry.delete(conn.wsId);
+    this.userLanguage.delete(conn.wsId);
+    this.languageDetected.delete(conn.wsId);
+    
+    if (conn.room && this.roomViewers.has(conn.room)) {
+      this.roomViewers.get(conn.room).delete(username);
+      if (this.roomViewers.get(conn.room).size === 0) {
+        this.roomViewers.delete(conn.room);
+      }
+    }
+    
+    this.userConnections.delete(username);
+  }
+  
+  _addClient(room, ws, username = null, isNewConnection = false) {
+    const wsId = this._getWsId(ws);
+    if (!wsId) {
+      this._safeSend(ws, ["gameLowCardError", "Connection error, please reconnect"]);
+      return;
+    }
+    
+    if (username && isNewConnection) {
+      this._forceCleanupUserConnections(username, wsId);
+      this.userConnections.set(username, {
+        wsId: wsId,
+        ws: ws,
+        room: room,
+        timestamp: Date.now()
+      });
+    }
+    
+    if (username && !isNewConnection) {
+      const conn = this.userConnections.get(username);
+      if (conn) {
+        conn.room = room;
+        conn.timestamp = Date.now();
+      } else {
+        this.userConnections.set(username, {
+          wsId: wsId,
+          ws: ws,
+          room: room,
+          timestamp: Date.now()
+        });
+      }
+    }
+    
+    if (this.clientRooms.has(wsId)) {
+      const oldRoom = this.clientRooms.get(wsId);
+      if (oldRoom !== room) {
+        this._removeClientFromRoom(oldRoom, wsId);
+      }
+    }
+    
+    const clients = this.wsClients.get(room);
+    if (clients) {
+      clients.delete(wsId);
+    }
+    
+    if (!this.wsClients.has(room)) {
+      this.wsClients.set(room, new Set());
+    }
+    this.wsClients.get(room).add(wsId);
+    this.clientRooms.set(wsId, room);
+    this.wsMap.set(wsId, ws);
+    
+    ws.room = room;
+    ws.roomname = room;
+    ws.username = username;
+    
+    if (username) {
+      if (!this.roomViewers.has(room)) {
+        this.roomViewers.set(room, new Set());
+      }
+      this.roomViewers.get(room).add(username);
+    }
+  }
+  
+  _removeClientFromRoom(room, wsId) {
+    const clients = this.wsClients.get(room);
+    if (clients) {
+      clients.delete(wsId);
+      if (clients.size === 0) {
+        this.wsClients.delete(room);
+      }
+    }
+  }
+  
+  _removeClient(room, ws) {
+    const wsId = this._getWsId(ws);
+    if (!wsId) return;
+    
+    const username = ws.username;
+    
+    this._removeClientFromRoom(room, wsId);
+    this.clientRooms.delete(wsId);
+    this.wsMap.delete(wsId);
+    
+    this.userCountry.delete(wsId);
+    this.userLanguage.delete(wsId);
+    this.languageDetected.delete(wsId);
+    
+    if (username) {
+      const conn = this.userConnections.get(username);
+      if (conn && conn.wsId === wsId) {
+        this.userConnections.delete(username);
+      }
+      
+      if (this.roomViewers.has(room)) {
+        this.roomViewers.get(room).delete(username);
+        if (this.roomViewers.get(room).size === 0) {
+          this.roomViewers.delete(room);
+        }
+      }
+    }
+    
+    if (ws) {
+      ws.room = null;
+      ws.roomname = null;
+      ws._wsId = null;
+      ws.username = null;
+    }
+  }
+  
+  _ensureSingleConnection(room, username, newWs, newWsId) {
+    const game = this.activeGames.get(room);
+    if (!game) return newWsId;
+    
+    this._forceCleanupUserConnections(username, newWsId);
+    game.playerWsId.set(username, newWsId);
+    this._addClient(room, newWs, username, true);
+    
+    return newWsId;
+  }
+  
+  // ==================== ROOM MANAGEMENT ====================
+  
+  async switchRoom(ws, room, username = null) {
+    if (this.isDestroyed) {
+      this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]);
+      return;
+    }
+    
+    if (!room || room.trim() === "") {
+      this._safeSend(ws, ["gameLowCardError", "Invalid room name"]);
+      return;
+    }
+    
+    const roomName = room.trim();
+    const wsId = this._getWsId(ws);
+    
+    if (!wsId) {
+      this._safeSend(ws, ["gameLowCardError", "Connection error"]);
+      return;
+    }
+    
+    const lockKey = `switch_${wsId}`;
+    if (this._switchLocks.has(lockKey)) {
+      this._safeSend(ws, ["switchRoomBusy", "Please wait..."]);
+      return;
+    }
+    this._switchLocks.set(lockKey, Date.now());
+    
+    try {
+      const oldRoom = this.clientRooms.get(wsId);
+      
+      if (oldRoom === roomName) {
+        this._safeSend(ws, ["switchRoomSuccess", roomName]);
+        this._sendGameStatusToWs(ws, roomName);
+        if (roomName === QUIZ_ROOM) {
+          await this._setAutoLanguage(ws);
+          this._safeSend(ws, ["quizInfo", "🎯 Welcome to LowCard 2! Quiz is running!"]);
+        }
+        return;
+      }
+      
+      if (oldRoom) {
+        this._removeClientFromRoom(oldRoom, wsId);
+      }
+      
+      this._addClient(roomName, ws, username, false);
+      
+      ws.room = roomName;
+      ws.roomname = roomName;
+      ws.username = username;
+      
+      if (username) {
+        const conn = this.userConnections.get(username);
+        if (conn) {
+          conn.room = roomName;
+        }
+      }
+      
+      this._broadcastToRoom(roomName, ["roomUserJoined", username || "Anonymous"]);
+      this._safeSend(ws, ["switchRoomSuccess", roomName]);
+      this._sendGameStatusToWs(ws, roomName);
+      
+      if (roomName === QUIZ_ROOM) {
+        await this._setAutoLanguage(ws);
+        this._safeSend(ws, ["quizInfo", "🎯 Welcome to LowCard 2! Quiz is running!"]);
+      }
+      
+    } finally {
+      this._switchLocks.delete(lockKey);
+    }
+  }
+  
+  _sendGameStatusToWs(ws, room) {
+    const roomGame = this.activeGames.get(room);
+    if (roomGame && roomGame._isActive && !roomGame._gameEnded) {
+      this._safeSend(ws, ["gameLowCardStatus", {
+        room: room,
+        running: true,
+        phase: roomGame._phase || 'idle',
+        round: roomGame.round || 0,
+        betAmount: roomGame.betAmount || 0,
+        registrationOpen: roomGame.registrationOpen || false,
+        players: Array.from(roomGame.players?.values() || []).map(p => p.name),
+        eliminated: Array.from(roomGame.eliminated || []),
+        numbers: Array.from(roomGame.numbers?.entries() || []).map(([name, num]) => ({ name, num })),
+        totalPlayers: roomGame.players?.size || 0,
+        activePlayers: this._getActivePlayers(roomGame).length
+      }]);
+    } else {
+      this._safeSend(ws, ["gameLowCardStatus", {
+        room: room,
+        running: false,
+        phase: 'idle',
+        round: 0,
+        betAmount: 0,
+        registrationOpen: false,
+        players: [],
+        eliminated: [],
+        numbers: [],
+        totalPlayers: 0,
+        activePlayers: 0
+      }]);
+    }
+  }
+  
+  // ==================== BROADCAST ====================
+  
+  _broadcastToRoom(room, message) {
+    if (this.closing || this.isDestroyed || !room || !message) return;
+    
+    const wsIds = this.wsClients.get(room);
+    if (!wsIds || wsIds.size === 0) return;
+    
+    const now = Date.now();
+    const reset = this._roomBroadcastReset.get(room) || 0;
+    const count = this._roomBroadcastCount.get(room) || 0;
+    
+    if (now > reset) {
+      this._roomBroadcastReset.set(room, now + 1000);
+      this._roomBroadcastCount.set(room, 1);
+    } else {
+      if (count > 50) {
+        return;
+      }
+      this._roomBroadcastCount.set(room, count + 1);
+    }
+    
+    const msgStr = JSON.stringify(message);
+    const disconnected = new Set();
+    
+    const wsIdArray = Array.from(wsIds);
+    const BATCH_SIZE = 10;
+    
+    for (let i = 0; i < wsIdArray.length; i += BATCH_SIZE) {
+      const batch = wsIdArray.slice(i, i + BATCH_SIZE);
+      
+      for (const wsId of batch) {
+        const ws = this.wsMap.get(wsId);
+        if (ws && ws.readyState === 1) {
+          try {
+            ws.send(msgStr);
+          } catch(e) {
+            disconnected.add(wsId);
+          }
+        } else {
+          disconnected.add(wsId);
+        }
+      }
+    }
+    
+    if (disconnected.size > 0) {
+      for (const wsId of disconnected) {
+        const ws = this.wsMap.get(wsId);
+        if (ws) {
+          this._removeClient(room, ws);
+        } else {
+          this._removeClientFromRoom(room, wsId);
+          this.clientRooms.delete(wsId);
+        }
+      }
+    }
+  }
+  
+  _safeSend(ws, message) {
+    if (!ws || ws.readyState !== 1) return false;
+    try {
+      ws.send(JSON.stringify(message));
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+  
+  // ==================== GAME HELPERS ====================
+  
+  _isGameActuallyRunning(game) {
+    if (!game) return false;
+    return game._isActive === true && !game._gameEnded;
+  }
+  
+  _isGameValid(game) {
+    if (!game) return false;
+    return game._isActive === true && 
+           !game._gameEnded && 
+           game.players && 
+           game.players.size > 0;
+  }
+  
+  _getActivePlayers(game) {
+    if (!game?._isActive || game._gameEnded || !game.players) return [];
+    return Array.from(game.players.entries())
+      .filter(([id]) => !game.eliminated?.has(id))
+      .map(([, p]) => p);
+  }
+  
+  _getActivePlayerIds(game) {
+    if (!game?._isActive || game._gameEnded || !game.players) return [];
+    return Array.from(game.players.keys()).filter(id => !game.eliminated?.has(id));
+  }
+  
+  _getActivePlayersWithSubmitStatus(game) {
+    if (!game?._isActive || game._gameEnded || !game.players) return [];
+    const submittedIds = new Set(game.numbers?.keys() || []);
+    return Array.from(game.players.entries())
+      .filter(([id]) => !game.eliminated?.has(id))
+      .map(([id, p]) => ({
+        ...p,
+        hasSubmitted: submittedIds.has(id)
+      }));
+  }
+  
+  _getRandomCardTanda() {
+    return ["C1", "C2", "C3", "C4"][Math.floor(Math.random() * 4)];
+  }
+  
+  _getRandomDrawDelay() {
+    return (Math.floor(Math.random() * 14) + 2) * 1000;
+  }
+  
+  _getBotNumberByRound(round) {
+    if (round <= 2) {
+      return Math.floor(Math.random() * 12) + 1;
+    } else {
+      return Math.random() < 0.6 ? 
+        [8, 9, 10, 11, 12][Math.floor(Math.random() * 5)] :
+        [1, 2, 3, 4, 5, 6, 7][Math.floor(Math.random() * 7)];
+    }
+  }
+  
+  _safeGetGame(room) {
+    if (this.isDestroyed || !room) return null;
+    const game = this.activeGames.get(room);
+    if (game && game._isActive === true && !game._gameEnded && game.players) {
+      return game;
+    }
+    return null;
+  }
+  
+  // ==================== GAME CLEANUP ====================
+  
+  _scheduleGameCleanup(room, game) {
+    if (this._cleanupTimers.has(room)) {
+      clearTimeout(this._cleanupTimers.get(room));
+      this._cleanupTimers.delete(room);
+    }
+    
+    if (!game._gameEnded) {
+      return;
+    }
+    
+    const timer = setTimeout(() => {
+      try {
+        const currentGame = this.activeGames.get(room);
+        if (currentGame && currentGame._isActive && !currentGame._gameEnded) {
+          this._cleanupTimers.delete(room);
+          return;
+        }
+        
+        this._cleanupTimers.delete(room);
+        this._deleteGame(room, game);
+      } catch(e) {}
+    }, CONSTANTS.GAME_CLEANUP_DELAY_MS);
+    
+    this._cleanupTimers.set(room, timer);
+  }
+  
+  _cleanupGame(game) {
+    if (!game) return;
+    
+    if (game._isActive === true && !game._gameEnded) {
+      return;
+    }
+    
+    const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
+    for (const key of timers) {
+      if (game[key]) {
+        clearTimeout(game[key]);
+        clearInterval(game[key]);
+        game[key] = null;
+      }
+    }
+    
+    if (game._botTimeouts) {
+      for (const id of game._botTimeouts) {
+        clearTimeout(id);
+      }
+      game._botTimeouts.clear();
+      game._botTimeouts = null;
+    }
+    
+    game.players = null;
+    game.botPlayers = null;
+    game.numbers = null;
+    game.tanda = null;
+    game.eliminated = null;
+    game._isActive = false;
+    game._gameEnded = true;
+    game._isEvaluating = false;
+  }
+  
+  _deleteGame(room, game) {
+    if (game && game._isActive === true && !game._gameEnded) {
+      return;
+    }
+    
+    if (this._cleanupTimers.has(room)) {
+      clearTimeout(this._cleanupTimers.get(room));
+      this._cleanupTimers.delete(room);
+    }
+    
+    this._roomBroadcastCount.delete(room);
+    this._roomBroadcastReset.delete(room);
+    
+    if (game) {
+      game._gameEnded = true;
+      game._isActive = false;
+      game.playerWsId = null;
+      this._cleanupGame(game);
+    }
+    this.activeGames.delete(room);
+    this._gameLocks.delete(room);
+    this._joinLocks.delete(room);
+    this._gameStartFlags.delete(room);
+    
+    this._broadcastToRoom(room, ["gameLowCardEnd", []]);
+  }
+  
+  // ==================== PLAYER MANAGEMENT ====================
+  
+  _removePlayerFromGame(username, room) {
+    try {
+      const game = this.activeGames.get(room);
+      if (!game) return false;
+      
+      if (!game.players || !game.players.has(username)) return false;
+      if (!game._isActive || game._gameEnded) return false;
+      if (game._isEvaluating || game.evaluationLocked) return false;
+      
+      if (!game.eliminated) game.eliminated = new Set();
+      game.eliminated.add(username);
+      
+      this._broadcastToRoom(room, ["gameLowCardPlayerEliminated", username, "Disconnected"]);
+      
+      game.numbers?.delete(username);
+      game.tanda?.delete(username);
+      
+      setTimeout(() => {
+        try {
+          const currentGame = this.activeGames.get(room);
+          if (currentGame && currentGame === game && !game._gameEnded) {
+            this._checkGameCanContinue(room, game);
+          }
+        } catch(e) {}
+      }, 1000);
+      
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+  
+  _checkGameCanContinue(room, game) {
+    try {
+      if (!game || game._gameEnded || !game.players || !game._isActive) return;
+      
+      if (game._isEvaluating || game.evaluationLocked) return;
+      if (game.registrationOpen) return;
+      
+      const activePlayers = this._getActivePlayers(game);
+      
+      if (activePlayers.length === 0) {
+        const allPlayers = Array.from(game.players.keys());
+        const submitted = Array.from(game.numbers?.keys() || []);
+        const notSubmitted = allPlayers.filter(id => !submitted.includes(id) && !game.eliminated?.has(id));
+        
+        if (notSubmitted.length > 0) {
+          return;
+        }
+        
+        game._gameEnded = true;
+        game._isActive = false;
+        game._endTime = Date.now();
+        this._broadcastToRoom(room, ["gameLowCardEnd", []]);
+        this._scheduleGameCleanup(room, game);
+        return;
+      }
+      
+      if (activePlayers.length === 1 && !game._gameEnded) {
+        const activeIds = this._getActivePlayerIds(game);
+        const submittedIds = Array.from(game.numbers?.keys() || []);
+        const notSubmitted = activeIds.filter(id => !submittedIds.includes(id));
+        
+        if (notSubmitted.length > 0) {
+          this._broadcastToRoom(room, ["gameLowCardInfo", `Waiting for ${notSubmitted.length} player(s)`]);
+          return;
+        }
+        
+        const winner = activePlayers[0]?.name || "Unknown";
+        const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
+        
+        game._gameEnded = true;
+        game._isActive = false;
+        game._endTime = Date.now();
+        
+        this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
+        this._scheduleGameCleanup(room, game);
+      }
+    } catch(e) {}
+  }
+  
+  _findAllGamesByUsername(username) {
+    if (!username) return [];
+    const result = [];
+    for (const [room, game] of this.activeGames) {
+      if (game._isActive && !game._gameEnded && game.players) {
+        if (game.players.has(username)) {
+          result.push({ game, room });
+        }
+      }
+    }
+    return result;
+  }
+  
+  // ==================== BOT MANAGEMENT ====================
+  
+  _addBots(room, count) {
+    try {
+      const game = this.activeGames.get(room);
+      if (!this._isGameActuallyRunning(game)) return;
+      
+      const botNames = ["moz1", "moz2", "moz3", "moz4"];
+      
+      const existingBots = Array.from(game.players.keys()).filter(id => id.startsWith('BOT_'));
+      const existingBotCount = existingBots.length;
+      
+      const maxBotsToAdd = Math.min(count, CONSTANTS.MAX_BOTS_PER_GAME - existingBotCount);
+      
+      if (maxBotsToAdd <= 0) return;
+      
+      for (let i = 0; i < maxBotsToAdd; i++) {
+        const botId = `BOT_${room}_${i}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        const botName = botNames[(existingBotCount + i) % botNames.length];
+        
+        if (!game.players.has(botId)) {
+          game.players.set(botId, { id: botId, name: botName });
+          if (!game.botPlayers) game.botPlayers = new Map();
+          game.botPlayers.set(botId, botName);
+        }
+      }
+      
+      game._botsAdded = true;
+      game.useBots = true;
+    } catch(e) {}
+  }
+  
+  _startBotDraws(room, game) {
+    try {
+      if (!this._isGameActuallyRunning(game) || !game.botPlayers) return;
+      
+      if (!game._botTimeouts) game._botTimeouts = new Set();
+      
+      const notDrawn = Array.from(game.botPlayers.keys())
+        .filter(id => !game.eliminated?.has(id) && !game.numbers?.has(id))
+        .slice(0, CONSTANTS.MAX_BOT_DRAWS_PER_ROUND);
+      
+      for (const botId of notDrawn) {
+        const delay = this._getRandomDrawDelay();
+        
+        const timeout = setTimeout(() => {
+          try {
+            const currentGame = this.activeGames.get(room);
+            if (this._isGameActuallyRunning(currentGame) && 
+                !currentGame.drawTimeExpired &&
+                !currentGame.evaluationLocked &&
+                !currentGame.numbers?.has(botId) &&
+                !currentGame.eliminated?.has(botId)) {
+              this._handleBotDraw(room, botId, currentGame);
             }
+            currentGame?._botTimeouts?.delete(timeout);
+          } catch(e) {}
+        }, delay);
+        
+        game._botTimeouts.add(timeout);
+      }
+    } catch(e) {}
+  }
+  
+  _handleBotDraw(room, botId, game) {
+    try {
+      if (!this._isGameActuallyRunning(game) || game.numbers?.has(botId) || game.drawTimeExpired || game.evaluationLocked) return;
+      if (game.eliminated?.has(botId)) return;
+      
+      const number = this._getBotNumberByRound(game.round);
+      const tanda = this._getRandomCardTanda();
+      
+      game.numbers.set(botId, number);
+      game.tanda.set(botId, tanda);
+      
+      const botName = game.players.get(botId)?.name || botId;
+      
+      this._broadcastToRoom(room, ["gameLowCardPlayerDraw", botName, number, tanda]);
+      
+      const activeIds = this._getActivePlayerIds(game);
+      if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired && this._isGameActuallyRunning(game)) {
+        game.evaluationLocked = true;
+        this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+        game._evalTimer = setTimeout(() => {
+          try {
+            this._evaluateRound(room, game);
+          } catch(e) {}
+        }, CONSTANTS.EVALUATION_DELAY_MS);
+      }
+    } catch(e) {}
+  }
+  
+  _forceBotDraw(room, botId, game) {
+    try {
+      if (!this._isGameActuallyRunning(game) || game.numbers?.has(botId)) return;
+      if (game.eliminated?.has(botId)) return;
+      
+      const number = this._getBotNumberByRound(game.round);
+      const tanda = this._getRandomCardTanda();
+      
+      game.numbers.set(botId, number);
+      game.tanda.set(botId, tanda);
+      
+      const botName = game.players.get(botId)?.name || botId;
+      
+      this._broadcastToRoom(room, ["gameLowCardPlayerDraw", botName, number, tanda]);
+    } catch(e) {}
+  }
+  
+  // ==================== GAME PHASES ====================
+  
+  _startRegistration(room, game) {
+    if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
+    
+    if (game._registrationTimer) {
+      clearInterval(game._registrationTimer);
+      game._registrationTimer = null;
+    }
+    
+    let timeLeft = 20;
+    
+    const timer = setInterval(() => {
+      try {
+        if (!this._isGameActuallyRunning(game) || !game.registrationOpen || timeLeft < 0) {
+          clearInterval(timer);
+          game._registrationTimer = null;
+          return;
         }
-
-        OnQuizError("Not connected");
+        
+        if (timeLeft === 15 || timeLeft === 10 || timeLeft === 5) {
+          this._broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
+        }
+        
+        if (timeLeft === 0) {
+          clearInterval(timer);
+          game._registrationTimer = null;
+          this._broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
+          this._closeRegistration(room, game);
+        }
+        timeLeft--;
+      } catch(e) {
+        clearInterval(timer);
+        game._registrationTimer = null;
+      }
+    }, 1000);
+    
+    game._registrationTimer = timer;
+  }
+  
+  _closeRegistration(room, game) {
+    try {
+      if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
+      game.registrationOpen = false;
+      
+      if (game._registrationTimer) {
+        clearInterval(game._registrationTimer);
+        game._registrationTimer = null;
+      }
+      
+      const humanPlayers = Array.from(game.players.keys()).filter(id => !id.startsWith('BOT_'));
+      const humanCount = humanPlayers.length;
+      
+      if (!game._botsAdded) {
+        if (humanCount === 1) {
+          this._addBots(room, 4);
+          game._botsAdded = true;
+        } else if (humanCount === 0) {
+          this._addBots(room, 4);
+          game._botsAdded = true;
+        } else if (game.players.size < 2) {
+          const needed = Math.min(4 - game.players.size, CONSTANTS.MAX_BOTS_PER_GAME);
+          if (needed > 0) {
+            this._addBots(room, needed);
+            game._botsAdded = true;
+          }
+        }
+      }
+      
+      if (this._isGameActuallyRunning(game) && game.players.size >= 2) {
+        this._startDrawPhase(room, game);
+      } else {
+        game._gameEnded = true;
+        game._isActive = false;
+        game._endTime = Date.now();
+        this._broadcastToRoom(room, ["gameLowCardError", "Not enough players"]);
+        this._scheduleGameCleanup(room, game);
+      }
+    } catch(e) {}
+  }
+  
+  _startDrawPhase(room, game) {
+    try {
+      if (!this._isGameActuallyRunning(game)) return;
+      
+      if (game._drawTimer) {
+        clearInterval(game._drawTimer);
+        game._drawTimer = null;
+      }
+      
+      if (game._evalTimer) {
+        clearTimeout(game._evalTimer);
+        game._evalTimer = null;
+      }
+      
+      if (game._botTimeouts) {
+        for (const id of game._botTimeouts) {
+          clearTimeout(id);
+        }
+        game._botTimeouts.clear();
+      }
+      
+      const activePlayers = this._getActivePlayers(game);
+      
+      if (activePlayers.length < 2) {
+        if (!game._botsAdded) {
+          const needed = Math.min(4 - activePlayers.length, CONSTANTS.MAX_BOTS_PER_GAME);
+          if (needed > 0) {
+            this._addBots(room, needed);
+            game._botsAdded = true;
+          }
+        }
+        
+        const newActive = this._getActivePlayers(game);
+        if (newActive.length < 2) {
+          if (newActive.length === 1 && !game._gameEnded) {
+            const winner = newActive[0]?.name || "Unknown";
+            const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
+            game._gameEnded = true;
+            game._isActive = false;
+            game._endTime = Date.now();
+            this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
+            this._scheduleGameCleanup(room, game);
+          } else {
+            game._gameEnded = true;
+            game._isActive = false;
+            game._endTime = Date.now();
+            this._broadcastToRoom(room, ["gameLowCardError", "Not enough players"]);
+            this._scheduleGameCleanup(room, game);
+          }
+          return;
+        }
+      }
+      
+      game._phase = 'draw';
+      game.drawTimeExpired = false;
+      game.evaluationLocked = false;
+      game._drawPhaseStart = Date.now();
+      
+      if (!game._botTimeouts) game._botTimeouts = new Set();
+      
+      const playersList = this._getActivePlayers(game).map(p => p.name);
+      
+      this._broadcastToRoom(room, ["gameLowCardClosed", playersList]);
+      this._broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
+      
+      this._startDrawCountdown(room, game);
+      
+      if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) {
+        this._startBotDraws(room, game);
+      }
+    } catch(e) {}
+  }
+  
+  _startDrawCountdown(room, game) {
+    if (!this._isGameActuallyRunning(game)) return;
+    
+    if (game._drawTimer) {
+      clearInterval(game._drawTimer);
+      game._drawTimer = null;
     }
-
-    // ==================== GETTER METHODS ====================
-
-    @SimpleFunction
-    public String GetConnectionState() {
-        if (isConnected.get()) return "CONNECTED";
-        if (isConnecting.get()) return "CONNECTING";
-        if (isReconnecting.get()) return "RECONNECTING";
-        if (isManualDisconnect.get()) return "MANUALLY_DISCONNECTED";
-        return "DISCONNECTED";
+    
+    let timeLeft = 20;
+    
+    const timer = setInterval(() => {
+      try {
+        if (!this._isGameActuallyRunning(game) || game.drawTimeExpired || timeLeft < 0) {
+          clearInterval(timer);
+          game._drawTimer = null;
+          return;
+        }
+        
+        if (timeLeft === 15 || timeLeft === 10 || timeLeft === 5) {
+          this._broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
+        }
+        
+        if (timeLeft === 0) {
+          clearInterval(timer);
+          game._drawTimer = null;
+          this._broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP!"]);
+          this._closeDrawPhase(room, game);
+        }
+        timeLeft--;
+      } catch(e) {
+        clearInterval(timer);
+        game._drawTimer = null;
+      }
+    }, 1000);
+    
+    game._drawTimer = timer;
+  }
+  
+  _closeDrawPhase(room, game) {
+    try {
+      if (!this._isGameActuallyRunning(game) || game.drawTimeExpired || game.evaluationLocked) return;
+      
+      game.drawTimeExpired = true;
+      game.evaluationLocked = true;
+      
+      if (game._drawTimer) {
+        clearInterval(game._drawTimer);
+        game._drawTimer = null;
+      }
+      
+      if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) {
+        const activeBotIds = Array.from(game.botPlayers.keys())
+          .filter(id => !game.eliminated?.has(id) && !game.numbers?.has(id));
+        for (const botId of activeBotIds) {
+          this._forceBotDraw(room, botId, game);
+        }
+      }
+      
+      this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+      
+      game._evalTimer = setTimeout(() => {
+        try {
+          this._evaluateRound(room, game);
+        } catch(e) {}
+      }, CONSTANTS.EVALUATION_DELAY_MS);
+    } catch(e) {}
+  }
+  
+  // ==================== EVALUATION ====================
+  
+  _evaluateRound(room, game) {
+    try {
+      if (this.isDestroyed || !game || game._gameEnded || !game._isActive || game._isEvaluating) return;
+      if (!game.players) return;
+      
+      const currentGame = this.activeGames.get(room);
+      if (currentGame !== game) return;
+      
+      game._isEvaluating = true;
+      
+      game._safetyTimer = setTimeout(() => {
+        try {
+          if (game && game._isEvaluating) {
+            game._isEvaluating = false;
+            this._scheduleGameCleanup(room, game);
+          }
+        } catch(e) {}
+      }, CONSTANTS.EVALUATION_TIMEOUT_MS);
+      
+      if (game._evalTimer) {
+        clearTimeout(game._evalTimer);
+        game._evalTimer = null;
+      }
+      
+      if (game._botTimeouts) {
+        for (const id of game._botTimeouts) {
+          clearTimeout(id);
+        }
+        game._botTimeouts.clear();
+      }
+      
+      const numbers = game.numbers || new Map();
+      const players = game.players || new Map();
+      const eliminated = game.eliminated || new Set();
+      const tanda = game.tanda || new Map();
+      
+      const entries = Array.from(numbers.entries());
+      const submittedIds = new Set(numbers.keys());
+      const activeIds = this._getActivePlayerIds(game);
+      
+      for (const id of activeIds) {
+        if (!submittedIds.has(id)) {
+          eliminated.add(id);
+        }
+      }
+      
+      if (entries.length === 0) {
+        game._isEvaluating = false;
+        if (game._safetyTimer) {
+          clearTimeout(game._safetyTimer);
+          game._safetyTimer = null;
+        }
+        
+        this._broadcastToRoom(room, ["gameLowCardError", "No numbers drawn this round"]);
+        game._gameEnded = true;
+        game._isActive = false;
+        game._endTime = Date.now();
+        this._scheduleGameCleanup(room, game);
+        return;
+      }
+      
+      if (entries.length === 1 && eliminated.size === activeIds.length - 1) {
+        const winnerId = entries[0][0];
+        const winnerName = players.get(winnerId)?.name || winnerId;
+        const totalCoin = (game.betAmount || 0) * players.size;
+        
+        game._gameEnded = true;
+        game._isActive = false;
+        game._endTime = Date.now();
+        game._isEvaluating = false;
+        
+        if (game._safetyTimer) {
+          clearTimeout(game._safetyTimer);
+          game._safetyTimer = null;
+        }
+        
+        this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
+        this._scheduleGameCleanup(room, game);
+        return;
+      }
+      
+      const values = entries.map(([, n]) => n);
+      const allSame = values.every(v => v === values[0]);
+      let losers = [];
+      
+      if (!allSame && values.length > 0) {
+        const lowest = Math.min(...values);
+        losers = entries.filter(([, n]) => n === lowest).map(([id]) => id);
+        for (const id of losers) {
+          eliminated.add(id);
+        }
+      }
+      
+      const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
+      
+      if (allSame && remaining.length >= 2) {
+        game._isEvaluating = false;
+        
+        if (game._safetyTimer) {
+          clearTimeout(game._safetyTimer);
+          game._safetyTimer = null;
+        }
+        
+        numbers.clear();
+        tanda.clear();
+        game.round++;
+        game.evaluationLocked = false;
+        game.drawTimeExpired = false;
+        game._phase = 'draw';
+        game.numbers = new Map();
+        game.tanda = new Map();
+        game._botTimeouts = new Set();
+        
+        const remainingNames = remaining.map(id => players.get(id)?.name || id);
+        this._broadcastToRoom(room, [
+          "gameLowCardRoundResult", 
+          game.round - 1, 
+          entries.map(([id, n]) => {
+            const name = players.get(id)?.name || id;
+            const t = tanda.get(id) || "";
+            return `${name}:${n}${t ? `(${t})` : ''}`;
+          }),
+          [],
+          remainingNames,
+          true
+        ]);
+        
+        if (this._isGameActuallyRunning(game) && !game._gameEnded) {
+          this._startDrawPhase(room, game);
+        }
+        return;
+      }
+      
+      if (remaining.length === 1 && !game._gameEnded) {
+        const winnerId = remaining[0];
+        const winnerName = players.get(winnerId)?.name || winnerId;
+        const totalCoin = (game.betAmount || 0) * players.size;
+        
+        game._gameEnded = true;
+        game._isActive = false;
+        game._endTime = Date.now();
+        game._isEvaluating = false;
+        
+        if (game._safetyTimer) {
+          clearTimeout(game._safetyTimer);
+          game._safetyTimer = null;
+        }
+        
+        this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
+        this._scheduleGameCleanup(room, game);
+        return;
+      }
+      
+      if (remaining.length === 0) {
+        game._isEvaluating = false;
+        
+        if (game._safetyTimer) {
+          clearTimeout(game._safetyTimer);
+          game._safetyTimer = null;
+        }
+        
+        game._gameEnded = true;
+        game._isActive = false;
+        game._endTime = Date.now();
+        this._broadcastToRoom(room, ["gameLowCardError", "All players eliminated"]);
+        this._scheduleGameCleanup(room, game);
+        return;
+      }
+      
+      const numbersArr = entries.map(([id, n]) => {
+        const name = players.get(id)?.name || id;
+        const t = tanda.get(id) || "";
+        return `${name}:${n}${t ? `(${t})` : ''}`;
+      });
+      
+      const loserNames = [...losers].map(id => players.get(id)?.name || id);
+      const remainingNames = remaining.map(id => players.get(id)?.name || id);
+      
+      this._broadcastToRoom(room, [
+        "gameLowCardRoundResult", game.round, numbersArr, loserNames, remainingNames
+      ]);
+      
+      numbers.clear();
+      tanda.clear();
+      game.round++;
+      game.evaluationLocked = false;
+      game.drawTimeExpired = false;
+      game._phase = 'draw';
+      game.numbers = new Map();
+      game.tanda = new Map();
+      game._botTimeouts = new Set();
+      game._isEvaluating = false;
+      
+      if (game._safetyTimer) {
+        clearTimeout(game._safetyTimer);
+        game._safetyTimer = null;
+      }
+      
+      if (this._isGameActuallyRunning(game) && !game._gameEnded) {
+        this._startDrawPhase(room, game);
+      }
+      
+    } catch(e) {
+      if (game) {
+        game._isEvaluating = false;
+        if (game._safetyTimer) {
+          clearTimeout(game._safetyTimer);
+          game._safetyTimer = null;
+        }
+      }
+      this._scheduleGameCleanup(room, game);
     }
-
-    @SimpleFunction
-    public int GetAndroidSDKVersion() {
-        return Build.VERSION.SDK_INT;
-    }
-
-    @SimpleFunction
-    public int GetReconnectCount() {
-        return pingReconnectCount;
-    }
-
-    @SimpleFunction
-    public String GetCurrentRoom() {
-        return roomnama != null ? roomnama : "";
-    }
-
-    @SimpleFunction
-    public boolean IsMinimized() {
-        return minimize;
-    }
-
-    @SimpleFunction
-    public int GetMySeatNumber() {
-        return mySeatNumber;
-    }
-
-    @SimpleFunction
-    public String GetMyIdTarget() {
-        return myIdTarget != null ? myIdTarget : "";
-    }
-
-    @SimpleFunction
-    public void ClearAllRoomsData() {
-        // Tidak ada data yang disimpan
-    }
-
-    @SimpleFunction
-    public int GetRoomSeatCount(String roomName) {
-        return 0;
-    }
-
-    @SimpleFunction
-    public void onDestroy() {
-        SendOnDestroy();
-        GameLowCardLeave();
-        Disconnect();
-        DisconnectGame();
-        cleanup();
-    }
-
-    // ==================== CLEANUP ====================
-
-    private void cleanup() {
-        isCleaningUp.set(true);
-        stopReconnectProcess();
-        cleanupStatusTimeout();
-        cleanupPointHandler();
-        cleanupKursiHandler();
-
-        synchronized (webSocketLock) {
-            if (webSocket != null) {
-                try {
-                    webSocket.close(1000, "Cleanup");
-                } catch (Exception ignored) {}
-                webSocket = null;
+  }
+  
+  // ==================== QUIZ - TRIVIA API ====================
+  
+  async _preloadQuestions() {
+    try {
+      if (this.quizQuestionCache && this.quizQuestionCache.length > 0) {
+        return;
+      }
+      
+      const url = 'https://opentdb.com/api.php?amount=50&type=multiple';
+      const response = await fetch(url);
+      const data = await response.json();
+      
+      if (data.response_code === 0 && data.results && data.results.length > 0) {
+        const questions = data.results.map((q) => {
+          const answers = [
+            { text: q.correct_answer, isCorrect: true },
+            { text: q.incorrect_answers[0] || "N/A", isCorrect: false },
+            { text: q.incorrect_answers[1] || "N/A", isCorrect: false },
+            { text: q.incorrect_answers[2] || "N/A", isCorrect: false }
+          ];
+          
+          const shuffled = this._shuffleArray(answers);
+          const options = {};
+          const keys = ['A', 'B', 'C', 'D'];
+          let correctKey = '';
+          
+          shuffled.forEach((item, i) => {
+            const key = keys[i];
+            options[key] = item.text;
+            if (item.isCorrect) {
+              correctKey = key;
             }
-        }
-
-        stopPulseAnimation();
-
-        if (toast != null) {
-            toast.cancel();
-            toast = null;
-        }
-
-        isReconnecting.set(false);
-        isManualDisconnect.set(false);
-        isConnecting.set(false);
-        shouldReconnect.set(true);
-        isConnected.set(false);
-        isHandlingConnectionLoss.set(false);
-        pingReconnectCount = 0;
-        hasReceivedStatusResponse = 0;
-
-        messageQueue.clear();
-        isCleaningUp.set(false);
-
-        OnCleanupCompleted();
+          });
+          
+          return {
+            question: q.question,
+            options: options,
+            correct: correctKey,
+            category: q.category || 'General',
+            difficulty: q.difficulty || 'medium'
+          };
+        });
+        
+        this.quizQuestionCache = questions;
+      } else {
+        this.quizQuestionCache = [];
+      }
+      
+    } catch(e) {
+      this.quizQuestionCache = [];
     }
-
-    private void cleanupStatusTimeout() {
-        if (statusTimeoutHandler != null) {
-            if (statusTimeoutRunnable != null) {
-                statusTimeoutHandler.removeCallbacks(statusTimeoutRunnable);
-                statusTimeoutRunnable = null;
-            }
-            statusTimeoutHandler.removeCallbacksAndMessages(null);
+  }
+  
+  _shuffleArray(array) {
+    const arr = [...array];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+  
+  // ==================== QUIZ - LANGUAGE ====================
+  
+  async _setAutoLanguage(ws) {
+    const wsId = this._getWsId(ws);
+    if (!wsId) return;
+    
+    try {
+      if (this.languageDetected.get(wsId)) {
+        return;
+      }
+      
+      const language = 'en';
+      this.userLanguage.set(wsId, language);
+      this.languageDetected.set(wsId, true);
+      
+      this._safeSend(ws, ["quizAutoLanguage", {
+        language: language,
+        message: "Language: English"
+      }]);
+      
+    } catch(e) {}
+  }
+  
+  _getDominantLanguage() {
+    return 'en';
+  }
+  
+  // ==================== QUIZ ====================
+  
+  _startQuizLoop() {
+    if (this.quizTimer) {
+      clearInterval(this.quizTimer);
+      this.quizTimer = null;
+    }
+    
+    this.quizTimer = setInterval(() => {
+      try {
+        if (this.closing || this.isDestroyed) return;
+        
+        const clients = this.wsClients.get(QUIZ_ROOM);
+        if (!clients || clients.size === 0) return;
+        
+        this._showQuestion();
+        
+      } catch(e) {}
+    }, CONSTANTS.QUIZ_INTERVAL_MS);
+  }
+  
+  _showQuestion() {
+    try {
+      if (this.isDestroyed) return;
+      
+      const clients = this.wsClients.get(QUIZ_ROOM);
+      if (!clients || clients.size === 0) return;
+      
+      const questions = this.quizQuestionCache;
+      if (!questions || questions.length === 0) return;
+      
+      const randomIndex = Math.floor(Math.random() * questions.length);
+      const q = questions[randomIndex];
+      
+      this.currentQuestion = q;
+      this.quizAnswered = new Set();
+      this.quizHasWinner = false;
+      this.quizWinner = null;
+      
+      this._broadcastToRoom(QUIZ_ROOM, ["quizQuestion", {
+        question: q.question,
+        options: q.options,
+        timeLimit: 15,
+        language: 'en',
+        category: q.category || 'General',
+        difficulty: q.difficulty || 'medium'
+      }]);
+      
+      setTimeout(() => {
+        try {
+          if (this.closing || this.isDestroyed) return;
+          
+          const currentClients = this.wsClients.get(QUIZ_ROOM);
+          if (!currentClients || currentClients.size === 0) return;
+          
+          if (this.quizHasWinner && this.quizWinner) {
+            this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
+              username: this.quizWinner
+            }]);
+          } else {
+            this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
+              message: "⏰ Time's up! No one answered correctly."
+            }]);
+          }
+          
+        } catch(e) {}
+      }, 15000);
+      
+    } catch(e) {}
+  }
+  
+  async submitQuizAnswer(ws, username, answer) {
+    try {
+      const room = this._ensureRoomConsistency(ws);
+      if (room !== QUIZ_ROOM) {
+        this._safeSend(ws, ["quizError", "Quiz only in LowCard 2"]);
+        return;
+      }
+      
+      const clients = this.wsClients.get(QUIZ_ROOM);
+      if (!clients || clients.size === 0) {
+        this._safeSend(ws, ["quizError", "Quiz is paused"]);
+        return;
+      }
+      
+      if (!this.currentQuestion) {
+        this._safeSend(ws, ["quizError", "No active question"]);
+        return;
+      }
+      
+      if (this.quizAnswered.has(username)) {
+        this._safeSend(ws, ["quizError", "You already answered!"]);
+        return;
+      }
+      
+      if (!answer || !['A','B','C','D'].includes(answer.toUpperCase())) {
+        this._safeSend(ws, ["quizError", "Invalid answer! Use A, B, C, or D"]);
+        return;
+      }
+      
+      const answerKey = answer.toUpperCase();
+      const isCorrect = answerKey === this.currentQuestion.correct;
+      
+      // ✅ BROADCAST JAWABAN KE SEMUA USER (REAL-TIME)
+      this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", {
+        username: username,
+        answer: answerKey,
+        isCorrect: isCorrect,
+        correctAnswer: this.currentQuestion.correct
+      }]);
+      
+      this.quizAnswered.add(username);
+      
+      if (isCorrect && !this.quizHasWinner) {
+        this.quizHasWinner = true;
+        this.quizWinner = username;
+      }
+      
+    } catch(e) {
+      this._safeSend(ws, ["quizError", e.message]);
+    }
+  }
+  
+  // ==================== GAME LOWCARD ====================
+  
+  async startGame(ws, bet, username) {
+    try {
+      if (this.isDestroyed) {
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]);
+        return;
+      }
+      
+      if (!username || username.trim() === "") {
+        this._safeSend(ws, ["gameLowCardError", "Username is required"]);
+        return;
+      }
+      
+      const usernameClean = username.trim();
+      const room = this._ensureRoomConsistency(ws);
+      
+      if (!room) {
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
+        return;
+      }
+      
+      if (room === QUIZ_ROOM) {
+        this._safeSend(ws, ["gameLowCardError", "❌ Cannot start game in LowCard 2. This room is for Quiz only!"]);
+        return;
+      }
+      
+      await this._setAutoLanguage(ws);
+      
+      const startKey = `start_${room}`;
+      if (this._gameStartFlags.has(startKey)) {
+        this._safeSend(ws, ["gameLowCardError", "Game is already starting..."]);
+        return;
+      }
+      
+      const existingGame = this.activeGames.get(room);
+      if (existingGame && existingGame._isActive && !existingGame._gameEnded) {
+        this._safeSend(ws, ["gameLowCardInfo", "Game is already running"]);
+        return;
+      }
+      
+      this._gameStartFlags.set(startKey, Date.now());
+      
+      if (existingGame) {
+        await this._forceCleanupGame(room, existingGame);
+      }
+      
+      const now = Date.now();
+      const lockTime = this._gameLocks.get(room);
+      if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
+        this._safeSend(ws, ["gameLowCardError", "Game is starting, please wait"]);
+        this._gameStartFlags.delete(startKey);
+        return;
+      }
+      
+      this._gameLocks.set(room, now);
+      
+      try {
+        if (this.activeGames.size >= this._maxGames) {
+          this._safeSend(ws, ["gameLowCardError", "Server is busy"]);
+          this._gameLocks.delete(room);
+          this._gameStartFlags.delete(startKey);
+          return;
         }
-        hasReceivedStatusResponse = 0;
-    }
-
-    private void cleanupPointHandler() {
-        if (pointHandler != null) {
-            pointHandler.removeCallbacksAndMessages(null);
+        
+        const betAmount = parseInt(bet, 10) || 0;
+        if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
+          this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
+          this._gameLocks.delete(room);
+          this._gameStartFlags.delete(startKey);
+          return;
         }
-    }
-
-    private void cleanupKursiHandler() {
-        if (kursiHandler != null) {
-            kursiHandler.removeCallbacksAndMessages(null);
-        }
-    }
-
-    // ==================== CHAT METHODS LAINNYA ====================
-
-    @SimpleFunction
-    public void SetMutetoroom(boolean isMuted, String roomname) {
-        if (roomname == null) roomname = "";
-        JSONArray arr = new JSONArray();
-        arr.put("setMuteType");
-        arr.put(isMuted);
-        arr.put(roomname);
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void GetMuteType(String roomname) {
-        if (roomname == null) roomname = "";
-        JSONArray arr = new JSONArray();
-        arr.put("getMuteType");
-        arr.put(roomname);
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void rollangak(String roomname, String username, int angka) {
-        if (roomname == null) roomname = "";
-        if (username == null) username = "";
-
-        JSONArray arr = new JSONArray();
-        arr.put("rollangak");
-        arr.put(roomname);
-        arr.put(username);
-        arr.put(angka);
-        sendJson(arr.toString());
-    }
-
-    // ==================== MULTI AKUN ====================
-
-    @SimpleFunction
-    public void MultiJoinRoom(String username, String roomname) {
-        if (username == null || username.isEmpty()) {
-            OnMultiError("Username tidak boleh kosong");
-            return;
-        }
-        if (roomname == null || roomname.isEmpty()) {
-            OnMultiError("Roomname tidak boleh kosong");
-            return;
-        }
-
-        JSONArray arr = new JSONArray();
-        arr.put("multiJoin");
-        arr.put(username);
-        arr.put(roomname);
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void MultiSetActive(String username) {
-        if (username == null || username.isEmpty()) {
-            OnMultiError("Username tidak boleh kosong");
-            return;
-        }
-
-        JSONArray arr = new JSONArray();
-        arr.put("setActiveMulti");
-        arr.put(username);
-        sendJson(arr.toString());
-    }
-
-    @SimpleFunction
-    public void MultiExit(String username) {
-        if (username == null || username.isEmpty()) {
-            OnMultiError("Username tidak boleh kosong");
-            return;
-        }
-
-        JSONArray arr = new JSONArray();
-        arr.put("exitMulti");
-        arr.put(username);
-        sendJson(arr.toString());
-    }
-
-    // ==================== DELAY ====================
-
-    private final Handler delayHandler = new Handler(Looper.getMainLooper());
-    private Runnable delayRunnable;
-
-    @SimpleFunction
-    public void setDelay(int ms) {
-        if (delayRunnable != null) {
-            delayHandler.removeCallbacks(delayRunnable);
-        }
-
-        delayRunnable = new Runnable() {
-            @Override
-            public void run() {
-                OnDelayDone();
-            }
+        
+        const wsId = this._getWsId(ws);
+        
+        const game = {
+          room,
+          players: new Map(),
+          botPlayers: new Map(),
+          registrationOpen: true,
+          round: 1,
+          numbers: new Map(),
+          tanda: new Map(),
+          eliminated: new Set(),
+          betAmount,
+          hostId: usernameClean,
+          hostName: usernameClean,
+          useBots: false,
+          evaluationLocked: false,
+          drawTimeExpired: false,
+          _isActive: true,
+          _gameEnded: false,
+          _phase: 'registration',
+          _botTimeouts: new Set(),
+          _botsAdded: false,
+          _registrationTimer: null,
+          _drawTimer: null,
+          _evalTimer: null,
+          _safetyTimer: null,
+          _isEvaluating: false,
+          _createdAt: Date.now(),
+          _drawPhaseStart: null,
+          _endTime: null,
+          playerWsId: new Map()
         };
-
-        delayHandler.postDelayed(delayRunnable, ms);
+        
+        game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
+        game.playerWsId.set(usernameClean, wsId);
+        
+        this.activeGames.set(room, game);
+        this._addClient(room, ws, usernameClean, false);
+        
+        this._broadcastToRoom(room, ["gameLowCardStart", game.betAmount, usernameClean]);
+        this._safeSend(ws, ["gameLowCardStartSuccess", game.hostName, game.betAmount]);
+        
+        this._startRegistration(room, game);
+        
+        setTimeout(() => {
+          try {
+            this._gameStartFlags.delete(startKey);
+            if (this._gameLocks.get(room) === now) {
+              this._gameLocks.delete(room);
+            }
+          } catch(e) {}
+        }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
+        
+      } catch(e) {
+        this._deleteGame(room, this.activeGames.get(room));
+        this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
+        this._gameLocks.delete(room);
+        this._gameStartFlags.delete(startKey);
+      }
+    } catch(e) {
+      this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
     }
-
-    @SimpleFunction
-    public void cancelDelay() {
-        if (delayRunnable != null) {
-            delayHandler.removeCallbacks(delayRunnable);
-            delayRunnable = null;
+  }
+  
+  async _forceCleanupGame(room, game) {
+    if (!game) return;
+    
+    try {
+      const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
+      for (const key of timers) {
+        if (game[key]) {
+          clearTimeout(game[key]);
+          clearInterval(game[key]);
+          game[key] = null;
         }
-    }
-
-    // ==================== PROCESS BATCH ====================
-
-    private void processKursiBatch(String room, List<Integer> seats, List<JSONObject> infos, int index) {
-        if (index >= seats.size()) {
-            fastkursi = false;
+      }
+      
+      if (game._botTimeouts) {
+        for (const id of game._botTimeouts) {
+          clearTimeout(id);
+        }
+        game._botTimeouts.clear();
+      }
+      
+      game._gameEnded = true;
+      game._isActive = false;
+      game._endTime = Date.now();
+      
+      this._broadcastToRoom(room, ["gameLowCardEnd", []]);
+      
+      this.activeGames.delete(room);
+      
+      if (this._cleanupTimers.has(room)) {
+        clearTimeout(this._cleanupTimers.get(room));
+        this._cleanupTimers.delete(room);
+      }
+      
+      this._gameLocks.delete(room);
+      this._joinLocks.delete(room);
+      this._gameStartFlags.delete(`start_${room}`);
+      
+    } catch(e) {}
+  }
+  
+  async joinGame(ws, username) {
+    try {
+      if (this.isDestroyed) {
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]);
+        return;
+      }
+      
+      if (!username || username.trim() === "") {
+        this._safeSend(ws, ["gameLowCardError", "Username is required"]);
+        return;
+      }
+      
+      const usernameClean = username.trim();
+      const wsId = this._getWsId(ws);
+      const room = this._ensureRoomConsistency(ws);
+      
+      if (!room) {
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
+        return;
+      }
+      
+      await this._setAutoLanguage(ws);
+      
+      const lockKey = `join_${room}_${usernameClean}`;
+      if (this._joinLocks.has(lockKey)) {
+        this._safeSend(ws, ["gameLowCardError", "Join in progress, please wait"]);
+        return;
+      }
+      this._joinLocks.set(lockKey, Date.now());
+      
+      try {
+        const game = this.activeGames.get(room);
+        
+        if (!game || !game._isActive || game._gameEnded || !game.players) {
+          this._safeSend(ws, ["gameLowCardError", "No active game in this room"]);
+          return;
+        }
+        
+        if (game.players.has(usernameClean)) {
+          if (game.eliminated?.has(usernameClean)) {
+            this._safeSend(ws, ["gameLowCardError", "You have been eliminated"]);
             return;
+          }
+          
+          const finalWsId = this._ensureSingleConnection(room, usernameClean, ws, wsId);
+          
+          this._safeSend(ws, ["gameLowCardRejoinSuccess", usernameClean]);
+          this._safeSend(ws, ["gameLowCardStatus", {
+            room: room,
+            running: true,
+            phase: game._phase || 'idle',
+            round: game.round || 0,
+            betAmount: game.betAmount || 0,
+            registrationOpen: game.registrationOpen || false,
+            players: Array.from(game.players?.values() || []).map(p => p.name)
+          }]);
+          
+          if (game.numbers.has(usernameClean)) {
+            const number = game.numbers.get(usernameClean);
+            const tanda = game.tanda.get(usernameClean) || "";
+            this._safeSend(ws, ["gameLowCardPlayerDraw", usernameClean, number, tanda]);
+          }
+          
+          this._safeSend(ws, ["gameLowCardRejoinComplete", usernameClean]);
+          return;
         }
-
-        int endIndex = Math.min(index + 5, seats.size());
-        for (int i = index; i < endIndex; i++) {
-            int seat = seats.get(i);
-            JSONObject info = infos.get(i);
-
-            if (fastkursi) {
-                OnUpdateKursiHistory2(
-                        room, seat,
-                        info.optString("noimageUrl", ""),
-                        info.optString("namauser", ""),
-                        info.optString("color", ""),
-                        info.optInt("itembawah", 0),
-                        info.optInt("itematas", 0),
-                        info.optInt("vip", 0),
-                        info.optInt("viptanda", 0)
-                );
-            } else {
-                OnUpdateKursiHistory(
-                        room, seat,
-                        info.optString("noimageUrl", ""),
-                        info.optString("namauser", ""),
-                        info.optString("color", ""),
-                        info.optInt("itembawah", 0),
-                        info.optInt("itematas", 0),
-                        info.optInt("vip", 0),
-                        info.optInt("viptanda", 0)
-                );
+        
+        if (!game.registrationOpen) {
+          this._safeSend(ws, ["gameLowCardError", "Registration is closed"]);
+          return;
+        }
+        
+        if (game.players.size >= CONSTANTS.MAX_PLAYERS_PER_GAME) {
+          this._safeSend(ws, ["gameLowCardError", "Game is full"]);
+          return;
+        }
+        
+        game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
+        this._addClient(room, ws, usernameClean, false);
+        game.playerWsId.set(usernameClean, wsId);
+        
+        this._broadcastToRoom(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
+        this._safeSend(ws, ["gameLowCardJoinSuccess", usernameClean, game.betAmount]);
+        
+      } finally {
+        this._joinLocks.delete(lockKey);
+      }
+    } catch(e) {
+      this._safeSend(ws, ["gameLowCardError", "Failed to join game"]);
+    }
+  }
+  
+  async submitNumber(ws, number, tanda, username) {
+    try {
+      if (this.isDestroyed) {
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]);
+        return;
+      }
+      
+      if (!username || username.trim() === "") {
+        this._safeSend(ws, ["gameLowCardError", "Username is required"]);
+        return;
+      }
+      
+      const usernameClean = username.trim();
+      const wsId = this._getWsId(ws);
+      const room = this._ensureRoomConsistency(ws);
+      
+      if (!room) {
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
+        return;
+      }
+      
+      const game = this.activeGames.get(room);
+      
+      if (!game || !game._isActive || game._gameEnded || !game.players) {
+        this._safeSend(ws, ["gameLowCardError", "No active game"]);
+        return;
+      }
+      
+      if (game.players.has(usernameClean)) {
+        if (game.eliminated?.has(usernameClean)) {
+          this._safeSend(ws, ["gameLowCardError", "You have been eliminated from this game"]);
+          return;
+        }
+        
+        const existingWsId = game.playerWsId.get(usernameClean);
+        if (existingWsId && existingWsId !== wsId) {
+          this._ensureSingleConnection(room, usernameClean, ws, wsId);
+        }
+      }
+      
+      if (game.registrationOpen || game.evaluationLocked || game.drawTimeExpired || game._phase !== 'draw') {
+        this._safeSend(ws, ["gameLowCardError", "Cannot submit now"]);
+        return;
+      }
+      
+      if (!game.players.has(usernameClean)) {
+        this._safeSend(ws, ["gameLowCardError", "You are not in this game"]);
+        return;
+      }
+      
+      if (game.eliminated.has(usernameClean)) {
+        this._safeSend(ws, ["gameLowCardError", "You have been eliminated"]);
+        return;
+      }
+      
+      if (game.numbers.has(usernameClean)) {
+        this._safeSend(ws, ["gameLowCardError", "You have already submitted"]);
+        return;
+      }
+      
+      const n = parseInt(number, 10);
+      if (isNaN(n) || n < 1 || n > 12) {
+        this._safeSend(ws, ["gameLowCardError", "Invalid number (1-12)"]);
+        return;
+      }
+      
+      const validTandas = ["C1", "C2", "C3", "C4", ""];
+      if (!validTandas.includes(tanda)) tanda = "";
+      
+      game.numbers.set(usernameClean, n);
+      game.tanda.set(usernameClean, tanda);
+      
+      this._broadcastToRoom(room, ["gameLowCardPlayerDraw", usernameClean, n, tanda]);
+      
+      const activeIds = this._getActivePlayerIds(game);
+      if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired && this._isGameActuallyRunning(game)) {
+        game.evaluationLocked = true;
+        this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+        game._evalTimer = setTimeout(() => {
+          try {
+            this._evaluateRound(room, game);
+          } catch(e) {}
+        }, CONSTANTS.EVALUATION_DELAY_MS);
+      }
+    } catch(e) {
+      this._safeSend(ws, ["gameLowCardError", "Failed to submit number"]);
+    }
+  }
+  
+  async leaveGame(ws, username) {
+    try {
+      if (this.isDestroyed) {
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]);
+        return;
+      }
+      
+      if (!username || username.trim() === "") {
+        this._safeSend(ws, ["gameLowCardError", "Username is required"]);
+        return;
+      }
+      
+      const usernameClean = username.trim();
+      const room = this._ensureRoomConsistency(ws);
+      
+      if (!room) {
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
+        return;
+      }
+      
+      const game = this.activeGames.get(room);
+      if (!game || !game._isActive || game._gameEnded || !game.players) {
+        this._safeSend(ws, ["gameLowCardError", "No active game in this room"]);
+        return;
+      }
+      
+      if (!game.players.has(usernameClean)) {
+        this._safeSend(ws, ["gameLowCardError", "You are not in this game"]);
+        return;
+      }
+      
+      this._removePlayerFromGame(usernameClean, room);
+      this._safeSend(ws, ["gameLowCardLeaveSuccess", usernameClean]);
+    } catch(e) {
+      this._safeSend(ws, ["gameLowCardError", "Failed to leave game"]);
+    }
+  }
+  
+  async forceEndGame(room) {
+    try {
+      const game = this.activeGames.get(room);
+      if (game) {
+        await this._forceCleanupGame(room, game);
+      }
+    } catch(e) {}
+  }
+  
+  async checkGameRunning(ws, roomname) {
+    try {
+      if (this.isDestroyed) {
+        this._safeSend(ws, ["gameStatus", { running: "false" }]);
+        return;
+      }
+      
+      let room = roomname;
+      
+      if (!room) {
+        room = this._ensureRoomConsistency(ws);
+      }
+      
+      if (!room) {
+        this._safeSend(ws, ["gameStatus", { running: "false" }]);
+        return;
+      }
+      
+      const game = this.activeGames.get(room);
+      
+      const isRunning = game && game._isActive && !game._gameEnded && game.players && game.players.size > 0;
+      
+      this._safeSend(ws, ["gameStatus", { running: isRunning ? "true" : "false" }]);
+      
+    } catch(e) {
+      this._safeSend(ws, ["gameStatus", { running: "false" }]);
+    }
+  }
+  
+  getGame(room) {
+    return this.activeGames.get(room);
+  }
+  
+  isGameRunning(room) {
+    try {
+      if (this.isDestroyed || !room) {
+        return {
+          running: false,
+          message: this.isDestroyed ? "System destroyed" : "Invalid room"
+        };
+      }
+      
+      const game = this.activeGames.get(room);
+      
+      if (!game || !game.players) {
+        return {
+          running: false,
+          message: "No game in this room"
+        };
+      }
+      
+      const isRunning = game._isActive === true && !game._gameEnded;
+      
+      return {
+        running: isRunning,
+        message: isRunning ? "Game is running" : "Game is not active"
+      };
+    } catch(e) {
+      return { running: false, message: "Error checking game" };
+    }
+  }
+  
+  // ==================== EVENT HANDLER ====================
+  
+  async handleEvent(ws, data) {
+    try {
+      if (this.isDestroyed || !ws || !data || !data[0]) return;
+      
+      const evt = data[0];
+      
+      if (evt === "switchRoom") {
+        const [_, room, username] = data;
+        await this.switchRoom(ws, room, username);
+        return;
+      }
+      
+      if (evt === "setUserLanguage") {
+        const language = data[1];
+        const wsId = this._getWsId(ws);
+        if (wsId && language) {
+          this.userLanguage.set(wsId, language);
+          this.languageDetected.set(wsId, true);
+          this._safeSend(ws, ["quizLanguageSet", language, "Language set to " + language]);
+        }
+        return;
+      }
+      
+      const room = this._ensureRoomConsistency(ws);
+      
+      if (!room) {
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
+        return;
+      }
+      
+      switch (evt) {
+        case "gameLowCardStart":
+          await this.startGame(ws, data[1], data[2]);
+          break;
+          
+        case "gameLowCardJoin":
+          await this.joinGame(ws, data[1]);
+          break;
+          
+        case "gameLowCardNumber":
+          await this.submitNumber(ws, data[1], data[2] || "", data[3]);
+          break;
+          
+        case "gameLowCardLeave":
+          await this.leaveGame(ws, data[1]);
+          break;
+          
+        case "checkGameRunning":
+          await this.checkGameRunning(ws, data[1]);
+          break;
+        
+        case "submitQuizAnswer":
+          await this.submitQuizAnswer(ws, data[1], data[2]);
+          break;
+          
+        default:
+          this._safeSend(ws, ["gameLowCardError", `Unknown event: ${evt}`]);
+          break;
+      }
+    } catch(e) {
+      this._safeSend(ws, ["gameLowCardError", "Game error: " + (e.message || "Unknown")]);
+    }
+  }
+  
+  // ==================== WEB SOCKET ====================
+  
+  async fetch(req) {
+    if (this.closing || this.isDestroyed) {
+      return new Response("Shutting down", { status: 503 });
+    }
+    
+    try {
+      const url = new URL(req.url);
+      
+      if (url.pathname === "/game/ws") {
+        const upgrade = req.headers.get("Upgrade");
+        if (upgrade !== "websocket") {
+          return new Response("WebSocket only", { status: 400 });
+        }
+        
+        const pair = new WebSocketPair();
+        const [client, server] = [pair[0], pair[1]];
+        
+        const timeoutId = setTimeout(() => {
+          try {
+            if (server.readyState === 0) {
+              server.close(1000, "Timeout");
             }
+          } catch(e) {}
+        }, 5000);
+        
+        server._timeoutId = timeoutId;
+        
+        try { 
+          this.state.acceptWebSocket(server);
+        } catch(e) { 
+          clearTimeout(timeoutId);
+          return new Response("WebSocket acceptance failed", { status: 500 }); 
         }
-
-        if (endIndex < seats.size()) {
-            mainHandler.postDelayed(() -> processKursiBatch(room, seats, infos, endIndex), 50);
-        } else {
-            fastkursi = false;
-        }
-    }
-
-    private void processPointBatch(String roomName, List<Integer> seats, List<Float> xs, List<Float> ys, List<Integer> fasts, int index) {
-        if (index >= seats.size()) return;
-
-        int endIndex = Math.min(index + 10, seats.size());
-        for (int i = index; i < endIndex; i++) {
-            OnPointHistory(roomName, seats.get(i), xs.get(i), ys.get(i), fasts.get(i));
-        }
-
-        if (endIndex < seats.size()) {
-            mainHandler.postDelayed(() -> processPointBatch(roomName, seats, xs, ys, fasts, endIndex), 30);
-        }
-    }
-
-    private void handleConnectionLoss(String reason) {
-        if (!isHandlingConnectionLoss.compareAndSet(false, true) || isCleaningUp.get()) {
-            return;
-        }
-
-        Disconnecteror();
-        isConnecting.set(false);
-        isConnected.set(false);
-
-        cleanupPointHandler();
-
-        if (!isManualDisconnect.get() && shouldReconnect.get() && !isReconnecting.get()) {
-            mainHandler.postDelayed(() -> {
-                isHandlingConnectionLoss.set(false);
-                startReconnectProcess();
-                OnNeedReconnect(reason);
-            }, 2000);
-        } else {
-            isHandlingConnectionLoss.set(false);
-            OnConnectionLost(reason);
-        }
-    }
-
-    // ==================== CHAT WEB SOCKET LISTENER ====================
-
-    private class WebSocketListenerImpl extends WebSocketListener {
-
-        @Override
-        public void onOpen(WebSocket ws, Response response) {
-            synchronized (webSocketLock) {
-                if (webSocket != null && webSocket != ws) {
-                    try {
-                        webSocket.close(1000, "Replaced by new connection");
-                    } catch (Exception ignored) {}
+        
+        const wsId = ++this._wsIdCounter;
+        server._wsId = wsId;
+        server._closing = false;
+        server.room = null;
+        server.roomname = null;
+        server._createdAt = Date.now();
+        server.username = null;
+        server._languageDetected = false;
+        
+        this.userLanguage.set(wsId, 'en');
+        this.languageDetected.set(wsId, true);
+        
+        server.addEventListener("message", async (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (!Array.isArray(data) || data.length === 0) return;
+            
+            await this.handleEvent(server, data);
+          } catch(e) {
+            this._safeSend(server, ["gameLowCardError", e.message || "Error"]);
+          }
+        });
+        
+        server.addEventListener("close", () => {
+          try {
+            if (server.room || server.roomname) {
+              const room = server.room || server.roomname;
+              const wsId = this._getWsId(server);
+              const username = server.username;
+              
+              this._removeClient(room, server);
+              
+              this.userCountry.delete(wsId);
+              this.userLanguage.delete(wsId);
+              this.languageDetected.delete(wsId);
+              
+              if (username) {
+                const conn = this.userConnections.get(username);
+                if (conn && conn.wsId === wsId) {
+                  this.userConnections.delete(username);
                 }
-                webSocket = ws;
+              }
             }
-
-            stopReconnectProcess();
-            onConnected();
-
-            if (roomnama != null && !roomnama.isEmpty() && myIdTarget != null && !myIdTarget.isEmpty()) {
-                fastkursi = true;
-                mainHandler.postDelayed(() -> {
-                    SetIdTarget2(myIdTarget, false);
-                }, 500);
-            } else {
-                mainHandler.post(() -> {
-                    OnOpen();
-                });
+          } catch(e) {}
+        });
+        
+        server.addEventListener("error", () => {
+          try {
+            if (server.room || server.roomname) {
+              const room = server.room || server.roomname;
+              const wsId = this._getWsId(server);
+              const username = server.username;
+              
+              this._removeClient(room, server);
+              
+              this.userCountry.delete(wsId);
+              this.userLanguage.delete(wsId);
+              this.languageDetected.delete(wsId);
+              
+              if (username) {
+                const conn = this.userConnections.get(username);
+                if (conn && conn.wsId === wsId) {
+                  this.userConnections.delete(username);
+                }
+              }
             }
+          } catch(e) {}
+        });
+        
+        return new Response(null, { status: 101, webSocket: client });
+      }
+      
+      return new Response("Game Server", { status: 200 });
+      
+    } catch(e) {
+      return new Response("Internal Server Error", { status: 500 });
+    }
+  }
+  
+  async webSocketMessage(ws, msg) {
+    try {
+      if (!ws || ws._closing || this.closing || this.isDestroyed) return;
+      if (!ws._wsId) return;
+      
+      const data = JSON.parse(msg);
+      if (!Array.isArray(data) || data.length === 0) return;
+      await this.handleEvent(ws, data);
+    } catch(e) {
+      this._safeSend(ws, ["gameLowCardError", e.message || "Error"]);
+    }
+  }
+  
+  async webSocketClose(ws) {
+    try {
+      if (!ws) return;
+      const wsId = this._getWsId(ws);
+      const username = ws.username;
+      
+      if (ws.room || ws.roomname) {
+        const room = ws.room || ws.roomname;
+        this._removeClient(room, ws);
+      }
+      
+      this.userCountry.delete(wsId);
+      this.userLanguage.delete(wsId);
+      this.languageDetected.delete(wsId);
+      
+      if (username) {
+        const conn = this.userConnections.get(username);
+        if (conn && conn.wsId === wsId) {
+          this.userConnections.delete(username);
         }
-
-        @Override
-        public void onMessage(WebSocket ws, String text) {
-            messageQueue.offer(() -> processMessage(text));
-            if (messageQueue.size() == 1) {
-                messageHandler.post(messageProcessor);
-            }
+      }
+      
+      if (wsId) {
+        this.clientRooms.delete(wsId);
+        this.wsMap.delete(wsId);
+      }
+      
+      ws.room = null;
+      ws.roomname = null;
+      ws._wsId = null;
+      ws.username = null;
+    } catch(e) {}
+  }
+  
+  async webSocketError(ws) {
+    try {
+      if (!ws) return;
+      const wsId = this._getWsId(ws);
+      const username = ws.username;
+      
+      if (ws.room || ws.roomname) {
+        const room = ws.room || ws.roomname;
+        this._removeClient(room, ws);
+      }
+      
+      this.userCountry.delete(wsId);
+      this.userLanguage.delete(wsId);
+      this.languageDetected.delete(wsId);
+      
+      if (username) {
+        const conn = this.userConnections.get(username);
+        if (conn && conn.wsId === wsId) {
+          this.userConnections.delete(username);
         }
-
-        private void processMessage(String text) {
-            if (text == null || text.isEmpty()) return;
-
+      }
+      
+      if (wsId) {
+        this.clientRooms.delete(wsId);
+        this.wsMap.delete(wsId);
+      }
+      
+      ws.room = null;
+      ws.roomname = null;
+      ws._wsId = null;
+      ws.username = null;
+    } catch(e) {}
+  }
+  
+  // ==================== DESTROY ====================
+  
+  async destroy() {
+    try {
+      if (this.isDestroyed) return;
+      this.closing = true;
+      this.isDestroyed = true;
+      
+      if (this.quizTimer) {
+        clearInterval(this.quizTimer);
+        this.quizTimer = null;
+      }
+      
+      for (const [room, game] of this.activeGames) {
+        this._cleanupGame(game);
+      }
+      
+      for (const [room, timer] of this._cleanupTimers) {
+        clearTimeout(timer);
+      }
+      this._cleanupTimers.clear();
+      
+      this.quizQuestionCache = [];
+      this.userCountry.clear();
+      this.userLanguage.clear();
+      this.languageDetected.clear();
+      
+      for (const [room, wsIds] of this.wsClients) {
+        for (const wsId of wsIds) {
+          const ws = this.wsMap.get(wsId);
+          if (ws) {
             try {
-                JSONArray data = new JSONArray(text);
-                String evt = data.getString(0);
-
-                switch (evt) {
-                    case "rooMasuk":
-                        int seatNr = data.getInt(1);
-                        String roomz = data.getString(2);
-                        joinroomsucces(roomz, seatNr);
-                        ClearMessageQueue();
-                        break;
-
-                    case "needJoinRoom":
-                        mainHandler.postDelayed(() -> {
-                            OnNeedjoinroom();
-                        }, 1000);
-                        break;
-
-                    case "joinroomawal":
-                        OnJoinroomawal();
-                        break;
-
-                    case "inRoomStatus":
-                        boolean isInRoom = data.getBoolean(1);
-                        hasReceivedStatusResponse = isInRoom ? 1 : 2;
-                        OnInRoomStatusReceived(isInRoom);
-                        break;
-
-                    case "numberKursiSaya":
-                        mySeatNumber = data.getInt(1);
-                        if (mySeatNumber >= 1 && mySeatNumber <= 45) {
-                            OnNumberKursiSaya(mySeatNumber);
-                        }
-                        break;
-
-                    case "roomFull":
-                        OnRoomFull(data.getString(1));
-                        break;
-
-                    case "resetRoom": {
-                        String roomName = data.getString(1);
-                        OnResetRoom(roomName);
-                        break;
-                    }
-
-                    case "removeKursi": {
-                        String roomName = data.getString(1);
-                        int seatNumber = data.getInt(2);
-                        if (seatNumber >= 1 && seatNumber <= 45) {
-                            OnRemoveKursi(roomName, seatNumber);
-                        }
-                        break;
-                    }
-
-                    case "allUpdateKursiList": {
-                        final String room = data.getString(1);
-                        final JSONObject meta = data.getJSONObject(2);
-
-                        mainHandler.postDelayed(() -> {
-                            if (kursiHandler != null) {
-                                kursiHandler.removeCallbacksAndMessages(null);
-                            }
-
-                            Iterator<String> keys = meta.keys();
-                            List<Integer> seats = new ArrayList<>();
-                            List<JSONObject> infos = new ArrayList<>();
-
-                            while (keys.hasNext()) {
-                                String key = keys.next();
-                                try {
-                                    int seat = Integer.parseInt(key);
-                                    if (seat >= 1 && seat <= 45) {
-                                        seats.add(seat);
-                                        infos.add(meta.getJSONObject(key));
-                                    }
-                                } catch (Exception e) {
-                                    // Silent fail
-                                }
-                            }
-
-                            processKursiBatch(room, seats, infos, 0);
-                        }, 1000);
-
-                        break;
-                    }
-
-                    case "kursiBatchUpdate": {
-                        String roomName = data.getString(1);
-                        JSONArray kursiList = data.getJSONArray(2);
-
-                        for (int i = 0; i < kursiList.length(); i++) {
-                            JSONArray kursi = kursiList.getJSONArray(i);
-                            int seat = kursi.getInt(0);
-
-                            if (seat >= 1 && seat <= 45) {
-                                JSONObject info = kursi.getJSONObject(1);
-
-                                String noimageUrl = info.optString("noimageUrl", "");
-                                String namauser = info.optString("namauser", "");
-                                String color = info.optString("color", "");
-                                int itembawah = info.optInt("itembawah", 0);
-                                int itematas = info.optInt("itematas", 0);
-                                int vip = info.optInt("vip", 0);
-                                int viptanda = info.optInt("viptanda", 0);
-
-                                OnKursiUpdated(
-                                        roomName,
-                                        seat,
-                                        noimageUrl,
-                                        namauser,
-                                        color,
-                                        itembawah,
-                                        itematas,
-                                        vip,
-                                        viptanda
-                                );
-                            }
-                        }
-                        break;
-                    }
-
-                    case "allPointsList": {
-                        final String roomName = data.optString(1, "");
-                        final JSONArray points = data.optJSONArray(2);
-                        if (points == null || points.length() == 0) break;
-
-                        mainHandler.postDelayed(() -> {
-                            if (pointHandler != null) {
-                                pointHandler.removeCallbacksAndMessages(null);
-                            }
-
-                            List<Integer> pointSeats = new ArrayList<>();
-                            List<Float> pointXs = new ArrayList<>();
-                            List<Float> pointYs = new ArrayList<>();
-                            List<Integer> pointFasts = new ArrayList<>();
-
-                            for (int i = 0; i < points.length(); i++) {
-                                try {
-                                    JSONObject p = points.getJSONObject(i);
-                                    int seat = p.optInt("seat", -1);
-                                    if (seat >= 1 && seat <= 45) {
-                                        pointSeats.add(seat);
-                                        pointXs.add((float) p.optDouble("x", 0));
-                                        pointYs.add((float) p.optDouble("y", 0));
-                                        pointFasts.add(p.optInt("fast", 0));
-                                    }
-                                } catch (JSONException e) {
-                                    // Silent fail
-                                }
-                            }
-
-                            processPointBatch(roomName, pointSeats, pointXs, pointYs, pointFasts, 0);
-                        }, 2000);
-
-                        break;
-                    }
-
-                    case "pointUpdated": {
-                        String roomName = data.getString(1);
-                        int seat = data.getInt(2);
-                        double x = data.getDouble(3);
-                        double y = data.getDouble(4);
-                        int fast = data.getInt(5);
-
-                        if (seat >= 1 && seat <= 45) {
-                            OnPointUpdated(roomName, seat, x, y, fast);
-                        }
-                        break;
-                    }
-
-                    case "chat": {
-                        OnChaRoomReceived(
-                                data.optString(1, ""),
-                                data.optString(2, ""),
-                                data.optString(3, ""),
-                                data.optString(4, ""),
-                                data.optString(5, ""),
-                                data.optString(6, "")
-                        );
-                        break;
-                    }
-
-                    case "private": {
-                        OnPrivateMessageReceived(
-                                data.optString(1, ""),
-                                data.optString(2, ""),
-                                data.optString(3, ""),
-                                data.optLong(4, 0),
-                                data.optString(5, "")
-                        );
-                        break;
-                    }
-
-                    case "notif": {
-                        OnReceiveNotif(
-                                data.optString(1, ""),
-                                data.optString(2, ""),
-                                data.optString(3, ""),
-                                data.optLong(4, 0)
-                        );
-                        break;
-                    }
-
-                    case "userOnlineStatus": {
-                        String tanda = data.length() > 3 ? data.optString(3, "") : "";
-                        OnUserOnlineStatus(data.optString(1, ""), data.optBoolean(2, false), tanda);
-                        break;
-                    }
-
-                    case "roomUserCount": {
-                        OnRoomUserCount(data.optString(1, ""), data.optInt(2, 0));
-                        break;
-                    }
-
-                    case "privateFailed": {
-                        OnPrivateFailed(data.optString(1, ""), data.optString(2, ""));
-                        break;
-                    }
-
-                    case "currentNumber": {
-                        OnBgNumberReceived(data.optInt(1, 0));
-                        break;
-                    }
-
-                    case "allOnlineUsers": {
-                        JSONArray onlineList = data.getJSONArray(1);
-                        List<String> users = new ArrayList<>();
-                        for (int i = 0; i < onlineList.length(); i++) {
-                            users.add(onlineList.optString(i, ""));
-                        }
-                        OnAllUserOnlineList(YailList.makeList(users));
-                        break;
-                    }
-
-                    case "allRoomsUserCount": {
-                        String jsonStr = data.getJSONArray(1).toString();
-                        setAllRoomsFromJson(jsonStr);
-                        JSONArray rooms = data.getJSONArray(1);
-                        for (int i = 0; i < rooms.length(); i++) {
-                            JSONObject room = rooms.getJSONObject(i);
-                            OnAllJumlahRoom(room.optString("roomName", ""), room.optInt("userCount", 0));
-                        }
-                        break;
-                    }
-
-                    case "gift": {
-                        OnGiftReceived(
-                                data.optString(1, ""),
-                                data.optString(2, ""),
-                                data.optString(3, ""),
-                                data.optString(4, ""),
-                                data.optLong(5, 0)
-                        );
-                        break;
-                    }
-
-                    case "modwarning": {
-                        String roomName = data.optString(1, "");
-                        OnModwarningReceived(roomName);
-                        break;
-                    }
-
-                    case "muteTypeResponse":
-                        boolean isMuted = data.optBoolean(1, false);
-                        String roomName = data.optString(2, "");
-                        OnMuteTypeReceived(isMuted, roomName);
-                        break;
-
-                    case "muteStatusChanged":
-                        boolean isMutedChanged = data.optBoolean(1, false);
-                        String roomNameChanged = data.optString(2, "");
-                        OnMuteStatusChanged(isMutedChanged, roomNameChanged);
-                        break;
-
-                    case "rollangakBroadcast":
-                        String roomBroadcast = data.optString(1, "");
-                        String usernameBroadcast = data.optString(2, "");
-                        int angkaBroadcast = data.optInt(3, 0);
-                        OnRollangakBroadcast(roomBroadcast, usernameBroadcast, angkaBroadcast);
-                        break;
-
-                    case "rooMasukMulti": {
-                        int seatNumber = data.getInt(1);
-                        String roomNameMulti = data.getString(2);
-                        OnMultiJoinSuccess(seatNumber, roomNameMulti);
-                        break;
-                    }
-
-                    case "activeChangedMulti": {
-                        String username = data.getString(1);
-                        int seatNumber = data.optInt(2, -1);
-                        OnMultiSetActiveSuccess(username, seatNumber);
-                        break;
-                    }
-
-                    case "forceExit": {
-                        String reason = data.optString(1, "Multi akun dikeluarkan");
-                        OnMultiForceExit(reason);
-                        break;
-                    }
-
-                    case "userActiveChanged": {
-                        String username = data.getString(1);
-                        int seatNumber = data.optInt(2, -1);
-                        OnUserActiveChanged(username, seatNumber);
-                        break;
-                    }
-
-                    default:
-                        break;
-                }
-
-            } catch (JSONException e) {
-                // Silent fail
-            } catch (Exception e) {
-                // Silent fail
-            }
+              ws.close(1000, "Game server shutting down");
+            } catch(e) {}
+          }
         }
-
-        @Override
-        public void onClosed(WebSocket ws, int code, String reason) {
-            synchronized (webSocketLock) {
-                if (webSocket == ws) {
-                    webSocket = null;
-                }
-            }
-
-            isConnected.set(false);
-            isConnecting.set(false);
-
-            if (code == 1000 || code == 1001) {
-                OnWebSocketClosed(code, reason != null ? reason : "Normal close");
-                OnConnectionLost("Disconnected normally");
-                return;
-            }
-
-            if (code == 1006) {
-                OnWebSocketClosed(code, "Connection lost (abnormal)");
-                OnConnectionLost("Connection lost");
-                return;
-            }
-
-            OnWebSocketClosed(code, reason != null ? reason : "");
-            handleConnectionLoss("Connection closed");
-        }
-
-        @Override
-        public void onFailure(WebSocket ws, Throwable t, Response r) {
-            synchronized (webSocketLock) {
-                if (webSocket == ws) {
-                    try {
-                        ws.close(1000, "Failure cleanup");
-                    } catch (Exception ignored) {}
-                    webSocket = null;
-                }
-            }
-
-            isConnected.set(false);
-            isConnecting.set(false);
-
-            boolean shouldProcess = true;
-            if (minimize && Build.VERSION.SDK_INT >= 45) {
-                shouldProcess = false;
-            }
-
-            if (shouldProcess && roomnama != null && !roomnama.isEmpty() && !isCleaningUp.get()) {
-                mainHandler.postDelayed(() -> {
-                    if (!isConnected.get() && !isManualDisconnect.get() && !isCleaningUp.get()) {
-                        handleConnectionLoss("Connection failed");
-                    }
-                }, 2000);
-            }
-
-            OnWebSocketFailure(t != null ? t.getMessage() : "Unknown error");
-        }
-    }
-
-    // ==================== GAME WEB SOCKET LISTENER ====================
-
-    private class GameWebSocketListener extends WebSocketListener {
-        @Override
-        public void onMessage(WebSocket ws, String text) {
-            try {
-                JSONArray data = new JSONArray(text);
-                String evt = data.getString(0);
-
-                switch (evt) {
-                    // ==================== GAME LOWCARD ====================
-                    case "gameStatus": {
-                        String running = "";
-                        try {
-                            if (data.length() > 1 && data.get(1) instanceof JSONObject) {
-                                JSONObject status = data.getJSONObject(1);
-                                running = status.getString("running");
-                            }
-                        } catch (Exception e) {
-                            running = "";
-                        }
-                        String finalRunning = running;
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameStatusReceived(finalRunning);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "gameLowCardStart": {
-                        int bet = data.optInt(1, 0);
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameLowCardStart(bet);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "gameLowCardStartSuccess": {
-                        String hostName = data.optString(1, "");
-                        int bet = data.optInt(2, 0);
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameLowCardStartSuccess(hostName, bet);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "gameLowCardJoin": {
-                        String player = data.optString(1, "");
-                        int bet = data.optInt(2, 0);
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameLowCardJoin(player, bet);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "gameLowCardNoJoin": {
-                        String hostName = data.optString(1, "");
-                        int bet = data.optInt(2, 0);
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameLowCardNoJoin(hostName, bet);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "gameLowCardClosed": {
-                        String message = "Players in the game";
-                        try {
-                            JSONArray arr = data.getJSONArray(1);
-                            List<String> playerList = new ArrayList<>();
-                            for (int i = 0; i < arr.length(); i++) {
-                                playerList.add(arr.optString(i, ""));
-                            }
-                            message = "Players: " + String.join(", ", playerList);
-                        } catch (Exception e) {}
-                        final String finalMessage = message;
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameLowCardClosedMessage(finalMessage);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "gameLowCardPlayerDraw": {
-                        String playerId = data.optString(1, "");
-                        int number = data.optInt(2, 0);
-                        String tanda = data.optString(3, "");
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameLowCardPlayerDraw(playerId, number, tanda);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "gameLowCardRoundResult": {
-                        int round = data.getInt(1);
-                        JSONArray losersArr = data.getJSONArray(3);
-                        List<String> losersList = new ArrayList<>();
-                        for (int i = 0; i < losersArr.length(); i++) {
-                            losersList.add(losersArr.optString(i, ""));
-                        }
-                        String message = "";
-                        if (!losersList.isEmpty()) {
-                            message = String.join(", ", losersList) + " OUT with the lowest card!";
-                        } else {
-                            message = "No one eliminated this round! 🎉";
-                        }
-                        final String finalMessage = message;
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameLowCardRoundResult(finalMessage);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "gameLowCardWinner": {
-                        String winnerId = data.optString(1, "");
-                        int totalCoin = data.optInt(2, 0);
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameLowCardWinner(winnerId, totalCoin);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "gameLowCardNextRound": {
-                        int round = data.getInt(1);
-                        String message = "ROUND #" + round + "\nGet ready now! click draw";
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameLowCardNextRound(message);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "gameLowCardTimeLeft": {
-                        String timeLeft = data.optString(1, "");
-                        String message = "Time left: " + timeLeft;
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameLowCardTimeLeft(message);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "gameLowCardError": {
-                        String error = data.optString(1, "");
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameLowCardError(error);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "gameLowCardWait": {
-                        String message = data.optString(1, "Please wait for results...");
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameWait(message);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "gameLowCardEnd": {
-                        String message = "Game has ended";
-                        try {
-                            JSONArray arr = data.getJSONArray(1);
-                            List<String> players = new ArrayList<>();
-                            for (int i = 0; i < arr.length(); i++) {
-                                players.add(arr.optString(i, ""));
-                            }
-                            if (!players.isEmpty()) {
-                                message = "Game ended. Players: " + String.join(", ", players);
-                            }
-                        } catch (Exception e) {}
-                        final String finalMessage = message;
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnGameEnded(finalMessage);
-                            }
-                        });
-                        break;
-                    }
-
-                    // ==================== QUIZ EVENTS ====================
-
-                    case "quizQuestion": {
-                        JSONObject qObj = data.optJSONObject(1);
-                        String question = qObj != null ? qObj.optString("question", "") : "";
-                        JSONObject optionsObj = qObj != null ? qObj.optJSONObject("options") : null;
-
-                        StringBuilder formatted = new StringBuilder();
-                        formatted.append(question).append("\n");
-
-                        if (optionsObj != null) {
-                            if (optionsObj.has("A")) formatted.append("A. ").append(optionsObj.getString("A")).append("\n");
-                            if (optionsObj.has("B")) formatted.append("B. ").append(optionsObj.getString("B")).append("\n");
-                            if (optionsObj.has("C")) formatted.append("C. ").append(optionsObj.getString("C")).append("\n");
-                            if (optionsObj.has("D")) formatted.append("D. ").append(optionsObj.getString("D")).append("\n");
-                        }
-
-                        final String fQuestion = formatted.toString();
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnQuizQuestion(fQuestion);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "quizAnswerResult": {
-                        JSONObject resultObj = data.optJSONObject(1);
-                        String username = resultObj != null ? resultObj.optString("username", "") : "";
-                        String answer = resultObj != null ? resultObj.optString("answer", "") : "";
-                        boolean isCorrect = resultObj != null && resultObj.optBoolean("isCorrect", false);
-                        String correctAnswer = resultObj != null ? resultObj.optString("correctAnswer", "") : "";
-                        
-                        final String fUsername = username;
-                        final String fAnswer = answer;
-                        final boolean fIsCorrect = isCorrect;
-                        final String fCorrectAnswer = correctAnswer;
-                        
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnQuizAnswerResult(fUsername, fAnswer, fIsCorrect, fCorrectAnswer);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "quizWinner": {
-                        JSONObject winnerObj = data.optJSONObject(1);
-                        String username = winnerObj != null ? winnerObj.optString("username", "") : "";
-                        final String fUsername = username;
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnQuizWinner(fUsername);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "quizNoWinner": {
-                        JSONObject noWinnerObj = data.optJSONObject(1);
-                        String message = noWinnerObj != null ? noWinnerObj.optString("message", "") : "";
-                        final String fMessage = message;
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnQuizNoWinner(fMessage);
-                            }
-                        });
-                        break;
-                    }
-
-                    case "quizError": {
-                        String error = data.optString(1, "");
-                        final String fError = error;
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                OnQuizError(fError);
-                            }
-                        });
-                        break;
-                    }
-
-                    default:
-                        break;
-                }
-            } catch (JSONException e) {
-                // Silent fail
-            } catch (Exception e) {
-                // Silent fail
-            }
-        }
-
-        @Override
-        public void onOpen(WebSocket ws, Response response) {
-            gameWebSocket = ws;
-            isGameConnected.set(true);
-            reconnectAttempts = 0;
-
-            mainHandler.post(new Runnable() {
-                @Override
-                public void run() {
-                    OnGameConnected();
-                }
-            });
-        }
-
-        @Override
-        public void onClosed(WebSocket ws, int code, String reason) {
-            isGameConnected.set(false);
-            gameWebSocket = null;
-
-            mainHandler.post(new Runnable() {
-                @Override
-                public void run() {
-                    OnGameDisconnected();
-                    OnGameError("Disconnected: " + (reason != null ? reason : "Normal"));
-                }
-            });
-        }
-
-        @Override
-        public void onFailure(WebSocket ws, Throwable t, Response r) {
-            isGameConnected.set(false);
-            gameWebSocket = null;
-
-            String error = t != null ? t.getMessage() : "Unknown error";
-            mainHandler.post(new Runnable() {
-                @Override
-                public void run() {
-                    OnGameError("Connection error: " + error);
-                }
-            });
-
-            if (ws != null) {
-                try {
-                    ws.close(1000, "Failure handled");
-                } catch (Exception e) {}
-            }
-
-            if (!isManualDisconnect.get() && !isCleaningUp.get()) {
-                mainHandler.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (!isGameConnected.get() && !isManualDisconnect.get() && !isCleaningUp.get()) {
-                            OnGameError("Attempting to reconnect...");
-                            handleReconnection();
-                        }
-                    }
-                }, 3000);
-            }
-        }
-    }
-
-    private void handleReconnection() {
-        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-            reconnectAttempts++;
-            long delay = reconnectAttempts * 2 * 1000;
-
-            new android.os.Handler().postDelayed(() -> {
-                if (!isGameConnected.get()) {
-                    ConnectGame(gameServerUrl);
-                }
-            }, delay);
-
-            OnGameError("Connection lost, reconnecting");
-        } else {
-            reconnectAttempts = 0;
-            OnGameError("Check your network");
-        }
-    }
-
-    // ==================== EVENTS ====================
-
-    @SimpleEvent
-    public void OnGiftReceived(String roomname, String sender, String receiver, String giftName, long timestamp) {
-        EventDispatcher.dispatchEvent(this, "OnGiftReceived",
-                roomname != null ? roomname : "",
-                sender != null ? sender : "",
-                receiver != null ? receiver : "",
-                giftName != null ? giftName : "",
-                timestamp);
-    }
-
-    @SimpleEvent
-    public void OnNeedReconnect(String reason) {
-        EventDispatcher.dispatchEvent(this, "OnNeedReconnect", reason != null ? reason : "");
-    }
-
-    @SimpleEvent
-    public void OnReconnectSuccess(String roomname) {
-        EventDispatcher.dispatchEvent(this, "OnReconnectSuccess", roomname != null ? roomname : "");
-    }
-
-    @SimpleEvent
-    public void Disconnecteror() {
-        EventDispatcher.dispatchEvent(this, "Disconnecteror");
-    }
-
-    @SimpleEvent
-    public void joinroomsucces(String room, int kursi) {
-        EventDispatcher.dispatchEvent(this, "joinroomsucces",
-                room != null ? room : "",
-                kursi);
-    }
-
-    @SimpleEvent
-    public void OnPointUpdated(String roomname, int seat, double x, double y, int fast) {
-        if (roomname != null && seat >= 0) {
-            EventDispatcher.dispatchEvent(this, "OnPointUpdated", roomname, seat, x, y, fast);
-        }
-    }
-
-    @SimpleEvent
-    public void OnPrivateMessageReceived(String fromId, String imageUrl, String message, long timestamp, String sender) {
-        EventDispatcher.dispatchEvent(this, "OnPrivateMessageReceived",
-                fromId != null ? fromId : "",
-                imageUrl != null ? imageUrl : "",
-                message != null ? message : "",
-                timestamp,
-                sender != null ? sender : "");
-    }
-
-    @SimpleEvent
-    public void OnKursiUpdated(String roomname, int seat, String noimageUrl, String namauser,
-                               String color, int itembawah, int itematas, int vip, int viptanda) {
-        if (roomname != null && seat >= 0) {
-            EventDispatcher.dispatchEvent(this, "OnKursiUpdated",
-                    roomname, seat,
-                    noimageUrl != null ? noimageUrl : "",
-                    namauser != null ? namauser : "",
-                    color != null ? color : "",
-                    itembawah, itematas, vip, viptanda);
-        }
-    }
-
-    @SimpleEvent
-    public void OnUpdateKursiHistory(String roomname, int seat, String noimageUrl, String namauser,
-                                     String color, int itembawah, int itematas, int vip, int viptanda) {
-        if (roomname != null && seat >= 0) {
-            EventDispatcher.dispatchEvent(this, "OnUpdateKursiHistory",
-                    roomname, seat,
-                    noimageUrl != null ? noimageUrl : "",
-                    namauser != null ? namauser : "",
-                    color != null ? color : "",
-                    itembawah, itematas, vip, viptanda);
-        }
-    }
-
-    @SimpleEvent
-    public void OnUpdateKursiHistory2(String roomname, int seat, String noimageUrl, String namauser,
-                                      String color, int itembawah, int itematas, int vip, int viptanda) {
-        if (roomname != null && seat >= 0) {
-            EventDispatcher.dispatchEvent(this, "OnUpdateKursiHistory2",
-                    roomname, seat,
-                    noimageUrl != null ? noimageUrl : "",
-                    namauser != null ? namauser : "",
-                    color != null ? color : "",
-                    itembawah, itematas, vip, viptanda);
-        }
-    }
-
-    @SimpleEvent
-    public void OnNumberKursiSaya(int kursi) {
-        EventDispatcher.dispatchEvent(this, "OnNumberKursiSaya", kursi);
-    }
-
-    @SimpleEvent
-    public void OnRoomFull(String roomname) {
-        EventDispatcher.dispatchEvent(this, "OnRoomFull", roomname != null ? roomname : "");
-    }
-
-    @SimpleEvent
-    public void OnPointHistory(String roomname, int seat, double x, double y, int fast) {
-        if (roomname != null && !roomname.isEmpty() && seat >= 0) {
-            EventDispatcher.dispatchEvent(this, "OnPointHistory", roomname, seat, x, y, fast);
-        }
-    }
-
-    @SimpleEvent
-    public void OnRemoveKursi(String roomname, int seatNumber) {
-        EventDispatcher.dispatchEvent(this, "OnRemoveKursi",
-                roomname != null ? roomname : "",
-                seatNumber);
-    }
-
-    @SimpleEvent
-    public void OnChaRoomReceived(String roomname, String noImageURL, String username, String message, String usernameColor, String chatTextColor) {
-        EventDispatcher.dispatchEvent(this, "OnChaRoomReceived",
-                roomname != null ? roomname : "",
-                noImageURL != null ? noImageURL : "",
-                username != null ? username : "",
-                message != null ? message : "",
-                usernameColor != null ? usernameColor : "",
-                chatTextColor != null ? chatTextColor : "");
-    }
-
-    @SimpleEvent
-    public void OnRoomUserCount(String roomname, int count) {
-        EventDispatcher.dispatchEvent(this, "OnRoomUserCount",
-                roomname != null ? roomname : "",
-                count);
-    }
-
-    @SimpleEvent
-    public void setAllRoomsFromJson(String json) {
-        EventDispatcher.dispatchEvent(this, "setAllRoomsFromJson", json != null ? json : "");
-    }
-
-    @SimpleEvent
-    public void OnAllJumlahRoom(String roomName, int jumlah) {
-        EventDispatcher.dispatchEvent(this, "OnAllJumlahRoom",
-                roomName != null ? roomName : "",
-                jumlah);
-    }
-
-    @SimpleEvent
-    public void OnAllUserOnlineList(YailList users) {
-        EventDispatcher.dispatchEvent(this, "OnAllUserOnlineList", users != null ? users : YailList.makeEmptyList());
-    }
-
-    @SimpleEvent
-    public void OnUserOnlineStatus(String userName, boolean online, String tanda) {
-        EventDispatcher.dispatchEvent(this, "OnUserOnlineStatus",
-                userName != null ? userName : "",
-                online,
-                tanda != null ? tanda : "");
-    }
-
-    @SimpleEvent
-    public void OnBgNumberReceived(int number) {
-        EventDispatcher.dispatchEvent(this, "OnBgNumberReceived", number);
-    }
-
-    @SimpleEvent
-    public void OnReceiveNotif(String imageUrl, String username, String deskripsi, long timestamp) {
-        EventDispatcher.dispatchEvent(this, "OnReceiveNotif",
-                imageUrl != null ? imageUrl : "",
-                username != null ? username : "",
-                deskripsi != null ? deskripsi : "",
-                timestamp);
-    }
-
-    @SimpleEvent
-    public void OnPrivateFailed(String username, String reason) {
-        EventDispatcher.dispatchEvent(this, "OnPrivateFailed",
-                username != null ? username : "",
-                reason != null ? reason : "");
-    }
-
-    @SimpleEvent
-    public void OnResetRoom(String roomName) {
-        EventDispatcher.dispatchEvent(this, "OnResetRoom", roomName != null ? roomName : "");
-    }
-
-    @SimpleEvent
-    public void OnOpen() {
-        EventDispatcher.dispatchEvent(this, "OnOpen");
-    }
-
-    @SimpleEvent
-    public void OnJoinroomawal() {
-        EventDispatcher.dispatchEvent(this, "OnJoinroomawal");
-    }
-
-    @SimpleEvent
-    public void OnNeedjoinroom() {
-        EventDispatcher.dispatchEvent(this, "OnNeedjoinroom");
-    }
-
-    @SimpleEvent
-    public void OnAndroidVersionDetected(int sdkVersion) {
-        EventDispatcher.dispatchEvent(this, "OnAndroidVersionDetected", sdkVersion);
-    }
-
-    @SimpleEvent
-    public void OnPingReceived(long timestamp) {
-        EventDispatcher.dispatchEvent(this, "OnPingReceived", timestamp);
-    }
-
-    @SimpleEvent
-    public void OnMaxReconnectAttemptsReached(int attempts) {
-        EventDispatcher.dispatchEvent(this, "OnMaxReconnectAttemptsReached", attempts);
-    }
-
-    @SimpleEvent
-    public void OnReconnectStarted() {
-        EventDispatcher.dispatchEvent(this, "OnReconnectStarted");
-    }
-
-    @SimpleEvent
-    public void OnReconnectStopped() {
-        EventDispatcher.dispatchEvent(this, "OnReconnectStopped");
-    }
-
-    @SimpleEvent
-    public void OnMinimizeStateChanged(boolean minimized) {
-        EventDispatcher.dispatchEvent(this, "OnMinimizeStateChanged", minimized);
-    }
-
-    @SimpleEvent
-    public void OnPulseAnimationStarted() {
-        EventDispatcher.dispatchEvent(this, "OnPulseAnimationStarted");
-    }
-
-    @SimpleEvent
-    public void OnPulseAnimationStopped() {
-        EventDispatcher.dispatchEvent(this, "OnPulseAnimationStopped");
-    }
-
-    @SimpleEvent
-    public void OnNotificationBatchCompleted(int sent, int total) {
-        EventDispatcher.dispatchEvent(this, "OnNotificationBatchCompleted", sent, total);
-    }
-
-    @SimpleEvent
-    public void OnWebSocketFailure(String error) {
-        EventDispatcher.dispatchEvent(this, "OnWebSocketFailure", error != null ? error : "");
-    }
-
-    @SimpleEvent
-    public void OnWebSocketClosed(int code, String reason) {
-        EventDispatcher.dispatchEvent(this, "OnWebSocketClosed", code, reason != null ? reason : "");
-    }
-
-    @SimpleEvent
-    public void OnConnectionLost(String reason) {
-        EventDispatcher.dispatchEvent(this, "OnConnectionLost", reason != null ? reason : "");
-    }
-
-    @SimpleEvent
-    public void OnInRoomStatusReceived(boolean isInRoom) {
-        EventDispatcher.dispatchEvent(this, "OnInRoomStatusReceived", isInRoom);
-    }
-
-    @SimpleEvent
-    public void OnMuteTypeReceived(boolean isMuted, String roomname) {
-        EventDispatcher.dispatchEvent(this, "OnMuteTypeReceived", isMuted, roomname != null ? roomname : "");
-    }
-
-    @SimpleEvent
-    public void OnMuteStatusChanged(boolean isMuted, String roomname) {
-        EventDispatcher.dispatchEvent(this, "OnMuteStatusChanged", isMuted, roomname != null ? roomname : "");
-    }
-
-    @SimpleEvent
-    public void OnRollangakBroadcast(String roomname, String username, int angka) {
-        EventDispatcher.dispatchEvent(this, "OnRollangakBroadcast",
-                roomname != null ? roomname : "",
-                username != null ? username : "",
-                angka);
-    }
-
-    @SimpleEvent
-    public void OnModwarningReceived(String roomName) {
-        EventDispatcher.dispatchEvent(this, "OnModwarningReceived",
-                roomName != null ? roomName : "");
-    }
-
-    @SimpleEvent
-    public void OnCleanupCompleted() {
-        EventDispatcher.dispatchEvent(this, "OnCleanupCompleted");
-    }
-
-    // ==================== GAME EVENTS ====================
-
-    @SimpleEvent
-    public void OnGameConnected() {
-        EventDispatcher.dispatchEvent(this, "OnGameConnected");
-    }
-
-    @SimpleEvent
-    public void OnGameDisconnected() {
-        EventDispatcher.dispatchEvent(this, "OnGameDisconnected");
-    }
-
-    @SimpleEvent
-    public void OnGameError(String error) {
-        EventDispatcher.dispatchEvent(this, "OnGameError", error != null ? error : "");
-    }
-
-    @SimpleEvent
-    public void OnGameWait(String message) {
-        EventDispatcher.dispatchEvent(this, "OnGameWait", message != null ? message : "");
-    }
-
-    @SimpleEvent
-    public void OnGameEnded(String message) {
-        EventDispatcher.dispatchEvent(this, "OnGameEnded", message != null ? message : "");
-    }
-
-    // ==================== GAME LOWCARD EVENTS ====================
-
-    @SimpleEvent
-    public void OnGameLowCardStart(int bet) {
-        EventDispatcher.dispatchEvent(this, "OnGameLowCardStart", bet);
-    }
-
-    @SimpleEvent
-    public void OnGameLowCardStartSuccess(String hostName, int bet) {
-        EventDispatcher.dispatchEvent(this, "OnGameLowCardStartSuccess",
-                hostName != null ? hostName : "",
-                bet);
-    }
-
-    @SimpleEvent
-    public void OnGameLowCardJoin(String player, int bet) {
-        EventDispatcher.dispatchEvent(this, "OnGameLowCardJoin",
-                player != null ? player : "",
-                bet);
-    }
-
-    @SimpleEvent
-    public void OnGameLowCardNoJoin(String hostName, int bet) {
-        EventDispatcher.dispatchEvent(this, "OnGameLowCardNoJoin",
-                hostName != null ? hostName : "",
-                bet);
-    }
-
-    @SimpleEvent
-    public void OnGameLowCardClosedMessage(String message) {
-        EventDispatcher.dispatchEvent(this, "OnGameLowCardClosedMessage", message != null ? message : "");
-    }
-
-    @SimpleEvent
-    public void OnGameLowCardPlayerDraw(String playerId, int number, String tanda) {
-        EventDispatcher.dispatchEvent(this, "OnGameLowCardPlayerDraw",
-                playerId != null ? playerId : "",
-                number,
-                tanda != null ? tanda : "");
-    }
-
-    @SimpleEvent
-    public void OnGameLowCardRoundResult(String message) {
-        EventDispatcher.dispatchEvent(this, "OnGameLowCardRoundResult", message != null ? message : "");
-    }
-
-    @SimpleEvent
-    public void OnGameLowCardWinner(String winnerId, int totalCoin) {
-        EventDispatcher.dispatchEvent(this, "OnGameLowCardWinner",
-                winnerId != null ? winnerId : "",
-                totalCoin);
-    }
-
-    @SimpleEvent
-    public void OnGameLowCardNextRound(String message) {
-        EventDispatcher.dispatchEvent(this, "OnGameLowCardNextRound", message != null ? message : "");
-    }
-
-    @SimpleEvent
-    public void OnGameLowCardTimeLeft(String message) {
-        EventDispatcher.dispatchEvent(this, "OnGameLowCardTimeLeft", message != null ? message : "");
-    }
-
-    @SimpleEvent
-    public void OnGameLowCardError(String message) {
-        EventDispatcher.dispatchEvent(this, "OnGameLowCardError", message != null ? message : "");
-    }
-
-    @SimpleEvent
-    public void OnGameStatusReceived(String isRunning) {
-        EventDispatcher.dispatchEvent(this, "OnGameStatusReceived", isRunning);
-    }
-
-    // ==================== MULTI AKUN EVENTS ====================
-
-    @SimpleEvent
-    public void OnMultiJoinSuccess(int seatNumber, String roomName) {
-        EventDispatcher.dispatchEvent(this, "OnMultiJoinSuccess", seatNumber, roomName != null ? roomName : "");
-    }
-
-    @SimpleEvent
-    public void OnMultiSetActiveSuccess(String username, int seatNumber) {
-        EventDispatcher.dispatchEvent(this, "OnMultiSetActiveSuccess", username != null ? username : "", seatNumber);
-    }
-
-    @SimpleEvent
-    public void OnMultiForceExit(String reason) {
-        EventDispatcher.dispatchEvent(this, "OnMultiForceExit", reason != null ? reason : "");
-    }
-
-    @SimpleEvent
-    public void OnUserActiveChanged(String username, int seatNumber) {
-        EventDispatcher.dispatchEvent(this, "OnUserActiveChanged", username != null ? username : "", seatNumber);
-    }
-
-    @SimpleEvent
-    public void OnMultiError(String error) {
-        EventDispatcher.dispatchEvent(this, "OnMultiError", error != null ? error : "");
-    }
-
-    @SimpleEvent
-    public void OnDelayDone() {
-        EventDispatcher.dispatchEvent(this, "OnDelayDone");
-    }
-
-    // ==================== QUIZ EVENTS ====================
-
-    @SimpleEvent
-    public void OnQuizQuestion(String question) {
-        EventDispatcher.dispatchEvent(this, "OnQuizQuestion",
-                question != null ? question : ""
-        );
-    }
-
-    @SimpleEvent
-    public void OnQuizAnswerResult(String username, String answer, boolean isCorrect, String correctAnswer) {
-        EventDispatcher.dispatchEvent(this, "OnQuizAnswerResult",
-                username != null ? username : "",
-                answer != null ? answer : "",
-                isCorrect,
-                correctAnswer != null ? correctAnswer : ""
-        );
-    }
-
-    @SimpleEvent
-    public void OnQuizWinner(String username) {
-        EventDispatcher.dispatchEvent(this, "OnQuizWinner",
-                username != null ? username : ""
-        );
-    }
-
-    @SimpleEvent
-    public void OnQuizNoWinner(String message) {
-        EventDispatcher.dispatchEvent(this, "OnQuizNoWinner",
-                message != null ? message : ""
-        );
-    }
-
-    @SimpleEvent
-    public void OnQuizError(String error) {
-        EventDispatcher.dispatchEvent(this, "OnQuizError",
-                error != null ? error : ""
-        );
-    }
+      }
+      
+      this.wsClients.clear();
+      this.clientRooms.clear();
+      this.wsMap.clear();
+      this.roomViewers.clear();
+      this.userConnections.clear();
+      this.connectionLocks.clear();
+      this._gameLocks.clear();
+      this._joinLocks.clear();
+      this._switchLocks.clear();
+      this._gameStartFlags.clear();
+      this._roomBroadcastCount.clear();
+      this._roomBroadcastReset.clear();
+      
+      for (const [room, game] of this.activeGames) {
+        this._deleteGame(room, game);
+      }
+      this.activeGames.clear();
+    } catch(e) {}
+  }
 }
