@@ -1,4 +1,4 @@
-// ==================== GAME SERVER - FULL CLASS (DENGAN KV) ====================
+// ==================== GAME SERVER - FULL CLASS ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -25,60 +25,6 @@ const CONSTANTS = {
 };
 
 const QUIZ_ROOM = "LowCard 2";
-
-// ==================== FALLBACK QUESTIONS (JIKA KV KOSONG) ====================
-const FALLBACK_QUESTIONS = [
-  {
-    question: "What is the capital of France?",
-    options: { A: "London", B: "Paris", C: "Berlin", D: "Madrid" },
-    correct: "B"
-  },
-  {
-    question: "Which planet is known as the Red Planet?",
-    options: { A: "Venus", B: "Jupiter", C: "Mars", D: "Saturn" },
-    correct: "C"
-  },
-  {
-    question: "What is the largest ocean on Earth?",
-    options: { A: "Atlantic", B: "Indian", C: "Arctic", D: "Pacific" },
-    correct: "D"
-  },
-  {
-    question: "Who wrote 'Romeo and Juliet'?",
-    options: { A: "Charles Dickens", B: "William Shakespeare", C: "Mark Twain", D: "Jane Austen" },
-    correct: "B"
-  },
-  {
-    question: "What is the chemical symbol for water?",
-    options: { A: "H2O", B: "CO2", C: "NaCl", D: "HCl" },
-    correct: "A"
-  },
-  {
-    question: "What is the tallest mountain in the world?",
-    options: { A: "K2", B: "Mount Everest", C: "Kangchenjunga", D: "Lhotse" },
-    correct: "B"
-  },
-  {
-    question: "Which country has the largest population?",
-    options: { A: "India", B: "China", C: "United States", D: "Indonesia" },
-    correct: "A"
-  },
-  {
-    question: "What is the smallest country in the world?",
-    options: { A: "Monaco", B: "Vatican City", C: "San Marino", D: "Liechtenstein" },
-    correct: "B"
-  },
-  {
-    question: "Who painted the Mona Lisa?",
-    options: { A: "Michelangelo", B: "Leonardo da Vinci", C: "Raphael", D: "Donatello" },
-    correct: "B"
-  },
-  {
-    question: "What is the speed of light?",
-    options: { A: "300,000 km/s", B: "150,000 km/s", C: "500,000 km/s", D: "100,000 km/s" },
-    correct: "A"
-  }
-];
 
 export class GameServer {
   constructor(state, env) {
@@ -125,7 +71,6 @@ export class GameServer {
     this.userLanguage = new Map();
     this.userCountry = new Map();
     
-    // ✅ LOAD SOAL DARI KV
     this._initQuiz();
     
     this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
@@ -227,13 +172,9 @@ export class GameServer {
   
   async _loadQuestionsFromKV() {
     try {
-      console.log('📝 Loading questions from KV...');
-      
-      // ✅ AMBIL DARI KV
       const cached = await this.env.QUESTIONS.get('quiz_questions', 'json');
       
       if (cached && cached.questions && cached.questions.length > 0) {
-        // Format ke format yang digunakan server
         this.quizQuestionCache['en'] = cached.questions.map(q => ({
           question: q.question,
           options: q.options,
@@ -241,21 +182,12 @@ export class GameServer {
           category: q.category || 'General',
           difficulty: q.difficulty || 'medium'
         }));
-        
-        console.log(`✅ Loaded ${this.quizQuestionCache['en'].length} questions from KV`);
-        console.log(`📅 Fetched at: ${cached.fetchedAt}`);
-        console.log(`📂 Source: ${cached.source}`);
         return true;
       }
       
-      // ❌ Jika tidak ada di KV, pakai fallback
-      console.log('⚠️ No questions in KV, using fallback');
-      this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
       return false;
       
     } catch(e) {
-      console.log('❌ KV error:', e.message);
-      this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
       return false;
     }
   }
@@ -264,18 +196,14 @@ export class GameServer {
   
   async _initQuiz() {
     try {
-      // ✅ LOAD DARI KV
-      await this._loadQuestionsFromKV();
-      
-      // ✅ START QUIZ LOOP
-      this._startQuizLoop();
-      
-      // ✅ RESET COUNTER
-      this._resetTranslateCounterDaily();
-      
+      const loaded = await this._loadQuestionsFromKV();
+      if (loaded) {
+        this._startQuizLoop();
+        this._resetTranslateCounterDaily();
+      } else {
+        setTimeout(() => this._initQuiz(), 5000);
+      }
     } catch(e) {
-      console.log('❌ _initQuiz error:', e.message);
-      this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
       setTimeout(() => this._initQuiz(), 5000);
     }
   }
@@ -284,9 +212,7 @@ export class GameServer {
   
   async forceStartQuiz() {
     try {
-      // ✅ CEK APAKAH SOAL TERSEDIA
       if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
-        // Coba reload dari KV
         await this._loadQuestionsFromKV();
       }
       
@@ -294,13 +220,11 @@ export class GameServer {
         return { success: false, message: "No questions available" };
       }
       
-      // RESET STATE QUIZ
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
       this.currentQuestion = null;
       
-      // TAMPILKAN PERTANYAAN
       await this._showQuestion();
       
       return { 
@@ -675,14 +599,11 @@ export class GameServer {
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
       this._sendGameStatusToWs(ws, roomName);
       
-      // ✅ JIKA USER MASUK KE QUIZ_ROOM → FORCE START QUIZ
       if (roomName === QUIZ_ROOM) {
-        // Preload soal jika belum
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
           await this._loadQuestionsFromKV();
         }
         
-        // ✅ FORCE START QUIZ
         const result = await this.forceStartQuiz();
         
         if (result.success) {
@@ -2093,7 +2014,6 @@ export class GameServer {
         server._createdAt = Date.now();
         server.username = null;
         
-        // ✅ DETEKSI BAHASA DARI CLOUDFLARE
         const cf = req.cf;
         let country = 'US';
         if (cf && cf.country) {
