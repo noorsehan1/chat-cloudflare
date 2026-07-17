@@ -32,17 +32,17 @@ export class GameServer {
     this.closing = false;
     this.isDestroyed = false;
     
-    // ==================== GAME LOWCARD (MULTI-ROOM) ====================
-    this.activeGames = new Map(); // Key: roomName, Value: game object
+    // ==================== GAME LOWCARD ====================
+    this.activeGames = new Map();
     this._maxGames = CONSTANTS.MAX_LOWCARD_GAMES;
     this._gameLocks = new Map();
     this._joinLocks = new Map();
     this._switchLocks = new Map();
     
     this._wsIdCounter = 0;
-    this.wsClients = new Map(); // Key: roomName, Value: Set of wsId
-    this.clientRooms = new Map(); // Key: wsId, Value: roomName
-    this.wsMap = new Map(); // Key: wsId, Value: WebSocket
+    this.wsClients = new Map();
+    this.clientRooms = new Map();
+    this.wsMap = new Map();
     this.roomViewers = new Map();
     this.userConnections = new Map();
     this.connectionLocks = new Map();
@@ -64,9 +64,6 @@ export class GameServer {
     this.isFetching = false;
     
     this.quizQuestionCache = [];
-    this.userCountry = new Map();
-    this.userLanguage = new Map();
-    this.languageDetected = new Map();
     
     this._preloadQuestions();
     this._startQuizLoop();
@@ -204,10 +201,6 @@ export class GameServer {
           this.clientRooms.delete(wsId);
           this.wsMap.delete(wsId);
           
-          this.userCountry.delete(wsId);
-          this.userLanguage.delete(wsId);
-          this.languageDetected.delete(wsId);
-          
           for (const [username, conn] of this.userConnections) {
             if (conn.wsId === wsId) {
               this.userConnections.delete(username);
@@ -290,10 +283,6 @@ export class GameServer {
     
     this.wsMap.delete(conn.wsId);
     this.clientRooms.delete(conn.wsId);
-    
-    this.userCountry.delete(conn.wsId);
-    this.userLanguage.delete(conn.wsId);
-    this.languageDetected.delete(conn.wsId);
     
     if (conn.room && this.roomViewers.has(conn.room)) {
       this.roomViewers.get(conn.room).delete(username);
@@ -388,10 +377,6 @@ export class GameServer {
     this.clientRooms.delete(wsId);
     this.wsMap.delete(wsId);
     
-    this.userCountry.delete(wsId);
-    this.userLanguage.delete(wsId);
-    this.languageDetected.delete(wsId);
-    
     if (username) {
       const conn = this.userConnections.get(username);
       if (conn && conn.wsId === wsId) {
@@ -460,7 +445,6 @@ export class GameServer {
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
         this._sendGameStatusToWs(ws, roomName);
         if (roomName === QUIZ_ROOM) {
-          await this._setAutoLanguage(ws);
           this._safeSend(ws, ["quizInfo", "🎯 Welcome to LowCard 2! Quiz is running!"]);
         }
         return;
@@ -488,7 +472,6 @@ export class GameServer {
       this._sendGameStatusToWs(ws, roomName);
       
       if (roomName === QUIZ_ROOM) {
-        await this._setAutoLanguage(ws);
         this._safeSend(ws, ["quizInfo", "🎯 Welcome to LowCard 2! Quiz is running!"]);
       }
       
@@ -1499,10 +1482,7 @@ export class GameServer {
       this._broadcastToRoom(QUIZ_ROOM, ["quizQuestion", {
         question: q.question,
         options: q.options,
-        timeLimit: 15,
-        language: 'en',
-        category: q.category || 'General',
-        difficulty: q.difficulty || 'medium'
+        timeLimit: 15
       }]);
       
       setTimeout(() => {
@@ -1518,7 +1498,7 @@ export class GameServer {
             }]);
           } else {
             this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
-              message: "⏰ Time's up! No one answered correctly."
+              message: "Time's up! No one answered correctly"
             }]);
           }
           
@@ -1575,7 +1555,7 @@ export class GameServer {
     }
   }
   
-  // ==================== GAME LOWCARD (MULTI-ROOM SUPPORT) ====================
+  // ==================== GAME LOWCARD ====================
   
   async startGame(ws, bet, username) {
     try {
@@ -1597,13 +1577,10 @@ export class GameServer {
         return;
       }
       
-      // ❌ QUIZ ROOM TIDAK BISA START GAME
       if (room === QUIZ_ROOM) {
         this._safeSend(ws, ["gameLowCardError", "❌ Cannot start game in LowCard 2. This room is for Quiz only!"]);
         return;
       }
-      
-      await this._setAutoLanguage(ws);
       
       const startKey = `start_${room}`;
       if (this._gameStartFlags.has(startKey)) {
@@ -1685,7 +1662,6 @@ export class GameServer {
         game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
         game.playerWsId.set(usernameClean, wsId);
         
-        // ✅ SIMPAN GAME PER ROOM
         this.activeGames.set(room, game);
         this._addClient(room, ws, usernameClean, false);
         
@@ -1774,8 +1750,6 @@ export class GameServer {
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
         return;
       }
-      
-      await this._setAutoLanguage(ws);
       
       const lockKey = `join_${room}_${usernameClean}`;
       if (this._joinLocks.has(lockKey)) {
@@ -2059,13 +2033,7 @@ export class GameServer {
       }
       
       if (evt === "setUserLanguage") {
-        const language = data[1];
-        const wsId = this._getWsId(ws);
-        if (wsId && language) {
-          this.userLanguage.set(wsId, language);
-          this.languageDetected.set(wsId, true);
-          this._safeSend(ws, ["quizLanguageSet", language, "Language set to " + language]);
-        }
+        // HAPUS - tidak digunakan lagi
         return;
       }
       
@@ -2155,9 +2123,6 @@ export class GameServer {
         server.username = null;
         server._languageDetected = false;
         
-        this.userLanguage.set(wsId, 'en');
-        this.languageDetected.set(wsId, true);
-        
         server.addEventListener("message", async (event) => {
           try {
             const data = JSON.parse(event.data);
@@ -2178,10 +2143,6 @@ export class GameServer {
               
               this._removeClient(room, server);
               
-              this.userCountry.delete(wsId);
-              this.userLanguage.delete(wsId);
-              this.languageDetected.delete(wsId);
-              
               if (username) {
                 const conn = this.userConnections.get(username);
                 if (conn && conn.wsId === wsId) {
@@ -2200,10 +2161,6 @@ export class GameServer {
               const username = server.username;
               
               this._removeClient(room, server);
-              
-              this.userCountry.delete(wsId);
-              this.userLanguage.delete(wsId);
-              this.languageDetected.delete(wsId);
               
               if (username) {
                 const conn = this.userConnections.get(username);
@@ -2249,10 +2206,6 @@ export class GameServer {
         this._removeClient(room, ws);
       }
       
-      this.userCountry.delete(wsId);
-      this.userLanguage.delete(wsId);
-      this.languageDetected.delete(wsId);
-      
       if (username) {
         const conn = this.userConnections.get(username);
         if (conn && conn.wsId === wsId) {
@@ -2282,10 +2235,6 @@ export class GameServer {
         const room = ws.room || ws.roomname;
         this._removeClient(room, ws);
       }
-      
-      this.userCountry.delete(wsId);
-      this.userLanguage.delete(wsId);
-      this.languageDetected.delete(wsId);
       
       if (username) {
         const conn = this.userConnections.get(username);
@@ -2329,9 +2278,6 @@ export class GameServer {
       this._cleanupTimers.clear();
       
       this.quizQuestionCache = [];
-      this.userCountry.clear();
-      this.userLanguage.clear();
-      this.languageDetected.clear();
       
       for (const [room, wsIds] of this.wsClients) {
         for (const wsId of wsIds) {
