@@ -32,7 +32,6 @@ export class GameServer {
     this.closing = false;
     this.isDestroyed = false;
     
-    // ==================== GAME LOWCARD ====================
     this.activeGames = new Map();
     this._maxGames = CONSTANTS.MAX_LOWCARD_GAMES;
     this._gameLocks = new Map();
@@ -52,7 +51,6 @@ export class GameServer {
     this._tikCounter = 0;
     this._gameStartFlags = new Map();
     
-    // ==================== QUIZ ====================
     this.quizQuestions = [];
     this.quizAnswered = new Set();
     this.quizHasWinner = false;
@@ -62,18 +60,13 @@ export class GameServer {
     this.currentQuestion = null;
     this.quizQuestionPool = [];
     this.isFetching = false;
-    this.quizAnswerHistory = [];
     
-    // ✅ HANYA BAHASA INGGRIS DARI TRIVIA API
     this.quizQuestionCache = [];
     this.userCountry = new Map();
     this.userLanguage = new Map();
     this.languageDetected = new Map();
     
-    // ✅ PRELOAD SOAL DARI TRIVIA API
     this._preloadQuestions();
-    
-    // ✅ QUIZ LANGSUNG JALAN
     this._startQuizLoop();
     
     this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
@@ -1400,22 +1393,15 @@ export class GameServer {
     }
   }
   
-  // ==================== QUIZ - TRIVIA API (ENGLISH ONLY) ====================
+  // ==================== QUIZ - TRIVIA API ====================
   
   async _preloadQuestions() {
-    await this._fetchTriviaQuestions();
-  }
-  
-  async _fetchTriviaQuestions() {
     try {
       if (this.quizQuestionCache && this.quizQuestionCache.length > 0) {
         return;
       }
       
       const url = 'https://opentdb.com/api.php?amount=50&type=multiple';
-      
-      console.log('🌐 Fetching questions from Trivia API (English)');
-      
       const response = await fetch(url);
       const data = await response.json();
       
@@ -1451,14 +1437,11 @@ export class GameServer {
         });
         
         this.quizQuestionCache = questions;
-        console.log(`✅ Loaded ${questions.length} questions from Trivia API (English)`);
       } else {
-        console.log('⚠️ Trivia API returned no results');
         this.quizQuestionCache = [];
       }
       
     } catch(e) {
-      console.log(`❌ Failed to fetch trivia: ${e.message}`);
       this.quizQuestionCache = [];
     }
   }
@@ -1484,7 +1467,6 @@ export class GameServer {
       }
       
       const language = 'en';
-      
       this.userLanguage.set(wsId, language);
       this.languageDetected.set(wsId, true);
       
@@ -1493,9 +1475,7 @@ export class GameServer {
         message: "Language: English"
       }]);
       
-    } catch(e) {
-      console.error('Error setting language:', e);
-    }
+    } catch(e) {}
   }
   
   _getDominantLanguage() {
@@ -1527,12 +1507,11 @@ export class GameServer {
     try {
       if (this.isDestroyed) return;
       
-      const questions = this.quizQuestionCache;
+      const clients = this.wsClients.get(QUIZ_ROOM);
+      if (!clients || clients.size === 0) return;
       
-      if (!questions || questions.length === 0) {
-        console.log('⚠️ No questions available from Trivia API');
-        return;
-      }
+      const questions = this.quizQuestionCache;
+      if (!questions || questions.length === 0) return;
       
       const randomIndex = Math.floor(Math.random() * questions.length);
       const q = questions[randomIndex];
@@ -1541,7 +1520,6 @@ export class GameServer {
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
-      this.quizAnswerHistory = [];
       
       this._broadcastToRoom(QUIZ_ROOM, ["quizQuestion", {
         question: q.question,
@@ -1556,6 +1534,9 @@ export class GameServer {
         try {
           if (this.closing || this.isDestroyed) return;
           
+          const currentClients = this.wsClients.get(QUIZ_ROOM);
+          if (!currentClients || currentClients.size === 0) return;
+          
           if (this.quizHasWinner && this.quizWinner) {
             this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
               username: this.quizWinner
@@ -1566,18 +1547,10 @@ export class GameServer {
             }]);
           }
           
-          if (this.quizAnswerHistory.length > 0) {
-            this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerHistory", {
-              answers: this.quizAnswerHistory
-            }]);
-          }
-          
         } catch(e) {}
       }, 15000);
       
-    } catch(e) {
-      console.error('Error showing question:', e);
-    }
+    } catch(e) {}
   }
   
   async submitQuizAnswer(ws, username, answer) {
@@ -1585,6 +1558,12 @@ export class GameServer {
       const room = this._ensureRoomConsistency(ws);
       if (room !== QUIZ_ROOM) {
         this._safeSend(ws, ["quizError", "Quiz only in LowCard 2"]);
+        return;
+      }
+      
+      const clients = this.wsClients.get(QUIZ_ROOM);
+      if (!clients || clients.size === 0) {
+        this._safeSend(ws, ["quizError", "Quiz is paused"]);
         return;
       }
       
@@ -1605,31 +1584,6 @@ export class GameServer {
       
       const answerKey = answer.toUpperCase();
       const isCorrect = answerKey === this.currentQuestion.correct;
-      
-      this.quizAnswerHistory.push({
-        username: username,
-        answer: answerKey,
-        isCorrect: isCorrect,
-        timestamp: Date.now()
-      });
-      
-      this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", {
-        username: username,
-        answer: answerKey,
-        isCorrect: isCorrect,
-        correctAnswer: this.currentQuestion.correct,
-        message: isCorrect ? "✅ Correct!" : "❌ Wrong!"
-      }]);
-      
-      const feedbackMsg = isCorrect ? 
-        "✅ Correct!" : 
-        `❌ Wrong! Correct answer: ${this.currentQuestion.correct}`;
-      
-      this._safeSend(ws, ["quizAnswerFeedback", {
-        isCorrect: isCorrect,
-        correctAnswer: this.currentQuestion.correct,
-        message: feedbackMsg
-      }]);
       
       if (isCorrect && !this.quizHasWinner) {
         this.quizHasWinner = true;
