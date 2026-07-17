@@ -319,6 +319,38 @@ export class GameServer {
     }
   }
   
+  // ==================== FORCE START QUIZ ====================
+  
+  async forceStartQuiz() {
+    try {
+      // 1. PRELOAD SOAL
+      await this._preloadQuestions();
+      
+      // 2. CEK APAKAH SOAL TERSEDIA
+      if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
+        return { success: false, message: "No questions available" };
+      }
+      
+      // 3. RESET STATE QUIZ
+      this.quizAnswered = new Set();
+      this.quizHasWinner = false;
+      this.quizWinner = null;
+      this.currentQuestion = null;
+      
+      // 4. TAMPILKAN PERTANYAAN
+      await this._showQuestion();
+      
+      return { 
+        success: true, 
+        message: "Quiz started!",
+        questions: this.quizQuestionCache['en'].length 
+      };
+      
+    } catch(e) {
+      return { success: false, message: e.message };
+    }
+  }
+  
   // ==================== ALARM ====================
   
   async alarm() {
@@ -650,29 +682,53 @@ export class GameServer {
       return;
     }
     this._switchLocks.set(lockKey, Date.now());
+    
     try {
       const oldRoom = this.clientRooms.get(wsId);
+      
       if (oldRoom === roomName) {
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
         this._sendGameStatusToWs(ws, roomName);
         return;
       }
+      
       if (oldRoom) {
         this._removeClientFromRoom(oldRoom, wsId);
       }
+      
       this._addClient(roomName, ws, username, false);
       ws.room = roomName;
       ws.roomname = roomName;
       ws.username = username;
+      
       if (username) {
         const conn = this.userConnections.get(username);
         if (conn) {
           conn.room = roomName;
         }
       }
+      
       this._broadcastToRoom(roomName, ["roomUserJoined", username || "Anonymous"]);
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
       this._sendGameStatusToWs(ws, roomName);
+      
+      // ✅ JIKA USER MASUK KE QUIZ_ROOM → FORCE START QUIZ
+      if (roomName === QUIZ_ROOM) {
+        // Preload soal jika belum
+        if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
+          await this._preloadQuestions();
+        }
+        
+        // ✅ FORCE START QUIZ
+        const result = await this.forceStartQuiz();
+        
+        if (result.success) {
+          this._safeSend(ws, ["quizInfo", "🎯 Quiz started! " + result.questions + " questions loaded."]);
+        } else {
+          this._safeSend(ws, ["quizError", "Failed to start quiz: " + result.message]);
+        }
+      }
+      
     } finally {
       this._switchLocks.delete(lockKey);
     }
@@ -1984,16 +2040,25 @@ export class GameServer {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
+      
       if (evt === "switchRoom") {
         const [_, room, username] = data;
         await this.switchRoom(ws, room, username);
         return;
       }
+      
+      if (evt === "forceStartQuiz") {
+        const result = await this.forceStartQuiz();
+        this._safeSend(ws, ["forceStartQuizResult", result]);
+        return;
+      }
+      
       const room = this._ensureRoomConsistency(ws);
       if (!room) {
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
         return;
       }
+      
       switch (evt) {
         case "gameLowCardStart":
           await this.startGame(ws, data[1], data[2]);
