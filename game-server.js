@@ -65,12 +65,12 @@ export class GameServer {
     this.quizAnswerHistory = [];
     
     // ✅ HANYA BAHASA INGGRIS DARI TRIVIA API
-    this.quizQuestionCache = []; // Array of questions
+    this.quizQuestionCache = [];
     this.userCountry = new Map();
     this.userLanguage = new Map();
     this.languageDetected = new Map();
     
-    // ✅ PRELOAD SOAL DARI TRIVIA API (BAHASA INGGRIS SAJA)
+    // ✅ PRELOAD SOAL DARI TRIVIA API
     this._preloadQuestions();
     
     // ✅ QUIZ LANGSUNG JALAN
@@ -209,7 +209,6 @@ export class GameServer {
           this.clientRooms.delete(wsId);
           this.wsMap.delete(wsId);
           
-          // Cleanup language data
           this.userCountry.delete(wsId);
           this.userLanguage.delete(wsId);
           this.languageDetected.delete(wsId);
@@ -297,7 +296,6 @@ export class GameServer {
     this.wsMap.delete(conn.wsId);
     this.clientRooms.delete(conn.wsId);
     
-    // Cleanup language data
     this.userCountry.delete(conn.wsId);
     this.userLanguage.delete(conn.wsId);
     this.languageDetected.delete(conn.wsId);
@@ -395,7 +393,6 @@ export class GameServer {
     this.clientRooms.delete(wsId);
     this.wsMap.delete(wsId);
     
-    // Cleanup language data
     this.userCountry.delete(wsId);
     this.userLanguage.delete(wsId);
     this.languageDetected.delete(wsId);
@@ -1403,21 +1400,18 @@ export class GameServer {
     }
   }
   
-  // ==================== QUIZ - TRIVIA API (ENGLISH ONLY - NO FALLBACK) ====================
+  // ==================== QUIZ - TRIVIA API (ENGLISH ONLY) ====================
   
   async _preloadQuestions() {
-    // ✅ HANYA BAHASA INGGRIS DARI TRIVIA API
     await this._fetchTriviaQuestions();
   }
   
   async _fetchTriviaQuestions() {
     try {
-      // Cek cache
       if (this.quizQuestionCache && this.quizQuestionCache.length > 0) {
         return;
       }
       
-      // ✅ AMBIL DARI TRIVIA API (ENGLISH)
       const url = 'https://opentdb.com/api.php?amount=50&type=multiple';
       
       console.log('🌐 Fetching questions from Trivia API (English)');
@@ -1426,7 +1420,6 @@ export class GameServer {
       const data = await response.json();
       
       if (data.response_code === 0 && data.results && data.results.length > 0) {
-        // ✅ Proses hasil dari Trivia API
         const questions = data.results.map((q) => {
           const answers = [
             { text: q.correct_answer, isCorrect: true },
@@ -1457,18 +1450,15 @@ export class GameServer {
           };
         });
         
-        // ✅ Simpan di cache
         this.quizQuestionCache = questions;
         console.log(`✅ Loaded ${questions.length} questions from Trivia API (English)`);
       } else {
-        // ❌ Jika API gagal, KOSONGKAN cache
         console.log('⚠️ Trivia API returned no results');
         this.quizQuestionCache = [];
       }
       
     } catch(e) {
       console.log(`❌ Failed to fetch trivia: ${e.message}`);
-      // ❌ KOSONGKAN cache jika error
       this.quizQuestionCache = [];
     }
   }
@@ -1482,26 +1472,22 @@ export class GameServer {
     return arr;
   }
   
-  // ==================== QUIZ - LANGUAGE (ENGLISH ONLY) ====================
+  // ==================== QUIZ - LANGUAGE ====================
   
   async _setAutoLanguage(ws) {
     const wsId = this._getWsId(ws);
     if (!wsId) return;
     
     try {
-      // ✅ Cek apakah sudah ada bahasa untuk user ini
       if (this.languageDetected.get(wsId)) {
         return;
       }
       
-      // ✅ HANYA BAHASA INGGRIS
       const language = 'en';
       
-      // Simpan bahasa user (selalu 'en')
       this.userLanguage.set(wsId, language);
       this.languageDetected.set(wsId, true);
       
-      // Kirim info ke client
       this._safeSend(ws, ["quizAutoLanguage", {
         language: language,
         message: "Language: English"
@@ -1513,7 +1499,6 @@ export class GameServer {
   }
   
   _getDominantLanguage() {
-    // ✅ SELALU KEMBALIKAN 'en'
     return 'en';
   }
   
@@ -1542,17 +1527,13 @@ export class GameServer {
     try {
       if (this.isDestroyed) return;
       
-      // ✅ HANYA DARI TRIVIA API
       const questions = this.quizQuestionCache;
       
-      // ❌ Jika tidak ada soal, TIDAK TAMPILKAN QUIZ
       if (!questions || questions.length === 0) {
         console.log('⚠️ No questions available from Trivia API');
-        // ❌ Jangan tampilkan quiz
         return;
       }
       
-      // Pilih soal random
       const randomIndex = Math.floor(Math.random() * questions.length);
       const q = questions[randomIndex];
       
@@ -1562,7 +1543,6 @@ export class GameServer {
       this.quizWinner = null;
       this.quizAnswerHistory = [];
       
-      // Kirim pertanyaan
       this._broadcastToRoom(QUIZ_ROOM, ["quizQuestion", {
         question: q.question,
         options: q.options,
@@ -1572,15 +1552,13 @@ export class GameServer {
         difficulty: q.difficulty || 'medium'
       }]);
       
-      // Timer untuk menutup quiz
       setTimeout(() => {
         try {
           if (this.closing || this.isDestroyed) return;
           
           if (this.quizHasWinner && this.quizWinner) {
             this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
-              username: this.quizWinner,
-              message: "🏆 " + this.quizWinner + " wins!"
+              username: this.quizWinner
             }]);
           } else {
             this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
@@ -1628,7 +1606,6 @@ export class GameServer {
       const answerKey = answer.toUpperCase();
       const isCorrect = answerKey === this.currentQuestion.correct;
       
-      // Tambahkan ke history
       this.quizAnswerHistory.push({
         username: username,
         answer: answerKey,
@@ -1636,7 +1613,6 @@ export class GameServer {
         timestamp: Date.now()
       });
       
-      // Kirim hasil jawaban ke semua client
       this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", {
         username: username,
         answer: answerKey,
@@ -1645,7 +1621,6 @@ export class GameServer {
         message: isCorrect ? "✅ Correct!" : "❌ Wrong!"
       }]);
       
-      // Kirim feedback ke user yang menjawab
       const feedbackMsg = isCorrect ? 
         "✅ Correct!" : 
         `❌ Wrong! Correct answer: ${this.currentQuestion.correct}`;
@@ -1656,15 +1631,9 @@ export class GameServer {
         message: feedbackMsg
       }]);
       
-      // Jika jawaban benar dan belum ada pemenang
       if (isCorrect && !this.quizHasWinner) {
         this.quizHasWinner = true;
         this.quizWinner = username;
-        
-        this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
-          username: username,
-          message: `🏆 ${username} is the first to answer correctly!`
-        }]);
       }
       
       this.quizAnswered.add(username);
@@ -1701,7 +1670,6 @@ export class GameServer {
         return;
       }
       
-      // Set language (selalu English)
       await this._setAutoLanguage(ws);
       
       const startKey = `start_${room}`;
@@ -1873,7 +1841,6 @@ export class GameServer {
         return;
       }
       
-      // Set language (selalu English)
       await this._setAutoLanguage(ws);
       
       const lockKey = `join_${room}_${usernameClean}`;
@@ -2157,7 +2124,6 @@ export class GameServer {
         return;
       }
       
-      // Handle set language from client (optional)
       if (evt === "setUserLanguage") {
         const language = data[1];
         const wsId = this._getWsId(ws);
@@ -2255,7 +2221,6 @@ export class GameServer {
         server.username = null;
         server._languageDetected = false;
         
-        // ✅ Set language ke English (tidak perlu deteksi)
         this.userLanguage.set(wsId, 'en');
         this.languageDetected.set(wsId, true);
         
@@ -2279,7 +2244,6 @@ export class GameServer {
               
               this._removeClient(room, server);
               
-              // Cleanup language data
               this.userCountry.delete(wsId);
               this.userLanguage.delete(wsId);
               this.languageDetected.delete(wsId);
@@ -2303,7 +2267,6 @@ export class GameServer {
               
               this._removeClient(room, server);
               
-              // Cleanup language data
               this.userCountry.delete(wsId);
               this.userLanguage.delete(wsId);
               this.languageDetected.delete(wsId);
@@ -2352,7 +2315,6 @@ export class GameServer {
         this._removeClient(room, ws);
       }
       
-      // Cleanup language data
       this.userCountry.delete(wsId);
       this.userLanguage.delete(wsId);
       this.languageDetected.delete(wsId);
@@ -2387,7 +2349,6 @@ export class GameServer {
         this._removeClient(room, ws);
       }
       
-      // Cleanup language data
       this.userCountry.delete(wsId);
       this.userLanguage.delete(wsId);
       this.languageDetected.delete(wsId);
@@ -2433,7 +2394,6 @@ export class GameServer {
       }
       this._cleanupTimers.clear();
       
-      // Cleanup all language data
       this.quizQuestionCache = [];
       this.userCountry.clear();
       this.userLanguage.clear();
