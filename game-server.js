@@ -64,14 +64,14 @@ export class GameServer {
     this.isFetching = false;
     this.quizAnswerHistory = [];
     
-    // ✅ Cache soal per bahasa dari Trivia API
-    this.quizQuestionCache = new Map(); // language -> [questions]
-    this.userCountry = new Map(); // wsId -> countryCode
-    this.userLanguage = new Map(); // wsId -> languageCode
-    this.languageDetected = new Map(); // wsId -> boolean
+    // ✅ HANYA BAHASA INGGRIS DARI TRIVIA API
+    this.quizQuestionCache = []; // Array of questions
+    this.userCountry = new Map();
+    this.userLanguage = new Map();
+    this.languageDetected = new Map();
     
-    // ✅ PRELOAD SOAL DARI TRIVIA API UNTUK SEMUA BAHASA
-    this._preloadAllQuestions();
+    // ✅ PRELOAD SOAL DARI TRIVIA API (BAHASA INGGRIS SAJA)
+    this._preloadQuestions();
     
     // ✅ QUIZ LANGSUNG JALAN
     this._startQuizLoop();
@@ -1403,55 +1403,31 @@ export class GameServer {
     }
   }
   
-  // ==================== QUIZ - TRIVIA API ====================
+  // ==================== QUIZ - TRIVIA API (ENGLISH ONLY - NO FALLBACK) ====================
   
-  async _preloadAllQuestions() {
-    // ✅ Ambil dari Trivia API untuk semua bahasa
-    const languages = ['en', 'id', 'es', 'fr', 'de', 'it', 'pt', 'ru', 'ja', 'zh', 'ar', 'hi'];
-    
-    for (const lang of languages) {
-      await this._fetchTriviaQuestions(lang);
-    }
+  async _preloadQuestions() {
+    // ✅ HANYA BAHASA INGGRIS DARI TRIVIA API
+    await this._fetchTriviaQuestions();
   }
   
-  async _fetchTriviaQuestions(language = 'en') {
+  async _fetchTriviaQuestions() {
     try {
       // Cek cache
-      if (this.quizQuestionCache.has(language) && this.quizQuestionCache.get(language).length > 0) {
+      if (this.quizQuestionCache && this.quizQuestionCache.length > 0) {
         return;
       }
       
-      // Mapping bahasa ke parameter API
-      const langMap = {
-        'en': 'en',
-        'id': 'id',
-        'es': 'es',
-        'fr': 'fr',
-        'de': 'de',
-        'it': 'it',
-        'pt': 'pt',
-        'ru': 'ru',
-        'ja': 'ja',
-        'zh': 'zh',
-        'ar': 'ar',
-        'hi': 'hi'
-      };
+      // ✅ AMBIL DARI TRIVIA API (ENGLISH)
+      const url = 'https://opentdb.com/api.php?amount=50&type=multiple';
       
-      const langCode = langMap[language] || 'en';
-      
-      // ✅ AMBIL DARI TRIVIA API
-      const url = `https://opentdb.com/api.php?amount=50&type=multiple&language=${langCode}`;
-      
-      console.log(`🌐 Fetching questions for ${language} from Trivia API`);
+      console.log('🌐 Fetching questions from Trivia API (English)');
       
       const response = await fetch(url);
       const data = await response.json();
       
-      let questions = [];
-      
       if (data.response_code === 0 && data.results && data.results.length > 0) {
         // ✅ Proses hasil dari Trivia API
-        questions = data.results.map((q) => {
+        const questions = data.results.map((q) => {
           const answers = [
             { text: q.correct_answer, isCorrect: true },
             { text: q.incorrect_answers[0] || "N/A", isCorrect: false },
@@ -1476,129 +1452,25 @@ export class GameServer {
             question: q.question,
             options: options,
             correct: correctKey,
-            language: langCode,
             category: q.category || 'General',
             difficulty: q.difficulty || 'medium'
           };
         });
         
         // ✅ Simpan di cache
-        this.quizQuestionCache.set(language, questions);
-        console.log(`✅ Loaded ${questions.length} questions from Trivia API for ${language}`);
+        this.quizQuestionCache = questions;
+        console.log(`✅ Loaded ${questions.length} questions from Trivia API (English)`);
       } else {
-        // ❌ Jika API gagal, pakai fallback
-        console.log(`⚠️ Trivia API returned no results for ${language}, using fallback`);
-        const fallback = this._getFallbackQuestions(language);
-        this.quizQuestionCache.set(language, fallback);
+        // ❌ Jika API gagal, KOSONGKAN cache
+        console.log('⚠️ Trivia API returned no results');
+        this.quizQuestionCache = [];
       }
       
     } catch(e) {
-      console.log(`❌ Failed to fetch trivia for ${language}: ${e.message}`);
-      // ✅ Hanya pakai fallback jika API error
-      const fallback = this._getFallbackQuestions(language);
-      this.quizQuestionCache.set(language, fallback);
+      console.log(`❌ Failed to fetch trivia: ${e.message}`);
+      // ❌ KOSONGKAN cache jika error
+      this.quizQuestionCache = [];
     }
-  }
-  
-  _getFallbackQuestions(language = 'en') {
-    const fallbacks = {
-      'en': [
-        {
-          question: "What is the capital of France?",
-          options: { A: "London", B: "Paris", C: "Berlin", D: "Madrid" },
-          correct: "B"
-        },
-        {
-          question: "Which planet is known as the Red Planet?",
-          options: { A: "Venus", B: "Jupiter", C: "Mars", D: "Saturn" },
-          correct: "C"
-        }
-      ],
-      'id': [
-        {
-          question: "Apa ibu kota Perancis?",
-          options: { A: "London", B: "Paris", C: "Berlin", D: "Madrid" },
-          correct: "B"
-        },
-        {
-          question: "Planet apa yang dikenal sebagai Planet Merah?",
-          options: { A: "Venus", B: "Jupiter", C: "Mars", D: "Saturn" },
-          correct: "C"
-        }
-      ],
-      'es': [
-        {
-          question: "¿Cuál es la capital de Francia?",
-          options: { A: "Londres", B: "París", C: "Berlín", D: "Madrid" },
-          correct: "B"
-        }
-      ],
-      'fr': [
-        {
-          question: "Quelle est la capitale de la France?",
-          options: { A: "Londres", B: "Paris", C: "Berlin", D: "Madrid" },
-          correct: "B"
-        }
-      ],
-      'de': [
-        {
-          question: "Was ist die Hauptstadt von Frankreich?",
-          options: { A: "London", B: "Paris", C: "Berlin", D: "Madrid" },
-          correct: "B"
-        }
-      ],
-      'it': [
-        {
-          question: "Qual è la capitale della Francia?",
-          options: { A: "Londra", B: "Parigi", C: "Berlino", D: "Madrid" },
-          correct: "B"
-        }
-      ],
-      'pt': [
-        {
-          question: "Qual é a capital da França?",
-          options: { A: "Londres", B: "Paris", C: "Berlim", D: "Madri" },
-          correct: "B"
-        }
-      ],
-      'ru': [
-        {
-          question: "Какая столица Франции?",
-          options: { A: "Лондон", B: "Париж", C: "Берлин", D: "Мадрид" },
-          correct: "B"
-        }
-      ],
-      'ja': [
-        {
-          question: "フランスの首都はどこですか？",
-          options: { A: "ロンドン", B: "パリ", C: "ベルリン", D: "マドリード" },
-          correct: "B"
-        }
-      ],
-      'zh': [
-        {
-          question: "法国的首都是什么？",
-          options: { A: "伦敦", B: "巴黎", C: "柏林", D: "马德里" },
-          correct: "B"
-        }
-      ],
-      'ar': [
-        {
-          question: "ما هي عاصمة فرنسا؟",
-          options: { A: "لندن", B: "باريس", C: "برلين", D: "مدريد" },
-          correct: "B"
-        }
-      ],
-      'hi': [
-        {
-          question: "फ्रांस की राजधानी क्या है?",
-          options: { A: "लंदन", B: "पेरिस", C: "बर्लिन", D: "मैड्रिड" },
-          correct: "B"
-        }
-      ]
-    };
-    
-    return fallbacks[language] || fallbacks['en'];
   }
   
   _shuffleArray(array) {
@@ -1610,171 +1482,39 @@ export class GameServer {
     return arr;
   }
   
-  // ==================== QUIZ - LANGUAGE DETECTION ====================
-  
-  _countryToLanguage(countryCode) {
-    if (!countryCode) return 'en';
-    
-    const map = {
-      // Asia
-      'ID': 'id', 'MY': 'id', 'SG': 'id', 'PH': 'id',
-      'JP': 'ja', 'CN': 'zh', 'TW': 'zh', 'HK': 'zh',
-      'KR': 'ko', 'IN': 'hi', 'TH': 'th', 'VN': 'vi',
-      
-      // Europe
-      'GB': 'en', 'US': 'en', 'AU': 'en', 'CA': 'en',
-      'NZ': 'en', 'FR': 'fr', 'DE': 'de', 'ES': 'es',
-      'IT': 'it', 'PT': 'pt', 'NL': 'nl', 'RU': 'ru',
-      'UA': 'ru', 'PL': 'pl', 'TR': 'tr',
-      
-      // Middle East
-      'SA': 'ar', 'AE': 'ar', 'EG': 'ar', 'IQ': 'ar', 'JO': 'ar',
-      
-      // Latin America
-      'MX': 'es', 'BR': 'pt', 'AR': 'es', 'CO': 'es',
-      'CL': 'es', 'PE': 'es',
-      
-      // Africa
-      'ZA': 'en', 'NG': 'en', 'KE': 'en', 'MA': 'ar', 'DZ': 'ar',
-      
-      // Default
-      'DEFAULT': 'en'
-    };
-    
-    return map[countryCode.toUpperCase()] || map['DEFAULT'];
-  }
+  // ==================== QUIZ - LANGUAGE (ENGLISH ONLY) ====================
   
   async _setAutoLanguage(ws) {
     const wsId = this._getWsId(ws);
     if (!wsId) return;
     
     try {
-      // Cek apakah sudah ada bahasa untuk user ini
+      // ✅ Cek apakah sudah ada bahasa untuk user ini
       if (this.languageDetected.get(wsId)) {
         return;
       }
       
-      // Dapatkan IP dari WebSocket
-      const ip = ws._remoteAddress || ws._socket?.remoteAddress || '';
-      let countryCode = 'US'; // Default
+      // ✅ HANYA BAHASA INGGRIS
+      const language = 'en';
       
-      // Jika ada IP, coba deteksi negara
-      if (ip && ip !== '::1' && ip !== '127.0.0.1') {
-        try {
-          let cleanIP = ip;
-          if (ip.includes('::ffff:')) {
-            cleanIP = ip.split('::ffff:')[1];
-          }
-          
-          const response = await fetch(`http://ip-api.com/json/${cleanIP}?fields=countryCode`);
-          const data = await response.json();
-          if (data && data.countryCode) {
-            countryCode = data.countryCode;
-          }
-        } catch(e) {
-          countryCode = 'US';
-        }
-      }
-      
-      // Mapping negara ke bahasa
-      const language = this._countryToLanguage(countryCode);
-      
-      // Simpan negara dan bahasa user
-      this.userCountry.set(wsId, countryCode);
+      // Simpan bahasa user (selalu 'en')
       this.userLanguage.set(wsId, language);
       this.languageDetected.set(wsId, true);
       
-      // Load soal untuk bahasa tersebut (dari Trivia API)
-      if (!this.quizQuestionCache.has(language)) {
-        await this._fetchTriviaQuestions(language);
-      }
-      
-      console.log(`🌐 User ${wsId} detected: Country=${countryCode}, Language=${language}`);
-      
       // Kirim info ke client
       this._safeSend(ws, ["quizAutoLanguage", {
-        country: countryCode,
         language: language,
-        message: `Detected: ${countryCode} → ${language}`
+        message: "Language: English"
       }]);
       
     } catch(e) {
-      console.error('Error detecting language:', e);
+      console.error('Error setting language:', e);
     }
   }
   
   _getDominantLanguage() {
-    if (this.userLanguage.size === 0) return 'en';
-    
-    // Hitung frekuensi bahasa
-    const langCount = new Map();
-    for (const [_, lang] of this.userLanguage) {
-      langCount.set(lang, (langCount.get(lang) || 0) + 1);
-    }
-    
-    // Cari bahasa dengan jumlah terbanyak
-    let maxLang = 'en';
-    let maxCount = 0;
-    for (const [lang, count] of langCount) {
-      if (count > maxCount) {
-        maxCount = count;
-        maxLang = lang;
-      }
-    }
-    
-    return maxLang;
-  }
-  
-  _getTranslation(key, language = 'en') {
-    const translations = {
-      'en': {
-        'winner_message': '🏆 ',
-        'no_winner': "⏰ Time's up! No one answered correctly.",
-        'correct': '✅ Correct!',
-        'wrong': '❌ Wrong!',
-        'already_answered': 'You already answered!',
-        'invalid_answer': 'Invalid answer! Use A, B, C, or D',
-        'no_active_question': 'No active question'
-      },
-      'id': {
-        'winner_message': '🏆 ',
-        'no_winner': "⏰ Waktu habis! Tidak ada yang menjawab dengan benar.",
-        'correct': '✅ Benar!',
-        'wrong': '❌ Salah!',
-        'already_answered': 'Anda sudah menjawab!',
-        'invalid_answer': 'Jawaban tidak valid! Gunakan A, B, C, atau D',
-        'no_active_question': 'Tidak ada pertanyaan aktif'
-      },
-      'es': {
-        'winner_message': '🏆 ',
-        'no_winner': "⏰ ¡Se acabó el tiempo! Nadie respondió correctamente.",
-        'correct': '✅ ¡Correcto!',
-        'wrong': '❌ ¡Incorrecto!',
-        'already_answered': '¡Ya respondiste!',
-        'invalid_answer': '¡Respuesta inválida! Usa A, B, C o D',
-        'no_active_question': 'No hay pregunta activa'
-      },
-      'fr': {
-        'winner_message': '🏆 ',
-        'no_winner': "⏰ Temps écoulé ! Personne n'a répondu correctement.",
-        'correct': '✅ Correct !',
-        'wrong': '❌ Faux !',
-        'already_answered': 'Vous avez déjà répondu !',
-        'invalid_answer': 'Réponse invalide ! Utilisez A, B, C ou D',
-        'no_active_question': 'Pas de question active'
-      },
-      'de': {
-        'winner_message': '🏆 ',
-        'no_winner': "⏰ Zeit abgelaufen! Niemand hat richtig geantwortet.",
-        'correct': '✅ Richtig!',
-        'wrong': '❌ Falsch!',
-        'already_answered': 'Sie haben bereits geantwortet!',
-        'invalid_answer': 'Ungültige Antwort! Verwenden Sie A, B, C oder D',
-        'no_active_question': 'Keine aktive Frage'
-      }
-    };
-    
-    return translations[language]?.[key] || translations['en'][key] || key;
+    // ✅ SELALU KEMBALIKAN 'en'
+    return 'en';
   }
   
   // ==================== QUIZ ====================
@@ -1802,16 +1542,14 @@ export class GameServer {
     try {
       if (this.isDestroyed) return;
       
-      // Dapatkan bahasa dominan dari semua user
-      const language = this._getDominantLanguage();
+      // ✅ HANYA DARI TRIVIA API
+      const questions = this.quizQuestionCache;
       
-      // Ambil soal sesuai bahasa (dari Trivia API)
-      let questions = this.quizQuestionCache.get(language);
-      
-      // Jika tidak ada, coba fetch ulang
+      // ❌ Jika tidak ada soal, TIDAK TAMPILKAN QUIZ
       if (!questions || questions.length === 0) {
-        this._fetchTriviaQuestions(language);
-        questions = this._getFallbackQuestions(language);
+        console.log('⚠️ No questions available from Trivia API');
+        // ❌ Jangan tampilkan quiz
+        return;
       }
       
       // Pilih soal random
@@ -1824,12 +1562,12 @@ export class GameServer {
       this.quizWinner = null;
       this.quizAnswerHistory = [];
       
-      // Kirim pertanyaan dengan bahasa yang sesuai
+      // Kirim pertanyaan
       this._broadcastToRoom(QUIZ_ROOM, ["quizQuestion", {
         question: q.question,
         options: q.options,
         timeLimit: 15,
-        language: language,
+        language: 'en',
         category: q.category || 'General',
         difficulty: q.difficulty || 'medium'
       }]);
@@ -1842,11 +1580,11 @@ export class GameServer {
           if (this.quizHasWinner && this.quizWinner) {
             this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
               username: this.quizWinner,
-              message: this._getTranslation('winner_message', language) + this.quizWinner + "!"
+              message: "🏆 " + this.quizWinner + " wins!"
             }]);
           } else {
             this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
-              message: this._getTranslation('no_winner', language)
+              message: "⏰ Time's up! No one answered correctly."
             }]);
           }
           
@@ -1878,14 +1616,12 @@ export class GameServer {
       }
       
       if (this.quizAnswered.has(username)) {
-        const language = this.userLanguage.get(this._getWsId(ws)) || 'en';
-        this._safeSend(ws, ["quizError", this._getTranslation('already_answered', language)]);
+        this._safeSend(ws, ["quizError", "You already answered!"]);
         return;
       }
       
       if (!answer || !['A','B','C','D'].includes(answer.toUpperCase())) {
-        const language = this.userLanguage.get(this._getWsId(ws)) || 'en';
-        this._safeSend(ws, ["quizError", this._getTranslation('invalid_answer', language)]);
+        this._safeSend(ws, ["quizError", "Invalid answer! Use A, B, C, or D"]);
         return;
       }
       
@@ -1910,10 +1646,9 @@ export class GameServer {
       }]);
       
       // Kirim feedback ke user yang menjawab
-      const language = this.userLanguage.get(this._getWsId(ws)) || 'en';
       const feedbackMsg = isCorrect ? 
-        this._getTranslation('correct', language) : 
-        `${this._getTranslation('wrong', language)} Correct answer: ${this.currentQuestion.correct}`;
+        "✅ Correct!" : 
+        `❌ Wrong! Correct answer: ${this.currentQuestion.correct}`;
       
       this._safeSend(ws, ["quizAnswerFeedback", {
         isCorrect: isCorrect,
@@ -1966,7 +1701,7 @@ export class GameServer {
         return;
       }
       
-      // Deteksi bahasa otomatis
+      // Set language (selalu English)
       await this._setAutoLanguage(ws);
       
       const startKey = `start_${room}`;
@@ -2138,7 +1873,7 @@ export class GameServer {
         return;
       }
       
-      // Deteksi bahasa otomatis
+      // Set language (selalu English)
       await this._setAutoLanguage(ws);
       
       const lockKey = `join_${room}_${usernameClean}`;
@@ -2520,30 +2255,14 @@ export class GameServer {
         server.username = null;
         server._languageDetected = false;
         
-        // ✅ Deteksi negara dari Cloudflare
-        const cf = req.cf;
-        if (cf && cf.country) {
-          const countryCode = cf.country;
-          const language = this._countryToLanguage(countryCode);
-          this.userCountry.set(wsId, countryCode);
-          this.userLanguage.set(wsId, language);
-          this.languageDetected.set(wsId, true);
-          console.log(`🌐 User ${wsId} detected via Cloudflare: Country=${countryCode}, Language=${language}`);
-        }
+        // ✅ Set language ke English (tidak perlu deteksi)
+        this.userLanguage.set(wsId, 'en');
+        this.languageDetected.set(wsId, true);
         
         server.addEventListener("message", async (event) => {
           try {
             const data = JSON.parse(event.data);
             if (!Array.isArray(data) || data.length === 0) return;
-            
-            // Deteksi bahasa otomatis saat event tertentu
-            const evt = data[0];
-            if (evt === "switchRoom" || evt === "gameLowCardJoin" || evt === "gameLowCardStart") {
-              if (!this.languageDetected.get(wsId)) {
-                await this._setAutoLanguage(server);
-                this.languageDetected.set(wsId, true);
-              }
-            }
             
             await this.handleEvent(server, data);
           } catch(e) {
@@ -2715,7 +2434,7 @@ export class GameServer {
       this._cleanupTimers.clear();
       
       // Cleanup all language data
-      this.quizQuestionCache.clear();
+      this.quizQuestionCache = [];
       this.userCountry.clear();
       this.userLanguage.clear();
       this.languageDetected.clear();
