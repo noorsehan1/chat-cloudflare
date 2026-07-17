@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS (LENGKAP) ====================
+// ==================== GAME-SERVER.JS (LENGKAP DENGAN RANDOM JAWABAN) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -237,6 +237,41 @@ export class GameServer {
     } catch(e) {
       return { success: false, message: e.message };
     }
+  }
+  
+  // ==================== SHUFFLE OPTIONS ====================
+  
+  _shuffleQuestionOptions(question) {
+    const options = question.options;
+    const keys = ['A', 'B', 'C', 'D'];
+    
+    // Buat array dari options
+    const entries = keys.map(key => ({
+      key: key,
+      text: options[key],
+      isCorrect: key === question.correct
+    }));
+    
+    // Acak array
+    const shuffled = this._shuffleArray(entries);
+    
+    // Buat options baru dengan key A, B, C, D
+    const newOptions = {};
+    const newKeys = ['A', 'B', 'C', 'D'];
+    let newCorrect = '';
+    
+    shuffled.forEach((item, index) => {
+      const newKey = newKeys[index];
+      newOptions[newKey] = item.text;
+      if (item.isCorrect) {
+        newCorrect = newKey;
+      }
+    });
+    
+    return {
+      options: newOptions,
+      correct: newCorrect
+    };
   }
   
   // ==================== ALARM ====================
@@ -577,12 +612,10 @@ export class GameServer {
     try {
       const oldRoom = this.clientRooms.get(wsId);
       
-      // ✅ JIKA SUDAH DI ROOM YANG SAMA, SKIP
       if (oldRoom === roomName) {
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
         this._sendGameStatusToWs(ws, roomName);
         
-        // ✅ TAPI TETAP KIRIM INFO QUIZ JIKA DI QUIZ_ROOM
         if (roomName === QUIZ_ROOM) {
           if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
             await this._loadQuestionsFromKV();
@@ -598,7 +631,6 @@ export class GameServer {
         return;
       }
       
-      // ✅ PINDAH KE ROOM BARU
       if (oldRoom) {
         this._removeClientFromRoom(oldRoom, wsId);
       }
@@ -619,7 +651,6 @@ export class GameServer {
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
       this._sendGameStatusToWs(ws, roomName);
       
-      // ✅ JIKA PINDAH KE QUIZ_ROOM
       if (roomName === QUIZ_ROOM) {
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
           await this._loadQuestionsFromKV();
@@ -635,7 +666,6 @@ export class GameServer {
       }
       
     } finally {
-      // ✅ HAPUS LOCK SETELAH SELESAI
       this._switchLocks.delete(lockKey);
     }
   }
@@ -784,13 +814,27 @@ export class GameServer {
       const randomIndex = Math.floor(Math.random() * questions.length);
       const q = questions[randomIndex];
       
-      this.currentQuestion = q;
+      // ✅ SHUFFLE OPTIONS (RANDOM JAWABAN)
+      const shuffled = this._shuffleQuestionOptions(q);
+      
+      // ✅ SIMPAN DENGAN CORRECT BARU
+      this.currentQuestion = {
+        ...q,
+        options: shuffled.options,
+        correct: shuffled.correct
+      };
+      
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
       
-      await this._broadcastQuizQuestion(q.question, q.options);
+      // ✅ KIRIM DENGAN OPTIONS YANG SUDAH DI-SHUFFLE
+      await this._broadcastQuizQuestion(
+        this.currentQuestion.question,
+        this.currentQuestion.options
+      );
       
+      // ✅ TUNGGU 20 DETIK, BARU KIRIM WINNER
       setTimeout(() => {
         try {
           if (this.closing || this.isDestroyed) return;
@@ -885,6 +929,17 @@ export class GameServer {
     } catch(e) {
       this._safeSend(ws, ["quizError", e.message]);
     }
+  }
+  
+  // ==================== SHUFFLE ARRAY ====================
+  
+  _shuffleArray(array) {
+    const arr = [...array];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
   }
   
   // ==================== GAME HELPERS ====================
