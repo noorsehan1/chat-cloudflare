@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS (LENGKAP DENGAN KV) ====================
+// ==================== GAME-SERVER.JS (LENGKAP) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -21,12 +21,13 @@ const CONSTANTS = {
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
   QUIZ_INTERVAL_MS: 20000,
+  QUIZ_TIME_LIMIT_MS: 20000,
   TRANSLATE_LIMIT: 1000,
 };
 
 const QUIZ_ROOM = "LowCard 2";
 
-// ==================== FALLBACK QUESTIONS (JIKA KV KOSONG) ====================
+// ==================== FALLBACK QUESTIONS ====================
 const FALLBACK_QUESTIONS = [
   {
     question: "What is the capital of France?",
@@ -226,8 +227,6 @@ export class GameServer {
   
   async _loadQuestionsFromKV() {
     try {
-      console.log('📝 Loading questions from KV...');
-      
       const cached = await this.env.QUESTIONS.get('quiz_questions', 'json');
       
       if (cached && cached.questions && cached.questions.length > 0) {
@@ -238,17 +237,13 @@ export class GameServer {
           category: q.category || 'General',
           difficulty: q.difficulty || 'medium'
         }));
-        
-        console.log(`✅ Loaded ${this.quizQuestionCache['en'].length} questions from KV`);
         return true;
       }
       
-      console.log('⚠️ No questions in KV, using fallback');
       this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
       return false;
       
     } catch(e) {
-      console.log('❌ KV Error:', e.message);
       this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
       return false;
     }
@@ -262,7 +257,6 @@ export class GameServer {
       this._startQuizLoop();
       this._resetTranslateCounterDaily();
     } catch(e) {
-      console.log('❌ _initQuiz error:', e.message);
       this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
       setTimeout(() => this._initQuiz(), 5000);
     }
@@ -847,8 +841,9 @@ export class GameServer {
               message: "⏰ Time's up! No one answered correctly."
             }]);
           }
+          
         } catch(e) {}
-      }, 20000);
+      }, CONSTANTS.QUIZ_TIME_LIMIT_MS);
       
     } catch(e) {}
   }
@@ -875,7 +870,7 @@ export class GameServer {
         this._safeSend(ws, ["quizQuestion", {
           question: finalQuestion,
           options: finalOptions,
-          timeLimit: 20
+          timeLimit: CONSTANTS.QUIZ_TIME_LIMIT_MS / 1000
         }]);
       }
     }
