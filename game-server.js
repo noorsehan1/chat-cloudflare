@@ -1455,33 +1455,6 @@ export class GameServer {
     return arr;
   }
   
-  // ==================== QUIZ - LANGUAGE ====================
-  
-  async _setAutoLanguage(ws) {
-    const wsId = this._getWsId(ws);
-    if (!wsId) return;
-    
-    try {
-      if (this.languageDetected.get(wsId)) {
-        return;
-      }
-      
-      const language = 'en';
-      this.userLanguage.set(wsId, language);
-      this.languageDetected.set(wsId, true);
-      
-      this._safeSend(ws, ["quizAutoLanguage", {
-        language: language,
-        message: "Language: English"
-      }]);
-      
-    } catch(e) {}
-  }
-  
-  _getDominantLanguage() {
-    return 'en';
-  }
-  
   // ==================== QUIZ ====================
   
   _startQuizLoop() {
@@ -1577,18 +1550,18 @@ export class GameServer {
         return;
       }
       
-      if (!answer || !['A','B','C','D'].includes(answer.toUpperCase())) {
-        this._safeSend(ws, ["quizError", "Invalid answer! Use A, B, C, or D"]);
-        return;
-      }
+      // ✅ TIDAK ADA PENGECEKAN INVALID ANSWER
+      // LANGSUNG PROSES JAWABAN
+      const answerKey = answer.toUpperCase().trim();
       
-      const answerKey = answer.toUpperCase();
-      const isCorrect = answerKey === this.currentQuestion.correct;
+      // ✅ VALIDASI SEDERHANA - JIKA BUKAN A/B/C/D ANGGAP SALAH
+      const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
+      const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
       
       // ✅ BROADCAST JAWABAN KE SEMUA USER (REAL-TIME)
       this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", {
         username: username,
-        answer: answerKey,
+        answer: isValidAnswer ? answerKey : "?",
         isCorrect: isCorrect,
         correctAnswer: this.currentQuestion.correct
       }]);
