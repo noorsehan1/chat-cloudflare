@@ -20,8 +20,6 @@ const CONSTANTS = {
   STALE_GAME_TIMEOUT_MS: 600000,
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
-  
-  // ✅ QUIZ
   QUIZ_INTERVAL_MS: 15000,
 };
 
@@ -34,7 +32,7 @@ export class GameServer {
     this.closing = false;
     this.isDestroyed = false;
     
-    // ==================== GAME LOWCARD ====================
+    // GAME LOWCARD
     this.activeGames = new Map();
     this._maxGames = CONSTANTS.MAX_LOWCARD_GAMES;
     this._gameLocks = new Map();
@@ -54,7 +52,7 @@ export class GameServer {
     this._tikCounter = 0;
     this._gameStartFlags = new Map();
     
-    // ==================== QUIZ ====================
+    // QUIZ
     this.quizQuestions = [];
     this.quizAnswered = new Set();
     this.quizHasWinner = false;
@@ -64,11 +62,12 @@ export class GameServer {
     this.currentQuestion = null;
     this.quizQuestionPool = [];
     this.isFetching = false;
+    this.quizAnswerHistory = []; // Track semua jawaban
     
-    // ✅ AMBIL SOAL DARI TRIVIA
+    // AMBIL SOAL DARI TRIVIA
     this._fetchTriviaQuestions();
     
-    // ✅ QUIZ LANGSUNG JALAN!
+    // QUIZ LANGSUNG JALAN
     this._startQuizLoop();
     
     this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
@@ -1455,31 +1454,6 @@ export class GameServer {
         question: "What is the chemical symbol for water?",
         options: { A: "H2O", B: "CO2", C: "NaCl", D: "HCl" },
         correct: "A"
-      },
-      {
-        question: "What is the speed of light?",
-        options: { A: "300,000 km/s", B: "150,000 km/s", C: "500,000 km/s", D: "100,000 km/s" },
-        correct: "A"
-      },
-      {
-        question: "What is the smallest country in the world?",
-        options: { A: "Monaco", B: "Vatican City", C: "San Marino", D: "Liechtenstein" },
-        correct: "B"
-      },
-      {
-        question: "What does CPU stand for?",
-        options: { A: "Central Processing Unit", B: "Computer Personal Unit", C: "Central Program Utility", D: "Core Processing Unit" },
-        correct: "A"
-      },
-      {
-        question: "In which year did World War II end?",
-        options: { A: "1943", B: "1944", C: "1945", D: "1946" },
-        correct: "C"
-      },
-      {
-        question: "What is the longest river in the world?",
-        options: { A: "Amazon", B: "Nile", C: "Mississippi", D: "Yangtze" },
-        correct: "B"
       }
     ];
   }
@@ -1540,18 +1514,22 @@ export class GameServer {
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
+      this.quizAnswerHistory = [];
       
+      // Kirim pertanyaan ke semua client di quiz room
       this._broadcastToRoom(QUIZ_ROOM, ["quizQuestion", {
         question: q.question,
         options: q.options,
         timeLimit: 15
       }]);
       
+      // Timer untuk menutup quiz
       setTimeout(() => {
         try {
           if (this.closing || this.isDestroyed) return;
           
           if (this.quizHasWinner && this.quizWinner) {
+            // Kirim pemenang (HANYA 1 KALI)
             this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
               username: this.quizWinner,
               message: `🏆 ${this.quizWinner} is the first to answer correctly!`
@@ -1559,6 +1537,13 @@ export class GameServer {
           } else {
             this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
               message: "⏰ Time's up! No one answered correctly."
+            }]);
+          }
+          
+          // Kirim history jawaban (opsional)
+          if (this.quizAnswerHistory.length > 0) {
+            this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerHistory", {
+              answers: this.quizAnswerHistory
             }]);
           }
           
@@ -1593,19 +1578,53 @@ export class GameServer {
         return;
       }
       
-      this.quizAnswered.add(username);
+      const answerKey = answer.toUpperCase();
+      const isCorrect = answerKey === this.currentQuestion.correct;
       
-      const isCorrect = answer.toUpperCase() === this.currentQuestion.correct;
+      // Tambahkan ke history
+      this.quizAnswerHistory.push({
+        username: username,
+        answer: answerKey,
+        isCorrect: isCorrect,
+        timestamp: Date.now()
+      });
       
+      // Kirim hasil jawaban ke semua client (untuk info)
+      this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", {
+        username: username,
+        answer: answerKey,
+        isCorrect: isCorrect,
+        correctAnswer: this.currentQuestion.correct,
+        message: isCorrect ? "✅ Correct!" : "❌ Wrong!"
+      }]);
+      
+      // Kirim feedback ke user yang menjawab
+      const feedbackMsg = isCorrect ? 
+        "✅ Jawaban Anda benar!" : 
+        `❌ Jawaban Anda salah. Jawaban yang benar adalah ${this.currentQuestion.correct}`;
+      
+      this._safeSend(ws, ["quizAnswerFeedback", {
+        isCorrect: isCorrect,
+        correctAnswer: this.currentQuestion.correct,
+        message: feedbackMsg
+      }]);
+      
+      // Jika jawaban benar dan belum ada pemenang
       if (isCorrect && !this.quizHasWinner) {
         this.quizHasWinner = true;
         this.quizWinner = username;
         
+        // Kirim pemenang ke semua (HANYA 1 KALI)
+        // Ini juga akan dikirim oleh timer di _showQuestion
+        // Tapi kita kirim juga untuk immediate feedback
         this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
           username: username,
           message: `🏆 ${username} is the first to answer correctly!`
         }]);
       }
+      
+      // Tandai user sudah menjawab
+      this.quizAnswered.add(username);
       
     } catch(e) {
       this._safeSend(ws, ["quizError", e.message]);
@@ -1634,7 +1653,6 @@ export class GameServer {
         return;
       }
       
-      // ✅ CEK APAKAH ROOM LowCard 2?
       if (room === QUIZ_ROOM) {
         this._safeSend(ws, ["gameLowCardError", "❌ Cannot start game in LowCard 2. This room is for Quiz only!"]);
         return;
@@ -2118,7 +2136,7 @@ export class GameServer {
           await this.checkGameRunning(ws, data[1]);
           break;
         
-        // ✅ QUIZ
+        // QUIZ EVENTS
         case "submitQuizAnswer":
           await this.submitQuizAnswer(ws, data[1], data[2]);
           break;
