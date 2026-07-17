@@ -1,4 +1,4 @@
-// ==================== GAME SERVER - FULL CLASS (DENGAN KV) ====================
+// ==================== GAME-SERVER.JS (LENGKAP DENGAN KV) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -115,7 +115,6 @@ export class GameServer {
     this.currentQuestion = null;
     this.quizQuestionPool = [];
     this.isFetching = false;
-    this._quizTimeoutId = null; // ✅ Tambahan untuk timeout quiz
     
     this.quizQuestionCache = {};
     this.questionTranslations = new Map();
@@ -126,7 +125,6 @@ export class GameServer {
     this.userLanguage = new Map();
     this.userCountry = new Map();
     
-    // ✅ LOAD SOAL DARI KV
     this._initQuiz();
     
     this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
@@ -230,11 +228,9 @@ export class GameServer {
     try {
       console.log('📝 Loading questions from KV...');
       
-      // ✅ AMBIL DARI KV
       const cached = await this.env.QUESTIONS.get('quiz_questions', 'json');
       
       if (cached && cached.questions && cached.questions.length > 0) {
-        // Format ke format yang digunakan server
         this.quizQuestionCache['en'] = cached.questions.map(q => ({
           question: q.question,
           options: q.options,
@@ -244,18 +240,15 @@ export class GameServer {
         }));
         
         console.log(`✅ Loaded ${this.quizQuestionCache['en'].length} questions from KV`);
-        console.log(`📅 Fetched at: ${cached.fetchedAt}`);
-        console.log(`📂 Source: ${cached.source}`);
         return true;
       }
       
-      // ❌ Jika tidak ada di KV, pakai fallback
       console.log('⚠️ No questions in KV, using fallback');
       this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
       return false;
       
     } catch(e) {
-      console.log('❌ KV error:', e.message);
+      console.log('❌ KV Error:', e.message);
       this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
       return false;
     }
@@ -265,15 +258,9 @@ export class GameServer {
   
   async _initQuiz() {
     try {
-      // ✅ LOAD DARI KV
       await this._loadQuestionsFromKV();
-      
-      // ✅ START QUIZ LOOP
       this._startQuizLoop();
-      
-      // ✅ RESET COUNTER
       this._resetTranslateCounterDaily();
-      
     } catch(e) {
       console.log('❌ _initQuiz error:', e.message);
       this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
@@ -285,9 +272,7 @@ export class GameServer {
   
   async forceStartQuiz() {
     try {
-      // ✅ CEK APAKAH SOAL TERSEDIA
       if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
-        // Coba reload dari KV
         await this._loadQuestionsFromKV();
       }
       
@@ -295,13 +280,11 @@ export class GameServer {
         return { success: false, message: "No questions available" };
       }
       
-      // RESET STATE QUIZ
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
       this.currentQuestion = null;
       
-      // TAMPILKAN PERTANYAAN
       await this._showQuestion();
       
       return { 
@@ -676,14 +659,11 @@ export class GameServer {
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
       this._sendGameStatusToWs(ws, roomName);
       
-      // ✅ JIKA USER MASUK KE QUIZ_ROOM → FORCE START QUIZ
       if (roomName === QUIZ_ROOM) {
-        // Preload soal jika belum
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
           await this._loadQuestionsFromKV();
         }
         
-        // ✅ FORCE START QUIZ
         const result = await this.forceStartQuiz();
         
         if (result.success) {
@@ -842,23 +822,14 @@ export class GameServer {
       const randomIndex = Math.floor(Math.random() * questions.length);
       const q = questions[randomIndex];
       
-      // Reset state untuk pertanyaan baru
       this.currentQuestion = q;
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
       
-      // ✅ Broadcast pertanyaan
       await this._broadcastQuizQuestion(q.question, q.options);
       
-      // ✅ Hapus timeout sebelumnya jika ada
-      if (this._quizTimeoutId) {
-        clearTimeout(this._quizTimeoutId);
-        this._quizTimeoutId = null;
-      }
-      
-      // ✅ Set timeout untuk menampilkan hasil setelah 20 detik
-      this._quizTimeoutId = setTimeout(() => {
+      setTimeout(() => {
         try {
           if (this.closing || this.isDestroyed) return;
           
@@ -867,34 +838,19 @@ export class GameServer {
             return;
           }
           
-          // ✅ CEK APAKAH SUDAH ADA PEMENANG
           if (this.quizHasWinner && this.quizWinner) {
-            // Sudah ada pemenang, tidak perlu broadcast lagi
-            // Tapi kita tetap kirimkan jawaban benar untuk info
-            this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerReveal", {
-              correctAnswer: this.currentQuestion?.correct || null,
-              message: `✅ Correct answer: ${this.currentQuestion?.correct || 'Unknown'}`
+            this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
+              username: this.quizWinner
             }]);
-            return;
+          } else {
+            this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
+              message: "⏰ Time's up! No one answered correctly."
+            }]);
           }
-          
-          // ✅ TIDAK ADA PEMENANG - TAMPILKAN TIME'S UP
-          this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
-            message: "⏰ Time's up! No one answered correctly.",
-            correctAnswer: this.currentQuestion?.correct || null
-          }]);
-          
-          // Reset timeout ID
-          this._quizTimeoutId = null;
-          
-        } catch(e) {
-          console.error('Error in quiz timeout:', e);
-        }
-      }, 20000); // 20 detik
+        } catch(e) {}
+      }, 20000);
       
-    } catch(e) {
-      console.error('Error showing question:', e);
-    }
+    } catch(e) {}
   }
   
   async _broadcastQuizQuestion(question, options) {
@@ -953,7 +909,6 @@ export class GameServer {
       const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
       const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
       
-      // ✅ Broadcast hasil jawaban
       this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", {
         username: username,
         answer: isValidAnswer ? answerKey : "?",
@@ -963,22 +918,9 @@ export class GameServer {
       
       this.quizAnswered.add(username);
       
-      // ✅ JIKA BENAR DAN BELUM ADA PEMENANG
       if (isCorrect && !this.quizHasWinner) {
         this.quizHasWinner = true;
         this.quizWinner = username;
-        
-        // ✅ BATALKAN TIMEOUT KARENA SUDAH ADA PEMENANG
-        if (this._quizTimeoutId) {
-          clearTimeout(this._quizTimeoutId);
-          this._quizTimeoutId = null;
-        }
-        
-        // ✅ BROADCAST PEMENANG
-        this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
-          username: username,
-          correctAnswer: this.currentQuestion.correct
-        }]);
       }
       
     } catch(e) {
@@ -2132,7 +2074,6 @@ export class GameServer {
         server._createdAt = Date.now();
         server.username = null;
         
-        // ✅ DETEKSI BAHASA DARI CLOUDFLARE
         const cf = req.cf;
         let country = 'US';
         if (cf && cf.country) {
@@ -2277,10 +2218,6 @@ export class GameServer {
       if (this.quizTimer) {
         clearInterval(this.quizTimer);
         this.quizTimer = null;
-      }
-      if (this._quizTimeoutId) {
-        clearTimeout(this._quizTimeoutId);
-        this._quizTimeoutId = null;
       }
       for (const [room, game] of this.activeGames) {
         this._cleanupGame(game);
