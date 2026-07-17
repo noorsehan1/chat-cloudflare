@@ -1,4 +1,4 @@
-// ==================== GAME SERVER - FULL CLASS (WORKING) ====================
+// ==================== GAME SERVER - FULL CLASS ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -134,9 +134,7 @@ export class GameServer {
     this.userLanguage = new Map();
     this.userCountry = new Map();
     
-    this._preloadQuestions();
-    this._startQuizLoop();
-    this._resetTranslateCounterDaily();
+    this._initQuiz();
     
     this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
   }
@@ -289,16 +287,13 @@ export class GameServer {
   
   async _preloadQuestions() {
     try {
-      // Coba ambil dari API
       const englishQuestions = await this._fetchQuestionsFromAPI('en');
       if (englishQuestions && englishQuestions.length > 0) {
         this.quizQuestionCache['en'] = englishQuestions;
       } else {
-        // FALLBACK: pakai soal bawaan
         this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
       }
     } catch(e) {
-      // FALLBACK: pakai soal bawaan
       this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
     }
   }
@@ -310,6 +305,18 @@ export class GameServer {
       [arr[i], arr[j]] = [arr[j], arr[i]];
     }
     return arr;
+  }
+  
+  // ==================== INIT QUIZ ====================
+  
+  async _initQuiz() {
+    try {
+      await this._preloadQuestions();
+      this._startQuizLoop();
+      this._resetTranslateCounterDaily();
+    } catch(e) {
+      setTimeout(() => this._initQuiz(), 5000);
+    }
   }
   
   // ==================== ALARM ====================
@@ -648,9 +655,6 @@ export class GameServer {
       if (oldRoom === roomName) {
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
         this._sendGameStatusToWs(ws, roomName);
-        if (roomName === QUIZ_ROOM) {
-          this._safeSend(ws, ["quizInfo", "🎯 Welcome to LowCard 2! Quiz is running!"]);
-        }
         return;
       }
       if (oldRoom) {
@@ -669,9 +673,6 @@ export class GameServer {
       this._broadcastToRoom(roomName, ["roomUserJoined", username || "Anonymous"]);
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
       this._sendGameStatusToWs(ws, roomName);
-      if (roomName === QUIZ_ROOM) {
-        this._safeSend(ws, ["quizInfo", "🎯 Welcome to LowCard 2! Quiz is running!"]);
-      }
     } finally {
       this._switchLocks.delete(lockKey);
     }
@@ -770,7 +771,87 @@ export class GameServer {
     }
   }
   
-  // ==================== BROADCAST QUIZ ====================
+  // ==================== QUIZ ====================
+  
+  _startQuizLoop() {
+    if (this.quizTimer) {
+      clearInterval(this.quizTimer);
+      this.quizTimer = null;
+    }
+    
+    this.quizTimer = setInterval(() => {
+      try {
+        if (this.closing || this.isDestroyed) return;
+        
+        const clients = this.wsClients.get(QUIZ_ROOM);
+        if (!clients || clients.size === 0) {
+          return;
+        }
+        
+        if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
+          this._preloadQuestions().then(() => {
+            if (this.quizQuestionCache['en'] && this.quizQuestionCache['en'].length > 0) {
+              this._showQuestion();
+            }
+          });
+          return;
+        }
+        
+        this._showQuestion();
+        
+      } catch(e) {}
+    }, CONSTANTS.QUIZ_INTERVAL_MS);
+  }
+  
+  async _showQuestion() {
+    try {
+      if (this.isDestroyed) return;
+      
+      const clients = this.wsClients.get(QUIZ_ROOM);
+      if (!clients || clients.size === 0) {
+        return;
+      }
+      
+      let questions = this.quizQuestionCache['en'];
+      if (!questions || questions.length === 0) {
+        await this._preloadQuestions();
+        questions = this.quizQuestionCache['en'];
+        if (!questions || questions.length === 0) return;
+      }
+      
+      const randomIndex = Math.floor(Math.random() * questions.length);
+      const q = questions[randomIndex];
+      
+      this.currentQuestion = q;
+      this.quizAnswered = new Set();
+      this.quizHasWinner = false;
+      this.quizWinner = null;
+      
+      await this._broadcastQuizQuestion(q.question, q.options);
+      
+      setTimeout(() => {
+        try {
+          if (this.closing || this.isDestroyed) return;
+          
+          const currentClients = this.wsClients.get(QUIZ_ROOM);
+          if (!currentClients || currentClients.size === 0) {
+            return;
+          }
+          
+          if (this.quizHasWinner && this.quizWinner) {
+            this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
+              username: this.quizWinner
+            }]);
+          } else {
+            this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
+              message: "⏰ Time's up! No one answered correctly."
+            }]);
+          }
+        } catch(e) {}
+      }, 20000);
+      
+    } catch(e) {}
+  }
   
   async _broadcastQuizQuestion(question, options) {
     const wsIds = this.wsClients.get(QUIZ_ROOM);
@@ -794,12 +875,56 @@ export class GameServer {
         this._safeSend(ws, ["quizQuestion", {
           question: finalQuestion,
           options: finalOptions,
-          timeLimit: 20,
-          originalLanguage: 'en',
-          userLanguage: lang,
-          translated: lang !== 'en' && !this.translateLimitReached
+          timeLimit: 20
         }]);
       }
+    }
+  }
+  
+  async submitQuizAnswer(ws, username, answer) {
+    try {
+      const room = this._ensureRoomConsistency(ws);
+      if (room !== QUIZ_ROOM) {
+        this._safeSend(ws, ["quizError", "Quiz only in LowCard 2"]);
+        return;
+      }
+      
+      const clients = this.wsClients.get(QUIZ_ROOM);
+      if (!clients || clients.size === 0) {
+        this._safeSend(ws, ["quizError", "Quiz is paused"]);
+        return;
+      }
+      
+      if (!this.currentQuestion) {
+        this._safeSend(ws, ["quizError", "No active question"]);
+        return;
+      }
+      
+      if (this.quizAnswered.has(username)) {
+        this._safeSend(ws, ["quizError", "You already answered!"]);
+        return;
+      }
+      
+      const answerKey = answer.toUpperCase().trim();
+      const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
+      const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
+      
+      this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", {
+        username: username,
+        answer: isValidAnswer ? answerKey : "?",
+        isCorrect: isCorrect,
+        correctAnswer: this.currentQuestion.correct
+      }]);
+      
+      this.quizAnswered.add(username);
+      
+      if (isCorrect && !this.quizHasWinner) {
+        this.quizHasWinner = true;
+        this.quizWinner = username;
+      }
+      
+    } catch(e) {
+      this._safeSend(ws, ["quizError", e.message]);
     }
   }
   
@@ -1476,106 +1601,6 @@ export class GameServer {
     }
   }
   
-  // ==================== QUIZ ====================
-  
-  _startQuizLoop() {
-    if (this.quizTimer) {
-      clearInterval(this.quizTimer);
-      this.quizTimer = null;
-    }
-    this.quizTimer = setInterval(() => {
-      try {
-        if (this.closing || this.isDestroyed) return;
-        const clients = this.wsClients.get(QUIZ_ROOM);
-        if (!clients || clients.size === 0) return;
-        this._showQuestion();
-      } catch(e) {}
-    }, CONSTANTS.QUIZ_INTERVAL_MS);
-  }
-  
-  async _showQuestion() {
-    try {
-      if (this.isDestroyed) return;
-      const clients = this.wsClients.get(QUIZ_ROOM);
-      if (!clients || clients.size === 0) return;
-      
-      let questions = this.quizQuestionCache['en'];
-      if (!questions || questions.length === 0) {
-        await this._preloadQuestions();
-        questions = this.quizQuestionCache['en'];
-        if (!questions || questions.length === 0) return;
-      }
-      
-      const randomIndex = Math.floor(Math.random() * questions.length);
-      const q = questions[randomIndex];
-      
-      this.currentQuestion = q;
-      this.quizAnswered = new Set();
-      this.quizHasWinner = false;
-      this.quizWinner = null;
-      
-      await this._broadcastQuizQuestion(q.question, q.options);
-      
-      setTimeout(() => {
-        try {
-          if (this.closing || this.isDestroyed) return;
-          const currentClients = this.wsClients.get(QUIZ_ROOM);
-          if (!currentClients || currentClients.size === 0) return;
-          if (this.quizHasWinner && this.quizWinner) {
-            this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
-              username: this.quizWinner
-            }]);
-          } else {
-            this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
-              message: "⏰ Time's up! No one answered correctly."
-            }]);
-          }
-        } catch(e) {}
-      }, 20000);
-    } catch(e) {}
-  }
-  
-  async submitQuizAnswer(ws, username, answer) {
-    try {
-      const room = this._ensureRoomConsistency(ws);
-      if (room !== QUIZ_ROOM) {
-        this._safeSend(ws, ["quizError", "Quiz only in LowCard 2"]);
-        return;
-      }
-      const clients = this.wsClients.get(QUIZ_ROOM);
-      if (!clients || clients.size === 0) {
-        this._safeSend(ws, ["quizError", "Quiz is paused"]);
-        return;
-      }
-      if (!this.currentQuestion) {
-        this._safeSend(ws, ["quizError", "No active question"]);
-        return;
-      }
-      if (this.quizAnswered.has(username)) {
-        this._safeSend(ws, ["quizError", "You already answered!"]);
-        return;
-      }
-      const answerKey = answer.toUpperCase().trim();
-      const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
-      const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
-      
-      this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", {
-        username: username,
-        answer: isValidAnswer ? answerKey : "?",
-        isCorrect: isCorrect,
-        correctAnswer: this.currentQuestion.correct
-      }]);
-      
-      this.quizAnswered.add(username);
-      if (isCorrect && !this.quizHasWinner) {
-        this.quizHasWinner = true;
-        this.quizWinner = username;
-      }
-    } catch(e) {
-      this._safeSend(ws, ["quizError", e.message]);
-    }
-  }
-  
   // ==================== GAME LOWCARD ====================
   
   async startGame(ws, bet, username) {
@@ -2033,6 +2058,8 @@ export class GameServer {
         server.roomname = null;
         server._createdAt = Date.now();
         server.username = null;
+        
+        // ✅ DETEKSI BAHASA DARI CLOUDFLARE
         const cf = req.cf;
         let country = 'US';
         if (cf && cf.country) {
@@ -2042,11 +2069,7 @@ export class GameServer {
         const lang = this._countryToLanguage(country);
         this.userLanguage.set(wsId, lang);
         this.userCountry.set(wsId, country);
-        this._safeSend(server, ["quizAutoLanguage", {
-          country: country,
-          language: lang,
-          message: `Detected: ${country} → ${lang}`
-        }]);
+        
         server.addEventListener("message", async (event) => {
           try {
             const data = JSON.parse(event.data);
@@ -2056,6 +2079,7 @@ export class GameServer {
             this._safeSend(server, ["gameLowCardError", e.message || "Error"]);
           }
         });
+        
         server.addEventListener("close", () => {
           try {
             if (server.room || server.roomname) {
@@ -2074,6 +2098,7 @@ export class GameServer {
             }
           } catch(e) {}
         });
+        
         server.addEventListener("error", () => {
           try {
             if (server.room || server.roomname) {
@@ -2092,6 +2117,7 @@ export class GameServer {
             }
           } catch(e) {}
         });
+        
         return new Response(null, { status: 101, webSocket: client });
       }
       return new Response("Game Server", { status: 200 });
