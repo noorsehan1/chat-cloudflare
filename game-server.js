@@ -1585,12 +1585,20 @@ export class GameServer {
       const answerKey = answer.toUpperCase();
       const isCorrect = answerKey === this.currentQuestion.correct;
       
+      // ✅ BROADCAST JAWABAN KE SEMUA USER (REAL-TIME)
+      this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", {
+        username: username,
+        answer: answerKey,
+        isCorrect: isCorrect,
+        correctAnswer: this.currentQuestion.correct
+      }]);
+      
+      this.quizAnswered.add(username);
+      
       if (isCorrect && !this.quizHasWinner) {
         this.quizHasWinner = true;
         this.quizWinner = username;
       }
-      
-      this.quizAnswered.add(username);
       
     } catch(e) {
       this._safeSend(ws, ["quizError", e.message]);
