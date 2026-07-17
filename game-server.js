@@ -1,4 +1,4 @@
-// ==================== GAME SERVER - FULL CLASS ====================
+// ==================== GAME SERVER - FULL CLASS (WORKING) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -28,26 +28,66 @@ const QUIZ_ROOM = "LowCard 2";
 
 // ==================== BAHASA YANG DIDUKUNG TRIVIA API ====================
 const SUPPORTED_LANGUAGES = {
-  'en': 'en',
-  'de': 'de',
-  'es': 'es',
-  'fr': 'fr',
-  'it': 'it',
-  'ja': 'ja',
-  'ko': 'ko',
-  'pt': 'pt',
-  'ru': 'ru',
-  'zh': 'zh-CN',
-  'nl': 'nl',
-  'pl': 'pl',
-  'el': 'el',
-  'he': 'he',
-  'sw': 'sw',
-  'th': 'th',
-  'tr': 'tr',
-  'ur': 'ur',
-  'vi': 'vi'
+  'en': 'en', 'de': 'de', 'es': 'es', 'fr': 'fr',
+  'it': 'it', 'ja': 'ja', 'ko': 'ko', 'pt': 'pt',
+  'ru': 'ru', 'zh': 'zh-CN', 'nl': 'nl', 'pl': 'pl',
+  'el': 'el', 'he': 'he', 'sw': 'sw', 'th': 'th',
+  'tr': 'tr', 'ur': 'ur', 'vi': 'vi'
 };
+
+// ==================== FALLBACK QUESTIONS ====================
+const FALLBACK_QUESTIONS = [
+  {
+    question: "What is the capital of France?",
+    options: { A: "London", B: "Paris", C: "Berlin", D: "Madrid" },
+    correct: "B"
+  },
+  {
+    question: "Which planet is known as the Red Planet?",
+    options: { A: "Venus", B: "Jupiter", C: "Mars", D: "Saturn" },
+    correct: "C"
+  },
+  {
+    question: "What is the largest ocean on Earth?",
+    options: { A: "Atlantic", B: "Indian", C: "Arctic", D: "Pacific" },
+    correct: "D"
+  },
+  {
+    question: "Who wrote 'Romeo and Juliet'?",
+    options: { A: "Charles Dickens", B: "William Shakespeare", C: "Mark Twain", D: "Jane Austen" },
+    correct: "B"
+  },
+  {
+    question: "What is the chemical symbol for water?",
+    options: { A: "H2O", B: "CO2", C: "NaCl", D: "HCl" },
+    correct: "A"
+  },
+  {
+    question: "What is the tallest mountain in the world?",
+    options: { A: "K2", B: "Mount Everest", C: "Kangchenjunga", D: "Lhotse" },
+    correct: "B"
+  },
+  {
+    question: "Which country has the largest population?",
+    options: { A: "India", B: "China", C: "United States", D: "Indonesia" },
+    correct: "A"
+  },
+  {
+    question: "What is the smallest country in the world?",
+    options: { A: "Monaco", B: "Vatican City", C: "San Marino", D: "Liechtenstein" },
+    correct: "B"
+  },
+  {
+    question: "Who painted the Mona Lisa?",
+    options: { A: "Michelangelo", B: "Leonardo da Vinci", C: "Raphael", D: "Donatello" },
+    correct: "B"
+  },
+  {
+    question: "What is the speed of light?",
+    options: { A: "300,000 km/s", B: "150,000 km/s", C: "500,000 km/s", D: "100,000 km/s" },
+    correct: "A"
+  }
+];
 
 export class GameServer {
   constructor(state, env) {
@@ -247,69 +287,20 @@ export class GameServer {
     }
   }
   
-  async _getQuestionsForUser(language) {
-    // 1. CEK APAKAH BAHASA DIDUKUNG TRIVIA API
-    if (this._isLanguageSupportedByTrivia(language)) {
-      // Coba ambil dari API
-      let questions = await this._fetchQuestionsFromAPI(language);
-      if (questions && questions.length > 0) {
-        return { source: 'api', questions: questions };
-      }
-    }
-    
-    // 2. BAHASA TIDAK DIDUKUNG ATAU API GAGAL → PAKAI TRANSLATE
-    const englishQuestions = await this._fetchQuestionsFromAPI('en');
-    if (!englishQuestions || englishQuestions.length === 0) {
-      return { source: 'none', questions: null };
-    }
-    
-    if (language === 'en') {
-      return { source: 'api', questions: englishQuestions };
-    }
-    
-    // 3. TRANSLATE KE BAHASA USER
-    const translatedQuestions = [];
-    for (const q of englishQuestions) {
-      try {
-        const translatedQ = {
-          question: await this._translateText(q.question, language),
-          options: {},
-          correct: q.correct,
-          category: q.category,
-          difficulty: q.difficulty
-        };
-        for (const key of ['A', 'B', 'C', 'D']) {
-          if (q.options[key]) {
-            translatedQ.options[key] = await this._translateText(q.options[key], language);
-          }
-        }
-        translatedQuestions.push(translatedQ);
-      } catch(e) {
-        translatedQuestions.push(q);
-      }
-    }
-    
-    return { source: 'translate', questions: translatedQuestions };
-  }
-  
   async _preloadQuestions() {
     try {
+      // Coba ambil dari API
       const englishQuestions = await this._fetchQuestionsFromAPI('en');
       if (englishQuestions && englishQuestions.length > 0) {
         this.quizQuestionCache['en'] = englishQuestions;
+      } else {
+        // FALLBACK: pakai soal bawaan
+        this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
       }
-      
-      // Preload bahasa yang didukung API
-      const supportedLangs = ['de', 'es', 'fr', 'it', 'ja', 'ko', 'pt', 'ru', 'zh'];
-      for (const lang of supportedLangs) {
-        try {
-          const questions = await this._fetchQuestionsFromAPI(lang);
-          if (questions && questions.length > 0) {
-            this.quizQuestionCache[lang] = questions;
-          }
-        } catch(e) {}
-      }
-    } catch(e) {}
+    } catch(e) {
+      // FALLBACK: pakai soal bawaan
+      this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
+    }
   }
   
   _shuffleArray(array) {
@@ -793,37 +784,11 @@ export class GameServer {
         let finalQuestion = question;
         let finalOptions = options;
         
-        // CEK: apakah bahasa didukung Trivia?
-        if (this._isLanguageSupportedByTrivia(lang)) {
-          // Jika didukung, coba ambil dari cache bahasa tersebut
-          if (this.quizQuestionCache[lang] && this.quizQuestionCache[lang].length > 0) {
-            // Gunakan soal dari cache bahasa tersebut (tidak perlu translate)
-            const cachedQuestions = this.quizQuestionCache[lang];
-            const randomIndex = Math.floor(Math.random() * cachedQuestions.length);
-            const q = cachedQuestions[randomIndex];
-            finalQuestion = q.question;
-            finalOptions = q.options;
-          } else {
-            // Jika belum ada cache, ambil dari API
-            const result = await this._getQuestionsForUser(lang);
-            if (result && result.questions && result.questions.length > 0) {
-              if (result.source === 'api') {
-                // Dari API langsung
-                const randomIndex = Math.floor(Math.random() * result.questions.length);
-                const q = result.questions[randomIndex];
-                finalQuestion = q.question;
-                finalOptions = q.options;
-              } else {
-                // Dari translate
-                finalQuestion = await this._translateText(question, lang);
-                finalOptions = await this._translateOptions(options, lang);
-              }
-            }
-          }
-        } else {
-          // BAHASA TIDAK DIDUKUNG TRIVIA → PAKAI TRANSLATE
-          finalQuestion = await this._translateText(question, lang);
-          finalOptions = await this._translateOptions(options, lang);
+        if (lang !== 'en' && !this.translateLimitReached) {
+          try {
+            finalQuestion = await this._translateText(question, lang);
+            finalOptions = await this._translateOptions(options, lang);
+          } catch(e) {}
         }
         
         this._safeSend(ws, ["quizQuestion", {
@@ -832,7 +797,7 @@ export class GameServer {
           timeLimit: 20,
           originalLanguage: 'en',
           userLanguage: lang,
-          translated: lang !== 'en'
+          translated: lang !== 'en' && !this.translateLimitReached
         }]);
       }
     }
@@ -1528,14 +1493,18 @@ export class GameServer {
     }, CONSTANTS.QUIZ_INTERVAL_MS);
   }
   
-  _showQuestion() {
+  async _showQuestion() {
     try {
       if (this.isDestroyed) return;
       const clients = this.wsClients.get(QUIZ_ROOM);
       if (!clients || clients.size === 0) return;
       
-      const questions = this.quizQuestionCache['en'];
-      if (!questions || questions.length === 0) return;
+      let questions = this.quizQuestionCache['en'];
+      if (!questions || questions.length === 0) {
+        await this._preloadQuestions();
+        questions = this.quizQuestionCache['en'];
+        if (!questions || questions.length === 0) return;
+      }
       
       const randomIndex = Math.floor(Math.random() * questions.length);
       const q = questions[randomIndex];
@@ -1545,7 +1514,7 @@ export class GameServer {
       this.quizHasWinner = false;
       this.quizWinner = null;
       
-      this._broadcastQuizQuestion(q.question, q.options);
+      await this._broadcastQuizQuestion(q.question, q.options);
       
       setTimeout(() => {
         try {
@@ -1589,12 +1558,14 @@ export class GameServer {
       const answerKey = answer.toUpperCase().trim();
       const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
       const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
+      
       this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", {
         username: username,
         answer: isValidAnswer ? answerKey : "?",
         isCorrect: isCorrect,
         correctAnswer: this.currentQuestion.correct
       }]);
+      
       this.quizAnswered.add(username);
       if (isCorrect && !this.quizHasWinner) {
         this.quizHasWinner = true;
