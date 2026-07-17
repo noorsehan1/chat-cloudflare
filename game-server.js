@@ -115,6 +115,7 @@ export class GameServer {
     this.currentQuestion = null;
     this.quizQuestionPool = [];
     this.isFetching = false;
+    this._quizTimeoutId = null; // ✅ Tambahan untuk timeout quiz
     
     this.quizQuestionCache = {};
     this.questionTranslations = new Map();
@@ -841,14 +842,23 @@ export class GameServer {
       const randomIndex = Math.floor(Math.random() * questions.length);
       const q = questions[randomIndex];
       
+      // Reset state untuk pertanyaan baru
       this.currentQuestion = q;
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
       
+      // ✅ Broadcast pertanyaan
       await this._broadcastQuizQuestion(q.question, q.options);
       
-      setTimeout(() => {
+      // ✅ Hapus timeout sebelumnya jika ada
+      if (this._quizTimeoutId) {
+        clearTimeout(this._quizTimeoutId);
+        this._quizTimeoutId = null;
+      }
+      
+      // ✅ Set timeout untuk menampilkan hasil setelah 20 detik
+      this._quizTimeoutId = setTimeout(() => {
         try {
           if (this.closing || this.isDestroyed) return;
           
@@ -857,19 +867,34 @@ export class GameServer {
             return;
           }
           
+          // ✅ CEK APAKAH SUDAH ADA PEMENANG
           if (this.quizHasWinner && this.quizWinner) {
-            this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
-              username: this.quizWinner
+            // Sudah ada pemenang, tidak perlu broadcast lagi
+            // Tapi kita tetap kirimkan jawaban benar untuk info
+            this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerReveal", {
+              correctAnswer: this.currentQuestion?.correct || null,
+              message: `✅ Correct answer: ${this.currentQuestion?.correct || 'Unknown'}`
             }]);
-          } else {
-            this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
-              message: "⏰ Time's up! No one answered correctly."
-            }]);
+            return;
           }
-        } catch(e) {}
-      }, 20000);
+          
+          // ✅ TIDAK ADA PEMENANG - TAMPILKAN TIME'S UP
+          this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
+            message: "⏰ Time's up! No one answered correctly.",
+            correctAnswer: this.currentQuestion?.correct || null
+          }]);
+          
+          // Reset timeout ID
+          this._quizTimeoutId = null;
+          
+        } catch(e) {
+          console.error('Error in quiz timeout:', e);
+        }
+      }, 20000); // 20 detik
       
-    } catch(e) {}
+    } catch(e) {
+      console.error('Error showing question:', e);
+    }
   }
   
   async _broadcastQuizQuestion(question, options) {
@@ -928,6 +953,7 @@ export class GameServer {
       const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
       const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
       
+      // ✅ Broadcast hasil jawaban
       this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", {
         username: username,
         answer: isValidAnswer ? answerKey : "?",
@@ -937,9 +963,22 @@ export class GameServer {
       
       this.quizAnswered.add(username);
       
+      // ✅ JIKA BENAR DAN BELUM ADA PEMENANG
       if (isCorrect && !this.quizHasWinner) {
         this.quizHasWinner = true;
         this.quizWinner = username;
+        
+        // ✅ BATALKAN TIMEOUT KARENA SUDAH ADA PEMENANG
+        if (this._quizTimeoutId) {
+          clearTimeout(this._quizTimeoutId);
+          this._quizTimeoutId = null;
+        }
+        
+        // ✅ BROADCAST PEMENANG
+        this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
+          username: username,
+          correctAnswer: this.currentQuestion.correct
+        }]);
       }
       
     } catch(e) {
@@ -2238,6 +2277,10 @@ export class GameServer {
       if (this.quizTimer) {
         clearInterval(this.quizTimer);
         this.quizTimer = null;
+      }
+      if (this._quizTimeoutId) {
+        clearTimeout(this._quizTimeoutId);
+        this._quizTimeoutId = null;
       }
       for (const [room, game] of this.activeGames) {
         this._cleanupGame(game);
