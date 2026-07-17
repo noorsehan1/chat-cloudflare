@@ -27,60 +27,6 @@ const CONSTANTS = {
 
 const QUIZ_ROOM = "LowCard 2";
 
-// ==================== FALLBACK QUESTIONS ====================
-const FALLBACK_QUESTIONS = [
-  {
-    question: "What is the capital of France?",
-    options: { A: "London", B: "Paris", C: "Berlin", D: "Madrid" },
-    correct: "B"
-  },
-  {
-    question: "Which planet is known as the Red Planet?",
-    options: { A: "Venus", B: "Jupiter", C: "Mars", D: "Saturn" },
-    correct: "C"
-  },
-  {
-    question: "What is the largest ocean on Earth?",
-    options: { A: "Atlantic", B: "Indian", C: "Arctic", D: "Pacific" },
-    correct: "D"
-  },
-  {
-    question: "Who wrote 'Romeo and Juliet'?",
-    options: { A: "Charles Dickens", B: "William Shakespeare", C: "Mark Twain", D: "Jane Austen" },
-    correct: "B"
-  },
-  {
-    question: "What is the chemical symbol for water?",
-    options: { A: "H2O", B: "CO2", C: "NaCl", D: "HCl" },
-    correct: "A"
-  },
-  {
-    question: "What is the tallest mountain in the world?",
-    options: { A: "K2", B: "Mount Everest", C: "Kangchenjunga", D: "Lhotse" },
-    correct: "B"
-  },
-  {
-    question: "Which country has the largest population?",
-    options: { A: "India", B: "China", C: "United States", D: "Indonesia" },
-    correct: "A"
-  },
-  {
-    question: "What is the smallest country in the world?",
-    options: { A: "Monaco", B: "Vatican City", C: "San Marino", D: "Liechtenstein" },
-    correct: "B"
-  },
-  {
-    question: "Who painted the Mona Lisa?",
-    options: { A: "Michelangelo", B: "Leonardo da Vinci", C: "Raphael", D: "Donatello" },
-    correct: "B"
-  },
-  {
-    question: "What is the speed of light?",
-    options: { A: "300,000 km/s", B: "150,000 km/s", C: "500,000 km/s", D: "100,000 km/s" },
-    correct: "A"
-  }
-];
-
 export class GameServer {
   constructor(state, env) {
     this.state = state;
@@ -240,11 +186,9 @@ export class GameServer {
         return true;
       }
       
-      this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
       return false;
       
     } catch(e) {
-      this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
       return false;
     }
   }
@@ -253,11 +197,14 @@ export class GameServer {
   
   async _initQuiz() {
     try {
-      await this._loadQuestionsFromKV();
-      this._startQuizLoop();
-      this._resetTranslateCounterDaily();
+      const loaded = await this._loadQuestionsFromKV();
+      if (loaded) {
+        this._startQuizLoop();
+        this._resetTranslateCounterDaily();
+      } else {
+        setTimeout(() => this._initQuiz(), 5000);
+      }
     } catch(e) {
-      this.quizQuestionCache['en'] = FALLBACK_QUESTIONS;
       setTimeout(() => this._initQuiz(), 5000);
     }
   }
@@ -611,12 +558,15 @@ export class GameServer {
       this._safeSend(ws, ["gameLowCardError", "Invalid room name"]);
       return;
     }
+    
     const roomName = room.trim();
     const wsId = this._getWsId(ws);
+    
     if (!wsId) {
       this._safeSend(ws, ["gameLowCardError", "Connection error"]);
       return;
     }
+    
     const lockKey = `switch_${wsId}`;
     if (this._switchLocks.has(lockKey)) {
       this._safeSend(ws, ["switchRoomBusy", "Please wait..."]);
@@ -627,12 +577,28 @@ export class GameServer {
     try {
       const oldRoom = this.clientRooms.get(wsId);
       
+      // ✅ JIKA SUDAH DI ROOM YANG SAMA, SKIP
       if (oldRoom === roomName) {
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
         this._sendGameStatusToWs(ws, roomName);
+        
+        // ✅ TAPI TETAP KIRIM INFO QUIZ JIKA DI QUIZ_ROOM
+        if (roomName === QUIZ_ROOM) {
+          if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
+            await this._loadQuestionsFromKV();
+          }
+          
+          const result = await this.forceStartQuiz();
+          if (result.success) {
+            this._safeSend(ws, ["quizInfo", "🎯 Quiz started! " + result.questions + " questions loaded."]);
+          } else {
+            this._safeSend(ws, ["quizError", "Failed to start quiz: " + result.message]);
+          }
+        }
         return;
       }
       
+      // ✅ PINDAH KE ROOM BARU
       if (oldRoom) {
         this._removeClientFromRoom(oldRoom, wsId);
       }
@@ -653,6 +619,7 @@ export class GameServer {
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
       this._sendGameStatusToWs(ws, roomName);
       
+      // ✅ JIKA PINDAH KE QUIZ_ROOM
       if (roomName === QUIZ_ROOM) {
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
           await this._loadQuestionsFromKV();
@@ -668,6 +635,7 @@ export class GameServer {
       }
       
     } finally {
+      // ✅ HAPUS LOCK SETELAH SELESAI
       this._switchLocks.delete(lockKey);
     }
   }
@@ -835,10 +803,6 @@ export class GameServer {
           if (this.quizHasWinner && this.quizWinner) {
             this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
               username: this.quizWinner
-            }]);
-          } else {
-            this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
-              message: "⏰ Time's up! No one answered correctly."
             }]);
           }
           
