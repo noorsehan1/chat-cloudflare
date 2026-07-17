@@ -11,3 +11,8 @@ bindings = [
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ChatServer", "GameServer"]
+
+# ==================== KV STORAGE UNTUK SOAL QUIZ ====================
+[[kv_namespaces]]
+binding = "QUESTIONS"
+id = "381322b49e234aa7a5d5609b4351c31b"
