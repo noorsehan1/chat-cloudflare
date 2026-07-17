@@ -32,16 +32,17 @@ export class GameServer {
     this.closing = false;
     this.isDestroyed = false;
     
-    this.activeGames = new Map();
+    // ==================== GAME LOWCARD (MULTI-ROOM) ====================
+    this.activeGames = new Map(); // Key: roomName, Value: game object
     this._maxGames = CONSTANTS.MAX_LOWCARD_GAMES;
     this._gameLocks = new Map();
     this._joinLocks = new Map();
     this._switchLocks = new Map();
     
     this._wsIdCounter = 0;
-    this.wsClients = new Map();
-    this.clientRooms = new Map();
-    this.wsMap = new Map();
+    this.wsClients = new Map(); // Key: roomName, Value: Set of wsId
+    this.clientRooms = new Map(); // Key: wsId, Value: roomName
+    this.wsMap = new Map(); // Key: wsId, Value: WebSocket
     this.roomViewers = new Map();
     this.userConnections = new Map();
     this.connectionLocks = new Map();
@@ -51,6 +52,7 @@ export class GameServer {
     this._tikCounter = 0;
     this._gameStartFlags = new Map();
     
+    // ==================== QUIZ ====================
     this.quizQuestions = [];
     this.quizAnswered = new Set();
     this.quizHasWinner = false;
@@ -1550,15 +1552,10 @@ export class GameServer {
         return;
       }
       
-      // ✅ TIDAK ADA PENGECEKAN INVALID ANSWER
-      // LANGSUNG PROSES JAWABAN
       const answerKey = answer.toUpperCase().trim();
-      
-      // ✅ VALIDASI SEDERHANA - JIKA BUKAN A/B/C/D ANGGAP SALAH
       const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
       const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
       
-      // ✅ BROADCAST JAWABAN KE SEMUA USER (REAL-TIME)
       this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", {
         username: username,
         answer: isValidAnswer ? answerKey : "?",
@@ -1578,7 +1575,7 @@ export class GameServer {
     }
   }
   
-  // ==================== GAME LOWCARD ====================
+  // ==================== GAME LOWCARD (MULTI-ROOM SUPPORT) ====================
   
   async startGame(ws, bet, username) {
     try {
@@ -1600,6 +1597,7 @@ export class GameServer {
         return;
       }
       
+      // ❌ QUIZ ROOM TIDAK BISA START GAME
       if (room === QUIZ_ROOM) {
         this._safeSend(ws, ["gameLowCardError", "❌ Cannot start game in LowCard 2. This room is for Quiz only!"]);
         return;
@@ -1687,6 +1685,7 @@ export class GameServer {
         game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
         game.playerWsId.set(usernameClean, wsId);
         
+        // ✅ SIMPAN GAME PER ROOM
         this.activeGames.set(room, game);
         this._addClient(room, ws, usernameClean, false);
         
