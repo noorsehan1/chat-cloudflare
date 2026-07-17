@@ -26,6 +26,22 @@ const CONSTANTS = {
 
 const QUIZ_ROOM = "LowCard 2";
 
+// ==================== BAHASA YANG DIDUKUNG API ====================
+// Open Trivia Database support languages:
+// en, de, es, fr, it, ja, ko, pt, ru, zh-CN, zh-TW, nl, pl, el, he, ar, hi, id, sw, th, tr, ur, vi
+
+// Bahasa yang TIDAK didukung API (perlu translate):
+// ar (Arab) - QATAR, SAUDI, UAE, dll
+// hi (Hindi) - INDIA
+// id (Indonesia) - INDONESIA (sebenarnya API support, tapi kadang error)
+// th (Thai) - THAILAND
+// vi (Vietnam) - VIETNAM
+// tr (Turkey) - TURKEY
+// ... dll
+
+// Bahasa yang DIDUKUNG API:
+// en, es, fr, de, it, ja, ko, pt, ru, zh-CN, zh-TW
+
 export class GameServer {
   constructor(state, env) {
     this.state = state;
@@ -66,13 +82,13 @@ export class GameServer {
     
     this.quizQuestionCache = [];
     this.questionTranslations = new Map(); // Cache terjemahan pertanyaan
-    this.translateCount = 0; // Counter translate hari ini
-    this.translateDate = new Date().toDateString(); // Tanggal reset
-    this.translateLimitReached = false; // Flag jika limit habis
+    this.translateCount = 0;
+    this.translateDate = new Date().toDateString();
+    this.translateLimitReached = false;
     
     // ==================== USER LANGUAGE ====================
-    this.userLanguage = new Map(); // wsId -> language code
-    this.userCountry = new Map(); // wsId -> country code
+    this.userLanguage = new Map();
+    this.userCountry = new Map();
     
     this._preloadQuestions();
     this._startQuizLoop();
@@ -92,10 +108,10 @@ export class GameServer {
         this.translateDate = now;
         this.translateCount = 0;
         this.translateLimitReached = false;
-        this.questionTranslations.clear(); // Clear cache
+        this.questionTranslations.clear();
         console.log('🔄 Translate counter reset for new day');
       }
-    }, 60000); // Cek setiap menit
+    }, 60000);
   }
   
   // ==================== LANGUAGE DETECTION ====================
@@ -104,47 +120,34 @@ export class GameServer {
     if (!countryCode) return 'en';
     
     const map = {
+      // Asia
       'ID': 'id', 'MY': 'id', 'SG': 'id', 'PH': 'id',
       'JP': 'ja', 'CN': 'zh', 'TW': 'zh', 'HK': 'zh',
       'KR': 'ko', 'IN': 'hi', 'TH': 'th', 'VN': 'vi',
+      // Europe
       'GB': 'en', 'US': 'en', 'AU': 'en', 'CA': 'en',
       'NZ': 'en', 'FR': 'fr', 'DE': 'de', 'ES': 'es',
       'IT': 'it', 'PT': 'pt', 'NL': 'nl', 'RU': 'ru',
       'UA': 'ru', 'PL': 'pl', 'TR': 'tr',
-      'SA': 'ar', 'AE': 'ar', 'EG': 'ar', 'IQ': 'ar', 'JO': 'ar',
+      // Middle East (ARAB)
+      'QA': 'ar', 'SA': 'ar', 'AE': 'ar', 'KW': 'ar', 'BH': 'ar',
+      'OM': 'ar', 'YE': 'ar', 'SY': 'ar', 'LB': 'ar', 'PS': 'ar',
+      'SD': 'ar', 'LY': 'ar', 'TN': 'ar', 'DZ': 'ar', 'MA': 'ar',
+      'MR': 'ar', 'IQ': 'ar', 'JO': 'ar', 'EG': 'ar',
+      // Latin America
       'MX': 'es', 'BR': 'pt', 'AR': 'es', 'CO': 'es',
       'CL': 'es', 'PE': 'es',
-      'ZA': 'en', 'NG': 'en', 'KE': 'en', 'MA': 'ar', 'DZ': 'ar',
+      // Africa
+      'ZA': 'en', 'NG': 'en', 'KE': 'en',
     };
     
     return map[countryCode.toUpperCase()] || 'en';
   }
   
-  async _detectUserLanguage(ws, ip) {
-    try {
-      if (ws._country) {
-        const lang = this._countryToLanguage(ws._country);
-        return { country: ws._country, language: lang };
-      }
-      
-      if (ip && ip !== '::1' && ip !== '127.0.0.1') {
-        let cleanIP = ip;
-        if (ip.includes('::ffff:')) {
-          cleanIP = ip.split('::ffff:')[1];
-        }
-        
-        const response = await fetch(`http://ip-api.com/json/${cleanIP}?fields=countryCode`);
-        const data = await response.json();
-        if (data && data.countryCode) {
-          const lang = this._countryToLanguage(data.countryCode);
-          return { country: data.countryCode, language: lang };
-        }
-      }
-      
-      return { country: 'US', language: 'en' };
-    } catch(e) {
-      return { country: 'US', language: 'en' };
-    }
+  _isLanguageSupportedByAPI(language) {
+    // Bahasa yang didukung oleh Open Trivia Database
+    const supported = ['en', 'de', 'es', 'fr', 'it', 'ja', 'ko', 'pt', 'ru', 'zh'];
+    return supported.includes(language);
   }
   
   _getUserLanguage(ws) {
@@ -155,31 +158,23 @@ export class GameServer {
   
   // ==================== TRANSLATE PERTANYAAN ====================
   
-  async _translateQuestion(question, targetLang) {
-    // Jika limit habis atau bahasa Inggris, kembali ke asli
-    if (this.translateLimitReached || targetLang === 'en') {
-      return question;
-    }
+  async _translateText(text, targetLang) {
+    if (targetLang === 'en') return text;
+    if (this.translateLimitReached) return text;
     
-    // Cek cache
-    const cacheKey = `${question}_${targetLang}`;
+    const cacheKey = `${text}_${targetLang}`;
     if (this.questionTranslations.has(cacheKey)) {
       return this.questionTranslations.get(cacheKey);
     }
     
-    // Cek limit
     if (this.translateCount >= CONSTANTS.TRANSLATE_LIMIT) {
       this.translateLimitReached = true;
-      console.log('⚠️ Translate limit reached! Using English for all users.');
-      this._broadcastToRoom(QUIZ_ROOM, ["translateLimitReached", {
-        message: "Translation limit reached for today. Questions will be in English."
-      }]);
-      return question;
+      console.log('⚠️ Translate limit reached! Using English.');
+      return text;
     }
     
     try {
-      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLang}&dt=t&q=${encodeURIComponent(question)}`;
-      
+      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
       const response = await fetch(url);
       const data = await response.json();
       
@@ -190,14 +185,18 @@ export class GameServer {
         return translated;
       }
     } catch(e) {
-      // Jika gagal, kembalikan asli
+      // Silent fail
     }
     
-    return question;
+    return text;
+  }
+  
+  async _translateQuestion(question, targetLang) {
+    return this._translateText(question, targetLang);
   }
   
   async _translateOptions(options, targetLang) {
-    if (this.translateLimitReached || targetLang === 'en') {
+    if (targetLang === 'en' || this.translateLimitReached) {
       return options;
     }
     
@@ -206,41 +205,139 @@ export class GameServer {
     
     for (const key of keys) {
       if (options[key]) {
-        const cacheKey = `${options[key]}_${targetLang}`;
-        if (this.questionTranslations.has(cacheKey)) {
-          translatedOptions[key] = this.questionTranslations.get(cacheKey);
-        } else {
-          // Cek limit
-          if (this.translateCount >= CONSTANTS.TRANSLATE_LIMIT) {
-            this.translateLimitReached = true;
-            console.log('⚠️ Translate limit reached! Using English for all users.');
-            this._broadcastToRoom(QUIZ_ROOM, ["translateLimitReached", {
-              message: "Translation limit reached for today. Questions will be in English."
-            }]);
-            return options;
-          }
-          
-          try {
-            const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLang}&dt=t&q=${encodeURIComponent(options[key])}`;
-            const response = await fetch(url);
-            const data = await response.json();
-            
-            if (data && data[0] && data[0][0] && data[0][0][0]) {
-              const translated = data[0][0][0];
-              this.questionTranslations.set(cacheKey, translated);
-              this.translateCount++;
-              translatedOptions[key] = translated;
-            } else {
-              translatedOptions[key] = options[key];
-            }
-          } catch(e) {
-            translatedOptions[key] = options[key];
-          }
-        }
+        translatedOptions[key] = await this._translateText(options[key], targetLang);
       }
     }
     
     return translatedOptions;
+  }
+  
+  // ==================== AMBIL SOAL DARI API ====================
+  
+  async _fetchQuestionsFromAPI(language = 'en') {
+    try {
+      // Mapping bahasa ke parameter API
+      const langMap = {
+        'en': 'en',
+        'de': 'de',
+        'es': 'es',
+        'fr': 'fr',
+        'it': 'it',
+        'ja': 'ja',
+        'ko': 'ko',
+        'pt': 'pt',
+        'ru': 'ru',
+        'zh': 'zh-CN'
+      };
+      
+      const apiLang = langMap[language] || 'en';
+      const url = `https://opentdb.com/api.php?amount=50&type=multiple&language=${apiLang}`;
+      
+      console.log(`🌐 Fetching questions for ${language} from Trivia API`);
+      
+      const response = await fetch(url);
+      const data = await response.json();
+      
+      if (data.response_code === 0 && data.results && data.results.length > 0) {
+        return data.results.map((q) => {
+          const answers = [
+            { text: q.correct_answer, isCorrect: true },
+            { text: q.incorrect_answers[0] || "N/A", isCorrect: false },
+            { text: q.incorrect_answers[1] || "N/A", isCorrect: false },
+            { text: q.incorrect_answers[2] || "N/A", isCorrect: false }
+          ];
+          
+          const shuffled = this._shuffleArray(answers);
+          const options = {};
+          const keys = ['A', 'B', 'C', 'D'];
+          let correctKey = '';
+          
+          shuffled.forEach((item, i) => {
+            const key = keys[i];
+            options[key] = item.text;
+            if (item.isCorrect) {
+              correctKey = key;
+            }
+          });
+          
+          return {
+            question: q.question,
+            options: options,
+            correct: correctKey,
+            category: q.category || 'General',
+            difficulty: q.difficulty || 'medium'
+          };
+        });
+      }
+      
+      return null;
+    } catch(e) {
+      console.log(`❌ Failed to fetch from Trivia API for ${language}: ${e.message}`);
+      return null;
+    }
+  }
+  
+  async _getQuestionsForLanguage(language) {
+    // Coba ambil dari API dengan bahasa tersebut
+    let questions = await this._fetchQuestionsFromAPI(language);
+    
+    // Jika API gagal atau tidak ada hasil, ambil dari English dan translate
+    if (!questions || questions.length === 0) {
+      console.log(`⚠️ No questions for ${language}, fetching from English and translating`);
+      
+      // Ambil dari English
+      const englishQuestions = await this._fetchQuestionsFromAPI('en');
+      
+      if (englishQuestions && englishQuestions.length > 0) {
+        // Translate setiap pertanyaan ke bahasa target
+        for (const q of englishQuestions) {
+          q.question = await this._translateText(q.question, language);
+          for (const key of ['A', 'B', 'C', 'D']) {
+            if (q.options[key]) {
+              q.options[key] = await this._translateText(q.options[key], language);
+            }
+          }
+        }
+        return englishQuestions;
+      }
+      
+      // Jika semua gagal, pakai fallback
+      return null;
+    }
+    
+    return questions;
+  }
+  
+  // ==================== PRELOAD QUESTIONS ====================
+  
+  async _preloadQuestions() {
+    try {
+      if (this.quizQuestionCache && this.quizQuestionCache.length > 0) {
+        return;
+      }
+      
+      // Ambil 50 soal dari API (English default)
+      const questions = await this._fetchQuestionsFromAPI('en');
+      
+      if (questions && questions.length > 0) {
+        this.quizQuestionCache = questions;
+        console.log(`✅ Loaded ${questions.length} questions from Trivia API (English)`);
+      } else {
+        this.quizQuestionCache = [];
+      }
+      
+    } catch(e) {
+      this.quizQuestionCache = [];
+    }
+  }
+  
+  _shuffleArray(array) {
+    const arr = [...array];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
   }
   
   // ==================== ALARM & CLEANUP ====================
@@ -626,7 +723,6 @@ export class GameServer {
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
         this._sendGameStatusToWs(ws, roomName);
         if (roomName === QUIZ_ROOM) {
-          // Cek limit translate
           let infoMsg = "🎯 Welcome to LowCard 2! Quiz is running!";
           if (this.translateLimitReached) {
             infoMsg += " ⚠️ Translation limit reached. Questions in English.";
@@ -658,7 +754,6 @@ export class GameServer {
       this._sendGameStatusToWs(ws, roomName);
       
       if (roomName === QUIZ_ROOM) {
-        // Cek limit translate
         let infoMsg = "🎯 Welcome to LowCard 2! Quiz is running!";
         if (this.translateLimitReached) {
           infoMsg += " ⚠️ Translation limit reached. Questions in English.";
@@ -762,7 +857,7 @@ export class GameServer {
     }
   }
   
-  // ==================== BROADCAST DENGAN TRANSLATE PERTANYAAN ====================
+  // ==================== BROADCAST QUIZ PERTANYAAN ====================
   
   async _broadcastQuizQuestion(question, options) {
     const wsIds = this.wsClients.get(QUIZ_ROOM);
@@ -773,7 +868,6 @@ export class GameServer {
       if (ws && ws.readyState === 1) {
         const lang = this._getUserLanguage(ws);
         
-        // Jika limit habis, kirim dalam bahasa Inggris
         let translatedQuestion = question;
         let translatedOptions = options;
         
@@ -782,7 +876,6 @@ export class GameServer {
           translatedOptions = await this._translateOptions(options, lang);
         }
         
-        // Kirim info jika limit habis
         let extraInfo = {};
         if (this.translateLimitReached) {
           extraInfo = { translateLimitReached: true };
@@ -1605,68 +1698,6 @@ export class GameServer {
       }
       this._scheduleGameCleanup(room, game);
     }
-  }
-  
-  // ==================== QUIZ - TRIVIA API ====================
-  
-  async _preloadQuestions() {
-    try {
-      if (this.quizQuestionCache && this.quizQuestionCache.length > 0) {
-        return;
-      }
-      
-      const url = 'https://opentdb.com/api.php?amount=50&type=multiple';
-      const response = await fetch(url);
-      const data = await response.json();
-      
-      if (data.response_code === 0 && data.results && data.results.length > 0) {
-        const questions = data.results.map((q) => {
-          const answers = [
-            { text: q.correct_answer, isCorrect: true },
-            { text: q.incorrect_answers[0] || "N/A", isCorrect: false },
-            { text: q.incorrect_answers[1] || "N/A", isCorrect: false },
-            { text: q.incorrect_answers[2] || "N/A", isCorrect: false }
-          ];
-          
-          const shuffled = this._shuffleArray(answers);
-          const options = {};
-          const keys = ['A', 'B', 'C', 'D'];
-          let correctKey = '';
-          
-          shuffled.forEach((item, i) => {
-            const key = keys[i];
-            options[key] = item.text;
-            if (item.isCorrect) {
-              correctKey = key;
-            }
-          });
-          
-          return {
-            question: q.question,
-            options: options,
-            correct: correctKey,
-            category: q.category || 'General',
-            difficulty: q.difficulty || 'medium'
-          };
-        });
-        
-        this.quizQuestionCache = questions;
-      } else {
-        this.quizQuestionCache = [];
-      }
-      
-    } catch(e) {
-      this.quizQuestionCache = [];
-    }
-  }
-  
-  _shuffleArray(array) {
-    const arr = [...array];
-    for (let i = arr.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [arr[i], arr[j]] = [arr[j], arr[i]];
-    }
-    return arr;
   }
   
   // ==================== QUIZ ====================
