@@ -21,6 +21,7 @@ const CONSTANTS = {
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
   QUIZ_INTERVAL_MS: 20000,
+  TRANSLATE_LIMIT: 1000, // Batas translate per hari
 };
 
 const QUIZ_ROOM = "LowCard 2";
@@ -64,11 +65,182 @@ export class GameServer {
     this.isFetching = false;
     
     this.quizQuestionCache = [];
+    this.questionTranslations = new Map(); // Cache terjemahan pertanyaan
+    this.translateCount = 0; // Counter translate hari ini
+    this.translateDate = new Date().toDateString(); // Tanggal reset
+    this.translateLimitReached = false; // Flag jika limit habis
+    
+    // ==================== USER LANGUAGE ====================
+    this.userLanguage = new Map(); // wsId -> language code
+    this.userCountry = new Map(); // wsId -> country code
     
     this._preloadQuestions();
     this._startQuizLoop();
     
+    // Reset counter setiap hari
+    this._resetTranslateCounterDaily();
+    
     this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
+  }
+  
+  // ==================== RESET COUNTER HARIAN ====================
+  
+  _resetTranslateCounterDaily() {
+    setInterval(() => {
+      const now = new Date().toDateString();
+      if (now !== this.translateDate) {
+        this.translateDate = now;
+        this.translateCount = 0;
+        this.translateLimitReached = false;
+        this.questionTranslations.clear(); // Clear cache
+        console.log('🔄 Translate counter reset for new day');
+      }
+    }, 60000); // Cek setiap menit
+  }
+  
+  // ==================== LANGUAGE DETECTION ====================
+  
+  _countryToLanguage(countryCode) {
+    if (!countryCode) return 'en';
+    
+    const map = {
+      'ID': 'id', 'MY': 'id', 'SG': 'id', 'PH': 'id',
+      'JP': 'ja', 'CN': 'zh', 'TW': 'zh', 'HK': 'zh',
+      'KR': 'ko', 'IN': 'hi', 'TH': 'th', 'VN': 'vi',
+      'GB': 'en', 'US': 'en', 'AU': 'en', 'CA': 'en',
+      'NZ': 'en', 'FR': 'fr', 'DE': 'de', 'ES': 'es',
+      'IT': 'it', 'PT': 'pt', 'NL': 'nl', 'RU': 'ru',
+      'UA': 'ru', 'PL': 'pl', 'TR': 'tr',
+      'SA': 'ar', 'AE': 'ar', 'EG': 'ar', 'IQ': 'ar', 'JO': 'ar',
+      'MX': 'es', 'BR': 'pt', 'AR': 'es', 'CO': 'es',
+      'CL': 'es', 'PE': 'es',
+      'ZA': 'en', 'NG': 'en', 'KE': 'en', 'MA': 'ar', 'DZ': 'ar',
+    };
+    
+    return map[countryCode.toUpperCase()] || 'en';
+  }
+  
+  async _detectUserLanguage(ws, ip) {
+    try {
+      if (ws._country) {
+        const lang = this._countryToLanguage(ws._country);
+        return { country: ws._country, language: lang };
+      }
+      
+      if (ip && ip !== '::1' && ip !== '127.0.0.1') {
+        let cleanIP = ip;
+        if (ip.includes('::ffff:')) {
+          cleanIP = ip.split('::ffff:')[1];
+        }
+        
+        const response = await fetch(`http://ip-api.com/json/${cleanIP}?fields=countryCode`);
+        const data = await response.json();
+        if (data && data.countryCode) {
+          const lang = this._countryToLanguage(data.countryCode);
+          return { country: data.countryCode, language: lang };
+        }
+      }
+      
+      return { country: 'US', language: 'en' };
+    } catch(e) {
+      return { country: 'US', language: 'en' };
+    }
+  }
+  
+  _getUserLanguage(ws) {
+    const wsId = this._getWsId(ws);
+    if (!wsId) return 'en';
+    return this.userLanguage.get(wsId) || 'en';
+  }
+  
+  // ==================== TRANSLATE PERTANYAAN ====================
+  
+  async _translateQuestion(question, targetLang) {
+    // Jika limit habis atau bahasa Inggris, kembali ke asli
+    if (this.translateLimitReached || targetLang === 'en') {
+      return question;
+    }
+    
+    // Cek cache
+    const cacheKey = `${question}_${targetLang}`;
+    if (this.questionTranslations.has(cacheKey)) {
+      return this.questionTranslations.get(cacheKey);
+    }
+    
+    // Cek limit
+    if (this.translateCount >= CONSTANTS.TRANSLATE_LIMIT) {
+      this.translateLimitReached = true;
+      console.log('⚠️ Translate limit reached! Using English for all users.');
+      this._broadcastToRoom(QUIZ_ROOM, ["translateLimitReached", {
+        message: "Translation limit reached for today. Questions will be in English."
+      }]);
+      return question;
+    }
+    
+    try {
+      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLang}&dt=t&q=${encodeURIComponent(question)}`;
+      
+      const response = await fetch(url);
+      const data = await response.json();
+      
+      if (data && data[0] && data[0][0] && data[0][0][0]) {
+        const translated = data[0][0][0];
+        this.questionTranslations.set(cacheKey, translated);
+        this.translateCount++;
+        return translated;
+      }
+    } catch(e) {
+      // Jika gagal, kembalikan asli
+    }
+    
+    return question;
+  }
+  
+  async _translateOptions(options, targetLang) {
+    if (this.translateLimitReached || targetLang === 'en') {
+      return options;
+    }
+    
+    const translatedOptions = {};
+    const keys = ['A', 'B', 'C', 'D'];
+    
+    for (const key of keys) {
+      if (options[key]) {
+        const cacheKey = `${options[key]}_${targetLang}`;
+        if (this.questionTranslations.has(cacheKey)) {
+          translatedOptions[key] = this.questionTranslations.get(cacheKey);
+        } else {
+          // Cek limit
+          if (this.translateCount >= CONSTANTS.TRANSLATE_LIMIT) {
+            this.translateLimitReached = true;
+            console.log('⚠️ Translate limit reached! Using English for all users.');
+            this._broadcastToRoom(QUIZ_ROOM, ["translateLimitReached", {
+              message: "Translation limit reached for today. Questions will be in English."
+            }]);
+            return options;
+          }
+          
+          try {
+            const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLang}&dt=t&q=${encodeURIComponent(options[key])}`;
+            const response = await fetch(url);
+            const data = await response.json();
+            
+            if (data && data[0] && data[0][0] && data[0][0][0]) {
+              const translated = data[0][0][0];
+              this.questionTranslations.set(cacheKey, translated);
+              this.translateCount++;
+              translatedOptions[key] = translated;
+            } else {
+              translatedOptions[key] = options[key];
+            }
+          } catch(e) {
+            translatedOptions[key] = options[key];
+          }
+        }
+      }
+    }
+    
+    return translatedOptions;
   }
   
   // ==================== ALARM & CLEANUP ====================
@@ -201,6 +373,9 @@ export class GameServer {
           this.clientRooms.delete(wsId);
           this.wsMap.delete(wsId);
           
+          this.userLanguage.delete(wsId);
+          this.userCountry.delete(wsId);
+          
           for (const [username, conn] of this.userConnections) {
             if (conn.wsId === wsId) {
               this.userConnections.delete(username);
@@ -283,6 +458,9 @@ export class GameServer {
     
     this.wsMap.delete(conn.wsId);
     this.clientRooms.delete(conn.wsId);
+    
+    this.userLanguage.delete(conn.wsId);
+    this.userCountry.delete(conn.wsId);
     
     if (conn.room && this.roomViewers.has(conn.room)) {
       this.roomViewers.get(conn.room).delete(username);
@@ -377,6 +555,9 @@ export class GameServer {
     this.clientRooms.delete(wsId);
     this.wsMap.delete(wsId);
     
+    this.userLanguage.delete(wsId);
+    this.userCountry.delete(wsId);
+    
     if (username) {
       const conn = this.userConnections.get(username);
       if (conn && conn.wsId === wsId) {
@@ -445,7 +626,12 @@ export class GameServer {
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
         this._sendGameStatusToWs(ws, roomName);
         if (roomName === QUIZ_ROOM) {
-          this._safeSend(ws, ["quizInfo", "🎯 Welcome to LowCard 2! Quiz is running!"]);
+          // Cek limit translate
+          let infoMsg = "🎯 Welcome to LowCard 2! Quiz is running!";
+          if (this.translateLimitReached) {
+            infoMsg += " ⚠️ Translation limit reached. Questions in English.";
+          }
+          this._safeSend(ws, ["quizInfo", infoMsg]);
         }
         return;
       }
@@ -472,7 +658,12 @@ export class GameServer {
       this._sendGameStatusToWs(ws, roomName);
       
       if (roomName === QUIZ_ROOM) {
-        this._safeSend(ws, ["quizInfo", "🎯 Welcome to LowCard 2! Quiz is running!"]);
+        // Cek limit translate
+        let infoMsg = "🎯 Welcome to LowCard 2! Quiz is running!";
+        if (this.translateLimitReached) {
+          infoMsg += " ⚠️ Translation limit reached. Questions in English.";
+        }
+        this._safeSend(ws, ["quizInfo", infoMsg]);
       }
       
     } finally {
@@ -567,6 +758,44 @@ export class GameServer {
           this._removeClientFromRoom(room, wsId);
           this.clientRooms.delete(wsId);
         }
+      }
+    }
+  }
+  
+  // ==================== BROADCAST DENGAN TRANSLATE PERTANYAAN ====================
+  
+  async _broadcastQuizQuestion(question, options) {
+    const wsIds = this.wsClients.get(QUIZ_ROOM);
+    if (!wsIds) return;
+    
+    for (const wsId of wsIds) {
+      const ws = this.wsMap.get(wsId);
+      if (ws && ws.readyState === 1) {
+        const lang = this._getUserLanguage(ws);
+        
+        // Jika limit habis, kirim dalam bahasa Inggris
+        let translatedQuestion = question;
+        let translatedOptions = options;
+        
+        if (lang !== 'en' && !this.translateLimitReached) {
+          translatedQuestion = await this._translateQuestion(question, lang);
+          translatedOptions = await this._translateOptions(options, lang);
+        }
+        
+        // Kirim info jika limit habis
+        let extraInfo = {};
+        if (this.translateLimitReached) {
+          extraInfo = { translateLimitReached: true };
+        }
+        
+        this._safeSend(ws, ["quizQuestion", {
+          question: translatedQuestion,
+          options: translatedOptions,
+          timeLimit: 20,
+          originalLanguage: 'en',
+          userLanguage: lang,
+          ...extraInfo
+        }]);
       }
     }
   }
@@ -1479,11 +1708,8 @@ export class GameServer {
       this.quizHasWinner = false;
       this.quizWinner = null;
       
-      this._broadcastToRoom(QUIZ_ROOM, ["quizQuestion", {
-        question: q.question,
-        options: q.options,
-        timeLimit: 15
-      }]);
+      // Kirim pertanyaan dengan translate per user
+      this._broadcastQuizQuestion(q.question, q.options);
       
       setTimeout(() => {
         try {
@@ -1498,12 +1724,12 @@ export class GameServer {
             }]);
           } else {
             this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
-              message: "Time's up! No one answered correctly"
+              message: "⏰ Time's up! No one answered correctly."
             }]);
           }
           
         } catch(e) {}
-      }, 15000);
+      }, 20000);
       
     } catch(e) {}
   }
@@ -2032,11 +2258,6 @@ export class GameServer {
         return;
       }
       
-      if (evt === "setUserLanguage") {
-        // HAPUS - tidak digunakan lagi
-        return;
-      }
-      
       const room = this._ensureRoomConsistency(ws);
       
       if (!room) {
@@ -2121,7 +2342,30 @@ export class GameServer {
         server.roomname = null;
         server._createdAt = Date.now();
         server.username = null;
-        server._languageDetected = false;
+        
+        // Deteksi bahasa dari Cloudflare
+        const cf = req.cf;
+        let country = 'US';
+        if (cf && cf.country) {
+          country = cf.country;
+        }
+        server._country = country;
+        
+        const lang = this._countryToLanguage(country);
+        this.userLanguage.set(wsId, lang);
+        this.userCountry.set(wsId, country);
+        
+        // Kirim info bahasa ke client
+        let infoMsg = `Detected: ${country} → ${lang}`;
+        if (this.translateLimitReached) {
+          infoMsg += " ⚠️ Translation limit reached. Questions in English.";
+        }
+        this._safeSend(server, ["quizAutoLanguage", {
+          country: country,
+          language: lang,
+          translateLimitReached: this.translateLimitReached,
+          message: infoMsg
+        }]);
         
         server.addEventListener("message", async (event) => {
           try {
@@ -2143,6 +2387,9 @@ export class GameServer {
               
               this._removeClient(room, server);
               
+              this.userLanguage.delete(wsId);
+              this.userCountry.delete(wsId);
+              
               if (username) {
                 const conn = this.userConnections.get(username);
                 if (conn && conn.wsId === wsId) {
@@ -2161,6 +2408,9 @@ export class GameServer {
               const username = server.username;
               
               this._removeClient(room, server);
+              
+              this.userLanguage.delete(wsId);
+              this.userCountry.delete(wsId);
               
               if (username) {
                 const conn = this.userConnections.get(username);
@@ -2206,6 +2456,9 @@ export class GameServer {
         this._removeClient(room, ws);
       }
       
+      this.userLanguage.delete(wsId);
+      this.userCountry.delete(wsId);
+      
       if (username) {
         const conn = this.userConnections.get(username);
         if (conn && conn.wsId === wsId) {
@@ -2235,6 +2488,9 @@ export class GameServer {
         const room = ws.room || ws.roomname;
         this._removeClient(room, ws);
       }
+      
+      this.userLanguage.delete(wsId);
+      this.userCountry.delete(wsId);
       
       if (username) {
         const conn = this.userConnections.get(username);
@@ -2278,6 +2534,9 @@ export class GameServer {
       this._cleanupTimers.clear();
       
       this.quizQuestionCache = [];
+      this.questionTranslations.clear();
+      this.userLanguage.clear();
+      this.userCountry.clear();
       
       for (const [room, wsIds] of this.wsClients) {
         for (const wsId of wsIds) {
