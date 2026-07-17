@@ -578,6 +578,10 @@ export class GameServer {
     // RESUME QUIZ JIKA ADA USER JOIN QUIZ ROOM
     if (room === QUIZ_ROOM) {
       this._resumeQuiz();
+      // TAMPILKAN QUIZ LANGSUNG SETELAH JOIN
+      setTimeout(() => {
+        this._showQuestion();
+      }, 500);
     }
   }
   
@@ -664,6 +668,10 @@ export class GameServer {
         this._sendGameStatusToWs(ws, roomName);
         if (roomName === QUIZ_ROOM) {
           this._safeSend(ws, ["quizInfo", "🎯 Welcome to LowCard 2! Quiz is running!"]);
+          // TAMPILKAN QUIZ LANGSUNG SETELAH SWITCH
+          setTimeout(() => {
+            this._showQuestion();
+          }, 500);
         }
         return;
       }
@@ -685,6 +693,10 @@ export class GameServer {
       this._sendGameStatusToWs(ws, roomName);
       if (roomName === QUIZ_ROOM) {
         this._safeSend(ws, ["quizInfo", "🎯 Welcome to LowCard 2! Quiz is running!"]);
+        // TAMPILKAN QUIZ LANGSUNG SETELAH SWITCH
+        setTimeout(() => {
+          this._showQuestion();
+        }, 500);
       }
     } finally {
       this._switchLocks.delete(lockKey);
