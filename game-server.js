@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS (CLEAN - TANPA LOG) ====================
+// ==================== GAME-SERVER.JS (LENGKAP DENGAN USER LIST) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -21,7 +21,7 @@ const CONSTANTS = {
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
   QUIZ_INTERVAL_MS: 30000,
-  QUIZ_TIME_LIMIT_MS: 29000,
+  QUIZ_TIME_LIMIT_MS: 20000,
   TRANSLATE_LIMIT: 1000,
   MAX_GAME_HISTORY: 100,
   MEMORY_CHECK_INTERVAL_MS: 60000,
@@ -411,6 +411,40 @@ export class GameServer {
     }
   }
   
+  // ==================== RESET QUIZ ====================
+  
+  async resetQuiz() {
+    try {
+      if (this._quizTimeout) {
+        clearTimeout(this._quizTimeout);
+        this._quizTimeout = null;
+      }
+      
+      if (this._quizBreakTimeout) {
+        clearTimeout(this._quizBreakTimeout);
+        this._quizBreakTimeout = null;
+      }
+      
+      if (this._quizStartTimeout) {
+        clearTimeout(this._quizStartTimeout);
+        this._quizStartTimeout = null;
+      }
+      
+      this.isQuizWaiting = false;
+      this.currentQuestion = null;
+      this.quizAnswered = new Set();
+      this.quizHasWinner = false;
+      this.quizWinner = null;
+      
+      this._broadcastToRoom(QUIZ_ROOM, ["quizReset", "Quiz has been reset"]);
+      
+      return { success: true, message: "Quiz reset successfully" };
+      
+    } catch(e) {
+      return { success: false, message: e.message };
+    }
+  }
+  
   // ==================== SHUFFLE OPTIONS ====================
   
   _shuffleQuestionOptions(question) {
@@ -712,6 +746,8 @@ export class GameServer {
         this.roomViewers.set(room, new Set());
       }
       this.roomViewers.get(room).add(username);
+      // Broadcast user list ke semua client di room
+      this._broadcastUserList(room);
     }
   }
   
@@ -753,6 +789,10 @@ export class GameServer {
       ws.roomname = null;
       ws._wsId = null;
       ws.username = null;
+    }
+    // Broadcast user list ke semua client di room
+    if (room) {
+      this._broadcastUserList(room);
     }
   }
   
@@ -801,7 +841,18 @@ export class GameServer {
         this._sendGameStatusToWs(ws, roomName);
         
         if (roomName === QUIZ_ROOM) {
-          await this._checkAndStartQuiz();
+          if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
+            await this._loadQuestionsFromKV();
+          }
+          if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting) {
+            await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
+          } else {
+            this._safeSend(ws, ["quizStatus", { 
+              running: true, 
+              question: this.currentQuestion ? true : false,
+              waiting: this.isQuizWaiting
+            }]);
+          }
         }
         return;
       }
@@ -826,81 +877,43 @@ export class GameServer {
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
       this._sendGameStatusToWs(ws, roomName);
       
+      // Kirim daftar user ke semua client di room
+      this._broadcastUserList(roomName);
+      
+      // Kirim daftar user spesifik ke user yang baru join
+      const wsIds = this.wsClients.get(roomName);
+      if (wsIds) {
+        const users = [];
+        for (const id of wsIds) {
+          const userWs = this.wsMap.get(id);
+          if (userWs && userWs.username) {
+            users.push({
+              username: userWs.username,
+              wsId: id,
+              isActive: userWs.readyState === 1
+            });
+          }
+        }
+        this._safeSend(ws, ["roomUserList", users]);
+      }
+      
       if (roomName === QUIZ_ROOM) {
-        await this._checkAndStartQuiz();
+        if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
+          await this._loadQuestionsFromKV();
+        }
+        if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting) {
+          await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
+        } else {
+          this._safeSend(ws, ["quizStatus", { 
+            running: true, 
+            question: this.currentQuestion ? true : false,
+            waiting: this.isQuizWaiting
+          }]);
+        }
       }
       
     } finally {
       this._switchLocks.delete(lockKey);
-    }
-  }
-  
-  // ==================== CHECK AND START QUIZ ====================
-  
-  async _checkAndStartQuiz() {
-    try {
-      if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
-        await this._loadQuestionsFromKV();
-      }
-      
-      if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
-        this._broadcastToRoom(QUIZ_ROOM, ["quizError", "No questions available"]);
-        return;
-      }
-      
-      const isQuizAlive = this.currentQuestion || 
-                          this._quizTimeout || 
-                          this.isQuizWaiting || 
-                          this._quizStartTimeout;
-      
-      if (isQuizAlive) {
-        this._broadcastToRoom(QUIZ_ROOM, ["quizStatus", {
-          running: true,
-          hasQuestion: this.currentQuestion ? true : false,
-          waiting: this.isQuizWaiting
-        }]);
-        return;
-      }
-      
-      this._broadcastToRoom(QUIZ_ROOM, ["quizStarting", "Quiz will start in a moment..."]);
-      
-      this.quizAnswered = new Set();
-      this.quizHasWinner = false;
-      this.quizWinner = null;
-      this.currentQuestion = null;
-      
-      if (this._quizTimeout) {
-        clearTimeout(this._quizTimeout);
-        this._quizTimeout = null;
-      }
-      if (this._quizBreakTimeout) {
-        clearTimeout(this._quizBreakTimeout);
-        this._quizBreakTimeout = null;
-      }
-      if (this._quizStartTimeout) {
-        clearTimeout(this._quizStartTimeout);
-        this._quizStartTimeout = null;
-      }
-      
-      this.isQuizWaiting = true;
-      
-      this._quizStartTimeout = setTimeout(() => {
-        try {
-          if (this.closing || this.isDestroyed) {
-            this._quizStartTimeout = null;
-            return;
-          }
-          
-          this.isQuizWaiting = false;
-          this._quizStartTimeout = null;
-          
-          this._showQuestion();
-          
-        } catch(e) {}
-      }, CONSTANTS.QUIZ_START_DELAY_MS);
-      
-    } catch(e) {
-      this._broadcastToRoom(QUIZ_ROOM, ["quizError", e.message]);
     }
   }
   
@@ -936,6 +949,31 @@ export class GameServer {
         activePlayers: 0
       }]);
     }
+  }
+  
+  // ==================== USER LIST BROADCAST ====================
+  
+  _broadcastUserList(room) {
+    if (!room) return;
+    
+    const wsIds = this.wsClients.get(room);
+    if (!wsIds || wsIds.size === 0) return;
+    
+    // Kumpulkan semua username di room
+    const users = [];
+    for (const wsId of wsIds) {
+      const ws = this.wsMap.get(wsId);
+      if (ws && ws.username) {
+        users.push({
+          username: ws.username,
+          wsId: wsId,
+          isActive: ws.readyState === 1
+        });
+      }
+    }
+    
+    // Kirim daftar user ke semua client di room
+    this._broadcastToRoom(room, ["roomUserList", users]);
   }
   
   // ==================== BROADCAST ====================
@@ -1046,6 +1084,7 @@ export class GameServer {
       if (this.isDestroyed) return;
       if (this.isQuizWaiting) return;
       if (this._quizStartTimeout) return;
+      
       if (this.currentQuestion) return;
       
       const clients = this.wsClients.get(QUIZ_ROOM);
@@ -1076,6 +1115,9 @@ export class GameServer {
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
+      
+      // Kirim daftar user sebelum quiz dimulai
+      this._broadcastUserList(QUIZ_ROOM);
       
       await this._broadcastQuizQuestion(
         this.currentQuestion.question,
@@ -2344,6 +2386,14 @@ export class GameServer {
       if (evt === "submitQuizAnswer") {
         const [_, username, answer] = data;
         await this.submitQuizAnswer(ws, username, answer);
+        return;
+      }
+      
+      if (evt === "getRoomUsers") {
+        const room = this._ensureRoomConsistency(ws);
+        if (room) {
+          this._broadcastUserList(room);
+        }
         return;
       }
       
