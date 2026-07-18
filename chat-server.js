@@ -11,7 +11,7 @@ const C = {
 };
 
 const ROOMS = [
-  "LowCard 1", "LowCard 2", "Gacor", "General", "LOVE BIRDS", "Birthday Party", "Heart Lovers", "Cat lovers",
+  "LowCard 1", "LowCard 2", "Gacor","Quiz", "General", "LOVE BIRDS", "Birthday Party", "Heart Lovers", "Cat lovers",
   "Chikahan Tambayan", "Lounge Talk", "Noxxeliverothcifsa", "BESTIES",
   "Happy Vibes", "Relax & Chat", "The Chatter Room","Pakistan", "Philippines",
   "India"
