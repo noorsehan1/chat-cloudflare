@@ -27,6 +27,13 @@ const CONSTANTS = {
   MEMORY_CHECK_INTERVAL_MS: 60000,
   QUIZ_BREAK_MS: 2000,
   QUIZ_START_DELAY_MS: 5000,
+  MAX_RETRY_INIT_QUIZ: 10,
+  MAX_BROADCAST_BATCH: 50,
+  MAX_SHUTDOWN_WAIT_MS: 5000,
+  MAX_WS_CLIENTS: 1000,
+  MAX_ARRAY_SIZE: 1000,
+  CIRCUIT_BREAKER_THRESHOLD: 5,
+  CIRCUIT_BREAKER_TIMEOUT_MS: 30000,
 };
 
 const QUIZ_ROOM = "Quiz";
@@ -83,6 +90,14 @@ export class GameServer {
     this._translateResetInterval = null;
     this._quizBreakTimeout = null;
     this._quizStartTimeout = null;
+    this._shutdownPromise = null;
+    this._pendingOperations = 0;
+    
+    this._translationCircuitBreaker = {
+      failures: 0,
+      lastFailureTime: 0,
+      isOpen: false
+    };
     
     this._initQuiz();
     this._startMemoryMonitoring();
@@ -93,8 +108,6 @@ export class GameServer {
     
     this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
   }
-  
-  // ==================== MEMORY MONITORING ====================
   
   _startMemoryMonitoring() {
     if (this._memoryCheckInterval) {
@@ -114,11 +127,11 @@ export class GameServer {
         const wsCount = this.wsMap.size;
         const historyCount = this._gameHistory.length;
         
-        if (gameCount > 100 || wsCount > 1000) {
+        if (gameCount > 100 || wsCount > CONSTANTS.MAX_WS_CLIENTS) {
           this._forceGarbageCollection();
         }
         
-        if (historyCount > 1000) {
+        if (historyCount > CONSTANTS.MAX_GAME_HISTORY * 2) {
           this._gameHistory = this._gameHistory.slice(-CONSTANTS.MAX_GAME_HISTORY);
         }
       } catch(e) {}
@@ -132,8 +145,6 @@ export class GameServer {
       }
     } catch(e) {}
   }
-  
-  // ==================== RESET COUNTER ====================
   
   _resetTranslateCounterDaily() {
     if (this._translateResetInterval) {
@@ -155,12 +166,12 @@ export class GameServer {
           this.translateCount = 0;
           this.translateLimitReached = false;
           this.questionTranslations.clear();
+          this._translationCircuitBreaker.isOpen = false;
+          this._translationCircuitBreaker.failures = 0;
         }
       } catch(e) {}
     }, 60000);
   }
-  
-  // ==================== LANGUAGE ====================
   
   _countryToLanguage(countryCode) {
     if (!countryCode) return 'en';
@@ -190,12 +201,19 @@ export class GameServer {
     return this.userLanguage.get(wsId) || 'en';
   }
   
-  // ==================== TRANSLATE ====================
-  
   async _translateText(text, targetLang) {
     if (targetLang === 'en') return text;
     if (this.translateLimitReached) return text;
     if (!text || typeof text !== 'string') return text;
+    if (this._translationCircuitBreaker.isOpen) {
+      const now = Date.now();
+      if (now - this._translationCircuitBreaker.lastFailureTime > CONSTANTS.CIRCUIT_BREAKER_TIMEOUT_MS) {
+        this._translationCircuitBreaker.isOpen = false;
+        this._translationCircuitBreaker.failures = 0;
+      } else {
+        return text;
+      }
+    }
     
     const cacheKey = `${text}_${targetLang}`;
     if (this.questionTranslations.has(cacheKey)) {
@@ -210,15 +228,25 @@ export class GameServer {
     try {
       const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
       const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
       const data = await response.json();
       
       if (data && data[0] && data[0][0] && data[0][0][0]) {
         const translated = data[0][0][0];
         this.questionTranslations.set(cacheKey, translated);
         this.translateCount++;
+        this._translationCircuitBreaker.failures = 0;
         return translated;
       }
-    } catch(e) {}
+    } catch(e) {
+      this._translationCircuitBreaker.failures++;
+      this._translationCircuitBreaker.lastFailureTime = Date.now();
+      if (this._translationCircuitBreaker.failures >= CONSTANTS.CIRCUIT_BREAKER_THRESHOLD) {
+        this._translationCircuitBreaker.isOpen = true;
+      }
+    }
     
     return text;
   }
@@ -246,14 +274,13 @@ export class GameServer {
     return translatedOptions;
   }
   
-  // ==================== LOAD QUESTIONS FROM KV ====================
-  
   async _loadQuestionsFromKV() {
     try {
       const cached = await this.env.QUESTIONS.get('quiz_questions', 'json');
       
       if (cached && cached.questions && Array.isArray(cached.questions) && cached.questions.length > 0) {
-        this.quizQuestionCache['en'] = cached.questions.map(q => ({
+        const questions = cached.questions.slice(0, CONSTANTS.MAX_ARRAY_SIZE);
+        this.quizQuestionCache['en'] = questions.map(q => ({
           question: q.question || '',
           options: q.options || { A: '', B: '', C: '', D: '' },
           correct: q.correct || 'A',
@@ -270,27 +297,26 @@ export class GameServer {
     }
   }
   
-  // ==================== INIT QUIZ ====================
-  
-  async _initQuiz() {
+  async _initQuiz(retryCount = 0) {
     try {
       const loaded = await this._loadQuestionsFromKV();
       if (loaded) {
         this._startQuizLoop();
         this._resetTranslateCounterDaily();
-      } else {
-        if (!this.closing && !this.isDestroyed) {
-          setTimeout(() => this._initQuiz(), 5000);
-        }
+        return true;
       }
+      
+      if (retryCount < CONSTANTS.MAX_RETRY_INIT_QUIZ && !this.closing && !this.isDestroyed) {
+        setTimeout(() => this._initQuiz(retryCount + 1), 5000);
+      }
+      return false;
     } catch(e) {
-      if (!this.closing && !this.isDestroyed) {
-        setTimeout(() => this._initQuiz(), 5000);
+      if (retryCount < CONSTANTS.MAX_RETRY_INIT_QUIZ && !this.closing && !this.isDestroyed) {
+        setTimeout(() => this._initQuiz(retryCount + 1), 5000);
       }
+      return false;
     }
   }
-  
-  // ==================== ENSURE QUIZ RUNNING ====================
   
   ensureQuizRunning() {
     try {
@@ -300,7 +326,7 @@ export class GameServer {
       }
       
       if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
-        this._loadQuestionsFromKV().then(() => {
+        this._initQuiz().then(() => {
           if (!this.closing && !this.isDestroyed) {
             this._startQuizIfNeeded();
           }
@@ -321,7 +347,7 @@ export class GameServer {
       
       if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout) {
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
-          this._loadQuestionsFromKV().then(() => {
+          this._initQuiz().then(() => {
             if (!this.closing && !this.isDestroyed) {
               this._showQuestion();
             }
@@ -334,12 +360,10 @@ export class GameServer {
     } catch(e) {}
   }
   
-  // ==================== FORCE START QUIZ ====================
-  
   async forceStartQuiz() {
     try {
       if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
-        await this._loadQuestionsFromKV();
+        await this._initQuiz();
       }
       
       if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
@@ -389,12 +413,10 @@ export class GameServer {
     }
   }
   
-  // ==================== START QUIZ WITH DELAY ====================
-  
   async startQuizWithDelay(delayMs = CONSTANTS.QUIZ_START_DELAY_MS) {
     try {
       if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
-        await this._loadQuestionsFromKV();
+        await this._initQuiz();
       }
       
       if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
@@ -443,7 +465,10 @@ export class GameServer {
           
           this._showQuestion();
           
-        } catch(e) {}
+        } catch(e) {
+          this._quizStartTimeout = null;
+          this.isQuizWaiting = false;
+        }
       }, delayMs);
       
       return { 
@@ -456,8 +481,6 @@ export class GameServer {
       return { success: false, message: e.message };
     }
   }
-  
-  // ==================== RESET QUIZ ====================
   
   async resetQuiz() {
     try {
@@ -488,8 +511,6 @@ export class GameServer {
       return { success: false, message: e.message };
     }
   }
-  
-  // ==================== SHUFFLE OPTIONS ====================
   
   _shuffleQuestionOptions(question) {
     if (!question || !question.options) {
@@ -525,8 +546,6 @@ export class GameServer {
     };
   }
   
-  // ==================== ALARM ====================
-  
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
@@ -545,7 +564,7 @@ export class GameServer {
     } catch(e) {}
     
     try {
-      this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
+      await this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
     } catch(e) {}
   }
   
@@ -661,8 +680,6 @@ export class GameServer {
       }
     } catch(e) {}
   }
-  
-  // ==================== WEB SOCKET HELPERS ====================
   
   _getWsId(ws) {
     return ws ? ws._wsId : null;
@@ -843,8 +860,6 @@ export class GameServer {
     return newWsId;
   }
   
-  // ==================== ROOM MANAGEMENT ====================
-  
   async switchRoom(ws, room, username = null) {
     if (this.isDestroyed) {
       this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]);
@@ -877,7 +892,7 @@ export class GameServer {
         
         if (roomName === QUIZ_ROOM) {
           if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
-            await this._loadQuestionsFromKV();
+            await this._initQuiz();
           }
           this._startQuizIfNeeded();
         }
@@ -904,7 +919,7 @@ export class GameServer {
       
       if (roomName === QUIZ_ROOM) {
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
-          await this._loadQuestionsFromKV();
+          await this._initQuiz();
         }
         this._startQuizIfNeeded();
       }
@@ -918,44 +933,46 @@ export class GameServer {
     // DIHAPUS - tidak digunakan
   }
   
-  // ==================== BROADCAST ====================
-  
   _broadcastToRoom(room, message) {
     if (this.closing || this.isDestroyed || !room || !message) return;
     const wsIds = this.wsClients.get(room);
     if (!wsIds || wsIds.size === 0) return;
+    
     const now = Date.now();
     const reset = this._roomBroadcastReset.get(room) || 0;
     const count = this._roomBroadcastCount.get(room) || 0;
+    
     if (now > reset) {
       this._roomBroadcastReset.set(room, now + 1000);
       this._roomBroadcastCount.set(room, 1);
     } else {
-      if (count > 50) {
+      if (count > CONSTANTS.MAX_BROADCAST_BATCH) {
         return;
       }
       this._roomBroadcastCount.set(room, count + 1);
     }
+    
     const msgStr = JSON.stringify(message);
-    const disconnected = new Set();
     const wsIdArray = Array.from(wsIds);
-    const BATCH_SIZE = 10;
-    for (let i = 0; i < wsIdArray.length; i += BATCH_SIZE) {
-      const batch = wsIdArray.slice(i, i + BATCH_SIZE);
+    const disconnected = [];
+    
+    for (let i = 0; i < wsIdArray.length; i += CONSTANTS.BATCH_SIZE) {
+      const batch = wsIdArray.slice(i, i + CONSTANTS.BATCH_SIZE);
       for (const wsId of batch) {
         const ws = this.wsMap.get(wsId);
         if (ws && ws.readyState === 1) {
           try {
             ws.send(msgStr);
           } catch(e) {
-            disconnected.add(wsId);
+            disconnected.push(wsId);
           }
         } else {
-          disconnected.add(wsId);
+          disconnected.push(wsId);
         }
       }
     }
-    if (disconnected.size > 0) {
+    
+    if (disconnected.length > 0) {
       for (const wsId of disconnected) {
         const ws = this.wsMap.get(wsId);
         if (ws) {
@@ -977,8 +994,6 @@ export class GameServer {
       return false;
     }
   }
-  
-  // ==================== QUIZ ====================
   
   _startQuizLoop() {
     if (this.quizTimer) {
@@ -1016,26 +1031,34 @@ export class GameServer {
       if (this.isDestroyed) return;
       if (this.isQuizWaiting) return;
       if (this._quizStartTimeout) return;
-      
       if (this.currentQuestion) return;
-      
+
       const clients = this.wsClients.get(QUIZ_ROOM);
       if (!clients || clients.size === 0) {
         return;
       }
-      
+
       let questions = this.quizQuestionCache['en'];
       if (!questions || !Array.isArray(questions) || questions.length === 0) {
-        await this._loadQuestionsFromKV();
+        const loaded = await this._loadQuestionsFromKV();
+        if (!loaded) {
+          setTimeout(() => this._showQuestion(), 5000);
+          return;
+        }
         questions = this.quizQuestionCache['en'];
-        if (!questions || !Array.isArray(questions) || questions.length === 0) return;
+        if (!questions || !Array.isArray(questions) || questions.length === 0) {
+          setTimeout(() => this._showQuestion(), 5000);
+          return;
+        }
       }
-      
+
       const randomIndex = Math.floor(Math.random() * questions.length);
       const q = questions[randomIndex];
-      
-      if (!q || !q.options) return;
-      
+      if (!q || !q.options || typeof q.options !== 'object') {
+        setTimeout(() => this._showQuestion(), 1000);
+        return;
+      }
+
       const shuffled = this._shuffleQuestionOptions(q);
       
       this.currentQuestion = {
@@ -1047,12 +1070,12 @@ export class GameServer {
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
-      
+
       await this._broadcastQuizQuestion(
         this.currentQuestion.question,
         this.currentQuestion.options
       );
-      
+
       if (this._quizTimeout) {
         clearTimeout(this._quizTimeout);
         this._quizTimeout = null;
@@ -1062,32 +1085,31 @@ export class GameServer {
         clearTimeout(this._quizBreakTimeout);
         this._quizBreakTimeout = null;
       }
-      
+
       this._quizTimeout = setTimeout(() => {
         try {
           if (this.closing || this.isDestroyed) {
             this._quizTimeout = null;
             return;
           }
-          
+
           const currentClients = this.wsClients.get(QUIZ_ROOM);
           if (!currentClients || currentClients.size === 0) {
             this._quizTimeout = null;
+            this.currentQuestion = null;
             return;
           }
-          
-          // KIRIM QUIZ WINNER JIKA ADA
+
           if (this.quizHasWinner && this.quizWinner) {
             this._broadcastToRoom(QUIZ_ROOM, [
               "quizWinner", 
               { username: this.quizWinner }
             ]);
           }
-          
+
           this._quizTimeout = null;
-          
           this.isQuizWaiting = true;
-          
+
           this._quizBreakTimeout = setTimeout(() => {
             try {
               if (this.closing || this.isDestroyed) {
@@ -1097,20 +1119,29 @@ export class GameServer {
               
               this.isQuizWaiting = false;
               this._quizBreakTimeout = null;
-              
               this.currentQuestion = null;
               
               if (!this.closing && !this.isDestroyed) {
                 this.ensureQuizRunning();
               }
-              
-            } catch(e) {}
+            } catch(e) {
+              this.isQuizWaiting = false;
+              this._quizBreakTimeout = null;
+            }
           }, CONSTANTS.QUIZ_BREAK_MS);
-          
-        } catch(e) {}
+
+        } catch(e) {
+          this._quizTimeout = null;
+          this.currentQuestion = null;
+          this.isQuizWaiting = false;
+        }
       }, CONSTANTS.QUIZ_TIME_LIMIT_MS);
-      
-    } catch(e) {}
+
+    } catch(e) {
+      this.currentQuestion = null;
+      this.isQuizWaiting = false;
+      this._quizTimeout = null;
+    }
   }
   
   async _broadcastQuizQuestion(question, options) {
@@ -1209,19 +1240,15 @@ export class GameServer {
     }
   }
   
-  // ==================== SHUFFLE ARRAY ====================
-  
   _shuffleArray(array) {
     if (!array || !Array.isArray(array) || array.length === 0) return array || [];
-    const arr = [...array];
+    const arr = array.length > CONSTANTS.MAX_ARRAY_SIZE ? array.slice(0, CONSTANTS.MAX_ARRAY_SIZE) : [...array];
     for (let i = arr.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [arr[i], arr[j]] = [arr[j], arr[i]];
     }
     return arr;
   }
-  
-  // ==================== GAME HELPERS ====================
   
   _isGameActuallyRunning(game) {
     if (!game) return false;
@@ -1279,8 +1306,6 @@ export class GameServer {
     }
     return null;
   }
-  
-  // ==================== GAME CLEANUP ====================
   
   _scheduleGameCleanup(room, game) {
     if (!room || !game) return;
@@ -1371,8 +1396,6 @@ export class GameServer {
     this._broadcastToRoom(room, ["gameLowCardEnd", []]);
   }
   
-  // ==================== PLAYER MANAGEMENT ====================
-  
   _removePlayerFromGame(username, room) {
     try {
       const game = this.activeGames.get(room);
@@ -1450,8 +1473,6 @@ export class GameServer {
     }
     return result;
   }
-  
-  // ==================== BOT MANAGEMENT ====================
   
   _addBots(room, count) {
     try {
@@ -1538,8 +1559,6 @@ export class GameServer {
       this._broadcastToRoom(room, ["gameLowCardPlayerDraw", botName, number, tanda]);
     } catch(e) {}
   }
-  
-  // ==================== GAME PHASES ====================
   
   _startRegistration(room, game) {
     if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
@@ -1712,35 +1731,39 @@ export class GameServer {
   }
   
   _closeDrawPhase(room, game) {
-    try {
-      if (!this._isGameActuallyRunning(game) || game.drawTimeExpired || game.evaluationLocked) return;
-      game.drawTimeExpired = true;
-      game.evaluationLocked = true;
-      if (game._drawTimer) {
-        clearInterval(game._drawTimer);
-        game._drawTimer = null;
+    if (!this._isGameActuallyRunning(game) || game.drawTimeExpired || game.evaluationLocked) return;
+    game.drawTimeExpired = true;
+    game.evaluationLocked = true;
+    
+    if (game._drawTimer) {
+      clearInterval(game._drawTimer);
+      game._drawTimer = null;
+    }
+    
+    if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) {
+      const activeBotIds = Array.from(game.botPlayers.keys())
+        .filter(id => !game.eliminated?.has(id) && !game.numbers?.has(id));
+      for (const botId of activeBotIds) {
+        this._forceBotDraw(room, botId, game);
       }
-      if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) {
-        const activeBotIds = Array.from(game.botPlayers.keys())
-          .filter(id => !game.eliminated?.has(id) && !game.numbers?.has(id));
-        for (const botId of activeBotIds) {
-          this._forceBotDraw(room, botId, game);
-        }
-      }
-      this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
-      if (game._evalTimer) {
-        clearTimeout(game._evalTimer);
-        game._evalTimer = null;
-      }
-      game._evalTimer = setTimeout(() => {
-        try {
+    }
+    
+    this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+    
+    if (game._evalTimer) {
+      clearTimeout(game._evalTimer);
+      game._evalTimer = null;
+    }
+    
+    game._evalTimer = setTimeout(() => {
+      try {
+        const currentGame = this.activeGames.get(room);
+        if (currentGame && currentGame === game && currentGame._isActive && !currentGame._gameEnded) {
           this._evaluateRound(room, game);
-        } catch(e) {}
-      }, CONSTANTS.EVALUATION_DELAY_MS);
-    } catch(e) {}
+        }
+      } catch(e) {}
+    }, CONSTANTS.EVALUATION_DELAY_MS);
   }
-  
-  // ==================== EVALUATION ====================
   
   _evaluateRound(room, game) {
     try {
@@ -1748,7 +1771,9 @@ export class GameServer {
       if (!game.players) return;
       const currentGame = this.activeGames.get(room);
       if (currentGame !== game) return;
+      
       game._isEvaluating = true;
+      
       game._safetyTimer = setTimeout(() => {
         try {
           if (game && game._isEvaluating) {
@@ -1757,16 +1782,19 @@ export class GameServer {
           }
         } catch(e) {}
       }, CONSTANTS.EVALUATION_TIMEOUT_MS);
+      
       if (game._evalTimer) {
         clearTimeout(game._evalTimer);
         game._evalTimer = null;
       }
+      
       if (game._botTimeouts) {
         for (const id of game._botTimeouts) {
           clearTimeout(id);
         }
         game._botTimeouts.clear();
       }
+      
       const numbers = game.numbers || new Map();
       const players = game.players || new Map();
       const eliminated = game.eliminated || new Set();
@@ -1774,11 +1802,13 @@ export class GameServer {
       const entries = Array.from(numbers.entries());
       const submittedIds = new Set(numbers.keys());
       const activeIds = this._getActivePlayerIds(game);
+      
       for (const id of activeIds) {
         if (!submittedIds.has(id)) {
           eliminated.add(id);
         }
       }
+      
       if (entries.length === 0) {
         game._isEvaluating = false;
         if (game._safetyTimer) {
@@ -1792,6 +1822,7 @@ export class GameServer {
         this._scheduleGameCleanup(room, game);
         return;
       }
+      
       if (entries.length === 1 && eliminated.size === activeIds.length - 1) {
         const winnerId = entries[0][0];
         const winnerName = players.get(winnerId)?.name || winnerId;
@@ -1808,9 +1839,11 @@ export class GameServer {
         this._scheduleGameCleanup(room, game);
         return;
       }
+      
       const values = entries.map(([, n]) => n);
       const allSame = values.every(v => v === values[0]);
       let losers = [];
+      
       if (!allSame && values.length > 0) {
         const lowest = Math.min(...values);
         losers = entries.filter(([, n]) => n === lowest).map(([id]) => id);
@@ -1818,7 +1851,9 @@ export class GameServer {
           eliminated.add(id);
         }
       }
+      
       const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
+      
       if (allSame && remaining.length >= 2) {
         game._isEvaluating = false;
         if (game._safetyTimer) {
@@ -1852,6 +1887,7 @@ export class GameServer {
         }
         return;
       }
+      
       if (remaining.length === 1 && !game._gameEnded) {
         const winnerId = remaining[0];
         const winnerName = players.get(winnerId)?.name || winnerId;
@@ -1868,6 +1904,7 @@ export class GameServer {
         this._scheduleGameCleanup(room, game);
         return;
       }
+      
       if (remaining.length === 0) {
         game._isEvaluating = false;
         if (game._safetyTimer) {
@@ -1881,6 +1918,7 @@ export class GameServer {
         this._scheduleGameCleanup(room, game);
         return;
       }
+      
       const numbersArr = entries.map(([id, n]) => {
         const name = players.get(id)?.name || id;
         const t = tanda.get(id) || "";
@@ -1888,9 +1926,11 @@ export class GameServer {
       });
       const loserNames = [...losers].map(id => players.get(id)?.name || id);
       const remainingNames = remaining.map(id => players.get(id)?.name || id);
+      
       this._broadcastToRoom(room, [
         "gameLowCardRoundResult", game.round, numbersArr, loserNames, remainingNames
       ]);
+      
       numbers.clear();
       tanda.clear();
       game.round++;
@@ -1901,10 +1941,12 @@ export class GameServer {
       game.tanda = new Map();
       game._botTimeouts = new Set();
       game._isEvaluating = false;
+      
       if (game._safetyTimer) {
         clearTimeout(game._safetyTimer);
         game._safetyTimer = null;
       }
+      
       if (this._isGameActuallyRunning(game) && !game._gameEnded) {
         this._startDrawPhase(room, game);
       }
@@ -1919,8 +1961,6 @@ export class GameServer {
       this._scheduleGameCleanup(room, game);
     }
   }
-  
-  // ==================== GAME LOWCARD ====================
   
   async startGame(ws, bet, username) {
     try {
@@ -2290,8 +2330,6 @@ export class GameServer {
     }
   }
   
-  // ==================== EVENT HANDLER ====================
-  
   async handleEvent(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
@@ -2344,14 +2382,24 @@ export class GameServer {
     }
   }
   
-  // ==================== WEB SOCKET ====================
-  
   async fetch(req) {
     if (this.closing || this.isDestroyed) {
       return new Response("Shutting down", { status: 503 });
     }
     try {
       const url = new URL(req.url);
+      
+      if (url.pathname === "/game/health") {
+        return new Response(JSON.stringify({
+          status: this.isDestroyed ? 'down' : 'healthy',
+          games: this.activeGames.size,
+          connections: this.wsMap.size,
+          memory: process.memoryUsage ? process.memoryUsage() : undefined
+        }), { 
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      
       if (url.pathname === "/game/ws") {
         const upgrade = req.headers.get("Upgrade");
         if (upgrade !== "websocket") {
@@ -2524,8 +2572,6 @@ export class GameServer {
       ws.username = null;
     } catch(e) {}
   }
-  
-  // ==================== DESTROY ====================
   
   async destroy() {
     try {
