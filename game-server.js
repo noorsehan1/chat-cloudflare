@@ -21,7 +21,7 @@ const CONSTANTS = {
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
   QUIZ_INTERVAL_MS: 30000,
-  QUIZ_TIME_LIMIT_MS: 30000,
+  QUIZ_TIME_LIMIT_MS: 20000,
   TRANSLATE_LIMIT: 1000,
   MAX_GAME_HISTORY: 100,
   MEMORY_CHECK_INTERVAL_MS: 60000,
@@ -936,7 +936,7 @@ export class GameServer {
           } else {
             this._broadcastToRoom(QUIZ_ROOM, [
               "quizNoWinner", 
-              { message: "No one answered correctly this round!" }
+              { message: "No one answered correctly!\n" }
             ]);
           }
           
@@ -1002,6 +1002,11 @@ export class GameServer {
       
       if (!this.currentQuestion) {
         this._safeSend(ws, ["quizError", "No active question"]);
+        return;
+      }
+      
+      if (this.quizHasWinner) {
+        this._safeSend(ws, ["quizError", "Someone already answered correctly!"]);
         return;
       }
       
@@ -2445,4 +2450,4 @@ export class GameServer {
       
     } catch(e) {}
   }
-}
+}                                                      
