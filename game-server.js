@@ -27,7 +27,7 @@ const CONSTANTS = {
   MEMORY_CHECK_INTERVAL_MS: 60000,
 };
 
-const QUIZ_ROOM = "LowCard 2";
+const QUIZ_ROOM = "Quiz";
 
 export class GameServer {
   constructor(state, env) {
