@@ -21,10 +21,11 @@ const CONSTANTS = {
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
   QUIZ_INTERVAL_MS: 30000,
-  QUIZ_TIME_LIMIT_MS: 20000,
+  QUIZ_TIME_LIMIT_MS: 30000,
   TRANSLATE_LIMIT: 1000,
   MAX_GAME_HISTORY: 100,
   MEMORY_CHECK_INTERVAL_MS: 60000,
+  QUIZ_BREAK_MS: 2000, // Jeda singkat antara quiz untuk baca hasil
 };
 
 const QUIZ_ROOM = "Quiz";
@@ -64,6 +65,7 @@ export class GameServer {
     this.currentQuestion = null;
     this.quizQuestionPool = [];
     this.isFetching = false;
+    this.isQuizWaiting = false; // Flag untuk menandai sedang jeda antar quiz
     
     this.quizQuestionCache = {};
     this.questionTranslations = new Map();
@@ -78,6 +80,7 @@ export class GameServer {
     this._gameHistory = [];
     this._quizTimeout = null;
     this._translateResetInterval = null;
+    this._quizBreakTimeout = null; // Timer untuk jeda antar quiz
     
     this._initQuiz();
     this._startMemoryMonitoring();
@@ -843,12 +846,18 @@ export class GameServer {
       this.quizTimer = null;
     }
     
+    // Gunakan setInterval untuk loop utama
     this.quizTimer = setInterval(() => {
       try {
         if (this.closing || this.isDestroyed) {
           clearInterval(this.quizTimer);
           this.quizTimer = null;
           return;
+        }
+        
+        // Cek apakah sedang dalam jeda atau sudah ada pertanyaan aktif
+        if (this.isQuizWaiting || this._quizTimeout) {
+          return; // Skip jika sedang menunggu
         }
         
         const clients = this.wsClients.get(QUIZ_ROOM);
@@ -875,6 +884,7 @@ export class GameServer {
   async _showQuestion() {
     try {
       if (this.isDestroyed) return;
+      if (this.isQuizWaiting) return; // Jika sedang jeda, jangan tampilkan
       
       const clients = this.wsClients.get(QUIZ_ROOM);
       if (!clients || clients.size === 0) {
@@ -910,11 +920,18 @@ export class GameServer {
         this.currentQuestion.options
       );
       
+      // Hapus timer lama jika ada
       if (this._quizTimeout) {
         clearTimeout(this._quizTimeout);
         this._quizTimeout = null;
       }
       
+      if (this._quizBreakTimeout) {
+        clearTimeout(this._quizBreakTimeout);
+        this._quizBreakTimeout = null;
+      }
+      
+      // Set timer untuk mengakhiri sesi tanya jawab
       this._quizTimeout = setTimeout(() => {
         try {
           if (this.closing || this.isDestroyed) {
@@ -928,6 +945,7 @@ export class GameServer {
             return;
           }
           
+          // Broadcast hasil
           if (this.quizHasWinner && this.quizWinner) {
             this._broadcastToRoom(QUIZ_ROOM, [
               "quizWinner", 
@@ -941,6 +959,27 @@ export class GameServer {
           }
           
           this._quizTimeout = null;
+          
+          // Mulai jeda singkat sebelum pertanyaan berikutnya
+          this.isQuizWaiting = true;
+          
+          this._quizBreakTimeout = setTimeout(() => {
+            try {
+              if (this.closing || this.isDestroyed) {
+                this._quizBreakTimeout = null;
+                return;
+              }
+              
+              this.isQuizWaiting = false;
+              this._quizBreakTimeout = null;
+              
+              // Tampilkan pertanyaan berikutnya
+              if (!this.closing && !this.isDestroyed) {
+                this._showQuestion();
+              }
+              
+            } catch(e) {}
+          }, CONSTANTS.QUIZ_BREAK_MS); // Jeda 2 detik
           
         } catch(e) {}
       }, CONSTANTS.QUIZ_TIME_LIMIT_MS);
@@ -2384,6 +2423,11 @@ export class GameServer {
         this._quizTimeout = null;
       }
       
+      if (this._quizBreakTimeout) {
+        clearTimeout(this._quizBreakTimeout);
+        this._quizBreakTimeout = null;
+      }
+      
       for (const [room, game] of this.activeGames) {
         if (game) {
           const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
@@ -2450,4 +2494,4 @@ export class GameServer {
       
     } catch(e) {}
   }
-}                                                      
+}
