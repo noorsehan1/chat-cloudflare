@@ -26,7 +26,7 @@ const CONSTANTS = {
   MAX_GAME_HISTORY: 100,
   MEMORY_CHECK_INTERVAL_MS: 60000,
   QUIZ_BREAK_MS: 2000,
-  QUIZ_START_DELAY_MS: 5000,  // ← DIUBAH: 1.5 detik → 5 detik
+  QUIZ_START_DELAY_MS: 5000,
 };
 
 const QUIZ_ROOM = "Quiz";
@@ -298,6 +298,15 @@ export class GameServer {
         return { success: false, message: "No questions available" };
       }
       
+      // CEK: Jika quiz sudah aktif, jangan mulai ulang
+      if (this.currentQuestion || this._quizTimeout || this.isQuizWaiting) {
+        return { 
+          success: true, 
+          message: "Quiz already running",
+          questions: this.quizQuestionCache['en'].length 
+        };
+      }
+      
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
@@ -345,6 +354,15 @@ export class GameServer {
         return { success: false, message: "No questions available" };
       }
       
+      // CEK: Jika quiz sudah aktif, jangan mulai ulang
+      if (this.currentQuestion || this._quizTimeout || this.isQuizWaiting) {
+        return { 
+          success: true, 
+          message: "Quiz already running",
+          questions: this.quizQuestionCache['en'].length 
+        };
+      }
+      
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
@@ -389,6 +407,40 @@ export class GameServer {
         message: `Quiz will start in ${delayMs/1000} seconds`,
         questions: this.quizQuestionCache['en'].length 
       };
+      
+    } catch(e) {
+      return { success: false, message: e.message };
+    }
+  }
+  
+  // ==================== RESET QUIZ ====================
+  
+  async resetQuiz() {
+    try {
+      if (this._quizTimeout) {
+        clearTimeout(this._quizTimeout);
+        this._quizTimeout = null;
+      }
+      
+      if (this._quizBreakTimeout) {
+        clearTimeout(this._quizBreakTimeout);
+        this._quizBreakTimeout = null;
+      }
+      
+      if (this._quizStartTimeout) {
+        clearTimeout(this._quizStartTimeout);
+        this._quizStartTimeout = null;
+      }
+      
+      this.isQuizWaiting = false;
+      this.currentQuestion = null;
+      this.quizAnswered = new Set();
+      this.quizHasWinner = false;
+      this.quizWinner = null;
+      
+      this._broadcastToRoom(QUIZ_ROOM, ["quizReset", "Quiz has been reset"]);
+      
+      return { success: true, message: "Quiz reset successfully" };
       
     } catch(e) {
       return { success: false, message: e.message };
@@ -788,7 +840,16 @@ export class GameServer {
           if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
             await this._loadQuestionsFromKV();
           }
-          await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
+          // CEK: Hanya panggil jika quiz belum aktif
+          if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting) {
+            await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
+          } else {
+            this._safeSend(ws, ["quizStatus", { 
+              running: true, 
+              question: this.currentQuestion ? true : false,
+              waiting: this.isQuizWaiting
+            }]);
+          }
         }
         return;
       }
@@ -817,7 +878,16 @@ export class GameServer {
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
           await this._loadQuestionsFromKV();
         }
-        await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
+        // CEK: Hanya panggil jika quiz belum aktif
+        if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting) {
+          await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
+        } else {
+          this._safeSend(ws, ["quizStatus", { 
+            running: true, 
+            question: this.currentQuestion ? true : false,
+            waiting: this.isQuizWaiting
+          }]);
+        }
       }
       
     } finally {
@@ -935,6 +1005,7 @@ export class GameServer {
           return;
         }
         
+        // CEK: Jika sedang ada pertanyaan aktif atau sedang jeda, skip
         if (this.isQuizWaiting || this._quizTimeout || this._quizStartTimeout) {
           return;
         }
@@ -944,17 +1015,20 @@ export class GameServer {
           return;
         }
         
-        if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
-          this._loadQuestionsFromKV().then(() => {
-            if (!this.closing && !this.isDestroyed &&
-                this.quizQuestionCache['en'] && this.quizQuestionCache['en'].length > 0) {
-              this._showQuestion();
-            }
-          });
-          return;
+        // CEK: Hanya tampilkan jika tidak ada pertanyaan yang sedang aktif
+        if (!this.currentQuestion) {
+          if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
+            this._loadQuestionsFromKV().then(() => {
+              if (!this.closing && !this.isDestroyed &&
+                  this.quizQuestionCache['en'] && this.quizQuestionCache['en'].length > 0) {
+                this._showQuestion();
+              }
+            });
+            return;
+          }
+          
+          this._showQuestion();
         }
-        
-        this._showQuestion();
         
       } catch(e) {}
     }, CONSTANTS.QUIZ_INTERVAL_MS);
@@ -965,6 +1039,9 @@ export class GameServer {
       if (this.isDestroyed) return;
       if (this.isQuizWaiting) return;
       if (this._quizStartTimeout) return;
+      
+      // CEK: Jika sudah ada pertanyaan aktif, jangan tampilkan lagi
+      if (this.currentQuestion) return;
       
       const clients = this.wsClients.get(QUIZ_ROOM);
       if (!clients || clients.size === 0) {
@@ -1028,12 +1105,8 @@ export class GameServer {
               "quizWinner", 
               { username: this.quizWinner }
             ]);
-          } else {
-            this._broadcastToRoom(QUIZ_ROOM, [
-              "quizNoWinner", 
-              { message: "No one answered correctly!\n" }
-            ]);
           }
+          // Tidak kirim pesan jika tidak ada pemenang
           
           this._quizTimeout = null;
           
@@ -1048,6 +1121,9 @@ export class GameServer {
               
               this.isQuizWaiting = false;
               this._quizBreakTimeout = null;
+              
+              // Reset currentQuestion agar bisa tampil berikutnya
+              this.currentQuestion = null;
               
               if (!this.closing && !this.isDestroyed) {
                 this._showQuestion();
