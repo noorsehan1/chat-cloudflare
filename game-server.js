@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS (LENGKAP DENGAN RANDOM JAWABAN) ====================
+// ==================== GAME-SERVER.JS (DENGAN RANDOM JAWABAN & KOMPATIBEL JAVA CLIENT) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -844,9 +844,19 @@ export class GameServer {
             return;
           }
           
+          // Kirim jawaban benar
+          this._broadcastToRoom(QUIZ_ROOM, ["quizCorrectAnswer", {
+            correctAnswer: this.currentQuestion.correct,
+            correctText: this.currentQuestion.options[this.currentQuestion.correct]
+          }]);
+          
           if (this.quizHasWinner && this.quizWinner) {
             this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", {
               username: this.quizWinner
+            }]);
+          } else {
+            this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", {
+              message: "No one answered correctly this round!"
             }]);
           }
           
@@ -875,11 +885,15 @@ export class GameServer {
           } catch(e) {}
         }
         
-        this._safeSend(ws, ["quizQuestion", {
+        // ✅ Format untuk client Java
+        // Kirim sebagai JSON object yang akan di-parse oleh client
+        const questionObj = {
           question: finalQuestion,
           options: finalOptions,
           timeLimit: CONSTANTS.QUIZ_TIME_LIMIT_MS / 1000
-        }]);
+        };
+        
+        this._safeSend(ws, ["quizQuestion", questionObj]);
       }
     }
   }
@@ -912,12 +926,15 @@ export class GameServer {
       const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
       const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
       
-      this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", {
+      // ✅ Format untuk client Java
+      const resultObj = {
         username: username,
         answer: isValidAnswer ? answerKey : "?",
         isCorrect: isCorrect,
         correctAnswer: this.currentQuestion.correct
-      }]);
+      };
+      
+      this._broadcastToRoom(QUIZ_ROOM, ["quizAnswerResult", resultObj]);
       
       this.quizAnswered.add(username);
       
@@ -2017,6 +2034,13 @@ export class GameServer {
         return;
       }
       
+      // ==================== QUIZ EVENTS ====================
+      if (evt === "submitQuizAnswer") {
+        const [_, username, answer] = data;
+        await this.submitQuizAnswer(ws, username, answer);
+        return;
+      }
+      
       const room = this._ensureRoomConsistency(ws);
       if (!room) {
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
@@ -2038,9 +2062,6 @@ export class GameServer {
           break;
         case "checkGameRunning":
           await this.checkGameRunning(ws, data[1]);
-          break;
-        case "submitQuizAnswer":
-          await this.submitQuizAnswer(ws, data[1], data[2]);
           break;
         default:
           this._safeSend(ws, ["gameLowCardError", `Unknown event: ${evt}`]);
