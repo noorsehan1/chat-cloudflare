@@ -1261,12 +1261,7 @@ export class GameServer {
             return;
           }
           
-          if (this.quizHasWinner && this.quizWinner) {
-            this._broadcastToRoom(QUIZ_ROOM, [
-              "quizWinner", 
-              { username: this.quizWinner }
-            ]);
-          }
+          // QUIZ WINNER SECTION REMOVED - Tidak mengirim pesan quizWinner
           
           this._quizTimeout = null;
           
