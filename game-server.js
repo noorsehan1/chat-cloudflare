@@ -87,7 +87,6 @@ export class GameServer {
     this._initQuiz();
     this._startMemoryMonitoring();
     
-    // PASTIKAN QUIZ BERJALAN SETELAH INISIALISASI
     setTimeout(() => {
       this.ensureQuizRunning();
     }, 2000);
@@ -295,13 +294,11 @@ export class GameServer {
   
   ensureQuizRunning() {
     try {
-      // Cek apakah ada user di room Quiz
       const clients = this.wsClients.get(QUIZ_ROOM);
       if (!clients || clients.size === 0) {
         return;
       }
       
-      // Cek apakah pertanyaan tersedia
       if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
         this._loadQuestionsFromKV().then(() => {
           if (!this.closing && !this.isDestroyed) {
@@ -311,7 +308,6 @@ export class GameServer {
         return;
       }
       
-      // Mulai quiz jika belum berjalan
       this._startQuizIfNeeded();
     } catch(e) {}
   }
@@ -323,9 +319,7 @@ export class GameServer {
         return;
       }
       
-      // Jika tidak ada pertanyaan dan tidak dalam keadaan menunggu
       if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout) {
-        // Pastikan ada pertanyaan di cache
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
           this._loadQuestionsFromKV().then(() => {
             if (!this.closing && !this.isDestroyed) {
@@ -885,7 +879,6 @@ export class GameServer {
           if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
             await this._loadQuestionsFromKV();
           }
-          // MULAI QUIZ LANGSUNG
           this._startQuizIfNeeded();
         }
         return;
@@ -913,7 +906,6 @@ export class GameServer {
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
           await this._loadQuestionsFromKV();
         }
-        // MULAI QUIZ LANGSUNG
         this._startQuizIfNeeded();
       }
       
@@ -994,7 +986,6 @@ export class GameServer {
       this.quizTimer = null;
     }
     
-    // QUIZ LOOP - LANGSUNG TAMPILKAN PERTANYAAN
     this.quizTimer = setInterval(() => {
       try {
         if (this.closing || this.isDestroyed) {
@@ -1008,12 +999,10 @@ export class GameServer {
           return;
         }
         
-        // CEK: Jika sedang ada pertanyaan aktif atau sedang jeda, skip
         if (this.currentQuestion || this._quizTimeout || this.isQuizWaiting || this._quizStartTimeout) {
           return;
         }
         
-        // LANGSUNG TAMPILKAN PERTANYAAN
         if (!this.closing && !this.isDestroyed) {
           this._showQuestion();
         }
@@ -1087,6 +1076,14 @@ export class GameServer {
             return;
           }
           
+          // KIRIM QUIZ WINNER JIKA ADA
+          if (this.quizHasWinner && this.quizWinner) {
+            this._broadcastToRoom(QUIZ_ROOM, [
+              "quizWinner", 
+              { username: this.quizWinner }
+            ]);
+          }
+          
           this._quizTimeout = null;
           
           this.isQuizWaiting = true;
@@ -1104,7 +1101,6 @@ export class GameServer {
               this.currentQuestion = null;
               
               if (!this.closing && !this.isDestroyed) {
-                // PASTIKAN QUIZ BERJALAN LAGI
                 this.ensureQuizRunning();
               }
               
@@ -1169,12 +1165,9 @@ export class GameServer {
         return;
       }
       
-      // JIKA TIDAK ADA PERTANYAAN, COBA MULAI QUIZ
       if (!this.currentQuestion) {
-        // Coba mulai quiz
         this._startQuizIfNeeded();
         
-        // Jika masih tidak ada pertanyaan setelah mencoba, kirim error
         if (!this.currentQuestion) {
           this._safeSend(ws, ["quizError", "No active question, starting quiz..."]);
           return;
@@ -2425,7 +2418,6 @@ export class GameServer {
               }
             }
             
-            // CEK APAKAH MASIH ADA USER DI QUIZ ROOM
             const clients = this.wsClients.get(QUIZ_ROOM);
             if (clients && clients.size > 0) {
               this.ensureQuizRunning();
@@ -2498,7 +2490,6 @@ export class GameServer {
       ws._wsId = null;
       ws.username = null;
       
-      // CEK APAKAH MASIH ADA USER DI QUIZ ROOM
       const clients = this.wsClients.get(QUIZ_ROOM);
       if (clients && clients.size > 0) {
         this.ensureQuizRunning();
