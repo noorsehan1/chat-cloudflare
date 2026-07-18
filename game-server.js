@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS (LENGKAP DENGAN RANDOM JAWABAN & KOMPATIBEL JAVA CLIENT) ====================
+// ==================== GAME-SERVER.JS (CLEAN - TANPA LOG) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -74,7 +74,6 @@ export class GameServer {
     this.userLanguage = new Map();
     this.userCountry = new Map();
     
-    // Memory monitoring
     this._memoryCheckInterval = null;
     this._gameHistory = [];
     this._quizTimeout = null;
@@ -104,19 +103,14 @@ export class GameServer {
         
         const gameCount = this.activeGames.size;
         const wsCount = this.wsMap.size;
-        const roomCount = this.wsClients.size;
         const historyCount = this._gameHistory.length;
-        
-        if (gameCount > 50 || wsCount > 500 || historyCount > 1000) {
-          console.warn(`[Memory Warning] Games=${gameCount}, WS=${wsCount}, Rooms=${roomCount}, History=${historyCount}`);
-          
-          if (historyCount > 1000) {
-            this._gameHistory = this._gameHistory.slice(-CONSTANTS.MAX_GAME_HISTORY);
-          }
-        }
         
         if (gameCount > 100 || wsCount > 1000) {
           this._forceGarbageCollection();
+        }
+        
+        if (historyCount > 1000) {
+          this._gameHistory = this._gameHistory.slice(-CONSTANTS.MAX_GAME_HISTORY);
         }
       } catch(e) {}
     }, CONSTANTS.MEMORY_CHECK_INTERVAL_MS);
@@ -710,13 +704,7 @@ export class GameServer {
           if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
             await this._loadQuestionsFromKV();
           }
-          
-          const result = await this.forceStartQuiz();
-          if (result.success) {
-            this._safeSend(ws, ["quizInfo", "🎯 Quiz started! " + result.questions + " questions loaded."]);
-          } else {
-            this._safeSend(ws, ["quizError", "Failed to start quiz: " + result.message]);
-          }
+          await this.forceStartQuiz();
         }
         return;
       }
@@ -745,14 +733,7 @@ export class GameServer {
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
           await this._loadQuestionsFromKV();
         }
-        
-        const result = await this.forceStartQuiz();
-        
-        if (result.success) {
-          this._safeSend(ws, ["quizInfo", "🎯 Quiz started! " + result.questions + " questions loaded."]);
-        } else {
-          this._safeSend(ws, ["quizError", "Failed to start quiz: " + result.message]);
-        }
+        await this.forceStartQuiz();
       }
       
     } finally {
@@ -912,10 +893,8 @@ export class GameServer {
       
       if (!q || !q.options) return;
       
-      // SHUFFLE OPTIONS (RANDOM JAWABAN)
       const shuffled = this._shuffleQuestionOptions(q);
       
-      // SIMPAN DENGAN CORRECT BARU
       this.currentQuestion = {
         ...q,
         options: shuffled.options,
@@ -926,13 +905,11 @@ export class GameServer {
       this.quizHasWinner = false;
       this.quizWinner = null;
       
-      // KIRIM DENGAN OPTIONS YANG SUDAH DI-SHUFFLE
       await this._broadcastQuizQuestion(
         this.currentQuestion.question,
         this.currentQuestion.options
       );
       
-      // TUNGGU 20 DETIK, BARU KIRIM WINNER ATAU NO WINNER
       if (this._quizTimeout) {
         clearTimeout(this._quizTimeout);
         this._quizTimeout = null;
@@ -952,11 +929,15 @@ export class GameServer {
           }
           
           if (this.quizHasWinner && this.quizWinner) {
-            // ✅ KIRIM SEBAGAI STRING LANGSUNG (KOMPATIBEL DENGAN JAVA CLIENT)
-            this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", this.quizWinner]);
+            this._broadcastToRoom(QUIZ_ROOM, [
+              "quizWinner", 
+              { username: this.quizWinner }
+            ]);
           } else {
-            // ✅ KIRIM SEBAGAI STRING LANGSUNG (KOMPATIBEL DENGAN JAVA CLIENT)
-            this._broadcastToRoom(QUIZ_ROOM, ["quizNoWinner", "No one answered correctly this round!"]);
+            this._broadcastToRoom(QUIZ_ROOM, [
+              "quizNoWinner", 
+              { message: "No one answered correctly this round!" }
+            ]);
           }
           
           this._quizTimeout = null;
@@ -987,23 +968,16 @@ export class GameServer {
           try {
             finalQuestion = await this._translateText(question, lang);
             finalOptions = await this._translateOptions(options, lang);
-          } catch(e) {
-            // Silent fail, tetap pakai bahasa Inggris
-          }
+          } catch(e) {}
         }
         
-        // Format untuk client Java
         const questionObj = {
           question: finalQuestion || '',
-          options: finalOptions || { A: '', B: '', C: '', D: '' },
-          timeLimit: CONSTANTS.QUIZ_TIME_LIMIT_MS / 1000
+          options: finalOptions || { A: '', B: '', C: '', D: '' }
         };
         
         this._safeSend(ws, ["quizQuestion", questionObj]);
-      } catch(e) {
-        // Continue ke client berikutnya
-        continue;
-      }
+      } catch(e) {}
     }
   }
   
@@ -1016,7 +990,7 @@ export class GameServer {
       
       const room = this._ensureRoomConsistency(ws);
       if (room !== QUIZ_ROOM) {
-        this._safeSend(ws, ["quizError", "Quiz only in LowCard 2"]);
+        this._safeSend(ws, ["quizError", "Quiz only in Quiz room"]);
         return;
       }
       
@@ -1040,7 +1014,6 @@ export class GameServer {
       const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
       const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
       
-      // Format untuk client Java
       const resultObj = {
         username: username,
         answer: isValidAnswer ? answerKey : "?",
@@ -1792,7 +1765,7 @@ export class GameServer {
         return;
       }
       if (room === QUIZ_ROOM) {
-        this._safeSend(ws, ["gameLowCardError", "❌ Cannot start game in LowCard 2. This room is for Quiz only!"]);
+        this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]);
         return;
       }
       const startKey = `start_${room}`;
@@ -2170,19 +2143,6 @@ export class GameServer {
         return;
       }
       
-      if (evt === "forceStartQuiz") {
-        const result = await this.forceStartQuiz();
-        this._safeSend(ws, ["forceStartQuizResult", result]);
-        return;
-      }
-      
-      if (evt === "reloadQuestions") {
-        const result = await this._loadQuestionsFromKV();
-        this._safeSend(ws, ["reloadQuestionsResult", { success: result, total: this.quizQuestionCache['en']?.length || 0 }]);
-        return;
-      }
-      
-      // ==================== QUIZ EVENTS ====================
       if (evt === "submitQuizAnswer") {
         const [_, username, answer] = data;
         await this.submitQuizAnswer(ws, username, answer);
