@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS (LENGKAP DENGAN USER LIST) ====================
+// ==================== GAME-SERVER.JS (QUIZ TIMER 10 DETIK × 3) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -20,13 +20,14 @@ const CONSTANTS = {
   STALE_GAME_TIMEOUT_MS: 600000,
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
-  QUIZ_INTERVAL_MS: 30000,
+  QUIZ_INTERVAL_MS: 10000, // 10 DETIK (ALARM)
   QUIZ_TIME_LIMIT_MS: 20000,
   TRANSLATE_LIMIT: 1000,
   MAX_GAME_HISTORY: 100,
   MEMORY_CHECK_INTERVAL_MS: 60000,
   QUIZ_BREAK_MS: 2000,
   QUIZ_START_DELAY_MS: 5000,
+  QUIZ_ALARM_COUNT: 3, // Jumlah alarm sebelum quiz tampil
 };
 
 const QUIZ_ROOM = "Quiz";
@@ -83,6 +84,11 @@ export class GameServer {
     this._translateResetInterval = null;
     this._quizBreakTimeout = null;
     this._quizStartTimeout = null;
+    
+    // QUIZ ALARM COUNTER
+    this._quizAlarmCounter = 0;
+    this._quizAlarmTimer = null;
+    this._isQuizAlarmRunning = false;
     
     this._initQuiz();
     this._startMemoryMonitoring();
@@ -326,6 +332,13 @@ export class GameServer {
         this._quizStartTimeout = null;
       }
       
+      if (this._quizAlarmTimer) {
+        clearInterval(this._quizAlarmTimer);
+        this._quizAlarmTimer = null;
+        this._isQuizAlarmRunning = false;
+        this._quizAlarmCounter = 0;
+      }
+      
       this.isQuizWaiting = false;
       
       await this._showQuestion();
@@ -381,6 +394,13 @@ export class GameServer {
         this._quizStartTimeout = null;
       }
       
+      if (this._quizAlarmTimer) {
+        clearInterval(this._quizAlarmTimer);
+        this._quizAlarmTimer = null;
+        this._isQuizAlarmRunning = false;
+        this._quizAlarmCounter = 0;
+      }
+      
       this.isQuizWaiting = true;
       
       this._broadcastToRoom(QUIZ_ROOM, ["quizStarting", "Quiz will start in a moment..."]);
@@ -428,6 +448,13 @@ export class GameServer {
       if (this._quizStartTimeout) {
         clearTimeout(this._quizStartTimeout);
         this._quizStartTimeout = null;
+      }
+      
+      if (this._quizAlarmTimer) {
+        clearInterval(this._quizAlarmTimer);
+        this._quizAlarmTimer = null;
+        this._isQuizAlarmRunning = false;
+        this._quizAlarmCounter = 0;
       }
       
       this.isQuizWaiting = false;
@@ -746,7 +773,6 @@ export class GameServer {
         this.roomViewers.set(room, new Set());
       }
       this.roomViewers.get(room).add(username);
-      // Broadcast user list ke semua client di room
       this._broadcastUserList(room);
     }
   }
@@ -790,7 +816,6 @@ export class GameServer {
       ws._wsId = null;
       ws.username = null;
     }
-    // Broadcast user list ke semua client di room
     if (room) {
       this._broadcastUserList(room);
     }
@@ -844,13 +869,15 @@ export class GameServer {
           if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
             await this._loadQuestionsFromKV();
           }
-          if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting) {
+          if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._isQuizAlarmRunning) {
             await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
           } else {
             this._safeSend(ws, ["quizStatus", { 
               running: true, 
               question: this.currentQuestion ? true : false,
-              waiting: this.isQuizWaiting
+              waiting: this.isQuizWaiting,
+              alarmRunning: this._isQuizAlarmRunning,
+              alarmCount: this._quizAlarmCounter
             }]);
           }
         }
@@ -877,10 +904,8 @@ export class GameServer {
       this._safeSend(ws, ["switchRoomSuccess", roomName]);
       this._sendGameStatusToWs(ws, roomName);
       
-      // Kirim daftar user ke semua client di room
       this._broadcastUserList(roomName);
       
-      // Kirim daftar user spesifik ke user yang baru join
       const wsIds = this.wsClients.get(roomName);
       if (wsIds) {
         const users = [];
@@ -901,13 +926,15 @@ export class GameServer {
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
           await this._loadQuestionsFromKV();
         }
-        if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting) {
+        if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._isQuizAlarmRunning) {
           await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
         } else {
           this._safeSend(ws, ["quizStatus", { 
             running: true, 
             question: this.currentQuestion ? true : false,
-            waiting: this.isQuizWaiting
+            waiting: this.isQuizWaiting,
+            alarmRunning: this._isQuizAlarmRunning,
+            alarmCount: this._quizAlarmCounter
           }]);
         }
       }
@@ -959,7 +986,6 @@ export class GameServer {
     const wsIds = this.wsClients.get(room);
     if (!wsIds || wsIds.size === 0) return;
     
-    // Kumpulkan semua username di room
     const users = [];
     for (const wsId of wsIds) {
       const ws = this.wsMap.get(wsId);
@@ -972,7 +998,6 @@ export class GameServer {
       }
     }
     
-    // Kirim daftar user ke semua client di room
     this._broadcastToRoom(room, ["roomUserList", users]);
   }
   
@@ -1044,6 +1069,7 @@ export class GameServer {
       this.quizTimer = null;
     }
     
+    // QUIZ LOOP SETIAP 10 DETIK
     this.quizTimer = setInterval(() => {
       try {
         if (this.closing || this.isDestroyed) {
@@ -1052,31 +1078,110 @@ export class GameServer {
           return;
         }
         
-        if (this.isQuizWaiting || this._quizTimeout || this._quizStartTimeout) {
-          return;
-        }
-        
         const clients = this.wsClients.get(QUIZ_ROOM);
         if (!clients || clients.size === 0) {
+          // Reset counter jika tidak ada user
+          this._quizAlarmCounter = 0;
+          if (this._isQuizAlarmRunning) {
+            this._isQuizAlarmRunning = false;
+            if (this._quizAlarmTimer) {
+              clearInterval(this._quizAlarmTimer);
+              this._quizAlarmTimer = null;
+            }
+          }
           return;
         }
         
-        if (!this.currentQuestion) {
-          if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
-            this._loadQuestionsFromKV().then(() => {
-              if (!this.closing && !this.isDestroyed &&
-                  this.quizQuestionCache['en'] && this.quizQuestionCache['en'].length > 0) {
-                this._showQuestion();
-              }
-            });
-            return;
+        // CEK: Jika sedang ada pertanyaan aktif atau sedang jeda, skip
+        if (this.currentQuestion || this._quizTimeout || this.isQuizWaiting || this._quizStartTimeout) {
+          return;
+        }
+        
+        // JALANKAN ALARM COUNTER
+        if (!this._isQuizAlarmRunning) {
+          this._quizAlarmCounter = 0;
+          this._isQuizAlarmRunning = true;
+          
+          // Kirim alarm pertama
+          this._quizAlarmCounter++;
+          this._broadcastToRoom(QUIZ_ROOM, ["quizAlarm", {
+            count: this._quizAlarmCounter,
+            total: CONSTANTS.QUIZ_ALARM_COUNT,
+            message: `⚠️ Quiz akan dimulai dalam ${CONSTANTS.QUIZ_ALARM_COUNT * 10} detik! (${this._quizAlarmCounter}/${CONSTANTS.QUIZ_ALARM_COUNT})`
+          }]);
+          
+          // Mulai timer alarm per 10 detik
+          if (this._quizAlarmTimer) {
+            clearInterval(this._quizAlarmTimer);
+            this._quizAlarmTimer = null;
           }
           
-          this._showQuestion();
+          this._quizAlarmTimer = setInterval(() => {
+            try {
+              if (this.closing || this.isDestroyed) {
+                clearInterval(this._quizAlarmTimer);
+                this._quizAlarmTimer = null;
+                this._isQuizAlarmRunning = false;
+                return;
+              }
+              
+              // Cek apakah masih ada user di room
+              const currentClients = this.wsClients.get(QUIZ_ROOM);
+              if (!currentClients || currentClients.size === 0) {
+                clearInterval(this._quizAlarmTimer);
+                this._quizAlarmTimer = null;
+                this._isQuizAlarmRunning = false;
+                this._quizAlarmCounter = 0;
+                return;
+              }
+              
+              // Cek apakah ada pertanyaan atau kondisi lain yang menghalangi
+              if (this.currentQuestion || this._quizTimeout || this.isQuizWaiting || this._quizStartTimeout) {
+                clearInterval(this._quizAlarmTimer);
+                this._quizAlarmTimer = null;
+                this._isQuizAlarmRunning = false;
+                this._quizAlarmCounter = 0;
+                return;
+              }
+              
+              this._quizAlarmCounter++;
+              
+              if (this._quizAlarmCounter >= CONSTANTS.QUIZ_ALARM_COUNT) {
+                // Alarm ke-3 (10 detik × 3 = 30 detik) - TAMPILKAN QUIZ
+                clearInterval(this._quizAlarmTimer);
+                this._quizAlarmTimer = null;
+                this._isQuizAlarmRunning = false;
+                
+                this._broadcastToRoom(QUIZ_ROOM, ["quizAlarm", {
+                  count: this._quizAlarmCounter,
+                  total: CONSTANTS.QUIZ_ALARM_COUNT,
+                  message: `🎯 QUIZ DIMULAI! (${this._quizAlarmCounter}/${CONSTANTS.QUIZ_ALARM_COUNT})`
+                }]);
+                
+                // Tampilkan pertanyaan
+                if (!this.closing && !this.isDestroyed) {
+                  this._showQuestion();
+                }
+                
+                this._quizAlarmCounter = 0;
+                
+              } else {
+                // Kirim alarm berikutnya (setiap 10 detik)
+                const remaining = (CONSTANTS.QUIZ_ALARM_COUNT - this._quizAlarmCounter) * 10;
+                this._broadcastToRoom(QUIZ_ROOM, ["quizAlarm", {
+                  count: this._quizAlarmCounter,
+                  total: CONSTANTS.QUIZ_ALARM_COUNT,
+                  message: `⏰ Quiz akan dimulai dalam ${remaining} detik! (${this._quizAlarmCounter}/${CONSTANTS.QUIZ_ALARM_COUNT})`
+                }]);
+              }
+              
+            } catch(e) {}
+          }, CONSTANTS.QUIZ_INTERVAL_MS); // 10 DETIK
+          
         }
         
       } catch(e) {}
-    }, CONSTANTS.QUIZ_INTERVAL_MS);
+    }, CONSTANTS.QUIZ_INTERVAL_MS); // 10 DETIK
   }
   
   async _showQuestion() {
@@ -1090,6 +1195,16 @@ export class GameServer {
       const clients = this.wsClients.get(QUIZ_ROOM);
       if (!clients || clients.size === 0) {
         return;
+      }
+      
+      // Reset alarm jika masih berjalan
+      if (this._isQuizAlarmRunning) {
+        if (this._quizAlarmTimer) {
+          clearInterval(this._quizAlarmTimer);
+          this._quizAlarmTimer = null;
+        }
+        this._isQuizAlarmRunning = false;
+        this._quizAlarmCounter = 0;
       }
       
       let questions = this.quizQuestionCache['en'];
@@ -1116,7 +1231,6 @@ export class GameServer {
       this.quizHasWinner = false;
       this.quizWinner = null;
       
-      // Kirim daftar user sebelum quiz dimulai
       this._broadcastUserList(QUIZ_ROOM);
       
       await this._broadcastQuizQuestion(
@@ -1170,8 +1284,16 @@ export class GameServer {
               
               this.currentQuestion = null;
               
+              // Reset alarm counter untuk siklus berikutnya
+              this._quizAlarmCounter = 0;
+              if (this._quizAlarmTimer) {
+                clearInterval(this._quizAlarmTimer);
+                this._quizAlarmTimer = null;
+              }
+              this._isQuizAlarmRunning = false;
+              
               if (!this.closing && !this.isDestroyed) {
-                this._showQuestion();
+                // Biarkan loop utama yang akan memulai alarm berikutnya
               }
               
             } catch(e) {}
@@ -2610,6 +2732,11 @@ export class GameServer {
       if (this.quizTimer) {
         clearInterval(this.quizTimer);
         this.quizTimer = null;
+      }
+      
+      if (this._quizAlarmTimer) {
+        clearInterval(this._quizAlarmTimer);
+        this._quizAlarmTimer = null;
       }
       
       if (this._memoryCheckInterval) {
