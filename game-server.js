@@ -20,14 +20,14 @@ const CONSTANTS = {
   STALE_GAME_TIMEOUT_MS: 600000,
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
-  QUIZ_INTERVAL_MS: 10000, // 10 DETIK (ALARM)
+  QUIZ_INTERVAL_MS: 10000,
   QUIZ_TIME_LIMIT_MS: 20000,
   TRANSLATE_LIMIT: 1000,
   MAX_GAME_HISTORY: 100,
   MEMORY_CHECK_INTERVAL_MS: 60000,
   QUIZ_BREAK_MS: 2000,
   QUIZ_START_DELAY_MS: 5000,
-  QUIZ_ALARM_COUNT: 3, // Jumlah alarm sebelum quiz tampil
+  QUIZ_ALARM_COUNT: 3,
 };
 
 const QUIZ_ROOM = "Quiz";
@@ -85,7 +85,6 @@ export class GameServer {
     this._quizBreakTimeout = null;
     this._quizStartTimeout = null;
     
-    // QUIZ ALARM COUNTER
     this._quizAlarmCounter = 0;
     this._quizAlarmTimer = null;
     this._isQuizAlarmRunning = false;
@@ -403,7 +402,7 @@ export class GameServer {
       
       this.isQuizWaiting = true;
       
-      this._broadcastToRoom(QUIZ_ROOM, ["quizStarting", "Quiz will start in a moment..."]);
+      // HAPUS: this._broadcastToRoom(QUIZ_ROOM, ["quizStarting", "Quiz will start in a moment..."]);
       
       this._quizStartTimeout = setTimeout(() => {
         try {
@@ -463,7 +462,7 @@ export class GameServer {
       this.quizHasWinner = false;
       this.quizWinner = null;
       
-      this._broadcastToRoom(QUIZ_ROOM, ["quizReset", "Quiz has been reset"]);
+      // HAPUS: this._broadcastToRoom(QUIZ_ROOM, ["quizReset", "Quiz has been reset"]);
       
       return { success: true, message: "Quiz reset successfully" };
       
@@ -699,7 +698,7 @@ export class GameServer {
     const oldWs = this.wsMap.get(conn.wsId);
     if (oldWs && oldWs.readyState === 1) {
       try {
-        this._safeSend(oldWs, ["gameLowCardReplaced", "New connection established"]);
+        // HAPUS: this._safeSend(oldWs, ["gameLowCardReplaced", "New connection established"]);
         oldWs.close(1000, "Replaced by new connection");
       } catch(e) {}
     }
@@ -773,7 +772,7 @@ export class GameServer {
         this.roomViewers.set(room, new Set());
       }
       this.roomViewers.get(room).add(username);
-      this._broadcastUserList(room);
+      // HAPUS: this._broadcastUserList(room);
     }
   }
   
@@ -816,9 +815,7 @@ export class GameServer {
       ws._wsId = null;
       ws.username = null;
     }
-    if (room) {
-      this._broadcastUserList(room);
-    }
+    // HAPUS: if (room) { this._broadcastUserList(room); }
   }
   
   _ensureSingleConnection(room, username, newWs, newWsId) {
@@ -853,7 +850,7 @@ export class GameServer {
     
     const lockKey = `switch_${wsId}`;
     if (this._switchLocks.has(lockKey)) {
-      this._safeSend(ws, ["switchRoomBusy", "Please wait..."]);
+      // HAPUS: this._safeSend(ws, ["switchRoomBusy", "Please wait..."]);
       return;
     }
     this._switchLocks.set(lockKey, Date.now());
@@ -862,7 +859,7 @@ export class GameServer {
       const oldRoom = this.clientRooms.get(wsId);
       
       if (oldRoom === roomName) {
-        this._safeSend(ws, ["switchRoomSuccess", roomName]);
+        // HAPUS: this._safeSend(ws, ["switchRoomSuccess", roomName]);
         this._sendGameStatusToWs(ws, roomName);
         
         if (roomName === QUIZ_ROOM) {
@@ -872,13 +869,7 @@ export class GameServer {
           if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._isQuizAlarmRunning) {
             await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
           } else {
-            this._safeSend(ws, ["quizStatus", { 
-              running: true, 
-              question: this.currentQuestion ? true : false,
-              waiting: this.isQuizWaiting,
-              alarmRunning: this._isQuizAlarmRunning,
-              alarmCount: this._quizAlarmCounter
-            }]);
+            // HAPUS: this._safeSend(ws, ["quizStatus", { ... }]);
           }
         }
         return;
@@ -900,27 +891,13 @@ export class GameServer {
         }
       }
       
-      this._broadcastToRoom(roomName, ["roomUserJoined", username || "Anonymous"]);
-      this._safeSend(ws, ["switchRoomSuccess", roomName]);
+      // HAPUS: this._broadcastToRoom(roomName, ["roomUserJoined", username || "Anonymous"]);
+      // HAPUS: this._safeSend(ws, ["switchRoomSuccess", roomName]);
       this._sendGameStatusToWs(ws, roomName);
       
-      this._broadcastUserList(roomName);
+      // HAPUS: this._broadcastUserList(roomName);
       
-      const wsIds = this.wsClients.get(roomName);
-      if (wsIds) {
-        const users = [];
-        for (const id of wsIds) {
-          const userWs = this.wsMap.get(id);
-          if (userWs && userWs.username) {
-            users.push({
-              username: userWs.username,
-              wsId: id,
-              isActive: userWs.readyState === 1
-            });
-          }
-        }
-        this._safeSend(ws, ["roomUserList", users]);
-      }
+      // HAPUS: this._safeSend(ws, ["roomUserList", users]);
       
       if (roomName === QUIZ_ROOM) {
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
@@ -929,13 +906,7 @@ export class GameServer {
         if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._isQuizAlarmRunning) {
           await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
         } else {
-          this._safeSend(ws, ["quizStatus", { 
-            running: true, 
-            question: this.currentQuestion ? true : false,
-            waiting: this.isQuizWaiting,
-            alarmRunning: this._isQuizAlarmRunning,
-            alarmCount: this._quizAlarmCounter
-          }]);
+          // HAPUS: this._safeSend(ws, ["quizStatus", { ... }]);
         }
       }
       
@@ -948,57 +919,16 @@ export class GameServer {
     if (!ws || !room) return;
     const roomGame = this.activeGames.get(room);
     if (roomGame && roomGame._isActive && !roomGame._gameEnded) {
-      this._safeSend(ws, ["gameLowCardStatus", {
-        room: room,
-        running: true,
-        phase: roomGame._phase || 'idle',
-        round: roomGame.round || 0,
-        betAmount: roomGame.betAmount || 0,
-        registrationOpen: roomGame.registrationOpen || false,
-        players: Array.from(roomGame.players?.values() || []).map(p => p.name),
-        eliminated: Array.from(roomGame.eliminated || []),
-        numbers: Array.from(roomGame.numbers?.entries() || []).map(([name, num]) => ({ name, num })),
-        totalPlayers: roomGame.players?.size || 0,
-        activePlayers: this._getActivePlayers(roomGame).length
-      }]);
+      // HAPUS: this._safeSend(ws, ["gameLowCardStatus", { ... }]);
     } else {
-      this._safeSend(ws, ["gameLowCardStatus", {
-        room: room,
-        running: false,
-        phase: 'idle',
-        round: 0,
-        betAmount: 0,
-        registrationOpen: false,
-        players: [],
-        eliminated: [],
-        numbers: [],
-        totalPlayers: 0,
-        activePlayers: 0
-      }]);
+      // HAPUS: this._safeSend(ws, ["gameLowCardStatus", { ... }]);
     }
   }
   
   // ==================== USER LIST BROADCAST ====================
   
   _broadcastUserList(room) {
-    if (!room) return;
-    
-    const wsIds = this.wsClients.get(room);
-    if (!wsIds || wsIds.size === 0) return;
-    
-    const users = [];
-    for (const wsId of wsIds) {
-      const ws = this.wsMap.get(wsId);
-      if (ws && ws.username) {
-        users.push({
-          username: ws.username,
-          wsId: wsId,
-          isActive: ws.readyState === 1
-        });
-      }
-    }
-    
-    this._broadcastToRoom(room, ["roomUserList", users]);
+    // DIHAPUS - tidak digunakan
   }
   
   // ==================== BROADCAST ====================
@@ -1069,7 +999,6 @@ export class GameServer {
       this.quizTimer = null;
     }
     
-    // QUIZ LOOP SETIAP 10 DETIK
     this.quizTimer = setInterval(() => {
       try {
         if (this.closing || this.isDestroyed) {
@@ -1080,7 +1009,6 @@ export class GameServer {
         
         const clients = this.wsClients.get(QUIZ_ROOM);
         if (!clients || clients.size === 0) {
-          // Reset counter jika tidak ada user
           this._quizAlarmCounter = 0;
           if (this._isQuizAlarmRunning) {
             this._isQuizAlarmRunning = false;
@@ -1092,17 +1020,14 @@ export class GameServer {
           return;
         }
         
-        // CEK: Jika sedang ada pertanyaan aktif atau sedang jeda, skip
         if (this.currentQuestion || this._quizTimeout || this.isQuizWaiting || this._quizStartTimeout) {
           return;
         }
         
-        // JALANKAN ALARM COUNTER
         if (!this._isQuizAlarmRunning) {
           this._quizAlarmCounter = 0;
           this._isQuizAlarmRunning = true;
           
-          // Kirim alarm pertama
           this._quizAlarmCounter++;
           this._broadcastToRoom(QUIZ_ROOM, ["quizAlarm", {
             count: this._quizAlarmCounter,
@@ -1110,7 +1035,6 @@ export class GameServer {
             message: `⚠️ Quiz akan dimulai dalam ${CONSTANTS.QUIZ_ALARM_COUNT * 10} detik! (${this._quizAlarmCounter}/${CONSTANTS.QUIZ_ALARM_COUNT})`
           }]);
           
-          // Mulai timer alarm per 10 detik
           if (this._quizAlarmTimer) {
             clearInterval(this._quizAlarmTimer);
             this._quizAlarmTimer = null;
@@ -1125,7 +1049,6 @@ export class GameServer {
                 return;
               }
               
-              // Cek apakah masih ada user di room
               const currentClients = this.wsClients.get(QUIZ_ROOM);
               if (!currentClients || currentClients.size === 0) {
                 clearInterval(this._quizAlarmTimer);
@@ -1135,7 +1058,6 @@ export class GameServer {
                 return;
               }
               
-              // Cek apakah ada pertanyaan atau kondisi lain yang menghalangi
               if (this.currentQuestion || this._quizTimeout || this.isQuizWaiting || this._quizStartTimeout) {
                 clearInterval(this._quizAlarmTimer);
                 this._quizAlarmTimer = null;
@@ -1147,7 +1069,6 @@ export class GameServer {
               this._quizAlarmCounter++;
               
               if (this._quizAlarmCounter >= CONSTANTS.QUIZ_ALARM_COUNT) {
-                // Alarm ke-3 (10 detik × 3 = 30 detik) - TAMPILKAN QUIZ
                 clearInterval(this._quizAlarmTimer);
                 this._quizAlarmTimer = null;
                 this._isQuizAlarmRunning = false;
@@ -1158,7 +1079,6 @@ export class GameServer {
                   message: `🎯 QUIZ DIMULAI! (${this._quizAlarmCounter}/${CONSTANTS.QUIZ_ALARM_COUNT})`
                 }]);
                 
-                // Tampilkan pertanyaan
                 if (!this.closing && !this.isDestroyed) {
                   this._showQuestion();
                 }
@@ -1166,7 +1086,6 @@ export class GameServer {
                 this._quizAlarmCounter = 0;
                 
               } else {
-                // Kirim alarm berikutnya (setiap 10 detik)
                 const remaining = (CONSTANTS.QUIZ_ALARM_COUNT - this._quizAlarmCounter) * 10;
                 this._broadcastToRoom(QUIZ_ROOM, ["quizAlarm", {
                   count: this._quizAlarmCounter,
@@ -1176,12 +1095,12 @@ export class GameServer {
               }
               
             } catch(e) {}
-          }, CONSTANTS.QUIZ_INTERVAL_MS); // 10 DETIK
+          }, CONSTANTS.QUIZ_INTERVAL_MS);
           
         }
         
       } catch(e) {}
-    }, CONSTANTS.QUIZ_INTERVAL_MS); // 10 DETIK
+    }, CONSTANTS.QUIZ_INTERVAL_MS);
   }
   
   async _showQuestion() {
@@ -1197,7 +1116,6 @@ export class GameServer {
         return;
       }
       
-      // Reset alarm jika masih berjalan
       if (this._isQuizAlarmRunning) {
         if (this._quizAlarmTimer) {
           clearInterval(this._quizAlarmTimer);
@@ -1231,8 +1149,6 @@ export class GameServer {
       this.quizHasWinner = false;
       this.quizWinner = null;
       
-      this._broadcastUserList(QUIZ_ROOM);
-      
       await this._broadcastQuizQuestion(
         this.currentQuestion.question,
         this.currentQuestion.options
@@ -1261,8 +1177,6 @@ export class GameServer {
             return;
           }
           
-          // QUIZ WINNER SECTION REMOVED - Tidak mengirim pesan quizWinner
-          
           this._quizTimeout = null;
           
           this.isQuizWaiting = true;
@@ -1279,7 +1193,6 @@ export class GameServer {
               
               this.currentQuestion = null;
               
-              // Reset alarm counter untuk siklus berikutnya
               this._quizAlarmCounter = 0;
               if (this._quizAlarmTimer) {
                 clearInterval(this._quizAlarmTimer);
@@ -2197,7 +2110,7 @@ export class GameServer {
         this.activeGames.set(room, game);
         this._addClient(room, ws, usernameClean, false);
         this._broadcastToRoom(room, ["gameLowCardStart", game.betAmount, usernameClean]);
-        this._safeSend(ws, ["gameLowCardStartSuccess", game.hostName, game.betAmount]);
+        // HAPUS: this._safeSend(ws, ["gameLowCardStartSuccess", game.hostName, game.betAmount]);
         this._startRegistration(room, game);
         setTimeout(() => {
           try {
@@ -2285,22 +2198,14 @@ export class GameServer {
             return;
           }
           const finalWsId = this._ensureSingleConnection(room, usernameClean, ws, wsId);
-          this._safeSend(ws, ["gameLowCardRejoinSuccess", usernameClean]);
-          this._safeSend(ws, ["gameLowCardStatus", {
-            room: room,
-            running: true,
-            phase: game._phase || 'idle',
-            round: game.round || 0,
-            betAmount: game.betAmount || 0,
-            registrationOpen: game.registrationOpen || false,
-            players: Array.from(game.players?.values() || []).map(p => p.name)
-          }]);
+          // HAPUS: this._safeSend(ws, ["gameLowCardRejoinSuccess", usernameClean]);
+          // HAPUS: this._safeSend(ws, ["gameLowCardStatus", { ... }]);
           if (game.numbers.has(usernameClean)) {
             const number = game.numbers.get(usernameClean);
             const tanda = game.tanda.get(usernameClean) || "";
             this._safeSend(ws, ["gameLowCardPlayerDraw", usernameClean, number, tanda]);
           }
-          this._safeSend(ws, ["gameLowCardRejoinComplete", usernameClean]);
+          // HAPUS: this._safeSend(ws, ["gameLowCardRejoinComplete", usernameClean]);
           return;
         }
         if (!game.registrationOpen) {
@@ -2315,7 +2220,7 @@ export class GameServer {
         this._addClient(room, ws, usernameClean, false);
         game.playerWsId.set(usernameClean, wsId);
         this._broadcastToRoom(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
-        this._safeSend(ws, ["gameLowCardJoinSuccess", usernameClean, game.betAmount]);
+        // HAPUS: this._safeSend(ws, ["gameLowCardJoinSuccess", usernameClean, game.betAmount]);
       } finally {
         this._joinLocks.delete(lockKey);
       }
@@ -2430,7 +2335,7 @@ export class GameServer {
         return;
       }
       this._removePlayerFromGame(usernameClean, room);
-      this._safeSend(ws, ["gameLowCardLeaveSuccess", usernameClean]);
+      // HAPUS: this._safeSend(ws, ["gameLowCardLeaveSuccess", usernameClean]);
     } catch(e) {
       this._safeSend(ws, ["gameLowCardError", "Failed to leave game"]);
     }
@@ -2507,10 +2412,7 @@ export class GameServer {
       }
       
       if (evt === "getRoomUsers") {
-        const room = this._ensureRoomConsistency(ws);
-        if (room) {
-          this._broadcastUserList(room);
-        }
+        // HAPUS: event ini tidak ada di client
         return;
       }
       
