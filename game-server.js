@@ -85,9 +85,10 @@ export class GameServer {
     this._quizBreakTimeout = null;
     this._quizStartTimeout = null;
     
-    this._quizAlarmCounter = 0;
-    this._quizAlarmTimer = null;
-    this._isQuizAlarmRunning = false;
+    // HAPUS: QUIZ ALARM COUNTER
+    // this._quizAlarmCounter = 0;
+    // this._quizAlarmTimer = null;
+    // this._isQuizAlarmRunning = false;
     
     this._initQuiz();
     this._startMemoryMonitoring();
@@ -331,12 +332,7 @@ export class GameServer {
         this._quizStartTimeout = null;
       }
       
-      if (this._quizAlarmTimer) {
-        clearInterval(this._quizAlarmTimer);
-        this._quizAlarmTimer = null;
-        this._isQuizAlarmRunning = false;
-        this._quizAlarmCounter = 0;
-      }
+      // HAPUS: if (this._quizAlarmTimer) { ... }
       
       this.isQuizWaiting = false;
       
@@ -393,16 +389,9 @@ export class GameServer {
         this._quizStartTimeout = null;
       }
       
-      if (this._quizAlarmTimer) {
-        clearInterval(this._quizAlarmTimer);
-        this._quizAlarmTimer = null;
-        this._isQuizAlarmRunning = false;
-        this._quizAlarmCounter = 0;
-      }
+      // HAPUS: if (this._quizAlarmTimer) { ... }
       
       this.isQuizWaiting = true;
-      
-      // HAPUS: this._broadcastToRoom(QUIZ_ROOM, ["quizStarting", "Quiz will start in a moment..."]);
       
       this._quizStartTimeout = setTimeout(() => {
         try {
@@ -449,20 +438,13 @@ export class GameServer {
         this._quizStartTimeout = null;
       }
       
-      if (this._quizAlarmTimer) {
-        clearInterval(this._quizAlarmTimer);
-        this._quizAlarmTimer = null;
-        this._isQuizAlarmRunning = false;
-        this._quizAlarmCounter = 0;
-      }
+      // HAPUS: if (this._quizAlarmTimer) { ... }
       
       this.isQuizWaiting = false;
       this.currentQuestion = null;
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
-      
-      // HAPUS: this._broadcastToRoom(QUIZ_ROOM, ["quizReset", "Quiz has been reset"]);
       
       return { success: true, message: "Quiz reset successfully" };
       
@@ -698,7 +680,6 @@ export class GameServer {
     const oldWs = this.wsMap.get(conn.wsId);
     if (oldWs && oldWs.readyState === 1) {
       try {
-        // HAPUS: this._safeSend(oldWs, ["gameLowCardReplaced", "New connection established"]);
         oldWs.close(1000, "Replaced by new connection");
       } catch(e) {}
     }
@@ -772,7 +753,6 @@ export class GameServer {
         this.roomViewers.set(room, new Set());
       }
       this.roomViewers.get(room).add(username);
-      // HAPUS: this._broadcastUserList(room);
     }
   }
   
@@ -815,7 +795,6 @@ export class GameServer {
       ws._wsId = null;
       ws.username = null;
     }
-    // HAPUS: if (room) { this._broadcastUserList(room); }
   }
   
   _ensureSingleConnection(room, username, newWs, newWsId) {
@@ -850,7 +829,6 @@ export class GameServer {
     
     const lockKey = `switch_${wsId}`;
     if (this._switchLocks.has(lockKey)) {
-      // HAPUS: this._safeSend(ws, ["switchRoomBusy", "Please wait..."]);
       return;
     }
     this._switchLocks.set(lockKey, Date.now());
@@ -859,17 +837,14 @@ export class GameServer {
       const oldRoom = this.clientRooms.get(wsId);
       
       if (oldRoom === roomName) {
-        // HAPUS: this._safeSend(ws, ["switchRoomSuccess", roomName]);
         this._sendGameStatusToWs(ws, roomName);
         
         if (roomName === QUIZ_ROOM) {
           if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
             await this._loadQuestionsFromKV();
           }
-          if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._isQuizAlarmRunning) {
+          if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout) {
             await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
-          } else {
-            // HAPUS: this._safeSend(ws, ["quizStatus", { ... }]);
           }
         }
         return;
@@ -891,22 +866,14 @@ export class GameServer {
         }
       }
       
-      // HAPUS: this._broadcastToRoom(roomName, ["roomUserJoined", username || "Anonymous"]);
-      // HAPUS: this._safeSend(ws, ["switchRoomSuccess", roomName]);
       this._sendGameStatusToWs(ws, roomName);
-      
-      // HAPUS: this._broadcastUserList(roomName);
-      
-      // HAPUS: this._safeSend(ws, ["roomUserList", users]);
       
       if (roomName === QUIZ_ROOM) {
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
           await this._loadQuestionsFromKV();
         }
-        if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._isQuizAlarmRunning) {
+        if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout) {
           await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
-        } else {
-          // HAPUS: this._safeSend(ws, ["quizStatus", { ... }]);
         }
       }
       
@@ -916,18 +883,6 @@ export class GameServer {
   }
   
   _sendGameStatusToWs(ws, room) {
-    if (!ws || !room) return;
-    const roomGame = this.activeGames.get(room);
-    if (roomGame && roomGame._isActive && !roomGame._gameEnded) {
-      // HAPUS: this._safeSend(ws, ["gameLowCardStatus", { ... }]);
-    } else {
-      // HAPUS: this._safeSend(ws, ["gameLowCardStatus", { ... }]);
-    }
-  }
-  
-  // ==================== USER LIST BROADCAST ====================
-  
-  _broadcastUserList(room) {
     // DIHAPUS - tidak digunakan
   }
   
@@ -999,6 +954,7 @@ export class GameServer {
       this.quizTimer = null;
     }
     
+    // QUIZ LOOP - LANGSUNG TAMPILKAN PERTANYAAN TANPA ALARM
     this.quizTimer = setInterval(() => {
       try {
         if (this.closing || this.isDestroyed) {
@@ -1009,98 +965,21 @@ export class GameServer {
         
         const clients = this.wsClients.get(QUIZ_ROOM);
         if (!clients || clients.size === 0) {
-          this._quizAlarmCounter = 0;
-          if (this._isQuizAlarmRunning) {
-            this._isQuizAlarmRunning = false;
-            if (this._quizAlarmTimer) {
-              clearInterval(this._quizAlarmTimer);
-              this._quizAlarmTimer = null;
-            }
-          }
           return;
         }
         
+        // CEK: Jika sedang ada pertanyaan aktif atau sedang jeda, skip
         if (this.currentQuestion || this._quizTimeout || this.isQuizWaiting || this._quizStartTimeout) {
           return;
         }
         
-        if (!this._isQuizAlarmRunning) {
-          this._quizAlarmCounter = 0;
-          this._isQuizAlarmRunning = true;
-          
-          this._quizAlarmCounter++;
-          this._broadcastToRoom(QUIZ_ROOM, ["quizAlarm", {
-            count: this._quizAlarmCounter,
-            total: CONSTANTS.QUIZ_ALARM_COUNT,
-            message: `⚠️ Quiz akan dimulai dalam ${CONSTANTS.QUIZ_ALARM_COUNT * 10} detik! (${this._quizAlarmCounter}/${CONSTANTS.QUIZ_ALARM_COUNT})`
-          }]);
-          
-          if (this._quizAlarmTimer) {
-            clearInterval(this._quizAlarmTimer);
-            this._quizAlarmTimer = null;
-          }
-          
-          this._quizAlarmTimer = setInterval(() => {
-            try {
-              if (this.closing || this.isDestroyed) {
-                clearInterval(this._quizAlarmTimer);
-                this._quizAlarmTimer = null;
-                this._isQuizAlarmRunning = false;
-                return;
-              }
-              
-              const currentClients = this.wsClients.get(QUIZ_ROOM);
-              if (!currentClients || currentClients.size === 0) {
-                clearInterval(this._quizAlarmTimer);
-                this._quizAlarmTimer = null;
-                this._isQuizAlarmRunning = false;
-                this._quizAlarmCounter = 0;
-                return;
-              }
-              
-              if (this.currentQuestion || this._quizTimeout || this.isQuizWaiting || this._quizStartTimeout) {
-                clearInterval(this._quizAlarmTimer);
-                this._quizAlarmTimer = null;
-                this._isQuizAlarmRunning = false;
-                this._quizAlarmCounter = 0;
-                return;
-              }
-              
-              this._quizAlarmCounter++;
-              
-              if (this._quizAlarmCounter >= CONSTANTS.QUIZ_ALARM_COUNT) {
-                clearInterval(this._quizAlarmTimer);
-                this._quizAlarmTimer = null;
-                this._isQuizAlarmRunning = false;
-                
-                this._broadcastToRoom(QUIZ_ROOM, ["quizAlarm", {
-                  count: this._quizAlarmCounter,
-                  total: CONSTANTS.QUIZ_ALARM_COUNT,
-                  message: `🎯 QUIZ DIMULAI! (${this._quizAlarmCounter}/${CONSTANTS.QUIZ_ALARM_COUNT})`
-                }]);
-                
-                if (!this.closing && !this.isDestroyed) {
-                  this._showQuestion();
-                }
-                
-                this._quizAlarmCounter = 0;
-                
-              } else {
-                const remaining = (CONSTANTS.QUIZ_ALARM_COUNT - this._quizAlarmCounter) * 10;
-                this._broadcastToRoom(QUIZ_ROOM, ["quizAlarm", {
-                  count: this._quizAlarmCounter,
-                  total: CONSTANTS.QUIZ_ALARM_COUNT,
-                  message: `⏰ Quiz akan dimulai dalam ${remaining} detik! (${this._quizAlarmCounter}/${CONSTANTS.QUIZ_ALARM_COUNT})`
-                }]);
-              }
-              
-            } catch(e) {}
-          }, CONSTANTS.QUIZ_INTERVAL_MS);
-          
+        // LANGSUNG TAMPILKAN PERTANYAAN TANPA ALARM
+        if (!this.closing && !this.isDestroyed) {
+          this._showQuestion();
         }
         
       } catch(e) {}
-    }, CONSTANTS.QUIZ_INTERVAL_MS);
+    }, CONSTANTS.QUIZ_INTERVAL_MS); // 10 DETIK
   }
   
   async _showQuestion() {
@@ -1114,15 +993,6 @@ export class GameServer {
       const clients = this.wsClients.get(QUIZ_ROOM);
       if (!clients || clients.size === 0) {
         return;
-      }
-      
-      if (this._isQuizAlarmRunning) {
-        if (this._quizAlarmTimer) {
-          clearInterval(this._quizAlarmTimer);
-          this._quizAlarmTimer = null;
-        }
-        this._isQuizAlarmRunning = false;
-        this._quizAlarmCounter = 0;
       }
       
       let questions = this.quizQuestionCache['en'];
@@ -1193,15 +1063,8 @@ export class GameServer {
               
               this.currentQuestion = null;
               
-              this._quizAlarmCounter = 0;
-              if (this._quizAlarmTimer) {
-                clearInterval(this._quizAlarmTimer);
-                this._quizAlarmTimer = null;
-              }
-              this._isQuizAlarmRunning = false;
-              
               if (!this.closing && !this.isDestroyed) {
-                // Biarkan loop utama yang akan memulai alarm berikutnya
+                // Biarkan loop utama yang akan memulai pertanyaan berikutnya
               }
               
             } catch(e) {}
@@ -2110,7 +1973,6 @@ export class GameServer {
         this.activeGames.set(room, game);
         this._addClient(room, ws, usernameClean, false);
         this._broadcastToRoom(room, ["gameLowCardStart", game.betAmount, usernameClean]);
-        // HAPUS: this._safeSend(ws, ["gameLowCardStartSuccess", game.hostName, game.betAmount]);
         this._startRegistration(room, game);
         setTimeout(() => {
           try {
@@ -2198,14 +2060,11 @@ export class GameServer {
             return;
           }
           const finalWsId = this._ensureSingleConnection(room, usernameClean, ws, wsId);
-          // HAPUS: this._safeSend(ws, ["gameLowCardRejoinSuccess", usernameClean]);
-          // HAPUS: this._safeSend(ws, ["gameLowCardStatus", { ... }]);
           if (game.numbers.has(usernameClean)) {
             const number = game.numbers.get(usernameClean);
             const tanda = game.tanda.get(usernameClean) || "";
             this._safeSend(ws, ["gameLowCardPlayerDraw", usernameClean, number, tanda]);
           }
-          // HAPUS: this._safeSend(ws, ["gameLowCardRejoinComplete", usernameClean]);
           return;
         }
         if (!game.registrationOpen) {
@@ -2220,7 +2079,6 @@ export class GameServer {
         this._addClient(room, ws, usernameClean, false);
         game.playerWsId.set(usernameClean, wsId);
         this._broadcastToRoom(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
-        // HAPUS: this._safeSend(ws, ["gameLowCardJoinSuccess", usernameClean, game.betAmount]);
       } finally {
         this._joinLocks.delete(lockKey);
       }
@@ -2335,7 +2193,6 @@ export class GameServer {
         return;
       }
       this._removePlayerFromGame(usernameClean, room);
-      // HAPUS: this._safeSend(ws, ["gameLowCardLeaveSuccess", usernameClean]);
     } catch(e) {
       this._safeSend(ws, ["gameLowCardError", "Failed to leave game"]);
     }
@@ -2412,7 +2269,6 @@ export class GameServer {
       }
       
       if (evt === "getRoomUsers") {
-        // HAPUS: event ini tidak ada di client
         return;
       }
       
@@ -2629,11 +2485,6 @@ export class GameServer {
       if (this.quizTimer) {
         clearInterval(this.quizTimer);
         this.quizTimer = null;
-      }
-      
-      if (this._quizAlarmTimer) {
-        clearInterval(this._quizAlarmTimer);
-        this._quizAlarmTimer = null;
       }
       
       if (this._memoryCheckInterval) {
