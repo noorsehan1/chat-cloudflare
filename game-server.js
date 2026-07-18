@@ -21,11 +21,12 @@ const CONSTANTS = {
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
   QUIZ_INTERVAL_MS: 30000,
-  QUIZ_TIME_LIMIT_MS: 30000,
+  QUIZ_TIME_LIMIT_MS: 29000,
   TRANSLATE_LIMIT: 1000,
   MAX_GAME_HISTORY: 100,
   MEMORY_CHECK_INTERVAL_MS: 60000,
-  QUIZ_BREAK_MS: 2000, // Jeda singkat antara quiz untuk baca hasil
+  QUIZ_BREAK_MS: 2000,
+  QUIZ_START_DELAY_MS: 1500,
 };
 
 const QUIZ_ROOM = "Quiz";
@@ -65,7 +66,7 @@ export class GameServer {
     this.currentQuestion = null;
     this.quizQuestionPool = [];
     this.isFetching = false;
-    this.isQuizWaiting = false; // Flag untuk menandai sedang jeda antar quiz
+    this.isQuizWaiting = false;
     
     this.quizQuestionCache = {};
     this.questionTranslations = new Map();
@@ -80,7 +81,8 @@ export class GameServer {
     this._gameHistory = [];
     this._quizTimeout = null;
     this._translateResetInterval = null;
-    this._quizBreakTimeout = null; // Timer untuk jeda antar quiz
+    this._quizBreakTimeout = null;
+    this._quizStartTimeout = null;
     
     this._initQuiz();
     this._startMemoryMonitoring();
@@ -301,11 +303,90 @@ export class GameServer {
       this.quizWinner = null;
       this.currentQuestion = null;
       
+      if (this._quizTimeout) {
+        clearTimeout(this._quizTimeout);
+        this._quizTimeout = null;
+      }
+      
+      if (this._quizBreakTimeout) {
+        clearTimeout(this._quizBreakTimeout);
+        this._quizBreakTimeout = null;
+      }
+      
+      if (this._quizStartTimeout) {
+        clearTimeout(this._quizStartTimeout);
+        this._quizStartTimeout = null;
+      }
+      
+      this.isQuizWaiting = false;
+      
       await this._showQuestion();
       
       return { 
         success: true, 
         message: "Quiz started!",
+        questions: this.quizQuestionCache['en'].length 
+      };
+      
+    } catch(e) {
+      return { success: false, message: e.message };
+    }
+  }
+  
+  // ==================== START QUIZ WITH DELAY ====================
+  
+  async startQuizWithDelay(delayMs = CONSTANTS.QUIZ_START_DELAY_MS) {
+    try {
+      if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
+        await this._loadQuestionsFromKV();
+      }
+      
+      if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
+        return { success: false, message: "No questions available" };
+      }
+      
+      this.quizAnswered = new Set();
+      this.quizHasWinner = false;
+      this.quizWinner = null;
+      this.currentQuestion = null;
+      
+      if (this._quizTimeout) {
+        clearTimeout(this._quizTimeout);
+        this._quizTimeout = null;
+      }
+      
+      if (this._quizBreakTimeout) {
+        clearTimeout(this._quizBreakTimeout);
+        this._quizBreakTimeout = null;
+      }
+      
+      if (this._quizStartTimeout) {
+        clearTimeout(this._quizStartTimeout);
+        this._quizStartTimeout = null;
+      }
+      
+      this.isQuizWaiting = true;
+      
+      this._broadcastToRoom(QUIZ_ROOM, ["quizStarting", "Quiz will start in a moment..."]);
+      
+      this._quizStartTimeout = setTimeout(() => {
+        try {
+          if (this.closing || this.isDestroyed) {
+            this._quizStartTimeout = null;
+            return;
+          }
+          
+          this.isQuizWaiting = false;
+          this._quizStartTimeout = null;
+          
+          this._showQuestion();
+          
+        } catch(e) {}
+      }, delayMs);
+      
+      return { 
+        success: true, 
+        message: `Quiz will start in ${delayMs/1000} seconds`,
         questions: this.quizQuestionCache['en'].length 
       };
       
@@ -707,7 +788,7 @@ export class GameServer {
           if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
             await this._loadQuestionsFromKV();
           }
-          await this.forceStartQuiz();
+          await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
         }
         return;
       }
@@ -736,7 +817,7 @@ export class GameServer {
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
           await this._loadQuestionsFromKV();
         }
-        await this.forceStartQuiz();
+        await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
       }
       
     } finally {
@@ -846,7 +927,6 @@ export class GameServer {
       this.quizTimer = null;
     }
     
-    // Gunakan setInterval untuk loop utama
     this.quizTimer = setInterval(() => {
       try {
         if (this.closing || this.isDestroyed) {
@@ -855,9 +935,8 @@ export class GameServer {
           return;
         }
         
-        // Cek apakah sedang dalam jeda atau sudah ada pertanyaan aktif
-        if (this.isQuizWaiting || this._quizTimeout) {
-          return; // Skip jika sedang menunggu
+        if (this.isQuizWaiting || this._quizTimeout || this._quizStartTimeout) {
+          return;
         }
         
         const clients = this.wsClients.get(QUIZ_ROOM);
@@ -884,7 +963,8 @@ export class GameServer {
   async _showQuestion() {
     try {
       if (this.isDestroyed) return;
-      if (this.isQuizWaiting) return; // Jika sedang jeda, jangan tampilkan
+      if (this.isQuizWaiting) return;
+      if (this._quizStartTimeout) return;
       
       const clients = this.wsClients.get(QUIZ_ROOM);
       if (!clients || clients.size === 0) {
@@ -920,7 +1000,6 @@ export class GameServer {
         this.currentQuestion.options
       );
       
-      // Hapus timer lama jika ada
       if (this._quizTimeout) {
         clearTimeout(this._quizTimeout);
         this._quizTimeout = null;
@@ -931,7 +1010,6 @@ export class GameServer {
         this._quizBreakTimeout = null;
       }
       
-      // Set timer untuk mengakhiri sesi tanya jawab
       this._quizTimeout = setTimeout(() => {
         try {
           if (this.closing || this.isDestroyed) {
@@ -945,7 +1023,6 @@ export class GameServer {
             return;
           }
           
-          // Broadcast hasil
           if (this.quizHasWinner && this.quizWinner) {
             this._broadcastToRoom(QUIZ_ROOM, [
               "quizWinner", 
@@ -960,7 +1037,6 @@ export class GameServer {
           
           this._quizTimeout = null;
           
-          // Mulai jeda singkat sebelum pertanyaan berikutnya
           this.isQuizWaiting = true;
           
           this._quizBreakTimeout = setTimeout(() => {
@@ -973,13 +1049,12 @@ export class GameServer {
               this.isQuizWaiting = false;
               this._quizBreakTimeout = null;
               
-              // Tampilkan pertanyaan berikutnya
               if (!this.closing && !this.isDestroyed) {
                 this._showQuestion();
               }
               
             } catch(e) {}
-          }, CONSTANTS.QUIZ_BREAK_MS); // Jeda 2 detik
+          }, CONSTANTS.QUIZ_BREAK_MS);
           
         } catch(e) {}
       }, CONSTANTS.QUIZ_TIME_LIMIT_MS);
@@ -2426,6 +2501,11 @@ export class GameServer {
       if (this._quizBreakTimeout) {
         clearTimeout(this._quizBreakTimeout);
         this._quizBreakTimeout = null;
+      }
+      
+      if (this._quizStartTimeout) {
+        clearTimeout(this._quizStartTimeout);
+        this._quizStartTimeout = null;
       }
       
       for (const [room, game] of this.activeGames) {
