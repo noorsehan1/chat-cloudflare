@@ -266,22 +266,22 @@ export class GameServer {
     
     switch(errorType) {
       case "NOT_QUIZ_TIME":
-        message = customMessage || `❌ Quiz is currently offline}`;
+        message = customMessage || `Quiz is currently offline`;
         break;
       case "QUIZ_DISABLED":
-        message = customMessage || `⏰ Quiz is not available right now}`;
+        message = customMessage || `Quiz is not available right now`;
         break;
       case "QUIZ_ENDED":
-        message = customMessage || `⏰ Quiz session has ended}`;
+        message = customMessage || `Quiz session has ended`;
         break;
       case "QUIZ_NOT_STARTED":
         const timeStr = timeLeft.minutes > 0 ? 
           `${timeLeft.minutes}m ${timeLeft.seconds}s` : 
           `${timeLeft.seconds}s`;
-        message = customMessage || `⏳ Quiz hasn't started yet. Starting in: ${timeStr}`;
+        message = customMessage || `Quiz hasn't started yet. Starting in: ${timeStr}`;
         break;
       default:
-        message = customMessage || "❌ Quiz error occurred";
+        message = customMessage || "Quiz error occurred";
     }
     
     this._safeSend(ws, ["quizError", message]);
