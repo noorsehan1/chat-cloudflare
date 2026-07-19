@@ -235,7 +235,7 @@ export class GameServer {
     let message = "";
     
     if (isQuizTime) {
-      message = "RUNNING|Quiz is currently running!";
+      message = "Quiz is currently running!";
     } else {
       const minutes = timeLeft.minutes;
       const seconds = timeLeft.seconds;
@@ -243,11 +243,11 @@ export class GameServer {
       if (minutes >= 60) {
         const hours = Math.floor(minutes / 60);
         const remainingMinutes = minutes % 60;
-        message = `Quiz starts in ${hours}h ${remainingMinutes}m ${seconds}s left`;
+        message = `Quiz starts in ${hours}h ${remainingMinutes}m ${seconds}s`;
       } else if (minutes > 0) {
-        message = `Quiz starts in ${minutes}m ${seconds}s left`;
+        message = `Quiz starts in ${minutes}m ${seconds}s`;
       } else {
-        message = 'Quiz starts in ${seconds}s! left`;
+        message = `Quiz starts in ${seconds}s!`;
       }
     }
     
@@ -633,8 +633,6 @@ export class GameServer {
       await this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
     } catch(e) {}
   }
-  
-  // ==================== ORIGINAL METHODS (TIDAK DIUBAH) ====================
   
   _startMemoryMonitoring() {
     if (this._memoryCheckInterval) {
@@ -2392,8 +2390,6 @@ export class GameServer {
       this._safeSend(ws, ["gameLowCardError", "Game error: " + (e.message || "Unknown")]);
     }
   }
-  
-  // ==================== GAME LOWCARD STUCK CHECKS ====================
   
   _checkStuckGames() {
     try {
