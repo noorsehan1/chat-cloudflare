@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS (QUIZ WITH TIME LEFT STRING) ====================
+// ==================== GAME-SERVER.JS (QUIZ WITH WEEKLY RESET) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -35,6 +35,9 @@ const CONSTANTS = {
   CIRCUIT_BREAKER_THRESHOLD: 5,
   CIRCUIT_BREAKER_TIMEOUT_MS: 30000,
   QUIZ_SWITCH_DELAY_MS: 5000,
+  QUIZ_POINT_KEY: 'quiz_points',
+  QUIZ_WEEK_KEY: 'quiz_current_week',
+  QUIZ_LAST_WEEK_WINNER: 'quiz_last_week_winner',
 };
 
 const QUIZ_SCHEDULE = {
@@ -113,12 +116,17 @@ export class GameServer {
     this._startMemoryMonitoring();
     this._startQuizScheduler();
     
+    // 🔥 CEK RESET MINGGUAN
+    this._checkAndResetWeeklyPoints();
+    
     setTimeout(() => {
       this.ensureQuizRunning();
     }, 2000);
     
     this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
   }
+  
+  // ==================== UTC TIME HELPERS ====================
   
   _getCurrentUTCTime() {
     return new Date();
@@ -138,6 +146,105 @@ export class GameServer {
     const year = date.getUTCFullYear();
     return `${hours}:${minutes}:${seconds} UTC (${day}/${month}/${year})`;
   }
+  
+  // ==================== WEEKLY HELPERS ====================
+  
+  _getCurrentWeek() {
+    const now = new Date();
+    const year = now.getUTCFullYear();
+    const startOfYear = new Date(year, 0, 1);
+    const diff = now - startOfYear;
+    const week = Math.ceil((diff / 86400000 + startOfYear.getUTCDay() + 1) / 7);
+    return `${year}-W${String(week).padStart(2, '0')}`;
+  }
+  
+  async _getQuizPoints() {
+    try {
+      const points = await this.env.QUESTIONS.get(CONSTANTS.QUIZ_POINT_KEY, 'json');
+      return points || {};
+    } catch(e) {
+      return {};
+    }
+  }
+  
+  async _getLastWeekWinner() {
+    try {
+      const winner = await this.env.QUESTIONS.get(CONSTANTS.QUIZ_LAST_WEEK_WINNER, 'json');
+      return winner || null;
+    } catch(e) {
+      return null;
+    }
+  }
+  
+  async _checkAndResetWeeklyPoints() {
+    try {
+      const currentWeek = this._getCurrentWeek();
+      const savedWeek = await this.env.QUESTIONS.get(CONSTANTS.QUIZ_WEEK_KEY);
+      
+      if (savedWeek !== currentWeek) {
+        // Ambil data poin minggu ini
+        const points = await this._getQuizPoints();
+        
+        // Cari pemenang minggu ini (poin tertinggi)
+        let winner = null;
+        let highestScore = 0;
+        
+        for (const [username, score] of Object.entries(points)) {
+          if (score > highestScore) {
+            highestScore = score;
+            winner = username;
+          }
+        }
+        
+        // Simpan pemenang minggu lalu
+        if (winner) {
+          const winnerData = {
+            username: winner,
+            score: highestScore,
+            week: savedWeek || currentWeek
+          };
+          
+          await this.env.QUESTIONS.put(
+            CONSTANTS.QUIZ_LAST_WEEK_WINNER,
+            JSON.stringify(winnerData)
+          );
+          
+          // Broadcast pemenang minggu lalu
+          this._broadcastToRoom(QUIZ_ROOM, [
+            "quizLastWeekWinner",
+            {
+              username: winner,
+              score: highestScore,
+              week: savedWeek || currentWeek
+            }
+          ]);
+        }
+        
+        // HAPUS LIST POIN MINGGU LALU (buat baru)
+        await this.env.QUESTIONS.put(CONSTANTS.QUIZ_POINT_KEY, JSON.stringify({}));
+        
+        // Simpan minggu baru
+        await this.env.QUESTIONS.put(CONSTANTS.QUIZ_WEEK_KEY, currentWeek);
+        
+        // Broadcast reset
+        this._broadcastToRoom(QUIZ_ROOM, [
+          "quizWeekReset",
+          {
+            week: currentWeek,
+            message: "New quiz week started! Points reset."
+          }
+        ]);
+        
+        return true;
+      }
+      
+      return false;
+    } catch(e) {
+      return false;
+    }
+  }
+  
+  // ==================== QUIZ SCHEDULE ====================
   
   _isQuizTime() {
     const hour = this._getCurrentUTCHours();
@@ -194,6 +301,8 @@ export class GameServer {
     return { minutes, seconds, isRunning: false };
   }
   
+  // ==================== QUIZ AUTO SCHEDULER ====================
+  
   _startQuizScheduler() {
     if (this.quizAutoTimer) {
       clearInterval(this.quizAutoTimer);
@@ -226,16 +335,24 @@ export class GameServer {
     }
   }
   
+  // ==================== SEND TO USER ====================
+  
   _sendQuizTimeLeftToUser(ws) {
     if (!ws || ws.readyState !== 1) return false;
     
     const isQuizTime = this._isQuizTime();
     const timeLeft = this._getTimeLeftUntilNextEvent();
+    const isQuizActive = this.currentQuestion !== null || this._quizTimeout !== null;
     
     let message = "";
+    let canType = true;
     
-    if (isQuizTime) {
+    if (isQuizTime && isQuizActive) {
       message = "Quiz is currently running!";
+      canType = false;
+    } else if (isQuizTime && !isQuizActive) {
+      message = "Quiz will start soon!";
+      canType = true;
     } else {
       const minutes = timeLeft.minutes;
       const seconds = timeLeft.seconds;
@@ -249,9 +366,10 @@ export class GameServer {
       } else {
         message = `Quiz starts in ${seconds}s!`;
       }
+      canType = true;
     }
     
-    this._safeSend(ws, ["quizTimeLeft", message]);
+    this._safeSend(ws, ["quizTimeLeft", message, canType]);
     return true;
   }
   
@@ -287,6 +405,8 @@ export class GameServer {
     this._safeSend(ws, ["quizError", message]);
     return true;
   }
+  
+  // ==================== SWITCH ROOM ====================
   
   async switchRoom(ws, room, username = null) {
     if (this.isDestroyed) {
@@ -372,6 +492,8 @@ export class GameServer {
       this._switchLocks.delete(lockKey);
     }
   }
+  
+  // ==================== QUIZ CORE ====================
   
   async _showQuestion() {
     try {
@@ -461,7 +583,7 @@ export class GameServer {
         this._quizBreakTimeout = null;
       }
 
-      this._quizTimeout = setTimeout(() => {
+      this._quizTimeout = setTimeout(async () => {
         try {
           if (this.closing || this.isDestroyed) {
             this._quizTimeout = null;
@@ -476,9 +598,32 @@ export class GameServer {
           }
 
           if (this.quizHasWinner && this.quizWinner) {
+            // 🔥 SIMPAN POIN KE KV
+            const points = await this._getQuizPoints();
+            if (points[this.quizWinner]) {
+              points[this.quizWinner] = (points[this.quizWinner] || 0) + 1;
+            } else {
+              points[this.quizWinner] = 1;
+            }
+            
+            await this.env.QUESTIONS.put(
+              CONSTANTS.QUIZ_POINT_KEY,
+              JSON.stringify(points)
+            );
+            
+            const totalPoints = points[this.quizWinner] || 0;
+            
             this._broadcastToRoom(QUIZ_ROOM, [
-              "quizWinner", 
-              { username: this.quizWinner }
+              "quizWinner",
+              {
+                username: this.quizWinner,
+                totalPoints: totalPoints
+              }
+            ]);
+          } else {
+            this._broadcastToRoom(QUIZ_ROOM, [
+              "quizNoWinner",
+              { message: "No one answered correctly!" }
             ]);
           }
 
@@ -614,6 +759,94 @@ export class GameServer {
     }, CONSTANTS.QUIZ_INTERVAL_MS);
   }
   
+  // ==================== HANDLE EVENT ====================
+  
+  async handleEvent(ws, data) {
+    try {
+      if (this.isDestroyed || !ws || !data || !data[0]) return;
+      const evt = data[0];
+      
+      if (evt === "switchRoom") {
+        const [_, room, username] = data;
+        await this.switchRoom(ws, room, username);
+        return;
+      }
+      
+      if (evt === "submitQuizAnswer") {
+        const [_, username, answer] = data;
+        await this.submitQuizAnswer(ws, username, answer);
+        return;
+      }
+      
+      if (evt === "getQuizLastWeekWinner") {
+        const winner = await this._getLastWeekWinner();
+        if (winner) {
+          this._safeSend(ws, ["quizLastWeekWinner", winner.username, winner.score, winner.week]);
+        } else {
+          this._safeSend(ws, ["quizLastWeekWinner", "", 0, ""]);
+        }
+        return;
+      }
+      
+      if (evt === "getQuizLeaderboard") {
+        const points = await this._getQuizPoints();
+        const limit = data.length > 1 ? data.optInt(1, 10) : 10;
+        
+        const sorted = Object.entries(points)
+          .map(([username, score]) => ({ username, score }))
+          .sort((a, b) => b.score - a.score)
+          .slice(0, limit);
+        
+        const result = sorted.map(item => `${item.username}|${item.score}`);
+        this._safeSend(ws, ["quizLeaderboard", result]);
+        return;
+      }
+      
+      if (evt === "getQuizUserPoints") {
+        const username = data.optString(1, "");
+        const points = await this._getQuizPoints();
+        const userPoints = points[username] || 0;
+        this._safeSend(ws, ["quizUserPoints", username, userPoints]);
+        return;
+      }
+      
+      if (evt === "getRoomUsers") {
+        return;
+      }
+      
+      const room = this._ensureRoomConsistency(ws);
+      if (!room) {
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
+        return;
+      }
+      
+      switch (evt) {
+        case "gameLowCardStart":
+          await this.startGame(ws, data[1], data[2]);
+          break;
+        case "gameLowCardJoin":
+          await this.joinGame(ws, data[1]);
+          break;
+        case "gameLowCardNumber":
+          await this.submitNumber(ws, data[1], data[2] || "", data[3]);
+          break;
+        case "gameLowCardLeave":
+          await this.leaveGame(ws, data[1]);
+          break;
+        case "checkGameRunning":
+          await this.checkGameRunning(ws, data[1]);
+          break;
+        default:
+          this._safeSend(ws, ["gameLowCardError", `Unknown event: ${evt}`]);
+          break;
+      }
+    } catch(e) {
+      this._safeSend(ws, ["gameLowCardError", "Game error: " + (e.message || "Unknown")]);
+    }
+  }
+  
+  // ==================== ALARM ====================
+  
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     try {
@@ -633,6 +866,8 @@ export class GameServer {
       await this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
     } catch(e) {}
   }
+  
+  // ==================== ORIGINAL METHODS (TIDAK DIUBAH) ====================
   
   _startMemoryMonitoring() {
     if (this._memoryCheckInterval) {
@@ -1288,6 +1523,8 @@ export class GameServer {
       return false;
     }
   }
+  
+  // ==================== GAME LOWCARD METHODS ====================
   
   _isGameActuallyRunning(game) {
     if (!game) return false;
@@ -2336,58 +2573,6 @@ export class GameServer {
       return { running: isRunning, message: isRunning ? "Game is running" : "Game is not active" };
     } catch(e) {
       return { running: false, message: "Error checking game" };
-    }
-  }
-  
-  async handleEvent(ws, data) {
-    try {
-      if (this.isDestroyed || !ws || !data || !data[0]) return;
-      const evt = data[0];
-      
-      if (evt === "switchRoom") {
-        const [_, room, username] = data;
-        await this.switchRoom(ws, room, username);
-        return;
-      }
-      
-      if (evt === "submitQuizAnswer") {
-        const [_, username, answer] = data;
-        await this.submitQuizAnswer(ws, username, answer);
-        return;
-      }
-      
-      if (evt === "getRoomUsers") {
-        return;
-      }
-      
-      const room = this._ensureRoomConsistency(ws);
-      if (!room) {
-        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
-        return;
-      }
-      
-      switch (evt) {
-        case "gameLowCardStart":
-          await this.startGame(ws, data[1], data[2]);
-          break;
-        case "gameLowCardJoin":
-          await this.joinGame(ws, data[1]);
-          break;
-        case "gameLowCardNumber":
-          await this.submitNumber(ws, data[1], data[2] || "", data[3]);
-          break;
-        case "gameLowCardLeave":
-          await this.leaveGame(ws, data[1]);
-          break;
-        case "checkGameRunning":
-          await this.checkGameRunning(ws, data[1]);
-          break;
-        default:
-          this._safeSend(ws, ["gameLowCardError", `Unknown event: ${evt}`]);
-          break;
-      }
-    } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Game error: " + (e.message || "Unknown")]);
     }
   }
   
