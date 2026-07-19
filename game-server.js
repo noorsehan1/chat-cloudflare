@@ -243,11 +243,11 @@ export class GameServer {
       if (minutes >= 60) {
         const hours = Math.floor(minutes / 60);
         const remainingMinutes = minutes % 60;
-        message = `WAITING|Quiz starts in ${hours}h ${remainingMinutes}m ${seconds}sleft`;
+        message = `Quiz starts in ${hours}h ${remainingMinutes}m ${seconds}s left`;
       } else if (minutes > 0) {
-        message = `WAITING|Quiz starts in ${minutes}m ${seconds}s left`;
+        message = `Quiz starts in ${minutes}m ${seconds}s left`;
       } else {
-        message = `WAITING|Quiz starts in ${seconds}s! left`;
+        message = 'Quiz starts in ${seconds}s! left`;
       }
     }
     
