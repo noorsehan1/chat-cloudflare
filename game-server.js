@@ -266,13 +266,13 @@ export class GameServer {
     
     switch(errorType) {
       case "NOT_QUIZ_TIME":
-        message = customMessage || `Quiz is currently offline`;
+        message = `Quiz is currently offline`;
         break;
       case "QUIZ_DISABLED":
-        message = customMessage || `Quiz is not available right now`;
+        message = `Quiz is not available right now`;
         break;
       case "QUIZ_ENDED":
-        message = customMessage || `Quiz session has ended`;
+        message = `Quiz session has ended`;
         break;
       case "QUIZ_NOT_STARTED":
         const timeStr = timeLeft.minutes > 0 ? 
