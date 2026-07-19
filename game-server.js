@@ -278,10 +278,10 @@ export class GameServer {
         const timeStr = timeLeft.minutes > 0 ? 
           `${timeLeft.minutes}m ${timeLeft.seconds}s` : 
           `${timeLeft.seconds}s`;
-        message = customMessage || `Quiz hasn't started yet. Starting in: ${timeStr}`;
+        message = `Quiz hasn't started yet. Starting in: ${timeStr}`;
         break;
       default:
-        message = customMessage || "Quiz error occurred";
+        message =  "Quiz error occurred";
     }
     
     this._safeSend(ws, ["quizError", message]);
