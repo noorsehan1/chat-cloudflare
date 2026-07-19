@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS (QUIZ WITH WEEKLY RESET) ====================
+// ==================== GAME-SERVER.JS (REALTIME ONLY - NO HISTORY) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -14,121 +14,139 @@ const CONSTANTS = {
   START_LOCK_DURATION_MS: 3000,
   MAX_PLAYERS_PER_GAME: 45,
   GAME_CLEANUP_DELAY_MS: 5000,
-  BATCH_SIZE: 20,
+  BATCH_SIZE: 3,
   ALARM_10_DETIK: 10000,
   CLEANUP_TIK: 90,
   STALE_GAME_TIMEOUT_MS: 600000,
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
-  QUIZ_INTERVAL_MS: 10000,
-  QUIZ_TIME_LIMIT_MS: 20000,
-  TRANSLATE_LIMIT: 1000,
-  MAX_GAME_HISTORY: 100,
-  MEMORY_CHECK_INTERVAL_MS: 60000,
+  QUIZ_INTERVAL_MS: 20000,
+  QUIZ_TIME_LIMIT_MS: 15000,
+  TRANSLATE_LIMIT: 30,
   QUIZ_BREAK_MS: 2000,
   QUIZ_START_DELAY_MS: 5000,
-  MAX_RETRY_INIT_QUIZ: 10,
-  MAX_BROADCAST_BATCH: 50,
+  MAX_RETRY_INIT_QUIZ: 3,
+  MAX_BROADCAST_BATCH: 5,
   MAX_SHUTDOWN_WAIT_MS: 5000,
-  MAX_WS_CLIENTS: 1000,
-  MAX_ARRAY_SIZE: 1000,
-  CIRCUIT_BREAKER_THRESHOLD: 5,
+  MAX_WS_CLIENTS: 100,
+  MAX_ARRAY_SIZE: 100,
+  CIRCUIT_BREAKER_THRESHOLD: 2,
   CIRCUIT_BREAKER_TIMEOUT_MS: 30000,
-  QUIZ_SWITCH_DELAY_MS: 5000,
+  QUIZ_SWITCH_DELAY_MS: 3000,
   QUIZ_POINT_KEY: 'quiz_points',
   QUIZ_WEEK_KEY: 'quiz_current_week',
   QUIZ_LAST_WEEK_WINNER: 'quiz_last_week_winner',
+  SCHEDULER_INTERVAL_MS: 120000,
 };
 
-// ==================== PERUBAHAN HANYA DI SINI ====================
 const QUIZ_SCHEDULE = {
-  SESSION1: { start: 0, end: 2 },     // 00:00 - 02:00 UTC (main 2 jam)
-  SESSION2: { start: 4, end: 6 },     // 04:00 - 06:00 UTC (main 2 jam)
-  SESSION3: { start: 8, end: 10 },    // 08:00 - 10:00 UTC (main 2 jam)
-  SESSION4: { start: 12, end: 14 },   // 12:00 - 14:00 UTC (main 2 jam)
-  SESSION5: { start: 16, end: 18 },   // 16:00 - 18:00 UTC (main 2 jam)
-  SESSION6: { start: 20, end: 22 },   // 20:00 - 22:00 UTC (main 2 jam)
+  SESSION1: { start: 0, end: 2 },
+  SESSION2: { start: 4, end: 6 },
+  SESSION3: { start: 8, end: 10 },
+  SESSION4: { start: 12, end: 14 },
+  SESSION5: { start: 16, end: 18 },
+  SESSION6: { start: 20, end: 22 },
 };
-// ==================== AKHIR PERUBAHAN ====================
 
 const QUIZ_ROOM = "Quiz";
 
 export class GameServer {
   constructor(state, env) {
-    this.state = state;
-    this.env = env;
-    this.closing = false;
-    this.isDestroyed = false;
+    try {
+      this.state = state;
+      this.env = env;
+      this.closing = false;
+      this.isDestroyed = false;
+      this._initialized = false;
+      
+      // GAME MAPS
+      this.activeGames = new Map();
+      this._maxGames = CONSTANTS.MAX_LOWCARD_GAMES;
+      this._gameLocks = new Map();
+      this._joinLocks = new Map();
+      this._switchLocks = new Map();
+      
+      // WEBSOCKET MAPS
+      this._wsIdCounter = 0;
+      this.wsClients = new Map();
+      this.clientRooms = new Map();
+      this.wsMap = new Map();
+      this.roomViewers = new Map();
+      this.userConnections = new Map();
+      this.connectionLocks = new Map();
+      this._cleanupTimers = new Map();
+      this._roomBroadcastCount = new Map();
+      this._roomBroadcastReset = new Map();
+      this._tikCounter = 0;
+      this._gameStartFlags = new Map();
+      
+      // QUIZ
+      this.quizAnswered = new Set();
+      this.quizHasWinner = false;
+      this.quizWinner = null;
+      this.quizTimer = null;
+      this.isQuizRunning = false;
+      this.currentQuestion = null;
+      this.isQuizWaiting = false;
+      this.quizQuestionCache = {};
+      this.questionTranslations = new Map();
+      
+      // TRANSLATION
+      this.translateCount = 0;
+      this.translateDate = new Date().toUTCString();
+      this.translateLimitReached = false;
+      this.userLanguage = new Map();
+      this.userCountry = new Map();
+      
+      // TIMERS
+      this._quizTimeout = null;
+      this._translateResetInterval = null;
+      this._quizBreakTimeout = null;
+      this._quizStartTimeout = null;
+      
+      this._translationCircuitBreaker = {
+        failures: 0,
+        lastFailureTime: 0,
+        isOpen: false
+      };
+      
+      this.quizAutoEnabled = false;
+      this.quizAutoTimer = null;
+      
+      // ✅ INIT VIA SETTIMEOUT
+      setTimeout(() => {
+        this._initAsync();
+      }, 0);
+      
+      // ALARM
+      if (this.state && this.state.storage) {
+        this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
+      }
+      
+    } catch(e) {
+      console.error("Constructor error:", e);
+      throw e;
+    }
+  }
+  
+  // ==================== ASYNC INIT ====================
+  
+  async _initAsync() {
+    if (this._initialized) return;
+    this._initialized = true;
     
-    this.activeGames = new Map();
-    this._maxGames = CONSTANTS.MAX_LOWCARD_GAMES;
-    this._gameLocks = new Map();
-    this._joinLocks = new Map();
-    this._switchLocks = new Map();
-    
-    this._wsIdCounter = 0;
-    this.wsClients = new Map();
-    this.clientRooms = new Map();
-    this.wsMap = new Map();
-    this.roomViewers = new Map();
-    this.userConnections = new Map();
-    this.connectionLocks = new Map();
-    this._cleanupTimers = new Map();
-    this._roomBroadcastCount = new Map();
-    this._roomBroadcastReset = new Map();
-    this._tikCounter = 0;
-    this._gameStartFlags = new Map();
-    
-    this.quizQuestions = [];
-    this.quizAnswered = new Set();
-    this.quizHasWinner = false;
-    this.quizWinner = null;
-    this.quizTimer = null;
-    this.isQuizRunning = false;
-    this.currentQuestion = null;
-    this.quizQuestionPool = [];
-    this.isFetching = false;
-    this.isQuizWaiting = false;
-    
-    this.quizQuestionCache = {};
-    this.questionTranslations = new Map();
-    this.translateCount = 0;
-    this.translateDate = new Date().toUTCString();
-    this.translateLimitReached = false;
-    
-    this.userLanguage = new Map();
-    this.userCountry = new Map();
-    
-    this._memoryCheckInterval = null;
-    this._gameHistory = [];
-    this._quizTimeout = null;
-    this._translateResetInterval = null;
-    this._quizBreakTimeout = null;
-    this._quizStartTimeout = null;
-    this._shutdownPromise = null;
-    this._pendingOperations = 0;
-    
-    this._translationCircuitBreaker = {
-      failures: 0,
-      lastFailureTime: 0,
-      isOpen: false
-    };
-    
-    this.quizAutoEnabled = false;
-    this.quizAutoTimer = null;
-    
-    this._initQuiz();
-    this._startMemoryMonitoring();
-    this._startQuizScheduler();
-    
-    // 🔥 CEK RESET MINGGUAN
-    this._checkAndResetWeeklyPoints();
-    
-    setTimeout(() => {
-      this.ensureQuizRunning();
-    }, 2000);
-    
-    this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
+    try {
+      await this._initQuiz();
+      this._startQuizScheduler();
+      await this._checkAndResetWeeklyPoints();
+      
+      setTimeout(() => {
+        this.ensureQuizRunning();
+      }, 2000);
+      
+    } catch(e) {
+      console.error("Init async error:", e);
+    }
   }
   
   // ==================== UTC TIME HELPERS ====================
@@ -139,17 +157,6 @@ export class GameServer {
   
   _getCurrentUTCHours() {
     return new Date().getUTCHours();
-  }
-  
-  _formatUTCTime(date) {
-    if (!date) return "Unknown UTC";
-    const hours = String(date.getUTCHours()).padStart(2, '0');
-    const minutes = String(date.getUTCMinutes()).padStart(2, '0');
-    const seconds = String(date.getUTCSeconds()).padStart(2, '0');
-    const day = String(date.getUTCDate()).padStart(2, '0');
-    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-    const year = date.getUTCFullYear();
-    return `${hours}:${minutes}:${seconds} UTC (${day}/${month}/${year})`;
   }
   
   // ==================== WEEKLY HELPERS ====================
@@ -165,6 +172,7 @@ export class GameServer {
   
   async _getQuizPoints() {
     try {
+      if (!this.env || !this.env.QUESTIONS) return {};
       const points = await this.env.QUESTIONS.get(CONSTANTS.QUIZ_POINT_KEY, 'json');
       return points || {};
     } catch(e) {
@@ -174,6 +182,7 @@ export class GameServer {
   
   async _getLastWeekWinner() {
     try {
+      if (!this.env || !this.env.QUESTIONS) return null;
       const winner = await this.env.QUESTIONS.get(CONSTANTS.QUIZ_LAST_WEEK_WINNER, 'json');
       return winner || null;
     } catch(e) {
@@ -183,14 +192,14 @@ export class GameServer {
   
   async _checkAndResetWeeklyPoints() {
     try {
+      if (!this.env || !this.env.QUESTIONS) return false;
+      
       const currentWeek = this._getCurrentWeek();
       const savedWeek = await this.env.QUESTIONS.get(CONSTANTS.QUIZ_WEEK_KEY);
       
       if (savedWeek !== currentWeek) {
-        // Ambil data poin minggu ini
         const points = await this._getQuizPoints();
         
-        // Cari pemenang minggu ini (poin tertinggi)
         let winner = null;
         let highestScore = 0;
         
@@ -201,7 +210,6 @@ export class GameServer {
           }
         }
         
-        // Simpan pemenang minggu lalu
         if (winner) {
           const winnerData = {
             username: winner,
@@ -214,7 +222,6 @@ export class GameServer {
             JSON.stringify(winnerData)
           );
           
-          // Broadcast pemenang minggu lalu
           this._broadcastToRoom(QUIZ_ROOM, [
             "quizLastWeekWinner",
             {
@@ -225,13 +232,9 @@ export class GameServer {
           ]);
         }
         
-        // HAPUS LIST POIN MINGGU LALU (buat baru)
         await this.env.QUESTIONS.put(CONSTANTS.QUIZ_POINT_KEY, JSON.stringify({}));
-        
-        // Simpan minggu baru
         await this.env.QUESTIONS.put(CONSTANTS.QUIZ_WEEK_KEY, currentWeek);
         
-        // Broadcast reset
         this._broadcastToRoom(QUIZ_ROOM, [
           "quizWeekReset",
           {
@@ -242,7 +245,6 @@ export class GameServer {
         
         return true;
       }
-      
       return false;
     } catch(e) {
       return false;
@@ -298,11 +300,7 @@ export class GameServer {
     const timeLeft = nextStart.getTime() - now;
     
     if (timeLeft <= 0) {
-      return { 
-        minutes: 0, 
-        seconds: 0,
-        isRunning: this._isQuizTime()
-      };
+      return { minutes: 0, seconds: 0, isRunning: this._isQuizTime() };
     }
     
     const totalSeconds = Math.floor(timeLeft / 1000);
@@ -328,22 +326,24 @@ export class GameServer {
         }
         this._checkQuizAutoStatus();
       } catch(e) {}
-    }, 30000);
+    }, CONSTANTS.SCHEDULER_INTERVAL_MS);
   }
   
   async _checkQuizAutoStatus() {
-    const isQuizTime = this._isQuizTime();
-    if (isQuizTime) {
-      if (!this.quizAutoEnabled) {
-        this.quizAutoEnabled = true;
-        await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
+    try {
+      const isQuizTime = this._isQuizTime();
+      if (isQuizTime) {
+        if (!this.quizAutoEnabled) {
+          this.quizAutoEnabled = true;
+          await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
+        }
+      } else {
+        if (this.quizAutoEnabled) {
+          this.quizAutoEnabled = false;
+          await this.resetQuiz();
+        }
       }
-    } else {
-      if (this.quizAutoEnabled) {
-        this.quizAutoEnabled = false;
-        await this.resetQuiz();
-      }
-    }
+    } catch(e) {}
   }
   
   // ==================== SEND TO USER ====================
@@ -351,70 +351,75 @@ export class GameServer {
   _sendQuizTimeLeftToUser(ws) {
     if (!ws || ws.readyState !== 1) return false;
     
-    const isQuizTime = this._isQuizTime();
-    const timeLeft = this._getTimeLeftUntilNextEvent();
-    const isQuizActive = this.currentQuestion !== null || this._quizTimeout !== null;
-    
-    let message = "";
-    let canType = true;
-    
-    if (isQuizTime && isQuizActive) {
-      message = "Quiz is currently running!";
-      canType = false;
-    } else if (isQuizTime && !isQuizActive) {
-      message = "Quiz will start soon!";
-      canType = true;
-    } else {
-      const minutes = timeLeft.minutes;
-      const seconds = timeLeft.seconds;
+    try {
+      const isQuizTime = this._isQuizTime();
+      const timeLeft = this._getTimeLeftUntilNextEvent();
+      const isQuizActive = this.currentQuestion !== null || this._quizTimeout !== null;
       
-      if (minutes >= 60) {
-        const hours = Math.floor(minutes / 60);
-        const remainingMinutes = minutes % 60;
-        message = `Quiz starts in ${hours}h ${remainingMinutes}m ${seconds}s`;
-      } else if (minutes > 0) {
-        message = `Quiz starts in ${minutes}m ${seconds}s`;
+      let message = "";
+      let canType = true;
+      
+      if (isQuizTime && isQuizActive) {
+        message = "Quiz is currently running!";
+        canType = false;
+      } else if (isQuizTime && !isQuizActive) {
+        message = "Quiz will start soon!";
+        canType = true;
       } else {
-        message = `Quiz starts in ${seconds}s!`;
+        const minutes = timeLeft.minutes;
+        const seconds = timeLeft.seconds;
+        
+        if (minutes >= 60) {
+          const hours = Math.floor(minutes / 60);
+          const remainingMinutes = minutes % 60;
+          message = `Quiz starts in ${hours}h ${remainingMinutes}m ${seconds}s`;
+        } else if (minutes > 0) {
+          message = `Quiz starts in ${minutes}m ${seconds}s`;
+        } else {
+          message = `Quiz starts in ${seconds}s!`;
+        }
+        canType = true;
       }
-      canType = true;
+      
+      this._safeSend(ws, ["quizTimeLeft", message, canType]);
+      return true;
+    } catch(e) {
+      return false;
     }
-    
-    this._safeSend(ws, ["quizTimeLeft", message, canType]);
-    return true;
   }
   
   _sendQuizErrorWithTime(ws, errorType, customMessage = null) {
     if (!ws || ws.readyState !== 1) return false;
     
-    const isQuizTime = this._isQuizTime();
-    const nextStart = this._getNextQuizStartTime();
-    const timeLeft = this._getTimeLeftUntilNextEvent();
-    
-    let message = "";
-    
-    switch(errorType) {
-      case "NOT_QUIZ_TIME":
-        message = `Quiz is currently offline`;
-        break;
-      case "QUIZ_DISABLED":
-        message = `Quiz is not available right now`;
-        break;
-      case "QUIZ_ENDED":
-        message = `Quiz session has ended`;
-        break;
-      case "QUIZ_NOT_STARTED":
-        const timeStr = timeLeft.minutes > 0 ? 
-          `${timeLeft.minutes}m ${timeLeft.seconds}s` : 
-          `${timeLeft.seconds}s`;
-        message = `Quiz hasn't started yet. Starting in: ${timeStr}`;
-        break;
-      default:
-        message =  "Quiz error occurred";
+    try {
+      const timeLeft = this._getTimeLeftUntilNextEvent();
+      let message = "";
+      
+      switch(errorType) {
+        case "NOT_QUIZ_TIME":
+          message = "Quiz is currently offline";
+          break;
+        case "QUIZ_DISABLED":
+          message = "Quiz is not available right now";
+          break;
+        case "QUIZ_ENDED":
+          message = "Quiz session has ended";
+          break;
+        case "QUIZ_NOT_STARTED":
+          const timeStr = timeLeft.minutes > 0 ? 
+            `${timeLeft.minutes}m ${timeLeft.seconds}s` : 
+            `${timeLeft.seconds}s`;
+          message = `Quiz hasn't started yet. Starting in: ${timeStr}`;
+          break;
+        default:
+          message = customMessage || "Quiz error occurred";
+      }
+      
+      this._safeSend(ws, ["quizError", message]);
+      return true;
+    } catch(e) {
+      return false;
     }
-    
-    this._safeSend(ws, ["quizError", message]);
-    return true;
   }
   
   // ==================== SWITCH ROOM ====================
@@ -438,29 +443,23 @@ export class GameServer {
     }
     
     const lockKey = `switch_${wsId}`;
-    if (this._switchLocks.has(lockKey)) {
-      return;
-    }
+    if (this._switchLocks.has(lockKey)) return;
     this._switchLocks.set(lockKey, Date.now());
     
     try {
       const oldRoom = this.clientRooms.get(wsId);
       
       if (oldRoom === roomName) {
-        this._sendGameStatusToWs(ws, roomName);
-        
         if (roomName === QUIZ_ROOM) {
           if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
             await this._initQuiz();
           }
-          
           setTimeout(() => {
             try {
               if (this.closing || this.isDestroyed) return;
               this._sendQuizTimeLeftToUser(ws);
             } catch(e) {}
           }, CONSTANTS.QUIZ_SWITCH_DELAY_MS);
-          
           this._startQuizIfNeeded();
         }
         return;
@@ -477,25 +476,19 @@ export class GameServer {
       
       if (username) {
         const conn = this.userConnections.get(username);
-        if (conn) {
-          conn.room = roomName;
-        }
+        if (conn) conn.room = roomName;
       }
-      
-      this._sendGameStatusToWs(ws, roomName);
       
       if (roomName === QUIZ_ROOM) {
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
           await this._initQuiz();
         }
-        
         setTimeout(() => {
           try {
             if (this.closing || this.isDestroyed) return;
             this._sendQuizTimeLeftToUser(ws);
           } catch(e) {}
         }, CONSTANTS.QUIZ_SWITCH_DELAY_MS);
-        
         this._startQuizIfNeeded();
       }
       
@@ -508,64 +501,24 @@ export class GameServer {
   
   async _showQuestion() {
     try {
-      if (!this._isQuizTime()) {
-        const clients = this.wsClients.get(QUIZ_ROOM);
-        if (clients && clients.size > 0) {
-          const wsIds = Array.from(clients);
-          for (const wsId of wsIds) {
-            const ws = this.wsMap.get(wsId);
-            if (ws && ws.readyState === 1) {
-              this._sendQuizErrorWithTime(ws, "NOT_QUIZ_TIME");
-            }
-          }
-        }
-        return;
-      }
-      
-      if (!this.quizAutoEnabled) {
-        const clients = this.wsClients.get(QUIZ_ROOM);
-        if (clients && clients.size > 0) {
-          const wsIds = Array.from(clients);
-          for (const wsId of wsIds) {
-            const ws = this.wsMap.get(wsId);
-            if (ws && ws.readyState === 1) {
-              this._sendQuizErrorWithTime(ws, "QUIZ_DISABLED");
-            }
-          }
-        }
-        return;
-      }
-      
-      if (this.isDestroyed) return;
-      if (this.isQuizWaiting) return;
-      if (this._quizStartTimeout) return;
-      if (this.currentQuestion) return;
+      if (!this._isQuizTime() || !this.quizAutoEnabled) return;
+      if (this.isDestroyed || this.isQuizWaiting || this._quizStartTimeout || this.currentQuestion) return;
 
       const clients = this.wsClients.get(QUIZ_ROOM);
-      if (!clients || clients.size === 0) {
-        return;
-      }
+      if (!clients || clients.size === 0) return;
 
       let questions = this.quizQuestionCache['en'];
-      if (!questions || !Array.isArray(questions) || questions.length === 0) {
+      if (!questions || questions.length === 0) {
         const loaded = await this._loadQuestionsFromKV();
-        if (!loaded) {
-          setTimeout(() => this._showQuestion(), 5000);
-          return;
-        }
+        if (!loaded) return;
         questions = this.quizQuestionCache['en'];
-        if (!questions || !Array.isArray(questions) || questions.length === 0) {
-          setTimeout(() => this._showQuestion(), 5000);
-          return;
-        }
+        if (!questions || questions.length === 0) return;
       }
 
-      const randomIndex = Math.floor(Math.random() * questions.length);
+      const maxIndex = Math.min(questions.length, 30);
+      const randomIndex = Math.floor(Math.random() * maxIndex);
       const q = questions[randomIndex];
-      if (!q || !q.options || typeof q.options !== 'object') {
-        setTimeout(() => this._showQuestion(), 1000);
-        return;
-      }
+      if (!q || !q.options) return;
 
       const shuffled = this._shuffleQuestionOptions(q);
       
@@ -584,15 +537,8 @@ export class GameServer {
         this.currentQuestion.options
       );
 
-      if (this._quizTimeout) {
-        clearTimeout(this._quizTimeout);
-        this._quizTimeout = null;
-      }
-      
-      if (this._quizBreakTimeout) {
-        clearTimeout(this._quizBreakTimeout);
-        this._quizBreakTimeout = null;
-      }
+      if (this._quizTimeout) clearTimeout(this._quizTimeout);
+      if (this._quizBreakTimeout) clearTimeout(this._quizBreakTimeout);
 
       this._quizTimeout = setTimeout(async () => {
         try {
@@ -609,27 +555,21 @@ export class GameServer {
           }
 
           if (this.quizHasWinner && this.quizWinner) {
-            // 🔥 SIMPAN POIN KE KV
             const points = await this._getQuizPoints();
-            if (points[this.quizWinner]) {
-              points[this.quizWinner] = (points[this.quizWinner] || 0) + 1;
-            } else {
-              points[this.quizWinner] = 1;
-            }
+            points[this.quizWinner] = (points[this.quizWinner] || 0) + 1;
             
-            await this.env.QUESTIONS.put(
-              CONSTANTS.QUIZ_POINT_KEY,
-              JSON.stringify(points)
-            );
+            if (this.env && this.env.QUESTIONS) {
+              await this.env.QUESTIONS.put(
+                CONSTANTS.QUIZ_POINT_KEY,
+                JSON.stringify(points)
+              );
+            }
             
             const totalPoints = points[this.quizWinner] || 0;
             
             this._broadcastToRoom(QUIZ_ROOM, [
               "quizWinner",
-              {
-                username: this.quizWinner,
-                totalPoints: totalPoints
-              }
+              { username: this.quizWinner, totalPoints: totalPoints }
             ]);
           } else {
             this._broadcastToRoom(QUIZ_ROOM, [
@@ -647,11 +587,9 @@ export class GameServer {
                 this._quizBreakTimeout = null;
                 return;
               }
-              
               this.isQuizWaiting = false;
               this._quizBreakTimeout = null;
               this.currentQuestion = null;
-              
               if (!this.closing && !this.isDestroyed) {
                 this.ensureQuizRunning();
               }
@@ -763,9 +701,7 @@ export class GameServer {
         if (!this._isQuizTime()) return;
         if (!this.quizAutoEnabled) return;
         if (this.currentQuestion || this._quizTimeout || this.isQuizWaiting || this._quizStartTimeout) return;
-        if (!this.closing && !this.isDestroyed) {
-          this._showQuestion();
-        }
+        this._showQuestion();
       } catch(e) {}
     }, CONSTANTS.QUIZ_INTERVAL_MS);
   }
@@ -800,8 +736,12 @@ export class GameServer {
       }
       
       if (evt === "getQuizLeaderboard") {
+        let limit = 10;
+        if (data.length > 1 && typeof data[1] === 'number') {
+          limit = Math.min(data[1], 30);
+        }
+        
         const points = await this._getQuizPoints();
-        const limit = data.length > 1 ? data.optInt(1, 10) : 10;
         
         const sorted = Object.entries(points)
           .map(([username, score]) => ({ username, score }))
@@ -814,7 +754,11 @@ export class GameServer {
       }
       
       if (evt === "getQuizUserPoints") {
-        const username = data.optString(1, "");
+        let username = "";
+        if (data.length > 1 && typeof data[1] === 'string') {
+          username = data[1];
+        }
+        
         const points = await this._getQuizPoints();
         const userPoints = points[username] || 0;
         this._safeSend(ws, ["quizUserPoints", username, userPoints]);
@@ -874,44 +818,13 @@ export class GameServer {
       }
     } catch(e) {}
     try {
-      await this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
-    } catch(e) {}
-  }
-  
-  // ==================== ORIGINAL METHODS (TIDAK DIUBAH) ====================
-  
-  _startMemoryMonitoring() {
-    if (this._memoryCheckInterval) {
-      clearInterval(this._memoryCheckInterval);
-      this._memoryCheckInterval = null;
-    }
-    this._memoryCheckInterval = setInterval(() => {
-      try {
-        if (this.closing || this.isDestroyed) {
-          clearInterval(this._memoryCheckInterval);
-          this._memoryCheckInterval = null;
-          return;
-        }
-        const gameCount = this.activeGames.size;
-        const wsCount = this.wsMap.size;
-        const historyCount = this._gameHistory.length;
-        if (gameCount > 100 || wsCount > CONSTANTS.MAX_WS_CLIENTS) {
-          this._forceGarbageCollection();
-        }
-        if (historyCount > CONSTANTS.MAX_GAME_HISTORY * 2) {
-          this._gameHistory = this._gameHistory.slice(-CONSTANTS.MAX_GAME_HISTORY);
-        }
-      } catch(e) {}
-    }, CONSTANTS.MEMORY_CHECK_INTERVAL_MS);
-  }
-  
-  _forceGarbageCollection() {
-    try {
-      if (global.gc) {
-        global.gc();
+      if (this.state && this.state.storage) {
+        await this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_10_DETIK);
       }
     } catch(e) {}
   }
+  
+  // ==================== TRANSLATION ====================
   
   _resetTranslateCounterDaily() {
     if (this._translateResetInterval) {
@@ -970,6 +883,7 @@ export class GameServer {
     if (targetLang === 'en') return text;
     if (this.translateLimitReached) return text;
     if (!text || typeof text !== 'string') return text;
+    
     if (this._translationCircuitBreaker.isOpen) {
       const now = Date.now();
       if (now - this._translationCircuitBreaker.lastFailureTime > CONSTANTS.CIRCUIT_BREAKER_TIMEOUT_MS) {
@@ -979,20 +893,26 @@ export class GameServer {
         return text;
       }
     }
-    const cacheKey = `${text}_${targetLang}`;
+    
+    const cacheKey = `${text.substring(0, 30)}_${targetLang}`;
     if (this.questionTranslations.has(cacheKey)) {
       return this.questionTranslations.get(cacheKey);
     }
+    
     if (this.translateCount >= CONSTANTS.TRANSLATE_LIMIT) {
       this.translateLimitReached = true;
       return text;
     }
+    
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1500);
+      
       const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      const response = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       if (data && data[0] && data[0][0] && data[0][0][0]) {
         const translated = data[0][0][0];
@@ -1031,8 +951,11 @@ export class GameServer {
     return translatedOptions;
   }
   
+  // ==================== LOAD QUESTIONS ====================
+  
   async _loadQuestionsFromKV() {
     try {
+      if (!this.env || !this.env.QUESTIONS) return false;
       const cached = await this.env.QUESTIONS.get('quiz_questions', 'json');
       if (cached && cached.questions && Array.isArray(cached.questions) && cached.questions.length > 0) {
         const questions = cached.questions.slice(0, CONSTANTS.MAX_ARRAY_SIZE);
@@ -1074,9 +997,7 @@ export class GameServer {
   ensureQuizRunning() {
     try {
       const clients = this.wsClients.get(QUIZ_ROOM);
-      if (!clients || clients.size === 0) {
-        return;
-      }
+      if (!clients || clients.size === 0) return;
       if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
         this._initQuiz().then(() => {
           if (!this.closing && !this.isDestroyed) {
@@ -1092,9 +1013,7 @@ export class GameServer {
   _startQuizIfNeeded() {
     try {
       const clients = this.wsClients.get(QUIZ_ROOM);
-      if (!clients || clients.size === 0) {
-        return;
-      }
+      if (!clients || clients.size === 0) return;
       if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout) {
         if (!this.quizQuestionCache['en'] || this.quizQuestionCache['en'].length === 0) {
           this._initQuiz().then(() => {
@@ -1128,18 +1047,9 @@ export class GameServer {
       this.quizHasWinner = false;
       this.quizWinner = null;
       this.currentQuestion = null;
-      if (this._quizTimeout) {
-        clearTimeout(this._quizTimeout);
-        this._quizTimeout = null;
-      }
-      if (this._quizBreakTimeout) {
-        clearTimeout(this._quizBreakTimeout);
-        this._quizBreakTimeout = null;
-      }
-      if (this._quizStartTimeout) {
-        clearTimeout(this._quizStartTimeout);
-        this._quizStartTimeout = null;
-      }
+      if (this._quizTimeout) clearTimeout(this._quizTimeout);
+      if (this._quizBreakTimeout) clearTimeout(this._quizBreakTimeout);
+      if (this._quizStartTimeout) clearTimeout(this._quizStartTimeout);
       this.isQuizWaiting = false;
       await this._showQuestion();
       return { 
@@ -1171,18 +1081,9 @@ export class GameServer {
       this.quizHasWinner = false;
       this.quizWinner = null;
       this.currentQuestion = null;
-      if (this._quizTimeout) {
-        clearTimeout(this._quizTimeout);
-        this._quizTimeout = null;
-      }
-      if (this._quizBreakTimeout) {
-        clearTimeout(this._quizBreakTimeout);
-        this._quizBreakTimeout = null;
-      }
-      if (this._quizStartTimeout) {
-        clearTimeout(this._quizStartTimeout);
-        this._quizStartTimeout = null;
-      }
+      if (this._quizTimeout) clearTimeout(this._quizTimeout);
+      if (this._quizBreakTimeout) clearTimeout(this._quizBreakTimeout);
+      if (this._quizStartTimeout) clearTimeout(this._quizStartTimeout);
       this.isQuizWaiting = true;
       this._quizStartTimeout = setTimeout(() => {
         try {
@@ -1210,18 +1111,9 @@ export class GameServer {
   
   async resetQuiz() {
     try {
-      if (this._quizTimeout) {
-        clearTimeout(this._quizTimeout);
-        this._quizTimeout = null;
-      }
-      if (this._quizBreakTimeout) {
-        clearTimeout(this._quizBreakTimeout);
-        this._quizBreakTimeout = null;
-      }
-      if (this._quizStartTimeout) {
-        clearTimeout(this._quizStartTimeout);
-        this._quizStartTimeout = null;
-      }
+      if (this._quizTimeout) clearTimeout(this._quizTimeout);
+      if (this._quizBreakTimeout) clearTimeout(this._quizBreakTimeout);
+      if (this._quizStartTimeout) clearTimeout(this._quizStartTimeout);
       this.isQuizWaiting = false;
       this.currentQuestion = null;
       this.quizAnswered = new Set();
@@ -1232,6 +1124,71 @@ export class GameServer {
       return { success: false, message: e.message };
     }
   }
+  
+  // ==================== OPTIMIZED BROADCAST ====================
+  
+  _broadcastToRoom(room, message) {
+    if (this.closing || this.isDestroyed || !room || !message) return;
+    const wsIds = this.wsClients.get(room);
+    if (!wsIds || wsIds.size === 0) return;
+    
+    const now = Date.now();
+    const reset = this._roomBroadcastReset.get(room) || 0;
+    const count = this._roomBroadcastCount.get(room) || 0;
+    
+    if (now > reset) {
+      this._roomBroadcastReset.set(room, now + 1000);
+      this._roomBroadcastCount.set(room, 1);
+    } else {
+      if (count > CONSTANTS.MAX_BROADCAST_BATCH) return;
+      this._roomBroadcastCount.set(room, count + 1);
+    }
+    
+    const msgStr = JSON.stringify(message);
+    const wsIdArray = Array.from(wsIds);
+    const batchSize = Math.min(CONSTANTS.BATCH_SIZE, 3);
+    const disconnected = [];
+    
+    for (let i = 0; i < wsIdArray.length && i < 15; i += batchSize) {
+      const batch = wsIdArray.slice(i, i + batchSize);
+      for (const wsId of batch) {
+        const ws = this.wsMap.get(wsId);
+        if (ws && ws.readyState === 1) {
+          try {
+            ws.send(msgStr);
+          } catch(e) {
+            disconnected.push(wsId);
+          }
+        } else {
+          disconnected.push(wsId);
+        }
+      }
+    }
+    
+    if (disconnected.length > 0) {
+      for (const wsId of disconnected) {
+        const ws = this.wsMap.get(wsId);
+        if (ws) {
+          this._removeClient(room, ws);
+        } else {
+          this._removeClientFromRoom(room, wsId);
+          this.clientRooms.delete(wsId);
+        }
+      }
+    }
+  }
+  
+  _safeSend(ws, message) {
+    if (!ws || ws.readyState !== 1) return false;
+    try {
+      ws.send(JSON.stringify(message));
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+  
+  // ==================== SHUFFLE HELPERS ====================
   
   _shuffleQuestionOptions(question) {
     if (!question || !question.options) {
@@ -1251,9 +1208,7 @@ export class GameServer {
     shuffled.forEach((item, index) => {
       const newKey = newKeys[index];
       newOptions[newKey] = item.text;
-      if (item.isCorrect) {
-        newCorrect = newKey;
-      }
+      if (item.isCorrect) newCorrect = newKey;
     });
     return {
       options: newOptions,
@@ -1297,6 +1252,8 @@ export class GameServer {
     return arr;
   }
   
+  // ==================== WEBSOCKET HELPERS ====================
+  
   _getWsId(ws) {
     return ws ? ws._wsId : null;
   }
@@ -1329,9 +1286,7 @@ export class GameServer {
   }
   
   _lockUserConnection(username) {
-    if (this.connectionLocks.has(username)) {
-      return false;
-    }
+    if (this.connectionLocks.has(username)) return false;
     this.connectionLocks.set(username, true);
     return true;
   }
@@ -1343,27 +1298,19 @@ export class GameServer {
   _forceCleanupUserConnections(username, excludeWsId = null) {
     const conn = this.userConnections.get(username);
     if (!conn) return;
-    if (excludeWsId !== null && conn.wsId === excludeWsId) {
-      return;
-    }
+    if (excludeWsId !== null && conn.wsId === excludeWsId) return;
     const oldWs = this.wsMap.get(conn.wsId);
     if (oldWs && oldWs.readyState === 1) {
-      try {
-        oldWs.close(1000, "Replaced by new connection");
-      } catch(e) {}
+      try { oldWs.close(1000, "Replaced by new connection"); } catch(e) {}
     }
-    if (conn.room) {
-      this._removeClientFromRoom(conn.room, conn.wsId);
-    }
+    if (conn.room) this._removeClientFromRoom(conn.room, conn.wsId);
     this.wsMap.delete(conn.wsId);
     this.clientRooms.delete(conn.wsId);
     this.userLanguage.delete(conn.wsId);
     this.userCountry.delete(conn.wsId);
     if (conn.room && this.roomViewers.has(conn.room)) {
       this.roomViewers.get(conn.room).delete(username);
-      if (this.roomViewers.get(conn.room).size === 0) {
-        this.roomViewers.delete(conn.room);
-      }
+      if (this.roomViewers.get(conn.room).size === 0) this.roomViewers.delete(conn.room);
     }
     this.userConnections.delete(username);
   }
@@ -1400,17 +1347,11 @@ export class GameServer {
     }
     if (this.clientRooms.has(wsId)) {
       const oldRoom = this.clientRooms.get(wsId);
-      if (oldRoom !== room) {
-        this._removeClientFromRoom(oldRoom, wsId);
-      }
+      if (oldRoom !== room) this._removeClientFromRoom(oldRoom, wsId);
     }
     const clients = this.wsClients.get(room);
-    if (clients) {
-      clients.delete(wsId);
-    }
-    if (!this.wsClients.has(room)) {
-      this.wsClients.set(room, new Set());
-    }
+    if (clients) clients.delete(wsId);
+    if (!this.wsClients.has(room)) this.wsClients.set(room, new Set());
     this.wsClients.get(room).add(wsId);
     this.clientRooms.set(wsId, room);
     this.wsMap.set(wsId, ws);
@@ -1418,9 +1359,7 @@ export class GameServer {
     ws.roomname = room;
     ws.username = username;
     if (username) {
-      if (!this.roomViewers.has(room)) {
-        this.roomViewers.set(room, new Set());
-      }
+      if (!this.roomViewers.has(room)) this.roomViewers.set(room, new Set());
       this.roomViewers.get(room).add(username);
     }
   }
@@ -1430,9 +1369,7 @@ export class GameServer {
     const clients = this.wsClients.get(room);
     if (clients) {
       clients.delete(wsId);
-      if (clients.size === 0) {
-        this.wsClients.delete(room);
-      }
+      if (clients.size === 0) this.wsClients.delete(room);
     }
   }
   
@@ -1448,22 +1385,16 @@ export class GameServer {
     this.userCountry.delete(wsId);
     if (username) {
       const conn = this.userConnections.get(username);
-      if (conn && conn.wsId === wsId) {
-        this.userConnections.delete(username);
-      }
+      if (conn && conn.wsId === wsId) this.userConnections.delete(username);
       if (this.roomViewers.has(room)) {
         this.roomViewers.get(room).delete(username);
-        if (this.roomViewers.get(room).size === 0) {
-          this.roomViewers.delete(room);
-        }
+        if (this.roomViewers.get(room).size === 0) this.roomViewers.delete(room);
       }
     }
-    if (ws) {
-      ws.room = null;
-      ws.roomname = null;
-      ws._wsId = null;
-      ws.username = null;
-    }
+    ws.room = null;
+    ws.roomname = null;
+    ws._wsId = null;
+    ws.username = null;
   }
   
   _ensureSingleConnection(room, username, newWs, newWsId) {
@@ -1477,63 +1408,6 @@ export class GameServer {
   }
   
   _sendGameStatusToWs(ws, room) {}
-  
-  _broadcastToRoom(room, message) {
-    if (this.closing || this.isDestroyed || !room || !message) return;
-    const wsIds = this.wsClients.get(room);
-    if (!wsIds || wsIds.size === 0) return;
-    const now = Date.now();
-    const reset = this._roomBroadcastReset.get(room) || 0;
-    const count = this._roomBroadcastCount.get(room) || 0;
-    if (now > reset) {
-      this._roomBroadcastReset.set(room, now + 1000);
-      this._roomBroadcastCount.set(room, 1);
-    } else {
-      if (count > CONSTANTS.MAX_BROADCAST_BATCH) {
-        return;
-      }
-      this._roomBroadcastCount.set(room, count + 1);
-    }
-    const msgStr = JSON.stringify(message);
-    const wsIdArray = Array.from(wsIds);
-    const disconnected = [];
-    for (let i = 0; i < wsIdArray.length; i += CONSTANTS.BATCH_SIZE) {
-      const batch = wsIdArray.slice(i, i + CONSTANTS.BATCH_SIZE);
-      for (const wsId of batch) {
-        const ws = this.wsMap.get(wsId);
-        if (ws && ws.readyState === 1) {
-          try {
-            ws.send(msgStr);
-          } catch(e) {
-            disconnected.push(wsId);
-          }
-        } else {
-          disconnected.push(wsId);
-        }
-      }
-    }
-    if (disconnected.length > 0) {
-      for (const wsId of disconnected) {
-        const ws = this.wsMap.get(wsId);
-        if (ws) {
-          this._removeClient(room, ws);
-        } else {
-          this._removeClientFromRoom(room, wsId);
-          this.clientRooms.delete(wsId);
-        }
-      }
-    }
-  }
-  
-  _safeSend(ws, message) {
-    if (!ws || ws.readyState !== 1) return false;
-    try {
-      ws.send(JSON.stringify(message));
-      return true;
-    } catch(e) {
-      return false;
-    }
-  }
   
   // ==================== GAME LOWCARD METHODS ====================
   
@@ -1557,14 +1431,6 @@ export class GameServer {
   _getActivePlayerIds(game) {
     if (!game || !game._isActive || game._gameEnded || !game.players) return [];
     return Array.from(game.players.keys()).filter(id => !game.eliminated?.has(id));
-  }
-  
-  _getActivePlayersWithSubmitStatus(game) {
-    if (!game || !game._isActive || game._gameEnded || !game.players) return [];
-    const submittedIds = new Set(game.numbers?.keys() || []);
-    return Array.from(game.players.entries())
-      .filter(([id]) => !game.eliminated?.has(id))
-      .map(([id, p]) => ({ ...p, hasSubmitted: submittedIds.has(id) }));
   }
   
   _getRandomCardTanda() {
@@ -1594,18 +1460,16 @@ export class GameServer {
     return null;
   }
   
+  // ==================== GAME CLEANUP ====================
+  
   _scheduleGameCleanup(room, game) {
     if (!room || !game) return;
     if (this._cleanupTimers.has(room)) {
       const oldTimer = this._cleanupTimers.get(room);
-      if (oldTimer) {
-        clearTimeout(oldTimer);
-      }
+      if (oldTimer) clearTimeout(oldTimer);
       this._cleanupTimers.delete(room);
     }
-    if (!game._gameEnded) {
-      return;
-    }
+    if (!game._gameEnded) return;
     const timer = setTimeout(() => {
       try {
         const currentGame = this.activeGames.get(room);
@@ -1615,9 +1479,7 @@ export class GameServer {
         }
         this._cleanupTimers.delete(room);
         const gameToDelete = this.activeGames.get(room);
-        if (gameToDelete) {
-          this._deleteGame(room, gameToDelete);
-        }
+        if (gameToDelete) this._deleteGame(room, gameToDelete);
       } catch(e) {}
     }, CONSTANTS.GAME_CLEANUP_DELAY_MS);
     this._cleanupTimers.set(room, timer);
@@ -1625,9 +1487,7 @@ export class GameServer {
   
   _cleanupGame(game) {
     if (!game) return;
-    if (game._isActive === true && !game._gameEnded) {
-      return;
-    }
+    if (game._isActive === true && !game._gameEnded) return;
     const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
     for (const key of timers) {
       if (game[key]) {
@@ -1637,9 +1497,7 @@ export class GameServer {
       }
     }
     if (game._botTimeouts) {
-      for (const id of game._botTimeouts) {
-        clearTimeout(id);
-      }
+      for (const id of game._botTimeouts) clearTimeout(id);
       game._botTimeouts.clear();
       game._botTimeouts = null;
     }
@@ -1655,9 +1513,7 @@ export class GameServer {
   
   _deleteGame(room, game) {
     if (!room || !game) return;
-    if (game && game._isActive === true && !game._gameEnded) {
-      return;
-    }
+    if (game && game._isActive === true && !game._gameEnded) return;
     if (this._cleanupTimers.has(room)) {
       clearTimeout(this._cleanupTimers.get(room));
       this._cleanupTimers.delete(room);
@@ -1713,9 +1569,7 @@ export class GameServer {
         const allPlayers = Array.from(game.players.keys());
         const submitted = Array.from(game.numbers?.keys() || []);
         const notSubmitted = allPlayers.filter(id => !submitted.includes(id) && !game.eliminated?.has(id));
-        if (notSubmitted.length > 0) {
-          return;
-        }
+        if (notSubmitted.length > 0) return;
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
@@ -1747,13 +1601,13 @@ export class GameServer {
     const result = [];
     for (const [room, game] of this.activeGames) {
       if (game && game._isActive && !game._gameEnded && game.players) {
-        if (game.players.has(username)) {
-          result.push({ game, room });
-        }
+        if (game.players.has(username)) result.push({ game, room });
       }
     }
     return result;
   }
+  
+  // ==================== BOT METHODS ====================
   
   _addBots(room, count) {
     try {
@@ -1820,9 +1674,7 @@ export class GameServer {
         game.evaluationLocked = true;
         this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
         game._evalTimer = setTimeout(() => {
-          try {
-            this._evaluateRound(room, game);
-          } catch(e) {}
+          try { this._evaluateRound(room, game); } catch(e) {}
         }, CONSTANTS.EVALUATION_DELAY_MS);
       }
     } catch(e) {}
@@ -1841,6 +1693,8 @@ export class GameServer {
     } catch(e) {}
   }
   
+  // ==================== GAME PHASE METHODS ====================
+  
   _startRegistration(room, game) {
     if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
     if (game._registrationTimer) {
@@ -1852,9 +1706,7 @@ export class GameServer {
       try {
         if (!this._isGameActuallyRunning(game) || !game.registrationOpen || timeLeft < 0) {
           clearInterval(timer);
-          if (game._registrationTimer === timer) {
-            game._registrationTimer = null;
-          }
+          if (game._registrationTimer === timer) game._registrationTimer = null;
           return;
         }
         if (timeLeft === 15 || timeLeft === 10 || timeLeft === 5) {
@@ -1869,9 +1721,7 @@ export class GameServer {
         timeLeft--;
       } catch(e) {
         clearInterval(timer);
-        if (game._registrationTimer === timer) {
-          game._registrationTimer = null;
-        }
+        if (game._registrationTimer === timer) game._registrationTimer = null;
       }
     }, 1000);
     game._registrationTimer = timer;
@@ -1888,10 +1738,7 @@ export class GameServer {
       const humanPlayers = Array.from(game.players.keys()).filter(id => !id.startsWith('BOT_'));
       const humanCount = humanPlayers.length;
       if (!game._botsAdded) {
-        if (humanCount === 1) {
-          this._addBots(room, 4);
-          game._botsAdded = true;
-        } else if (humanCount === 0) {
+        if (humanCount === 1 || humanCount === 0) {
           this._addBots(room, 4);
           game._botsAdded = true;
         } else if (game.players.size < 2) {
@@ -1926,9 +1773,7 @@ export class GameServer {
         game._evalTimer = null;
       }
       if (game._botTimeouts) {
-        for (const id of game._botTimeouts) {
-          clearTimeout(id);
-        }
+        for (const id of game._botTimeouts) clearTimeout(id);
         game._botTimeouts.clear();
       }
       const activePlayers = this._getActivePlayers(game);
@@ -1986,9 +1831,7 @@ export class GameServer {
       try {
         if (!this._isGameActuallyRunning(game) || game.drawTimeExpired || timeLeft < 0) {
           clearInterval(timer);
-          if (game._drawTimer === timer) {
-            game._drawTimer = null;
-          }
+          if (game._drawTimer === timer) game._drawTimer = null;
           return;
         }
         if (timeLeft === 15 || timeLeft === 10 || timeLeft === 5) {
@@ -2003,9 +1846,7 @@ export class GameServer {
         timeLeft--;
       } catch(e) {
         clearInterval(timer);
-        if (game._drawTimer === timer) {
-          game._drawTimer = null;
-        }
+        if (game._drawTimer === timer) game._drawTimer = null;
       }
     }, 1000);
     game._drawTimer = timer;
@@ -2061,9 +1902,7 @@ export class GameServer {
         game._evalTimer = null;
       }
       if (game._botTimeouts) {
-        for (const id of game._botTimeouts) {
-          clearTimeout(id);
-        }
+        for (const id of game._botTimeouts) clearTimeout(id);
         game._botTimeouts.clear();
       }
       const numbers = game.numbers || new Map();
@@ -2074,9 +1913,7 @@ export class GameServer {
       const submittedIds = new Set(numbers.keys());
       const activeIds = this._getActivePlayerIds(game);
       for (const id of activeIds) {
-        if (!submittedIds.has(id)) {
-          eliminated.add(id);
-        }
+        if (!submittedIds.has(id)) eliminated.add(id);
       }
       if (entries.length === 0) {
         game._isEvaluating = false;
@@ -2113,9 +1950,7 @@ export class GameServer {
       if (!allSame && values.length > 0) {
         const lowest = Math.min(...values);
         losers = entries.filter(([, n]) => n === lowest).map(([id]) => id);
-        for (const id of losers) {
-          eliminated.add(id);
-        }
+        for (const id of losers) eliminated.add(id);
       }
       const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
       if (allSame && remaining.length >= 2) {
@@ -2219,6 +2054,8 @@ export class GameServer {
     }
   }
   
+  // ==================== START GAME ====================
+  
   async startGame(ws, bet, username) {
     try {
       if (this.isDestroyed) {
@@ -2250,9 +2087,7 @@ export class GameServer {
         return;
       }
       this._gameStartFlags.set(startKey, Date.now());
-      if (existingGame) {
-        await this._forceCleanupGame(room, existingGame);
-      }
+      if (existingGame) await this._forceCleanupGame(room, existingGame);
       const now = Date.now();
       const lockTime = this._gameLocks.get(room);
       if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
@@ -2315,9 +2150,7 @@ export class GameServer {
         setTimeout(() => {
           try {
             this._gameStartFlags.delete(startKey);
-            if (this._gameLocks.get(room) === now) {
-              this._gameLocks.delete(room);
-            }
+            if (this._gameLocks.get(room) === now) this._gameLocks.delete(room);
           } catch(e) {}
         }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
       } catch(e) {
@@ -2343,9 +2176,7 @@ export class GameServer {
         }
       }
       if (game._botTimeouts) {
-        for (const id of game._botTimeouts) {
-          clearTimeout(id);
-        }
+        for (const id of game._botTimeouts) clearTimeout(id);
         game._botTimeouts.clear();
       }
       game._gameEnded = true;
@@ -2362,6 +2193,8 @@ export class GameServer {
       this._gameStartFlags.delete(`start_${room}`);
     } catch(e) {}
   }
+  
+  // ==================== JOIN GAME ====================
   
   async joinGame(ws, username) {
     try {
@@ -2424,6 +2257,8 @@ export class GameServer {
       this._safeSend(ws, ["gameLowCardError", "Failed to join game"]);
     }
   }
+  
+  // ==================== SUBMIT NUMBER ====================
   
   async submitNumber(ws, number, tanda, username) {
     try {
@@ -2505,6 +2340,8 @@ export class GameServer {
     }
   }
   
+  // ==================== LEAVE GAME ====================
+  
   async leaveGame(ws, username) {
     try {
       if (this.isDestroyed) {
@@ -2536,14 +2373,7 @@ export class GameServer {
     }
   }
   
-  async forceEndGame(room) {
-    try {
-      const game = this.activeGames.get(room);
-      if (game) {
-        await this._forceCleanupGame(room, game);
-      }
-    } catch(e) {}
-  }
+  // ==================== CHECK GAME ====================
   
   async checkGameRunning(ws, roomname) {
     try {
@@ -2552,9 +2382,7 @@ export class GameServer {
         return;
       }
       let room = roomname;
-      if (!room) {
-        room = this._ensureRoomConsistency(ws);
-      }
+      if (!room) room = this._ensureRoomConsistency(ws);
       if (!room) {
         this._safeSend(ws, ["gameStatus", { running: "false" }]);
         return;
@@ -2566,6 +2394,8 @@ export class GameServer {
       this._safeSend(ws, ["gameStatus", { running: "false" }]);
     }
   }
+  
+  // ==================== GETTERS ====================
   
   getGame(room) {
     return this.activeGames.get(room);
@@ -2586,6 +2416,8 @@ export class GameServer {
       return { running: false, message: "Error checking game" };
     }
   }
+  
+  // ==================== CLEANUP ====================
   
   _checkStuckGames() {
     try {
@@ -2658,9 +2490,7 @@ export class GameServer {
     try {
       const now = Date.now();
       for (const [key, time] of this._switchLocks) {
-        if ((now - time) > 5000) {
-          this._switchLocks.delete(key);
-        }
+        if ((now - time) > 5000) this._switchLocks.delete(key);
       }
     } catch(e) {}
   }
@@ -2669,17 +2499,13 @@ export class GameServer {
     try {
       const toRemove = [];
       for (const [wsId, ws] of this.wsMap) {
-        if (!ws || ws.readyState !== 1 || ws._closing) {
-          toRemove.push(wsId);
-        }
+        if (!ws || ws.readyState !== 1 || ws._closing) toRemove.push(wsId);
       }
       for (const wsId of toRemove) {
         const ws = this.wsMap.get(wsId);
         if (ws) {
           const room = this.clientRooms.get(wsId);
-          if (room) {
-            this._removeClientFromRoom(room, wsId);
-          }
+          if (room) this._removeClientFromRoom(room, wsId);
           this.clientRooms.delete(wsId);
           this.wsMap.delete(wsId);
           this.userLanguage.delete(wsId);
@@ -2695,115 +2521,132 @@ export class GameServer {
     } catch(e) {}
   }
   
+  // ==================== FETCH ====================
+  
   async fetch(req) {
     if (this.closing || this.isDestroyed) {
       return new Response("Shutting down", { status: 503 });
     }
     try {
       const url = new URL(req.url);
+      
       if (url.pathname === "/game/health") {
         return new Response(JSON.stringify({
           status: this.isDestroyed ? 'down' : 'healthy',
-          games: this.activeGames.size,
-          connections: this.wsMap.size,
-          memory: process.memoryUsage ? process.memoryUsage() : undefined
+          games: this.activeGames ? this.activeGames.size : 0,
+          connections: this.wsMap ? this.wsMap.size : 0,
+          questions: this.quizQuestionCache && this.quizQuestionCache['en'] ? 
+                     this.quizQuestionCache['en'].length : 0,
+          kvAvailable: !!(this.env && this.env.QUESTIONS),
+          quizAutoEnabled: this.quizAutoEnabled || false,
+          isQuizRunning: !!this.currentQuestion,
+          timestamp: Date.now()
         }), { 
           headers: { 'Content-Type': 'application/json' }
         });
       }
+      
       if (url.pathname === "/game/ws") {
         const upgrade = req.headers.get("Upgrade");
         if (upgrade !== "websocket") {
           return new Response("WebSocket only", { status: 400 });
         }
-        const pair = new WebSocketPair();
-        const [client, server] = [pair[0], pair[1]];
-        const timeoutId = setTimeout(() => {
-          try {
-            if (server.readyState === 0) {
-              server.close(1000, "Timeout");
-            }
-          } catch(e) {}
-        }, 5000);
-        server._timeoutId = timeoutId;
-        try { 
-          this.state.acceptWebSocket(server);
-        } catch(e) { 
-          clearTimeout(timeoutId);
-          return new Response("WebSocket acceptance failed", { status: 500 }); 
-        }
-        const wsId = ++this._wsIdCounter;
-        server._wsId = wsId;
-        server._closing = false;
-        server.room = null;
-        server.roomname = null;
-        server._createdAt = Date.now();
-        server.username = null;
-        const cf = req.cf;
-        let country = 'US';
-        if (cf && cf.country) {
-          country = cf.country;
-        }
-        server._country = country;
-        const lang = this._countryToLanguage(country);
-        this.userLanguage.set(wsId, lang);
-        this.userCountry.set(wsId, country);
-        server.addEventListener("message", async (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (!Array.isArray(data) || data.length === 0) return;
-            await this.handleEvent(server, data);
-          } catch(e) {
-            this._safeSend(server, ["gameLowCardError", e.message || "Error"]);
+        
+        try {
+          const pair = new WebSocketPair();
+          const [client, server] = [pair[0], pair[1]];
+          
+          const wsId = ++this._wsIdCounter;
+          server._wsId = wsId;
+          server._closing = false;
+          server.room = null;
+          server.roomname = null;
+          server._createdAt = Date.now();
+          server.username = null;
+          
+          const cf = req.cf;
+          let country = 'US';
+          if (cf && cf.country) {
+            country = cf.country;
           }
-        });
-        server.addEventListener("close", () => {
-          try {
-            if (server.room || server.roomname) {
-              const room = server.room || server.roomname;
-              const wsId = this._getWsId(server);
-              const username = server.username;
-              this._removeClient(room, server);
-              this.userLanguage.delete(wsId);
-              this.userCountry.delete(wsId);
-              if (username) {
-                const conn = this.userConnections.get(username);
-                if (conn && conn.wsId === wsId) {
-                  this.userConnections.delete(username);
+          server._country = country;
+          const lang = this._countryToLanguage(country);
+          this.userLanguage.set(wsId, lang);
+          this.userCountry.set(wsId, country);
+          
+          try { 
+            this.state.acceptWebSocket(server);
+          } catch(e) { 
+            return new Response("WebSocket acceptance failed", { status: 500 }); 
+          }
+          
+          server.addEventListener("message", async (event) => {
+            try {
+              const data = JSON.parse(event.data);
+              if (!Array.isArray(data) || data.length === 0) return;
+              await this.handleEvent(server, data);
+            } catch(e) {
+              this._safeSend(server, ["gameLowCardError", e.message || "Error"]);
+            }
+          });
+          
+          server.addEventListener("close", () => {
+            try {
+              if (server.room || server.roomname) {
+                const room = server.room || server.roomname;
+                const wsId = this._getWsId(server);
+                const username = server.username;
+                this._removeClient(room, server);
+                this.userLanguage.delete(wsId);
+                this.userCountry.delete(wsId);
+                if (username) {
+                  const conn = this.userConnections.get(username);
+                  if (conn && conn.wsId === wsId) {
+                    this.userConnections.delete(username);
+                  }
                 }
               }
-            }
-            const clients = this.wsClients.get(QUIZ_ROOM);
-            if (clients && clients.size > 0) {
-              this.ensureQuizRunning();
-            }
-          } catch(e) {}
-        });
-        server.addEventListener("error", () => {
-          try {
-            if (server.room || server.roomname) {
-              const room = server.room || server.roomname;
-              const wsId = this._getWsId(server);
-              const username = server.username;
-              this._removeClient(room, server);
-              this.userLanguage.delete(wsId);
-              this.userCountry.delete(wsId);
-              if (username) {
-                const conn = this.userConnections.get(username);
-                if (conn && conn.wsId === wsId) {
-                  this.userConnections.delete(username);
+              const clients = this.wsClients.get(QUIZ_ROOM);
+              if (clients && clients.size > 0) {
+                this.ensureQuizRunning();
+              }
+            } catch(e) {}
+          });
+          
+          server.addEventListener("error", () => {
+            try {
+              if (server.room || server.roomname) {
+                const room = server.room || server.roomname;
+                const wsId = this._getWsId(server);
+                const username = server.username;
+                this._removeClient(room, server);
+                this.userLanguage.delete(wsId);
+                this.userCountry.delete(wsId);
+                if (username) {
+                  const conn = this.userConnections.get(username);
+                  if (conn && conn.wsId === wsId) {
+                    this.userConnections.delete(username);
+                  }
                 }
               }
-            }
-          } catch(e) {}
-        });
-        return new Response(null, { status: 101, webSocket: client });
+            } catch(e) {}
+          });
+          
+          return new Response(null, { status: 101, webSocket: client });
+          
+        } catch(e) {
+          return new Response("WebSocket creation failed", { status: 500 });
+        }
       }
+      
       return new Response("Game Server", { status: 200 });
+      
     } catch(e) {
-      return new Response("Internal Server Error", { status: 500 });
+      return new Response("Internal Server Error: " + e.message, { status: 500 });
     }
   }
+  
+  // ==================== WEBSOCKET EVENTS ====================
   
   async webSocketMessage(ws, msg) {
     try {
@@ -2877,6 +2720,8 @@ export class GameServer {
     } catch(e) {}
   }
   
+  // ==================== DESTROY ====================
+  
   async destroy() {
     try {
       if (this.isDestroyed) return;
@@ -2887,32 +2732,22 @@ export class GameServer {
         clearInterval(this.quizAutoTimer);
         this.quizAutoTimer = null;
       }
-      
       if (this.quizTimer) {
         clearInterval(this.quizTimer);
         this.quizTimer = null;
       }
-      
-      if (this._memoryCheckInterval) {
-        clearInterval(this._memoryCheckInterval);
-        this._memoryCheckInterval = null;
-      }
-      
       if (this._translateResetInterval) {
         clearInterval(this._translateResetInterval);
         this._translateResetInterval = null;
       }
-      
       if (this._quizTimeout) {
         clearTimeout(this._quizTimeout);
         this._quizTimeout = null;
       }
-      
       if (this._quizBreakTimeout) {
         clearTimeout(this._quizBreakTimeout);
         this._quizBreakTimeout = null;
       }
-      
       if (this._quizStartTimeout) {
         clearTimeout(this._quizStartTimeout);
         this._quizStartTimeout = null;
@@ -2929,9 +2764,7 @@ export class GameServer {
             }
           }
           if (game._botTimeouts) {
-            for (const id of game._botTimeouts) {
-              clearTimeout(id);
-            }
+            for (const id of game._botTimeouts) clearTimeout(id);
             game._botTimeouts.clear();
             game._botTimeouts = null;
           }
@@ -2966,7 +2799,6 @@ export class GameServer {
       this._roomBroadcastCount.clear();
       this._roomBroadcastReset.clear();
       this.quizAnswered.clear();
-      this._gameHistory = [];
       this.activeGames.clear();
       
       for (const [room, wsIds] of this.wsClients) {
@@ -2979,8 +2811,6 @@ export class GameServer {
           }
         }
       }
-      
-      this._forceGarbageCollection();
     } catch(e) {}
   }
 }
