@@ -235,7 +235,7 @@ export class GameServer {
     let message = "";
     
     if (isQuizTime) {
-      message = "RUNNING|Quiz is currently running!|🔴 Live Now!";
+      message = "RUNNING|Quiz is currently running!";
     } else {
       const minutes = timeLeft.minutes;
       const seconds = timeLeft.seconds;
@@ -243,11 +243,11 @@ export class GameServer {
       if (minutes >= 60) {
         const hours = Math.floor(minutes / 60);
         const remainingMinutes = minutes % 60;
-        message = `WAITING|Quiz starts in ${hours}h ${remainingMinutes}m ${seconds}s|${hours}h ${remainingMinutes}m left`;
+        message = `WAITING|Quiz starts in ${hours}h ${remainingMinutes}m ${seconds}sleft`;
       } else if (minutes > 0) {
-        message = `WAITING|Quiz starts in ${minutes}m ${seconds}s|${minutes}m ${seconds}s left`;
+        message = `WAITING|Quiz starts in ${minutes}m ${seconds}s left`;
       } else {
-        message = `WAITING|Quiz starts in ${seconds}s!|${seconds}s left`;
+        message = `WAITING|Quiz starts in ${seconds}s! left`;
       }
     }
     
@@ -266,13 +266,13 @@ export class GameServer {
     
     switch(errorType) {
       case "NOT_QUIZ_TIME":
-        message = customMessage || `❌ Quiz is currently offline. Next session: ${this._formatUTCTime(nextStart)}`;
+        message = customMessage || `❌ Quiz is currently offline}`;
         break;
       case "QUIZ_DISABLED":
-        message = customMessage || `⏰ Quiz is not available right now. Schedule: ${this._formatUTCTime(nextStart)}`;
+        message = customMessage || `⏰ Quiz is not available right now}`;
         break;
       case "QUIZ_ENDED":
-        message = customMessage || `⏰ Quiz session has ended. Next session: ${this._formatUTCTime(nextStart)}`;
+        message = customMessage || `⏰ Quiz session has ended}`;
         break;
       case "QUIZ_NOT_STARTED":
         const timeStr = timeLeft.minutes > 0 ? 
