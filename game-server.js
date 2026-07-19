@@ -40,11 +40,16 @@ const CONSTANTS = {
   QUIZ_LAST_WEEK_WINNER: 'quiz_last_week_winner',
 };
 
+// ==================== PERUBAHAN HANYA DI SINI ====================
 const QUIZ_SCHEDULE = {
-  MORNING: { start: 1, end: 3 },
-  AFTERNOON: { start: 5, end: 7 },
-  EVENING: { start: 12, end: 14 },
+  SESSION1: { start: 0, end: 2 },     // 00:00 - 02:00 UTC (main 2 jam)
+  SESSION2: { start: 4, end: 6 },     // 04:00 - 06:00 UTC (main 2 jam)
+  SESSION3: { start: 8, end: 10 },    // 08:00 - 10:00 UTC (main 2 jam)
+  SESSION4: { start: 12, end: 14 },   // 12:00 - 14:00 UTC (main 2 jam)
+  SESSION5: { start: 16, end: 18 },   // 16:00 - 18:00 UTC (main 2 jam)
+  SESSION6: { start: 20, end: 22 },   // 20:00 - 22:00 UTC (main 2 jam)
 };
+// ==================== AKHIR PERUBAHAN ====================
 
 const QUIZ_ROOM = "Quiz";
 
@@ -249,9 +254,12 @@ export class GameServer {
   _isQuizTime() {
     const hour = this._getCurrentUTCHours();
     const schedules = [
-      QUIZ_SCHEDULE.MORNING,
-      QUIZ_SCHEDULE.AFTERNOON,
-      QUIZ_SCHEDULE.EVENING
+      QUIZ_SCHEDULE.SESSION1,
+      QUIZ_SCHEDULE.SESSION2,
+      QUIZ_SCHEDULE.SESSION3,
+      QUIZ_SCHEDULE.SESSION4,
+      QUIZ_SCHEDULE.SESSION5,
+      QUIZ_SCHEDULE.SESSION6
     ];
     for (const schedule of schedules) {
       if (hour >= schedule.start && hour < schedule.end) {
@@ -264,9 +272,12 @@ export class GameServer {
   _getNextQuizStartTime() {
     const now = this._getCurrentUTCTime();
     const schedules = [
-      QUIZ_SCHEDULE.MORNING,
-      QUIZ_SCHEDULE.AFTERNOON,
-      QUIZ_SCHEDULE.EVENING
+      QUIZ_SCHEDULE.SESSION1,
+      QUIZ_SCHEDULE.SESSION2,
+      QUIZ_SCHEDULE.SESSION3,
+      QUIZ_SCHEDULE.SESSION4,
+      QUIZ_SCHEDULE.SESSION5,
+      QUIZ_SCHEDULE.SESSION6
     ];
     for (const schedule of schedules) {
       const startTime = new Date(now);
@@ -277,7 +288,7 @@ export class GameServer {
     }
     const tomorrow = new Date(now);
     tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-    tomorrow.setUTCHours(QUIZ_SCHEDULE.MORNING.start, 0, 0, 0);
+    tomorrow.setUTCHours(QUIZ_SCHEDULE.SESSION1.start, 0, 0, 0);
     return tomorrow;
   }
   
