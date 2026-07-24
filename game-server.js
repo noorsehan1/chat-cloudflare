@@ -53,8 +53,7 @@ const CONSTANTS = {
   ERROR_RECOVERY_DELAY_MS: 5000,
   MAX_UNHANDLED_ERRORS: 5,
   ERROR_RESET_INTERVAL_MS: 60000,
-  // ===== PERBAIKAN: Jeda sebelum submit =====
-  QUIZ_READING_TIME_MS: 10000,
+  QUIZ_READING_TIME_MS: 20000,
 };
 
 const QUIZ_SCHEDULE = {
@@ -72,7 +71,6 @@ const COUNTRY_LANGUAGE_MAP = {
   'MY': { lang: 'id', name: 'Malaysia', kvKey: 'trivia_id' },
 };
 
-// ===== PERBAIKAN: Hanya 2 bahasa =====
 const SUPPORTED_LANGUAGES = ['en', 'id'];
 
 class CPUProtection {
@@ -189,7 +187,6 @@ class CountryBasedQuizSystem {
     this.gameServer = gameServer;
     this.env = gameServer.env;
     this.countryLanguageMap = COUNTRY_LANGUAGE_MAP;
-    // ===== PERBAIKAN: Hanya 2 bahasa =====
     this.supportedLanguages = ['en', 'id'];
     this.userCountryCache = new Map();
     this.questionCache = new Map();
@@ -218,7 +215,6 @@ class CountryBasedQuizSystem {
       if (this._loading) return this._isLoaded;
       if (this.gameServer._questionsCache?.loaded) {
         this._isLoaded = true;
-        // ===== PERBAIKAN: Hanya 2 bahasa =====
         const languages = ['en', 'id'];
         for (const lang of languages) {
           const questions = this.gameServer._questionsCache[lang];
@@ -241,7 +237,6 @@ class CountryBasedQuizSystem {
         this._loading = false;
         return false;
       }
-      // ===== PERBAIKAN: Hanya 2 bahasa =====
       const languages = [
         { code: 'id', key: 'trivia_id', name: 'Indonesia' },
         { code: 'en', key: 'trivia_en', name: 'English' }
@@ -428,7 +423,6 @@ export class GameServer extends CPUProtection {
 
       this._winnerProcessed = false;
 
-      // ===== PERBAIKAN: Hanya 2 bahasa =====
       this._questionsCache = {
         en: [],
         id: [],
@@ -502,7 +496,6 @@ export class GameServer extends CPUProtection {
       this._quizTimeLeftBroadcastCooldown = 30000;
       this._lastQuizTimeLeftBroadcast = 0;
 
-      // ===== PERBAIKAN: Track waktu mulai soal =====
       this._questionStartTime = null;
       this._canSubmitAnswer = false;
 
@@ -571,7 +564,6 @@ export class GameServer extends CPUProtection {
       if (this._questionsCache.loaded) return;
       this._questionsCache.loading = true;
       
-      // ===== PERBAIKAN: Hanya 2 bahasa =====
       const languages = [
         { code: 'en', key: 'trivia_en' },
         { code: 'id', key: 'trivia_id' }
@@ -597,7 +589,6 @@ export class GameServer extends CPUProtection {
       this._questionsCache.loading = false;
       
       if (this.countryQuizSystem) {
-        // ===== PERBAIKAN: Hanya 2 bahasa =====
         const langs = ['en', 'id'];
         for (const lang of langs) {
           const questions = this._questionsCache[lang];
@@ -1350,7 +1341,6 @@ export class GameServer extends CPUProtection {
       const globalIndex = this._globalQuestionIndex;
       const results = new Map();
       
-      // ===== PERBAIKAN: Hanya terjemahkan ke Indonesia =====
       for (const wsId of userWsIds) {
         const country = this.userCountry.get(wsId) || 'US';
         const info = COUNTRY_LANGUAGE_MAP[country];
@@ -1359,7 +1349,6 @@ export class GameServer extends CPUProtection {
         let translatedOptions = options;
         let isTranslated = false;
         
-        // Hanya terjemahkan jika bahasa Indonesia
         if (lang === 'id') {
           const translatedQ = this.countryQuizSystem.getQuestionByIndex('id', globalIndex);
           if (translatedQ) {
@@ -1435,7 +1424,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ===== PERBAIKAN: Method _showQuestion dengan jeda 5 detik =====
+  // ===== PERBAIKAN: Semua pesan dalam bahasa Inggris =====
   async _showQuestion() {
     try {
       if (this._isShowingQuestion) return;
@@ -1455,7 +1444,7 @@ export class GameServer extends CPUProtection {
       if (!this.quizAutoEnabled) {
         this.quizAutoEnabled = true;
         const clients = this.wsClients.get(QUIZ_ROOM);
-        if (clients?.size > 0) this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Quiz akan segera dimulai!", true]);
+        if (clients?.size > 0) this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Quiz is starting soon!", true]);
         return;
       }
       
@@ -1494,8 +1483,8 @@ export class GameServer extends CPUProtection {
         const shuffled = this._shuffleQuestionOptions(q);
         this.currentQuestion = { ...q, options: shuffled.options, correct: shuffled.correct };
         this._quizStartTime = Date.now();
-        this._questionStartTime = Date.now(); // ===== PERBAIKAN: Track waktu mulai =====
-        this._canSubmitAnswer = false; // ===== PERBAIKAN: Belum bisa submit =====
+        this._questionStartTime = Date.now();
+        this._canSubmitAnswer = false;
         this.quizAnswered = new Set();
         this.quizHasWinner = false;
         this.quizWinner = null;
@@ -1504,45 +1493,42 @@ export class GameServer extends CPUProtection {
         
         await this._broadcastQuizQuestion(this.currentQuestion.question, this.currentQuestion.options);
         
-        // ===== PERBAIKAN: Kirim status "baca dulu" =====
+        // ===== PESAN BAHASA INGGRIS =====
         this._broadcastQuizNotification("quizReading", {
           questionNumber: this._questionPointer,
           totalQuestions: this._allQuestions.length,
           readingTime: CONSTANTS.QUIZ_READING_TIME_MS / 1000,
-          message: "Baca soal dulu sebelum menjawab"
+          message: "Read the question first before answering"
         });
         
         this._broadcastToRoom(QUIZ_ROOM, [
           "quizTimeLeft",
-          `Baca soal dulu... ${CONSTANTS.QUIZ_READING_TIME_MS / 1000}s`,
+          `Read the question... ${CONSTANTS.QUIZ_READING_TIME_MS / 1000}s`,
           false
         ]);
         
-        // ===== PERBAIKAN: Timer jeda 5 detik =====
         setTimeout(() => {
           if (this.closing || this.isDestroyed) { 
             this._isShowingQuestion = false;
             return; 
           }
           
-          // Aktifkan submit
           this._canSubmitAnswer = true;
           
-          // Kirim notifikasi bisa menjawab
+          // ===== PESAN BAHASA INGGRIS =====
           this._broadcastQuizNotification("quizCanAnswer", {
-            remainingTime: `${this._getQuestionRemainingTime()}s tersisa`,
-            message: "Sekarang bisa menjawab!"
+            remainingTime: `${this._getQuestionRemainingTime()}s remaining`,
+            message: "You can now answer!"
           });
           
           this._broadcastToRoom(QUIZ_ROOM, [
             "quizTimeLeft",
-            `${this._getQuestionRemainingTime()}s tersisa`,
+            `${this._getQuestionRemainingTime()}s remaining`,
             false
           ]);
           
         }, CONSTANTS.QUIZ_READING_TIME_MS);
         
-        // Timer untuk timeout jawaban (15 detik setelah soal muncul)
         if (this._quizTimeout) clearTimeout(this._quizTimeout);
         if (this._quizBreakTimeout) clearTimeout(this._quizBreakTimeout);
         
@@ -1650,7 +1636,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ===== PERBAIKAN: Method submit jawaban dengan cek jeda =====
+  // ===== PERBAIKAN: Pesan error dalam bahasa Inggris =====
   async submitQuizAnswer(ws, username, answer) {
     try {
       if (!ws || !username) {
@@ -1688,20 +1674,20 @@ export class GameServer extends CPUProtection {
         }
       }
       
-      // ===== PERBAIKAN: Cek apakah sudah bisa submit =====
+      // ===== PESAN BAHASA INGGRIS =====
       if (!this._canSubmitAnswer) {
         const elapsed = (Date.now() - (this._questionStartTime || 0)) / 1000;
         const remaining = Math.max(0, Math.round((CONSTANTS.QUIZ_READING_TIME_MS / 1000) - elapsed));
-        this._safeSend(ws, ["quizError", `Tunggu ${remaining}s lagi, baca soal dulu!`]);
+        this._safeSend(ws, ["quizError", `Please wait ${remaining}s, read the question first!`]);
         return;
       }
       
       const remaining = this._getQuestionRemainingTime();
       if (remaining <= 0) {
         if (this.quizHasWinner && this.quizWinner) {
-          this._safeSend(ws, ["quizError", "Time is up! Winner: " + this.quizWinner]);
+          this._safeSend(ws, ["quizError", "Time's up! Winner: " + this.quizWinner]);
         } else {
-          this._safeSend(ws, ["quizError", "Time is up!"]);
+          this._safeSend(ws, ["quizError", "Time's up!"]);
         }
         return;
       }
@@ -1776,7 +1762,7 @@ export class GameServer extends CPUProtection {
             this.quizEndNotified = false;
             if (!this.quizAutoEnabled) {
               this.quizAutoEnabled = true;
-              this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Quiz akan segera dimulai!", true]);
+              this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Quiz is starting soon!", true]);
             }
             if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout && !this._isShowingQuestion) {
               this._showQuestion();
@@ -1936,6 +1922,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ===== PERBAIKAN: Pesan clear dalam bahasa Inggris =====
   _clearQuizData() {
     try {
       this.currentQuestion = null;
@@ -1964,12 +1951,14 @@ export class GameServer extends CPUProtection {
       this.quizQuestionCache = {};
       this._questionPointer = 0;
       this._totalQuestionsAnswered = 0;
+      
+      // ===== PESAN BAHASA INGGRIS =====
       this._broadcastToRoom(QUIZ_ROOM, ["quizClear", {
-        message: "Quiz telah berakhir. Kembali besok!",
+        message: "Quiz has ended. Come back tomorrow!",
         timestamp: Date.now()
       }]);
       this._broadcastQuizNotification("quizCleared", {
-        message: "Quiz telah berakhir. Kembali besok!",
+        message: "Quiz has ended. Come back tomorrow!",
         clearUI: true
       });
     } catch(e) {}
@@ -1996,6 +1985,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ===== PERBAIKAN: Pesan time left dalam bahasa Inggris =====
   _broadcastQuizTimeLeft() {
     try {
       const wsIds = this.wsClients.get(QUIZ_ROOM);
@@ -2012,10 +2002,10 @@ export class GameServer extends CPUProtection {
           const elapsed = (Date.now() - this._quizStartTime) / 1000;
           const left = Math.max(0, (CONSTANTS.QUIZ_TIME_LIMIT_MS / 1000) - elapsed);
           const minutes = Math.floor(left / 60), seconds = Math.floor(left % 60);
-          message = `${minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`} tersisa`;
+          message = `${minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`} remaining`;
           canType = false;
         } else {
-          message = `Quiz akan segera dimulai!`;
+          message = `Quiz is starting soon!`;
           canType = true;
         }
       } else {
@@ -2069,10 +2059,10 @@ export class GameServer extends CPUProtection {
           const elapsed = (Date.now() - this._quizStartTime) / 1000;
           const left = Math.max(0, (CONSTANTS.QUIZ_TIME_LIMIT_MS / 1000) - elapsed);
           const minutes = Math.floor(left / 60), seconds = Math.floor(left % 60);
-          message = minutes > 0 ? `${minutes}m ${seconds}s tersisa` : `${seconds}s tersisa`;
+          message = minutes > 0 ? `${minutes}m ${seconds}s remaining` : `${seconds}s remaining`;
           canType = false;
         } else {
-          message = `Quiz akan segera dimulai!`;
+          message = `Quiz is starting soon!`;
           canType = true;
         }
       } else {
@@ -2085,6 +2075,7 @@ export class GameServer extends CPUProtection {
     } catch(e) { return false; }
   }
 
+  // ===== PERBAIKAN: Pesan error dalam bahasa Inggris =====
   _sendQuizErrorWithTime(ws, errorType, customMessage = null) {
     try {
       if (!ws || ws.readyState !== 1) return false;
@@ -2092,19 +2083,19 @@ export class GameServer extends CPUProtection {
       let message = "";
       switch(errorType) {
         case "NOT_QUIZ_TIME":
-          message = `${timeLeft.text}`;
+          message = `Quiz will start in ${timeLeft.text}`;
           break;
         case "QUIZ_DISABLED": 
-          message = `${timeLeft.text}`; 
+          message = `Quiz is disabled. Next session: ${timeLeft.text}`; 
           break;
         case "QUIZ_ENDED":
-          message = `${timeLeft.text}`;
+          message = `Quiz ended. Next session: ${timeLeft.text}`;
           break;
         case "QUIZ_NOT_STARTED": 
-          message = `${timeLeft.text}`; 
+          message = `Quiz not started. Next session: ${timeLeft.text}`; 
           break;
         default: 
-          message = customMessage || `${timeLeft.text}`;
+          message = customMessage || `Next quiz: ${timeLeft.text}`;
       }
       this._safeSend(ws, ["quizError", message]);
       return true;
