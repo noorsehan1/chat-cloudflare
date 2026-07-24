@@ -60,7 +60,7 @@ const CONSTANTS = {
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 11, end: 12 },
-    { start: 16, end: 18 }
+    { start: 16, end: 17 }
   ],
   TIMEZONE_OFFSET: 8,
 };
@@ -1429,14 +1429,21 @@ export class GameServer extends CPUProtection {
       this._winnerProcessed = false;
       this._submitEndTime = null;
 
-      // ===== WAITING PHASE (10 seconds) - NO EVENTS TO USER =====
-      // Only store question internally, NO broadcast to users
+      // ===== PHASE 1: SHOW QUESTION (0s) =====
+      // Broadcast question immediately for users to read
+      this._broadcastQuizQuestion(
+        this.currentQuestion.question, 
+        this.currentQuestion.options
+      );
+      
+      this._broadcastToRoom(QUIZ_ROOM, ["quizStatus", "reading", CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000]);
+      this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", `Read question ${CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000}s`, false]);
 
       // Clear old timers
       if (this._quizTimeout) clearTimeout(this._quizTimeout);
       if (this._quizBreakTimeout) clearTimeout(this._quizBreakTimeout);
 
-      // ===== START WAITING TIMER (10 seconds) =====
+      // ===== PHASE 2: WAITING/READING PHASE (10 seconds) - NO ANSWERS =====
       this._quizTimeout = setTimeout(() => {
         try {
           if (this.closing || this.isDestroyed) {
@@ -1445,20 +1452,14 @@ export class GameServer extends CPUProtection {
             return;
           }
 
-          // ===== SUBMIT PHASE START (5 seconds) - EVENTS TO USER =====
-          // Reset start time for submit phase
+          // ===== PHASE 3: SUBMIT PHASE START (5 seconds) - ANSWERS ALLOWED =====
           this._quizStartTime = Date.now();
           const submitSeconds = CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000;
           
           // Set submit end time (5 seconds from now)
           this._submitEndTime = Date.now() + CONSTANTS.QUIZ_SUBMIT_TIME_MS;
           
-          // Broadcast question and start submit phase
-          this._broadcastQuizQuestion(
-            this.currentQuestion.question, 
-            this.currentQuestion.options
-          );
-          
+          // Broadcast submit phase started
           this._broadcastToRoom(QUIZ_ROOM, ["quizStatus", "submitting", submitSeconds]);
           this._broadcastToRoom(QUIZ_ROOM, ["quizSubmitStart", submitSeconds]);
           this._broadcastToRoom(QUIZ_ROOM, [
@@ -1469,7 +1470,7 @@ export class GameServer extends CPUProtection {
 
           this._quizTimeout = null;
 
-          // ===== START SUBMIT TIMER (5 seconds) =====
+          // ===== PHASE 4: SUBMIT TIMER (5 seconds) =====
           this._quizTimeout = setTimeout(() => {
             try {
               if (this.closing || this.isDestroyed) {
@@ -1479,7 +1480,7 @@ export class GameServer extends CPUProtection {
                 return;
               }
 
-              // ===== TIME UP - CLOSE SUBMISSION =====
+              // ===== PHASE 5: TIME UP - CALCULATE WINNER =====
               const correctAnswer = this.currentQuestion.correct;
               
               if (this.quizHasWinner && this.quizWinner) {
@@ -1488,12 +1489,16 @@ export class GameServer extends CPUProtection {
                   username: this.quizWinner,
                   correctAnswer: correctAnswer
                 }]);
+                this._broadcastQuizNotification("quizWinner", {
+                  username: this.quizWinner,
+                  correctAnswer: correctAnswer
+                });
               } else {
                 // No winner
                 this._broadcastToRoom(QUIZ_ROOM, ["quizTimeUp", correctAnswer]);
                 this._broadcastQuizNotification("quizTimeUp", {
                   correctAnswer: correctAnswer,
-                  message: "Time up!"
+                  message: "Time up! No winner this round."
                 });
               }
 
@@ -1503,7 +1508,7 @@ export class GameServer extends CPUProtection {
               this._isShowingQuestion = false;
               this._submitEndTime = null;
 
-              // ===== BREAK PHASE (2 seconds) =====
+              // ===== PHASE 6: BREAK PHASE (2 seconds) =====
               this._quizBreakTimeout = setTimeout(() => {
                 if (this.closing || this.isDestroyed) {
                   this._quizBreakTimeout = null;
@@ -1514,13 +1519,13 @@ export class GameServer extends CPUProtection {
                 this._quizBreakTimeout = null;
                 this.currentQuestion = null;
                 
-                // Start next question if still quiz time
+                // ===== PHASE 7: NEXT QUESTION (LOOP) =====
                 if (this._isQuizTime()) {
                   setTimeout(() => {
                     if (!this.closing && !this.isDestroyed) {
-                      this._showQuestion();
+                      this._showQuestion(); // LOOP back to show next question
                     }
-                  }, 2000);
+                  }, 1000);
                 }
               }, CONSTANTS.QUIZ_BREAK_MS);
 
@@ -1630,10 +1635,10 @@ export class GameServer extends CPUProtection {
       const elapsed = Date.now() - this._quizStartTime;
       const waitTime = CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS;
       
-      // Still in waiting phase (10 seconds) - CANNOT ANSWER YET
+      // Still in reading phase (10 seconds) - CANNOT ANSWER YET
       if (elapsed < waitTime) {
         const remaining = Math.ceil((waitTime - elapsed) / 1000);
-        this._safeSend(ws, ["quizError", `Cannot answer yet. Wait ${remaining}s`]);
+        this._safeSend(ws, ["quizError", `Reading question. Wait ${remaining}s to answer`]);
         return;
       }
 
