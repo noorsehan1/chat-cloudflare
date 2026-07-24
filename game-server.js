@@ -20,7 +20,10 @@ const CONSTANTS = {
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
   QUIZ_INTERVAL_MS: 30000,
-  QUIZ_TIME_LIMIT_MS: 15000,
+  // ===== PERUBAHAN: Waktu baca 20 detik, waktu jawab 10 detik =====
+  QUIZ_READING_TIME_MS: 20000,
+  QUIZ_ANSWER_TIME_MS: 10000,
+  QUIZ_TOTAL_TIME_MS: 30000, // 20 + 10 = 30 detik
   QUIZ_BREAK_MS: 2000,
   QUIZ_START_DELAY_MS: 5000,
   MAX_RETRY_INIT_QUIZ: 2,
@@ -53,7 +56,6 @@ const CONSTANTS = {
   ERROR_RECOVERY_DELAY_MS: 5000,
   MAX_UNHANDLED_ERRORS: 5,
   ERROR_RESET_INTERVAL_MS: 60000,
-  QUIZ_READING_TIME_MS: 20000,
 };
 
 const QUIZ_SCHEDULE = {
@@ -880,7 +882,7 @@ export class GameServer extends CPUProtection {
       }
       if (this._isQuizTime() && this.currentQuestion && this._quizStartTime) {
         const elapsed = (now - this._quizStartTime) / 1000;
-        if (elapsed > (CONSTANTS.QUIZ_TIME_LIMIT_MS / 1000) + 30) {
+        if (elapsed > (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) + 30) {
           this.currentQuestion = null;
           this._quizTimeout = null;
           this._isShowingQuestion = false;
@@ -980,7 +982,19 @@ export class GameServer extends CPUProtection {
     try {
       if (!this.currentQuestion || !this._quizStartTime) return 0;
       const elapsed = (Date.now() - this._quizStartTime) / 1000;
-      return Math.max(0, Math.round((CONSTANTS.QUIZ_TIME_LIMIT_MS / 1000) - elapsed));
+      return Math.max(0, Math.round((CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) - elapsed));
+    } catch(e) { return 0; }
+  }
+
+  _getAnswerRemainingTime() {
+    try {
+      if (!this.currentQuestion || !this._questionStartTime) return 0;
+      // Waktu jawab dimulai setelah waktu baca selesai (20 detik)
+      const readingEnd = this._questionStartTime + CONSTANTS.QUIZ_READING_TIME_MS;
+      const now = Date.now();
+      if (now < readingEnd) return 0;
+      const elapsed = (now - readingEnd) / 1000;
+      return Math.max(0, Math.round((CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000) - elapsed));
     } catch(e) { return 0; }
   }
 
@@ -1424,7 +1438,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ===== PERBAIKAN: Semua pesan dalam bahasa Inggris =====
+  // ===== PERUBAHAN: Waktu baca 20 detik, waktu jawab 10 detik =====
   async _showQuestion() {
     try {
       if (this._isShowingQuestion) return;
@@ -1493,7 +1507,7 @@ export class GameServer extends CPUProtection {
         
         await this._broadcastQuizQuestion(this.currentQuestion.question, this.currentQuestion.options);
         
-        // ===== PESAN BAHASA INGGRIS =====
+        // ===== FASE 1: BACA SOAL (20 detik) =====
         this._broadcastQuizNotification("quizReading", {
           questionNumber: this._questionPointer,
           totalQuestions: this._allQuestions.length,
@@ -1507,6 +1521,7 @@ export class GameServer extends CPUProtection {
           false
         ]);
         
+        // ===== SETELAH 20 DETIK, MULAI FASE JAWAB (10 detik) =====
         setTimeout(() => {
           if (this.closing || this.isDestroyed) { 
             this._isShowingQuestion = false;
@@ -1515,20 +1530,21 @@ export class GameServer extends CPUProtection {
           
           this._canSubmitAnswer = true;
           
-          // ===== PESAN BAHASA INGGRIS =====
           this._broadcastQuizNotification("quizCanAnswer", {
-            remainingTime: `${this._getQuestionRemainingTime()}s remaining`,
+            answerTime: CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000,
+            remainingTime: `${CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000}s remaining`,
             message: "You can now answer!"
           });
           
           this._broadcastToRoom(QUIZ_ROOM, [
             "quizTimeLeft",
-            `${this._getQuestionRemainingTime()}s remaining`,
+            `${CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000}s remaining to answer!`,
             false
           ]);
           
         }, CONSTANTS.QUIZ_READING_TIME_MS);
         
+        // ===== TIMEOUT TOTAL: 20 + 10 = 30 detik =====
         if (this._quizTimeout) clearTimeout(this._quizTimeout);
         if (this._quizBreakTimeout) clearTimeout(this._quizBreakTimeout);
         
@@ -1578,7 +1594,7 @@ export class GameServer extends CPUProtection {
             this._isShowingQuestion = false;
             this._canSubmitAnswer = false;
           }
-        }, CONSTANTS.QUIZ_TIME_LIMIT_MS);
+        }, CONSTANTS.QUIZ_TOTAL_TIME_MS); // 30 detik total
         
       } catch(e) {
         this._isShowingQuestion = false;
@@ -1636,7 +1652,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ===== PERBAIKAN: Pesan error dalam bahasa Inggris =====
+  // ===== PERUBAHAN: Cek sisa waktu jawab (bukan total) =====
   async submitQuizAnswer(ws, username, answer) {
     try {
       if (!ws || !username) {
@@ -1674,16 +1690,17 @@ export class GameServer extends CPUProtection {
         }
       }
       
-      // ===== PESAN BAHASA INGGRIS =====
+      // ===== CEK: Belum bisa submit (masih fase baca 20 detik) =====
       if (!this._canSubmitAnswer) {
         const elapsed = (Date.now() - (this._questionStartTime || 0)) / 1000;
         const remaining = Math.max(0, Math.round((CONSTANTS.QUIZ_READING_TIME_MS / 1000) - elapsed));
-        this._safeSend(ws, ["quizError", `Please wait ${remaining}s, read the question first!`]);
+        this._safeSend(ws, ["quizError", `Please wait ${remaining}s, reading time!`]);
         return;
       }
       
-      const remaining = this._getQuestionRemainingTime();
-      if (remaining <= 0) {
+      // ===== CEK: Sisa waktu jawab (10 detik) =====
+      const answerRemaining = this._getAnswerRemainingTime();
+      if (answerRemaining <= 0) {
         if (this.quizHasWinner && this.quizWinner) {
           this._safeSend(ws, ["quizError", "Time's up! Winner: " + this.quizWinner]);
         } else {
@@ -1705,7 +1722,7 @@ export class GameServer extends CPUProtection {
       const answerKey = answer ? answer.toUpperCase().trim() : '';
       const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
       const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
-      const remainingText = `${remaining}s remaining`;
+      const remainingText = `${answerRemaining}s remaining`;
       const wsId = this._getWsId(ws);
       const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
       
@@ -1902,10 +1919,10 @@ export class GameServer extends CPUProtection {
             }
             if (this.currentQuestion && this._quizStartTime) {
               const elapsed = (now - this._quizStartTime) / 1000;
-              if (elapsed > (CONSTANTS.QUIZ_TIME_LIMIT_MS / 1000) - 2 && !this._quizTimeout) {
+              if (elapsed > (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) - 2 && !this._quizTimeout) {
                 this._forceEvaluateQuiz();
               }
-              if (elapsed > (CONSTANTS.QUIZ_TIME_LIMIT_MS / 1000) + 10) {
+              if (elapsed > (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) + 10) {
                 this.currentQuestion = null;
                 this._quizTimeout = null;
                 this._isShowingQuestion = false;
@@ -1922,7 +1939,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ===== PERBAIKAN: Pesan clear dalam bahasa Inggris =====
   _clearQuizData() {
     try {
       this.currentQuestion = null;
@@ -1952,7 +1968,6 @@ export class GameServer extends CPUProtection {
       this._questionPointer = 0;
       this._totalQuestionsAnswered = 0;
       
-      // ===== PESAN BAHASA INGGRIS =====
       this._broadcastToRoom(QUIZ_ROOM, ["quizClear", {
         message: "Quiz has ended. Come back tomorrow!",
         timestamp: Date.now()
@@ -1985,7 +2000,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ===== PERBAIKAN: Pesan time left dalam bahasa Inggris =====
   _broadcastQuizTimeLeft() {
     try {
       const wsIds = this.wsClients.get(QUIZ_ROOM);
@@ -2000,7 +2014,7 @@ export class GameServer extends CPUProtection {
       if (isQuizTime) {
         if (this.currentQuestion && this._quizStartTime) {
           const elapsed = (Date.now() - this._quizStartTime) / 1000;
-          const left = Math.max(0, (CONSTANTS.QUIZ_TIME_LIMIT_MS / 1000) - elapsed);
+          const left = Math.max(0, (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) - elapsed);
           const minutes = Math.floor(left / 60), seconds = Math.floor(left % 60);
           message = `${minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`} remaining`;
           canType = false;
@@ -2057,7 +2071,7 @@ export class GameServer extends CPUProtection {
       if (isQuizTime) {
         if (this.currentQuestion && this._quizStartTime) {
           const elapsed = (Date.now() - this._quizStartTime) / 1000;
-          const left = Math.max(0, (CONSTANTS.QUIZ_TIME_LIMIT_MS / 1000) - elapsed);
+          const left = Math.max(0, (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) - elapsed);
           const minutes = Math.floor(left / 60), seconds = Math.floor(left % 60);
           message = minutes > 0 ? `${minutes}m ${seconds}s remaining` : `${seconds}s remaining`;
           canType = false;
@@ -2075,7 +2089,6 @@ export class GameServer extends CPUProtection {
     } catch(e) { return false; }
   }
 
-  // ===== PERBAIKAN: Pesan error dalam bahasa Inggris =====
   _sendQuizErrorWithTime(ws, errorType, customMessage = null) {
     try {
       if (!ws || ws.readyState !== 1) return false;
@@ -3383,6 +3396,7 @@ export class GameServer extends CPUProtection {
         const remaining = this._getQuestionRemainingTime();
         const remainingText = `${remaining}s remaining`;
         const timeLeft = this._getTimeLeftUntilNextQuiz();
+        const answerRemaining = this._getAnswerRemainingTime();
         const notification = {
           type: "quizStatus",
           timestamp: Date.now(),
@@ -3397,7 +3411,9 @@ export class GameServer extends CPUProtection {
             totalQuestions: this._allQuestions.length,
             timeLeft: timeLeft.text,
             canSubmit: this._canSubmitAnswer,
-            readingTimeLeft: this._canSubmitAnswer ? 0 : Math.max(0, Math.round((CONSTANTS.QUIZ_READING_TIME_MS - (Date.now() - this._questionStartTime)) / 1000))
+            readingTimeLeft: this._canSubmitAnswer ? 0 : Math.max(0, Math.round((CONSTANTS.QUIZ_READING_TIME_MS - (Date.now() - this._questionStartTime)) / 1000)),
+            answerTimeLeft: this._canSubmitAnswer ? answerRemaining : 0,
+            totalTimeLeft: Math.max(0, Math.round((CONSTANTS.QUIZ_TOTAL_TIME_MS - (Date.now() - this._questionStartTime)) / 1000))
           }
         };
         this._safeSend(ws, ["quizNotification", notification]);
@@ -3407,13 +3423,16 @@ export class GameServer extends CPUProtection {
       if (evt === "getQuizStatus") {
         const isQuizTime = this._isQuizTime();
         const timeLeft = this._getTimeLeftUntilNextQuiz();
+        const answerRemaining = this._getAnswerRemainingTime();
         let status = {
           isQuizTime: isQuizTime,
           isActive: !!this.currentQuestion,
           hasEnded: this.quizEndedToday || !isQuizTime,
           timeLeft: timeLeft.text,
           canSubmit: this._canSubmitAnswer,
-          readingTimeLeft: this._canSubmitAnswer ? 0 : Math.max(0, Math.round((CONSTANTS.QUIZ_READING_TIME_MS - (Date.now() - this._questionStartTime)) / 1000))
+          readingTimeLeft: this._canSubmitAnswer ? 0 : Math.max(0, Math.round((CONSTANTS.QUIZ_READING_TIME_MS - (Date.now() - this._questionStartTime)) / 1000)),
+          answerTimeLeft: this._canSubmitAnswer ? answerRemaining : 0,
+          totalTimeLeft: Math.max(0, Math.round((CONSTANTS.QUIZ_TOTAL_TIME_MS - (Date.now() - this._questionStartTime)) / 1000))
         };
         this._safeSend(ws, ["quizStatus", status]);
         return;
