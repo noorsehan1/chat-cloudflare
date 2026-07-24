@@ -54,13 +54,13 @@ const CONSTANTS = {
   MAX_UNHANDLED_ERRORS: 5,
   ERROR_RESET_INTERVAL_MS: 60000,
   QUIZ_WAIT_BEFORE_SUBMIT_MS: 10000,
-  QUIZ_SUBMIT_TIME_MS: 10000,
+  QUIZ_SUBMIT_TIME_MS: 5000,
 };
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 11, end: 12 },
-    { start: 16, end: 18 }
+    { start: 22, end: 23 }
   ],
   TIMEZONE_OFFSET: 8,
 };
@@ -525,7 +525,6 @@ export class GameServer extends CPUProtection {
   async _handleQuizWinner(username, correctAnswer) {
     try {
       if (this._winnerProcessed) {
-        console.log(`[QUIZ] Winner ${username} already processed, skipping duplicate`);
         return;
       }
       
@@ -536,14 +535,14 @@ export class GameServer extends CPUProtection {
       await this._setQuizPoints(points);
       
       this._broadcastQuizNotification("quizWinner", {
-        username: username,
-        totalPoints: points[username] || 0
+        user: username,
+        points: points[username] || 0
       });
       
       this._broadcastQuizResult("quizWinner", {
-        username: username,
-        totalPoints: points[username] || 0,
-        correctAnswer: correctAnswer
+        user: username,
+        points: points[username] || 0,
+        answer: correctAnswer
       });
       
       setTimeout(() => {
@@ -551,7 +550,6 @@ export class GameServer extends CPUProtection {
       }, 5000);
       
     } catch(e) {
-      console.error('[QUIZ] Error handling winner:', e);
       this._winnerProcessed = false;
     }
   }
@@ -913,7 +911,7 @@ export class GameServer extends CPUProtection {
       }
       this._broadcastToRoom(QUIZ_ROOM, ["serverRecovered", {
         timestamp: Date.now(),
-        message: "Server has recovered"
+        message: "Server recovered"
       }]);
     } catch(e) {}
   }
@@ -996,15 +994,15 @@ export class GameServer extends CPUProtection {
     try {
       if (!ws || ws.readyState !== 1) return;
       const remaining = this._getQuestionRemainingTime();
-      const remainingText = `${remaining}s remaining`;
+      const remainingText = `${remaining}s`;
       const notification = {
         type: type,
-        timestamp: Date.now(),
-        remainingTime: remainingText,
-        correctAnswer: this.currentQuestion?.correct || null,
+        ts: Date.now(),
+        time: remainingText,
+        answer: this.currentQuestion?.correct || null,
         data: data || {}
       };
-      this._safeSend(ws, ["quizNotification", notification]);
+      this._safeSend(ws, ["quizNotif", notification]);
     } catch(e) {}
   }
 
@@ -1013,15 +1011,15 @@ export class GameServer extends CPUProtection {
       const wsIds = this.wsClients.get(QUIZ_ROOM);
       if (!wsIds?.size) return;
       const remaining = this._getQuestionRemainingTime();
-      const remainingText = `${remaining}s remaining`;
+      const remainingText = `${remaining}s`;
       const notification = {
         type: type,
-        timestamp: Date.now(),
-        remainingTime: remainingText,
-        correctAnswer: this.currentQuestion?.correct || null,
+        ts: Date.now(),
+        time: remainingText,
+        answer: this.currentQuestion?.correct || null,
         data: data || {}
       };
-      const msgStr = JSON.stringify(["quizNotification", notification]);
+      const msgStr = JSON.stringify(["quizNotif", notification]);
       const wsIdArray = Array.from(wsIds);
       const batchSize = CONSTANTS.BROADCAST_BATCH_SIZE;
       for (let i = 0; i < wsIdArray.length; i += batchSize) {
@@ -1358,14 +1356,14 @@ export class GameServer extends CPUProtection {
           }
         }
         results.set(wsId, {
-          question: translatedQuestion,
-          options: translatedOptions,
-          language: lang,
+          q: translatedQuestion,
+          opts: translatedOptions,
+          lang: lang,
           country: country,
           countryName: info?.name || 'Unknown',
-          isTranslated: isTranslated,
-          questionId: globalIndex + 1,
-          questionNumber: globalIndex + 1
+          translated: isTranslated,
+          id: globalIndex + 1,
+          num: globalIndex + 1
         });
       }
       const batchSize = CONSTANTS.BROADCAST_BATCH_SIZE;
@@ -1378,16 +1376,7 @@ export class GameServer extends CPUProtection {
             if (!ws || ws.readyState !== 1) continue;
             const userQuestion = results.get(wsId);
             if (userQuestion) {
-              const message = ["quizQuestion", {
-                question: userQuestion.question,
-                options: userQuestion.options,
-                language: userQuestion.language,
-                country: userQuestion.country,
-                countryName: userQuestion.countryName,
-                isTranslated: userQuestion.isTranslated,
-                questionId: userQuestion.questionId,
-                questionNumber: userQuestion.questionNumber
-              }];
+              const message = ["quizQ", userQuestion];
               this._safeSend(ws, message);
             }
           } catch(e) {}
@@ -1398,7 +1387,7 @@ export class GameServer extends CPUProtection {
         }
       }
     } catch(e) {
-      const msgStr = JSON.stringify(["quizQuestion", { question, options }]);
+      const msgStr = JSON.stringify(["quizQ", { q: question, opts: options }]);
       const wsIdArray = Array.from(this.wsClients.get(QUIZ_ROOM) || []);
       for (const wsId of wsIdArray) {
         try {
@@ -1430,7 +1419,7 @@ export class GameServer extends CPUProtection {
       if (!this.quizAutoEnabled) {
         this.quizAutoEnabled = true;
         const clients = this.wsClients.get(QUIZ_ROOM);
-        if (clients?.size > 0) this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Quiz akan segera dimulai!", true]);
+        if (clients?.size > 0) this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Starting soon!", true]);
         return;
       }
       
@@ -1444,7 +1433,7 @@ export class GameServer extends CPUProtection {
           await this._loadAllQuestionsToMemory();
           const retryQuestions = this._getQuestionsFromMemory('en');
           if (!retryQuestions || retryQuestions.length === 0) {
-            this._broadcastToRoom(QUIZ_ROOM, ["quizError", "No questions available!"]);
+            this._broadcastToRoom(QUIZ_ROOM, ["quizError", "No questions!"]);
             this._isShowingQuestion = false;
             return;
           }
@@ -1477,29 +1466,27 @@ export class GameServer extends CPUProtection {
         
         await this._broadcastQuizQuestion(this.currentQuestion.question, this.currentQuestion.options);
         
-        // ===== TAMBAHAN: Kirim status WAITING =====
-        this._broadcastToRoom(QUIZ_ROOM, ["quizWaitingStart", CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000]);
-        this._broadcastToRoom(QUIZ_ROOM, ["quizStatus", "waiting", CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000]);
+        // WAITING PHASE
+        this._broadcastToRoom(QUIZ_ROOM, ["quizWait", CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000]);
+        this._broadcastToRoom(QUIZ_ROOM, ["quizStatus", "wait", CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000]);
         
         this._broadcastQuizNotification("quizUpdate", {
-          questionNumber: this._questionPointer,
-          totalQuestions: this._allQuestions.length,
-          hasWinner: false,
-          status: "waiting",
-          waitTime: CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000,
-          remainingTime: `${CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000}s waiting`
+          num: this._questionPointer,
+          total: this._allQuestions.length,
+          status: "wait",
+          wait: CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000
         });
         
         this._broadcastToRoom(QUIZ_ROOM, [
           "quizTimeLeft",
-          `Tunggu ${CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000} detik sebelum menjawab`,
+          `Wait ${CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000}s`,
           false
         ]);
         
         if (this._quizTimeout) clearTimeout(this._quizTimeout);
         if (this._quizBreakTimeout) clearTimeout(this._quizBreakTimeout);
         
-        // ===== TAMBAHAN: Timer WAITING 10 detik =====
+        // Timer WAITING 10 detik
         this._quizTimeout = setTimeout(async () => {
           try {
             if (this.closing || this.isDestroyed) { 
@@ -1508,31 +1495,28 @@ export class GameServer extends CPUProtection {
               return; 
             }
             
-            // Reset waktu untuk fase submit
             this._quizStartTime = Date.now();
             
-            // Kirim status SUBMIT ke client
-            this._broadcastToRoom(QUIZ_ROOM, ["quizSubmitStart", CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000]);
-            this._broadcastToRoom(QUIZ_ROOM, ["quizStatus", "submitting", CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000]);
+            // SUBMIT PHASE
+            this._broadcastToRoom(QUIZ_ROOM, ["quizSubmit", CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000]);
+            this._broadcastToRoom(QUIZ_ROOM, ["quizStatus", "submit", CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000]);
             
             this._broadcastQuizNotification("quizUpdate", {
-              questionNumber: this._questionPointer,
-              totalQuestions: this._allQuestions.length,
-              hasWinner: false,
-              status: "submitting",
-              submitTime: CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000,
-              remainingTime: `${CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000}s remaining`
+              num: this._questionPointer,
+              total: this._allQuestions.length,
+              status: "submit",
+              time: CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000
             });
             
             this._broadcastToRoom(QUIZ_ROOM, [
               "quizTimeLeft",
-              `${CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000}s tersisa untuk menjawab`,
+              `${CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000}s left!`,
               false
             ]);
             
             this._quizTimeout = null;
             
-            // ===== TAMBAHAN: Timer SUBMIT 10 detik =====
+            // Timer SUBMIT 5 detik
             this._quizTimeout = setTimeout(async () => {
               try {
                 if (this.closing || this.isDestroyed) { 
@@ -1554,11 +1538,10 @@ export class GameServer extends CPUProtection {
                 if (this.quizHasWinner && this.quizWinner) {
                   await this._handleQuizWinner(this.quizWinner, correctAnswer);
                 } else {
-                  // Jika tidak ada winner, broadcast jawaban benar
                   this._broadcastToRoom(QUIZ_ROOM, ["quizTimeUp", correctAnswer]);
                   this._broadcastQuizNotification("quizTimeUp", {
-                    correctAnswer: correctAnswer,
-                    message: "Waktu habis! Jawaban: " + correctAnswer
+                    answer: correctAnswer,
+                    msg: "Time up! Answer: " + correctAnswer
                   });
                 }
                 
@@ -1648,13 +1631,13 @@ export class GameServer extends CPUProtection {
   async submitQuizAnswer(ws, username, answer) {
     try {
       if (!ws || !username) {
-        this._sendQuizErrorWithTime(ws, "ERROR", "Invalid request");
+        this._sendQuizErrorWithTime(ws, "ERROR", "Invalid");
         return;
       }
       
       const room = this._ensureRoomConsistency(ws);
       if (room !== QUIZ_ROOM) {
-        this._safeSend(ws, ["quizError", "Quiz only available in Quiz room"]);
+        this._safeSend(ws, ["quizError", "Quiz room only"]);
         return;
       }
       
@@ -1670,7 +1653,7 @@ export class GameServer extends CPUProtection {
       
       const clients = this.wsClients.get(QUIZ_ROOM);
       if (!clients?.size) {
-        this._sendQuizErrorWithTime(ws, "ERROR", "Quiz is paused");
+        this._sendQuizErrorWithTime(ws, "ERROR", "Paused");
         return;
       }
       
@@ -1682,36 +1665,35 @@ export class GameServer extends CPUProtection {
         }
       }
       
-      // ===== TAMBAHAN: Cek apakah masih dalam fase WAITING =====
       const elapsed = Date.now() - this._quizStartTime;
       
+      // Check WAITING phase
       if (elapsed < CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS) {
         const remainingWait = Math.ceil((CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS - elapsed) / 1000);
-        this._safeSend(ws, ["quizError", `Tunggu ${remainingWait} detik lagi untuk menjawab!`]);
-        this._safeSend(ws, ["quizWaitingTime", remainingWait]);
+        this._safeSend(ws, ["quizError", `Wait ${remainingWait}s`]);
+        this._safeSend(ws, ["quizWaitTime", remainingWait]);
         return;
       }
       
-      // Cek apakah masih dalam waktu submit
       const totalTimeMs = CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS + CONSTANTS.QUIZ_SUBMIT_TIME_MS;
       
       if (elapsed > totalTimeMs) {
         if (this.quizHasWinner && this.quizWinner) {
-          this._safeSend(ws, ["quizError", "Time is up! Winner: " + this.quizWinner]);
+          this._safeSend(ws, ["quizError", "Time up! Winner: " + this.quizWinner]);
         } else {
-          this._safeSend(ws, ["quizError", "Time is up!"]);
-          this._safeSend(ws, ["quizCorrectAnswer", this.currentQuestion.correct]);
+          this._safeSend(ws, ["quizError", "Time up!"]);
+          this._safeSend(ws, ["quizAnswer", this.currentQuestion.correct]);
         }
         return;
       }
       
       if (this.quizHasWinner) {
-        this._safeSend(ws, ["quizError", "Someone already answered correctly!"]);
+        this._safeSend(ws, ["quizError", "Already answered!"]);
         return;
       }
       
       if (this.quizAnswered.has(username)) {
-        this._safeSend(ws, ["quizError", "You already answered!"]);
+        this._safeSend(ws, ["quizError", "You answered!"]);
         return;
       }
       
@@ -1723,22 +1705,20 @@ export class GameServer extends CPUProtection {
       const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
       
       this._broadcastQuizNotification("quizAnswer", {
-        username: username,
-        answer: isValidAnswer ? answerKey : "?",
-        isCorrect: isCorrect,
-        remainingTime: `${remainingSubmitTime}s remaining`,
-        country: countryInfo.countryCode,
-        countryName: countryInfo.countryName
+        user: username,
+        ans: isValidAnswer ? answerKey : "?",
+        correct: isCorrect,
+        time: `${remainingSubmitTime}s`,
+        country: countryInfo.countryCode
       });
       
       this._broadcastQuizResult("quizAnswerResult", {
-        username,
-        answer: isValidAnswer ? answerKey : "?",
-        isCorrect,
-        correctAnswer: this.currentQuestion.correct,
-        remainingTime: `${remainingSubmitTime}s remaining`,
-        country: countryInfo.countryCode,
-        countryName: countryInfo.countryName
+        user: username,
+        ans: isValidAnswer ? answerKey : "?",
+        correct: isCorrect,
+        correctAns: this.currentQuestion.correct,
+        time: `${remainingSubmitTime}s`,
+        country: countryInfo.countryCode
       });
       
       this.quizAnswered.add(username);
@@ -1746,10 +1726,9 @@ export class GameServer extends CPUProtection {
       if (isCorrect && !this.quizHasWinner) {
         this.quizHasWinner = true;
         this.quizWinner = username;
-        this._broadcastQuizNotification("quizWinnerWithCountry", {
-          username: username,
-          country: countryInfo.countryCode,
-          countryName: countryInfo.countryName
+        this._broadcastQuizNotification("quizWinner", {
+          user: username,
+          country: countryInfo.countryCode
         });
       }
       
@@ -1775,7 +1754,7 @@ export class GameServer extends CPUProtection {
             this.quizEndNotified = false;
             if (!this.quizAutoEnabled) {
               this.quizAutoEnabled = true;
-              this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Quiz akan segera dimulai!", true]);
+              this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Starting soon!", true]);
             }
             if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout && !this._isShowingQuestion) {
               this._showQuestion();
@@ -1959,12 +1938,12 @@ export class GameServer extends CPUProtection {
       this._questionPointer = 0;
       this._totalQuestionsAnswered = 0;
       this._broadcastToRoom(QUIZ_ROOM, ["quizClear", {
-        message: "Quiz telah berakhir. Kembali besok!",
-        timestamp: Date.now()
+        msg: "Quiz ended. Come back tomorrow!",
+        ts: Date.now()
       }]);
       this._broadcastQuizNotification("quizCleared", {
-        message: "Quiz telah berakhir. Kembali besok!",
-        clearUI: true
+        msg: "Quiz ended. Come back tomorrow!",
+        clear: true
       });
     } catch(e) {}
   }
@@ -2007,10 +1986,10 @@ export class GameServer extends CPUProtection {
           const totalTime = (CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS + CONSTANTS.QUIZ_SUBMIT_TIME_MS) / 1000;
           const left = Math.max(0, totalTime - elapsed);
           const minutes = Math.floor(left / 60), seconds = Math.floor(left % 60);
-          message = `${minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`} tersisa`;
+          message = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
           canType = false;
         } else {
-          message = `Quiz akan segera dimulai!`;
+          message = `Starting...`;
           canType = true;
         }
       } else {
@@ -2065,10 +2044,10 @@ export class GameServer extends CPUProtection {
           const totalTime = (CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS + CONSTANTS.QUIZ_SUBMIT_TIME_MS) / 1000;
           const left = Math.max(0, totalTime - elapsed);
           const minutes = Math.floor(left / 60), seconds = Math.floor(left % 60);
-          message = minutes > 0 ? `${minutes}m ${seconds}s tersisa` : `${seconds}s tersisa`;
+          message = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
           canType = false;
         } else {
-          message = `Quiz akan segera dimulai!`;
+          message = `Starting...`;
           canType = true;
         }
       } else {
@@ -2236,8 +2215,8 @@ export class GameServer extends CPUProtection {
 
   async switchRoom(ws, room, username = null) {
     try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
-      if (!room || room.trim() === "") { this._safeSend(ws, ["gameLowCardError", "Invalid room name"]); return; }
+      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Shutting down"]); return; }
+      if (!room || room.trim() === "") { this._safeSend(ws, ["gameLowCardError", "Invalid room"]); return; }
       const roomName = room.trim();
       const wsId = this._getWsId(ws);
       if (!wsId) { this._safeSend(ws, ["gameLowCardError", "Connection error"]); return; }
@@ -2265,12 +2244,12 @@ export class GameServer extends CPUProtection {
                 this._sendQuizNotification(ws, "quizStatus", {
                   isQuizTime: this._isQuizTime(),
                   isActive: !!this.currentQuestion,
-                  remainingTime: `${this._getQuestionRemainingTime()}s remaining`,
+                  time: `${this._getQuestionRemainingTime()}s`,
                   hasWinner: this.quizHasWinner,
                   winner: this.quizWinner,
-                  correctAnswer: this.currentQuestion?.correct || null,
-                  questionNumber: this._questionPointer,
-                  totalQuestions: this._allQuestions.length
+                  answer: this.currentQuestion?.correct || null,
+                  num: this._questionPointer,
+                  total: this._allQuestions.length
                 });
               }
             }, CONSTANTS.QUIZ_SWITCH_DELAY_MS);
@@ -2308,12 +2287,12 @@ export class GameServer extends CPUProtection {
               this._sendQuizNotification(ws, "quizStatus", {
                 isQuizTime: this._isQuizTime(),
                 isActive: !!this.currentQuestion,
-                remainingTime: `${this._getQuestionRemainingTime()}s remaining`,
+                time: `${this._getQuestionRemainingTime()}s`,
                 hasWinner: this.quizHasWinner,
                 winner: this.quizWinner,
-                correctAnswer: this.currentQuestion?.correct || null,
-                questionNumber: this._questionPointer,
-                totalQuestions: this._allQuestions.length
+                answer: this.currentQuestion?.correct || null,
+                num: this._questionPointer,
+                total: this._allQuestions.length
               });
             }
           }, CONSTANTS.QUIZ_SWITCH_DELAY_MS);
@@ -2475,7 +2454,7 @@ export class GameServer extends CPUProtection {
       game.eliminated.add(username);
       game.numbers?.delete(username);
       game.tanda?.delete(username);
-      this._broadcastToRoom(room, ["gameLowCardError", `${username} has been eliminated`]);
+      this._broadcastToRoom(room, ["gameLowCardError", `${username} eliminated`]);
       setTimeout(() => {
         try {
           const currentGame = this.activeGames.get(room);
@@ -2506,7 +2485,7 @@ export class GameServer extends CPUProtection {
         const activeIds = this._getActivePlayerIds(game);
         const submittedIds = Array.from(game.numbers?.keys() || []);
         const notSubmitted = activeIds.filter(id => !submittedIds.includes(id));
-        if (notSubmitted.length > 0) { this._broadcastToRoom(room, ["gameLowCardTimeLeft", `Waiting for ${notSubmitted.length} player(s)`]); return; }
+        if (notSubmitted.length > 0) { this._broadcastToRoom(room, ["gameLowCardTimeLeft", `Waiting ${notSubmitted.length}`]); return; }
         const winner = activePlayers[0]?.name || "Unknown";
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
         game._gameEnded = true;
@@ -2591,7 +2570,7 @@ export class GameServer extends CPUProtection {
       const activeIds = this._getActivePlayerIds(game);
       if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired && this._isGameActuallyRunning(game)) {
         game.evaluationLocked = true;
-        this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+        this._broadcastToRoom(room, ["gameLowCardWait", "Please wait..."]);
         game._evalTimer = setTimeout(() => { try { this._evaluateRound(room, game); } catch(e) {} }, CONSTANTS.EVALUATION_DELAY_MS);
       }
     } catch(e) {}
@@ -2748,7 +2727,7 @@ export class GameServer extends CPUProtection {
           .filter(id => !game.eliminated?.has(id) && !game.numbers?.has(id));
         for (const botId of activeBotIds) this._forceBotDraw(room, botId, game);
       }
-      this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+      this._broadcastToRoom(room, ["gameLowCardWait", "Please wait..."]);
       if (game._evalTimer) { clearTimeout(game._evalTimer); game._evalTimer = null; }
       game._evalTimer = setTimeout(() => {
         try {
@@ -2785,7 +2764,7 @@ export class GameServer extends CPUProtection {
       if (entries.length === 0) {
         game._isEvaluating = false;
         if (game._safetyTimer) { clearTimeout(game._safetyTimer); game._safetyTimer = null; }
-        this._broadcastToRoom(room, ["gameLowCardError", "No numbers drawn this round"]);
+        this._broadcastToRoom(room, ["gameLowCardError", "No numbers drawn"]);
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
@@ -2853,7 +2832,7 @@ export class GameServer extends CPUProtection {
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
-        this._broadcastToRoom(room, ["gameLowCardError", "All players eliminated"]);
+        this._broadcastToRoom(room, ["gameLowCardError", "All eliminated"]);
         this._scheduleGameCleanup(room, game);
         return;
       }
@@ -2881,17 +2860,17 @@ export class GameServer extends CPUProtection {
 
   async startGame(ws, bet, username) {
     try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
-      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username is required"]); return; }
+      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Shutting down"]); return; }
+      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username required"]); return; }
       const usernameClean = username.trim();
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
-      if (room === QUIZ_ROOM) { this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); return; }
+      if (!room) { this._safeSend(ws, ["gameLowCardError", "Switch to room first!"]); return; }
+      if (room === QUIZ_ROOM) { this._safeSend(ws, ["gameLowCardError", "Cannot start in Quiz room"]); return; }
       const startKey = `start_${room}`;
-      if (this._gameStartFlags.has(startKey)) { this._safeSend(ws, ["gameLowCardError", "Game is already starting..."]); return; }
+      if (this._gameStartFlags.has(startKey)) { this._safeSend(ws, ["gameLowCardError", "Game starting..."]); return; }
       const existingGame = this.activeGames.get(room);
       if (existingGame?._isActive && !existingGame._gameEnded) {
-        this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
+        this._safeSend(ws, ["gameLowCardError", "Game running"]);
         return;
       }
       this._gameStartFlags.set(startKey, Date.now());
@@ -2899,14 +2878,14 @@ export class GameServer extends CPUProtection {
       const now = Date.now();
       const lockTime = this._gameLocks.get(room);
       if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
-        this._safeSend(ws, ["gameLowCardError", "Game is starting, please wait"]);
+        this._safeSend(ws, ["gameLowCardError", "Please wait"]);
         this._gameStartFlags.delete(startKey);
         return;
       }
       this._gameLocks.set(room, now);
       try {
         if (this.activeGames.size >= this._maxGames) {
-          this._safeSend(ws, ["gameLowCardError", "Server is busy"]);
+          this._safeSend(ws, ["gameLowCardError", "Server busy"]);
           this._gameLocks.delete(room);
           this._gameStartFlags.delete(startKey);
           return;
@@ -2945,12 +2924,12 @@ export class GameServer extends CPUProtection {
         }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
       } catch(e) {
         this._deleteGame(room, this.activeGames.get(room));
-        this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
+        this._safeSend(ws, ["gameLowCardError", "Failed to start"]);
         this._gameLocks.delete(room);
         this._gameStartFlags.delete(startKey);
       }
     } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
+      this._safeSend(ws, ["gameLowCardError", "Failed to start"]);
     }
   }
 
@@ -2976,24 +2955,24 @@ export class GameServer extends CPUProtection {
 
   async joinGame(ws, username) {
     try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
-      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username is required"]); return; }
+      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Shutting down"]); return; }
+      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username required"]); return; }
       const usernameClean = username.trim();
       const wsId = this._getWsId(ws);
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
+      if (!room) { this._safeSend(ws, ["gameLowCardError", "Switch to room first!"]); return; }
       const lockKey = `join_${room}_${usernameClean}`;
-      if (this._joinLocks.has(lockKey)) { this._safeSend(ws, ["gameLowCardError", "Join in progress, please wait"]); return; }
+      if (this._joinLocks.has(lockKey)) { this._safeSend(ws, ["gameLowCardError", "Join in progress"]); return; }
       this._joinLocks.set(lockKey, Date.now());
       try {
         const game = this.activeGames.get(room);
         if (!game?._isActive || game._gameEnded || !game.players) {
-          this._safeSend(ws, ["gameLowCardError", "No active game in this room"]);
+          this._safeSend(ws, ["gameLowCardError", "No active game"]);
           return;
         }
         if (game.players.has(usernameClean)) {
           if (game.eliminated?.has(usernameClean)) {
-            this._safeSend(ws, ["gameLowCardError", "You have been eliminated"]);
+            this._safeSend(ws, ["gameLowCardError", "Eliminated"]);
             return;
           }
           const finalWsId = this._ensureSingleConnection(room, usernameClean, ws, wsId);
@@ -3004,11 +2983,11 @@ export class GameServer extends CPUProtection {
         }
         if (!game.registrationOpen) {
           this._safeSend(ws, ["gameLowCardNoJoin", usernameClean, game.betAmount]);
-          this._safeSend(ws, ["gameLowCardError", "Registration is closed"]);
+          this._safeSend(ws, ["gameLowCardError", "Registration closed"]);
           return;
         }
         if (game.players.size >= CONSTANTS.MAX_PLAYERS_PER_GAME) {
-          this._safeSend(ws, ["gameLowCardError", "Game is full"]);
+          this._safeSend(ws, ["gameLowCardError", "Game full"]);
           return;
         }
         game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
@@ -3019,18 +2998,18 @@ export class GameServer extends CPUProtection {
         this._joinLocks.delete(lockKey);
       }
     } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Failed to join game"]);
+      this._safeSend(ws, ["gameLowCardError", "Failed to join"]);
     }
   }
 
   async submitNumber(ws, number, tanda, username) {
     try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
-      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username is required"]); return; }
+      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Shutting down"]); return; }
+      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username required"]); return; }
       const usernameClean = username.trim();
       const wsId = this._getWsId(ws);
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
+      if (!room) { this._safeSend(ws, ["gameLowCardError", "Switch to room first!"]); return; }
       const game = this.activeGames.get(room);
       if (!game?._isActive || game._gameEnded || !game.players) {
         this._safeSend(ws, ["gameLowCardError", "No active game"]);
@@ -3038,7 +3017,7 @@ export class GameServer extends CPUProtection {
       }
       if (game.players.has(usernameClean)) {
         if (game.eliminated?.has(usernameClean)) {
-          this._safeSend(ws, ["gameLowCardError", "You have been eliminated from this game"]);
+          this._safeSend(ws, ["gameLowCardError", "Eliminated"]);
           return;
         }
         const existingWsId = game.playerWsId.get(usernameClean);
@@ -3049,15 +3028,15 @@ export class GameServer extends CPUProtection {
         return;
       }
       if (!game.players.has(usernameClean)) {
-        this._safeSend(ws, ["gameLowCardError", "You are not in this game"]);
+        this._safeSend(ws, ["gameLowCardError", "Not in game"]);
         return;
       }
       if (game.eliminated.has(usernameClean)) {
-        this._safeSend(ws, ["gameLowCardError", "You have been eliminated"]);
+        this._safeSend(ws, ["gameLowCardError", "Eliminated"]);
         return;
       }
       if (game.numbers.has(usernameClean)) {
-        this._safeSend(ws, ["gameLowCardError", "You have already submitted"]);
+        this._safeSend(ws, ["gameLowCardError", "Already submitted"]);
         return;
       }
       const n = parseInt(number, 10);
@@ -3075,7 +3054,7 @@ export class GameServer extends CPUProtection {
           this._isGameActuallyRunning(game) && game._isActive && !game._gameEnded) {
         game.evaluationLocked = true;
         if (game._evalTimer) { clearTimeout(game._evalTimer); game._evalTimer = null; }
-        this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+        this._broadcastToRoom(room, ["gameLowCardWait", "Please wait..."]);
         game._evalTimer = setTimeout(() => {
           try {
             const currentGame = this.activeGames.get(room);
@@ -3086,29 +3065,29 @@ export class GameServer extends CPUProtection {
         }, CONSTANTS.EVALUATION_DELAY_MS);
       }
     } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Failed to submit number"]);
+      this._safeSend(ws, ["gameLowCardError", "Failed to submit"]);
     }
   }
 
   async leaveGame(ws, username) {
     try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
-      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username is required"]); return; }
+      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Shutting down"]); return; }
+      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username required"]); return; }
       const usernameClean = username.trim();
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
+      if (!room) { this._safeSend(ws, ["gameLowCardError", "Switch to room first!"]); return; }
       const game = this.activeGames.get(room);
       if (!game?._isActive || game._gameEnded || !game.players) {
-        this._safeSend(ws, ["gameLowCardError", "No active game in this room"]);
+        this._safeSend(ws, ["gameLowCardError", "No active game"]);
         return;
       }
       if (!game.players.has(usernameClean)) {
-        this._safeSend(ws, ["gameLowCardError", "You are not in this game"]);
+        this._safeSend(ws, ["gameLowCardError", "Not in game"]);
         return;
       }
       this._removePlayerFromGame(usernameClean, room);
     } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Failed to leave game"]);
+      this._safeSend(ws, ["gameLowCardError", "Failed to leave"]);
     }
   }
 
@@ -3147,7 +3126,7 @@ export class GameServer extends CPUProtection {
       if (existingWsId && existingWsId !== newWsId) {
         const oldWs = this.wsMap.get(existingWsId);
         if (oldWs) {
-          try { oldWs.close(1000, "Duplicate connection"); } catch(e) {}
+          try { oldWs.close(1000, "Duplicate"); } catch(e) {}
           this._removeClient(room, oldWs);
         }
         if (game.playerWsId) game.playerWsId.set(username, newWsId);
@@ -3199,7 +3178,7 @@ export class GameServer extends CPUProtection {
         });
       }
     } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Server is recovering, please try again"]);
+      this._safeSend(ws, ["gameLowCardError", "Recovering, try again"]);
     }
   }
 
@@ -3346,9 +3325,9 @@ export class GameServer extends CPUProtection {
             await this.env.QUESTIONS.delete(CONSTANTS.QUIZ_LAST_WEEK_WINNER);
             const check = await this.env.QUESTIONS.get(CONSTANTS.QUIZ_LAST_WEEK_WINNER, 'json');
             if (!check) {
-              this._safeSend(ws, ["quizLastWeekWinnerDeleted", true, "Last week winner deleted successfully"]);
+              this._safeSend(ws, ["quizLastWeekWinnerDeleted", true, "Deleted"]);
             } else {
-              this._safeSend(ws, ["quizLastWeekWinnerDeleted", false, "Failed to delete"]);
+              this._safeSend(ws, ["quizLastWeekWinnerDeleted", false, "Failed"]);
             }
           } else {
             this._safeSend(ws, ["quizLastWeekWinnerDeleted", false, "KV not available"]);
@@ -3380,24 +3359,24 @@ export class GameServer extends CPUProtection {
 
       if (evt === "getQuizNotification") {
         const remaining = this._getQuestionRemainingTime();
-        const remainingText = `${remaining}s remaining`;
+        const remainingText = `${remaining}s`;
         const timeLeft = this._getTimeLeftUntilNextQuiz();
         const notification = {
           type: "quizStatus",
-          timestamp: Date.now(),
-          remainingTime: remainingText,
-          correctAnswer: this.currentQuestion?.correct || null,
+          ts: Date.now(),
+          time: remainingText,
+          answer: this.currentQuestion?.correct || null,
           data: {
             isQuizTime: this._isQuizTime(),
             isActive: !!this.currentQuestion,
             hasWinner: this.quizHasWinner,
             winner: this.quizWinner,
-            questionNumber: this._questionPointer,
-            totalQuestions: this._allQuestions.length,
+            num: this._questionPointer,
+            total: this._allQuestions.length,
             timeLeft: timeLeft.text
           }
         };
-        this._safeSend(ws, ["quizNotification", notification]);
+        this._safeSend(ws, ["quizNotif", notification]);
         return;
       }
 
@@ -3415,8 +3394,8 @@ export class GameServer extends CPUProtection {
       }
 
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
-      if (room === QUIZ_ROOM) { this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); return; }
+      if (!room) { this._safeSend(ws, ["gameLowCardError", "Switch to room first!"]); return; }
+      if (room === QUIZ_ROOM) { this._safeSend(ws, ["gameLowCardError", "Cannot start in Quiz room"]); return; }
 
       switch (evt) {
         case "gameLowCardStart":
@@ -3435,11 +3414,11 @@ export class GameServer extends CPUProtection {
           await this.checkGameRunning(ws, data[1]);
           break;
         default:
-          this._safeSend(ws, ["gameLowCardError", `Unknown event: ${evt}`]);
+          this._safeSend(ws, ["gameLowCardError", `Unknown: ${evt}`]);
           break;
       }
     } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Error processing event"]);
+      this._safeSend(ws, ["gameLowCardError", "Error processing"]);
     }
   }
 
@@ -3450,7 +3429,7 @@ export class GameServer extends CPUProtection {
         if (!game?._isActive || game._gameEnded) continue;
         if (game._phase === 'draw' && game._drawPhaseStart &&
             (now - game._drawPhaseStart) > CONSTANTS.STUCK_DRAW_TIMEOUT_MS) {
-          this._broadcastToRoom(room, ["gameLowCardError", "Game stuck, forcing evaluation..."]);
+          this._broadcastToRoom(room, ["gameLowCardError", "Stuck, forcing..."]);
           this._closeDrawPhase(room, game);
         }
         if (game._phase === 'registration' && game.registrationOpen &&
@@ -3520,7 +3499,7 @@ export class GameServer extends CPUProtection {
   async fetch(req) {
     try {
       if (this.closing || this.isDestroyed) {
-        return new Response("Server is shutting down", { status: 503 });
+        return new Response("Server shutting down", { status: 503 });
       }
       const url = new URL(req.url);
       if (url.pathname === "/health") {
@@ -3647,7 +3626,7 @@ export class GameServer extends CPUProtection {
       }
     } catch(e) {
       this._handleError('webSocketMessage', e);
-      this._safeSend(ws, ["gameLowCardError", "Server is recovering"]);
+      this._safeSend(ws, ["gameLowCardError", "Recovering"]);
     }
   }
 
