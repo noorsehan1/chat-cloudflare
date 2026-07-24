@@ -60,7 +60,7 @@ const CONSTANTS = {
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 11, end: 12 },
-    { start: 16, end: 19 }
+    { start: 16, end: 17 }
   ],
   TIMEZONE_OFFSET: 8,
 };
@@ -1512,13 +1512,14 @@ export class GameServer extends CPUProtection {
         
         console.log(`[QUIZ] Showing question #${this._questionPointer}: ${this.currentQuestion.question.substring(0, 50)}...`);
         
-        // ===== SOAL MASUK =====
+        // ===== STEP 1: SOAL MASUK =====
         await this._broadcastQuizQuestion(this.currentQuestion.question, this.currentQuestion.options);
         
-        // ===== NOTIF: JEDA 5 DETIK (tidak bisa submit) =====
+        // ===== STEP 2: NOTIF WAIT 5 DETIK =====
         console.log('[QUIZ] Broadcasting WAIT phase (5 seconds)');
         this._broadcastToRoom(QUIZ_ROOM, ["quizWait", CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000]);
         this._broadcastToRoom(QUIZ_ROOM, ["quizStatus", "wait", CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000]);
+        this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", `Wait ${CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000}s`, false]);
         
         this._broadcastQuizNotification("quizUpdate", {
           questionNumber: this._questionPointer,
@@ -1527,12 +1528,6 @@ export class GameServer extends CPUProtection {
           status: "wait",
           waitTime: CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000
         });
-        
-        this._broadcastToRoom(QUIZ_ROOM, [
-          "quizTimeLeft",
-          `Wait ${CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000}s`,
-          false
-        ]);
         
         // ===== CLEAR TIMER SEBELUMNYA =====
         if (this._quizTimeout) {
@@ -1544,7 +1539,7 @@ export class GameServer extends CPUProtection {
           this._quizBreakTimeout = null;
         }
         
-        // ===== Timer JEDA 5 DETIK =====
+        // ===== STEP 3: Timer JEDA 5 DETIK =====
         console.log('[QUIZ] Starting WAIT timer for 5 seconds');
         
         this._quizTimeout = setTimeout(() => {
@@ -1586,9 +1581,18 @@ export class GameServer extends CPUProtection {
       
       // ===== NOTIF: 5 DETIK UNTUK MENJAWAB =====
       console.log('[QUIZ] Broadcasting SUBMIT phase (5 seconds)');
-      this._broadcastToRoom(QUIZ_ROOM, ["quizSubmit", CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000]);
+      
+      // Kirim status submit
       this._broadcastToRoom(QUIZ_ROOM, ["quizStatus", "submit", CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000]);
       
+      // Kirim notifikasi waktu tersisa
+      this._broadcastToRoom(QUIZ_ROOM, [
+        "quizTimeLeft",
+        `${CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000}s left!`,
+        false
+      ]);
+      
+      // Kirim notifikasi quiz update
       this._broadcastQuizNotification("quizUpdate", {
         questionNumber: this._questionPointer,
         totalQuestions: this._allQuestions.length,
@@ -1596,12 +1600,6 @@ export class GameServer extends CPUProtection {
         status: "submit",
         submitTime: CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000
       });
-      
-      this._broadcastToRoom(QUIZ_ROOM, [
-        "quizTimeLeft",
-        `${CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000}s left!`,
-        false
-      ]);
       
       console.log('[QUIZ] Starting SUBMIT timer for 5 seconds');
       
@@ -1644,14 +1642,32 @@ export class GameServer extends CPUProtection {
       const correctAnswer = this.currentQuestion.correct;
       console.log(`[QUIZ] Correct answer: ${correctAnswer}, hasWinner: ${this.quizHasWinner}, winner: ${this.quizWinner}`);
       
+      // ===== KIRIM NOTIFIKASI WAKTU HABIS =====
       if (this.quizHasWinner && this.quizWinner) {
         console.log(`[QUIZ] Winner: ${this.quizWinner}`);
-        this._handleQuizWinner(this.quizWinner, correctAnswer);
-      } else {
-        console.log('[QUIZ] No winner, broadcasting time up');
+        
+        // Kirim notifikasi winner
+        this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", this.quizWinner]);
+        this._broadcastToRoom(QUIZ_ROOM, ["quizCorrectAnswer", correctAnswer]);
+        
+        // Kirim notifikasi waktu habis dengan winner
         this._broadcastToRoom(QUIZ_ROOM, ["quizTimeUp", correctAnswer]);
         this._broadcastQuizNotification("quizTimeUp", {
           correctAnswer: correctAnswer,
+          winner: this.quizWinner,
+          message: "Time up! Winner: " + this.quizWinner + " Answer: " + correctAnswer
+        });
+        
+        this._handleQuizWinner(this.quizWinner, correctAnswer);
+        
+      } else {
+        console.log('[QUIZ] No winner, broadcasting time up');
+        
+        // Kirim notifikasi waktu habis tanpa winner
+        this._broadcastToRoom(QUIZ_ROOM, ["quizTimeUp", correctAnswer]);
+        this._broadcastQuizNotification("quizTimeUp", {
+          correctAnswer: correctAnswer,
+          winner: null,
           message: "Time up! Answer: " + correctAnswer
         });
       }
