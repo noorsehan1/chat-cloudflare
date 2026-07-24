@@ -20,10 +20,9 @@ const CONSTANTS = {
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
   QUIZ_INTERVAL_MS: 30000,
-  // ===== PERUBAHAN: Waktu baca 20 detik, waktu jawab 10 detik =====
   QUIZ_READING_TIME_MS: 20000,
   QUIZ_ANSWER_TIME_MS: 10000,
-  QUIZ_TOTAL_TIME_MS: 30000, // 20 + 10 = 30 detik
+  QUIZ_TOTAL_TIME_MS: 30000,
   QUIZ_BREAK_MS: 2000,
   QUIZ_START_DELAY_MS: 5000,
   MAX_RETRY_INIT_QUIZ: 2,
@@ -989,7 +988,6 @@ export class GameServer extends CPUProtection {
   _getAnswerRemainingTime() {
     try {
       if (!this.currentQuestion || !this._questionStartTime) return 0;
-      // Waktu jawab dimulai setelah waktu baca selesai (20 detik)
       const readingEnd = this._questionStartTime + CONSTANTS.QUIZ_READING_TIME_MS;
       const now = Date.now();
       if (now < readingEnd) return 0;
@@ -1438,7 +1436,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ===== PERUBAHAN: Waktu baca 20 detik, waktu jawab 10 detik =====
+  // ===== PERUBAHAN: Hanya kirim "quizNoWinner" untuk pesan baca =====
   async _showQuestion() {
     try {
       if (this._isShowingQuestion) return;
@@ -1507,12 +1505,14 @@ export class GameServer extends CPUProtection {
         
         await this._broadcastQuizQuestion(this.currentQuestion.question, this.currentQuestion.options);
         
-        // ===== FASE 1: BACA SOAL (20 detik) =====
-        this._broadcastQuizNotification("quizReading", {
+        // ===== HANYA KIRIM quizNoWinner =====
+        // Kirim notifikasi "Read the question first before answering" via quizNoWinner
+        this._broadcastQuizNotification("quizNoWinner", {
           questionNumber: this._questionPointer,
           totalQuestions: this._allQuestions.length,
           readingTime: CONSTANTS.QUIZ_READING_TIME_MS / 1000,
-          message: "Read the question first before answering"
+          message: "Read the question first before answering",
+          phase: "reading"
         });
         
         this._broadcastToRoom(QUIZ_ROOM, [
@@ -1521,7 +1521,7 @@ export class GameServer extends CPUProtection {
           false
         ]);
         
-        // ===== SETELAH 20 DETIK, MULAI FASE JAWAB (10 detik) =====
+        // ===== SETELAH 20 DETIK =====
         setTimeout(() => {
           if (this.closing || this.isDestroyed) { 
             this._isShowingQuestion = false;
@@ -1544,7 +1544,7 @@ export class GameServer extends CPUProtection {
           
         }, CONSTANTS.QUIZ_READING_TIME_MS);
         
-        // ===== TIMEOUT TOTAL: 20 + 10 = 30 detik =====
+        // ===== TIMEOUT TOTAL =====
         if (this._quizTimeout) clearTimeout(this._quizTimeout);
         if (this._quizBreakTimeout) clearTimeout(this._quizBreakTimeout);
         
@@ -1570,6 +1570,13 @@ export class GameServer extends CPUProtection {
             
             if (this.quizHasWinner && this.quizWinner) {
               await this._handleQuizWinner(this.quizWinner, correctAnswer);
+            } else {
+              // Kirim quizNoWinner jika tidak ada pemenang
+              this._broadcastQuizNotification("quizNoWinner", {
+                message: "No winner this round!",
+                correctAnswer: correctAnswer,
+                phase: "ended"
+              });
             }
             
             this._quizTimeout = null;
@@ -1594,7 +1601,7 @@ export class GameServer extends CPUProtection {
             this._isShowingQuestion = false;
             this._canSubmitAnswer = false;
           }
-        }, CONSTANTS.QUIZ_TOTAL_TIME_MS); // 30 detik total
+        }, CONSTANTS.QUIZ_TOTAL_TIME_MS);
         
       } catch(e) {
         this._isShowingQuestion = false;
@@ -1628,6 +1635,12 @@ export class GameServer extends CPUProtection {
       
       if (this.quizHasWinner && this.quizWinner) {
         await this._handleQuizWinner(this.quizWinner, correctAnswer);
+      } else {
+        this._broadcastQuizNotification("quizNoWinner", {
+          message: "No winner this round!",
+          correctAnswer: correctAnswer,
+          phase: "ended"
+        });
       }
       
       this.currentQuestion = null;
@@ -1652,7 +1665,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ===== PERUBAHAN: Cek sisa waktu jawab (bukan total) =====
   async submitQuizAnswer(ws, username, answer) {
     try {
       if (!ws || !username) {
@@ -1690,7 +1702,6 @@ export class GameServer extends CPUProtection {
         }
       }
       
-      // ===== CEK: Belum bisa submit (masih fase baca 20 detik) =====
       if (!this._canSubmitAnswer) {
         const elapsed = (Date.now() - (this._questionStartTime || 0)) / 1000;
         const remaining = Math.max(0, Math.round((CONSTANTS.QUIZ_READING_TIME_MS / 1000) - elapsed));
@@ -1698,7 +1709,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // ===== CEK: Sisa waktu jawab (10 detik) =====
       const answerRemaining = this._getAnswerRemainingTime();
       if (answerRemaining <= 0) {
         if (this.quizHasWinner && this.quizWinner) {
