@@ -60,7 +60,7 @@ const CONSTANTS = {
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 11, end: 12 },
-    { start: 16, end: 18 }
+    { start: 16, end: 17 }
   ],
   TIMEZONE_OFFSET: 8,
 };
@@ -423,6 +423,7 @@ export class GameServer extends CPUProtection {
       this._lastRecoveryTime = 0;
 
       this._winnerProcessed = false;
+      this._submitEndTime = null;
 
       this._questionsCache = {
         en: [],
@@ -898,6 +899,7 @@ export class GameServer extends CPUProtection {
           this.currentQuestion = null;
           this._quizTimeout = null;
           this._isShowingQuestion = false;
+          this._submitEndTime = null;
         }
       }
       const deadConnections = [];
@@ -949,6 +951,7 @@ export class GameServer extends CPUProtection {
       this._quizStartTime = null;
       this._isShowingQuestion = false;
       this._winnerProcessed = false;
+      this._submitEndTime = null;
       if (this._eventQueue) {
         this._eventQueue = [];
       }
@@ -989,10 +992,8 @@ export class GameServer extends CPUProtection {
 
   _getQuestionRemainingTime() {
     try {
-      if (!this.currentQuestion || !this._quizStartTime) return 0;
-      const elapsed = (Date.now() - this._quizStartTime) / 1000;
-      const totalTime = (CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS + CONSTANTS.QUIZ_SUBMIT_TIME_MS) / 1000;
-      return Math.max(0, Math.round(totalTime - elapsed));
+      if (!this.currentQuestion || !this._submitEndTime) return 0;
+      return Math.max(0, Math.ceil((this._submitEndTime - Date.now()) / 1000));
     } catch(e) { return 0; }
   }
 
@@ -1426,6 +1427,7 @@ export class GameServer extends CPUProtection {
       this.quizHasWinner = false;
       this.quizWinner = null;
       this._winnerProcessed = false;
+      this._submitEndTime = null;
 
       // ===== WAITING PHASE (10 seconds) - NO EVENTS TO USER =====
       // Only store question internally, NO broadcast to users
@@ -1443,11 +1445,13 @@ export class GameServer extends CPUProtection {
             return;
           }
 
+          // ===== SUBMIT PHASE START (5 seconds) - EVENTS TO USER =====
           // Reset start time for submit phase
           this._quizStartTime = Date.now();
-
-          // ===== SUBMIT PHASE (5 seconds) - EVENTS TO USER =====
           const submitSeconds = CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000;
+          
+          // Set submit end time (5 seconds from now)
+          this._submitEndTime = Date.now() + CONSTANTS.QUIZ_SUBMIT_TIME_MS;
           
           // Broadcast question and start submit phase
           this._broadcastQuizQuestion(
@@ -1471,10 +1475,11 @@ export class GameServer extends CPUProtection {
               if (this.closing || this.isDestroyed) {
                 this._quizTimeout = null;
                 this._isShowingQuestion = false;
+                this._submitEndTime = null;
                 return;
               }
 
-              // ===== TIME UP =====
+              // ===== TIME UP - CLOSE SUBMISSION =====
               const correctAnswer = this.currentQuestion.correct;
               
               if (this.quizHasWinner && this.quizWinner) {
@@ -1496,6 +1501,7 @@ export class GameServer extends CPUProtection {
               this._quizTimeout = null;
               this.isQuizWaiting = true;
               this._isShowingQuestion = false;
+              this._submitEndTime = null;
 
               // ===== BREAK PHASE (2 seconds) =====
               this._quizBreakTimeout = setTimeout(() => {
@@ -1524,6 +1530,7 @@ export class GameServer extends CPUProtection {
               this.currentQuestion = null;
               this.isQuizWaiting = false;
               this._isShowingQuestion = false;
+              this._submitEndTime = null;
             }
           }, CONSTANTS.QUIZ_SUBMIT_TIME_MS);
 
@@ -1533,6 +1540,7 @@ export class GameServer extends CPUProtection {
           this.currentQuestion = null;
           this.isQuizWaiting = false;
           this._isShowingQuestion = false;
+          this._submitEndTime = null;
         }
       }, CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS);
 
@@ -1542,6 +1550,7 @@ export class GameServer extends CPUProtection {
       this.currentQuestion = null;
       this.isQuizWaiting = false;
       this._quizTimeout = null;
+      this._submitEndTime = null;
     }
   }
 
@@ -1553,6 +1562,7 @@ export class GameServer extends CPUProtection {
       if (!currentClients?.size) { 
         this.currentQuestion = null;
         this._isShowingQuestion = false;
+        this._submitEndTime = null;
         return; 
       }
       
@@ -1567,6 +1577,7 @@ export class GameServer extends CPUProtection {
       this.currentQuestion = null;
       this.isQuizWaiting = true;
       this._isShowingQuestion = false;
+      this._submitEndTime = null;
       
       this._quizBreakTimeout = setTimeout(() => {
         if (this.closing || this.isDestroyed) { 
@@ -1581,6 +1592,7 @@ export class GameServer extends CPUProtection {
       this.currentQuestion = null;
       this.isQuizWaiting = false;
       this._isShowingQuestion = false;
+      this._submitEndTime = null;
     }
   }
 
@@ -1614,21 +1626,25 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // 5. CHECK TIME PHASE
+      // 5. CHECK TIME PHASE - ONLY ALLOW DURING SUBMIT PHASE (5 seconds)
       const elapsed = Date.now() - this._quizStartTime;
       const waitTime = CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS;
-      const submitTime = CONSTANTS.QUIZ_SUBMIT_TIME_MS;
-      const totalTime = waitTime + submitTime;
-
-      // Still in waiting phase - CANNOT ANSWER YET
+      
+      // Still in waiting phase (10 seconds) - CANNOT ANSWER YET
       if (elapsed < waitTime) {
         const remaining = Math.ceil((waitTime - elapsed) / 1000);
         this._safeSend(ws, ["quizError", `Cannot answer yet. Wait ${remaining}s`]);
         return;
       }
 
-      // Time is up - CANNOT ANSWER
-      if (elapsed > totalTime) {
+      // Check if submit phase is still active (5 seconds window)
+      if (!this._submitEndTime) {
+        this._safeSend(ws, ["quizError", "Submit phase not active"]);
+        return;
+      }
+
+      // Check if time is up (beyond 5 seconds)
+      if (Date.now() > this._submitEndTime) {
         this._safeSend(ws, ["quizError", "Time is up!"]);
         this._safeSend(ws, ["quizCorrectAnswer", this.currentQuestion.correct]);
         return;
@@ -1658,7 +1674,7 @@ export class GameServer extends CPUProtection {
 
       // 9. PROCESS ANSWER
       const isCorrect = (answerKey === this.currentQuestion.correct);
-      const remainingTime = Math.ceil((totalTime - elapsed) / 1000);
+      const remainingTime = Math.ceil((this._submitEndTime - Date.now()) / 1000);
       const wsId = this._getWsId(ws);
       const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
 
@@ -1704,7 +1720,8 @@ export class GameServer extends CPUProtection {
           message: "Correct! +1 point",
           isWinner: true,
           correctAnswer: this.currentQuestion.correct,
-          points: await this._getUserPoints(username)
+          points: await this._getUserPoints(username),
+          remainingTime: remainingTime
         }]);
         
       } else if (isCorrect) {
@@ -1713,7 +1730,8 @@ export class GameServer extends CPUProtection {
           correct: true,
           message: "Correct but too late!",
           isWinner: false,
-          correctAnswer: this.currentQuestion.correct
+          correctAnswer: this.currentQuestion.correct,
+          remainingTime: remainingTime
         }]);
         
       } else {
@@ -1722,7 +1740,8 @@ export class GameServer extends CPUProtection {
           correct: false,
           message: `Wrong! Correct: ${this.currentQuestion.correct}`,
           isWinner: false,
-          correctAnswer: this.currentQuestion.correct
+          correctAnswer: this.currentQuestion.correct,
+          remainingTime: remainingTime
         }]);
       }
 
@@ -1804,6 +1823,7 @@ export class GameServer extends CPUProtection {
       this.quizEndNotified = false;
       this._isShowingQuestion = false;
       this._winnerProcessed = false;
+      this._submitEndTime = null;
       this._quizTimeLeftNotified.clear();
       this._nextQuizNotified.clear();
       this._startQuizKeepAlive();
@@ -1903,16 +1923,15 @@ export class GameServer extends CPUProtection {
                 this._showQuestion(); 
               }
             }
-            if (this.currentQuestion && this._quizStartTime) {
-              const elapsed = (now - this._quizStartTime) / 1000;
-              const totalTime = (CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS + CONSTANTS.QUIZ_SUBMIT_TIME_MS) / 1000;
-              if (elapsed > totalTime - 2 && !this._quizTimeout) {
+            if (this.currentQuestion && this._submitEndTime) {
+              if (now > this._submitEndTime && !this._quizTimeout) {
                 this._forceEvaluateQuiz();
               }
-              if (elapsed > totalTime + 10) {
+              if (now > this._submitEndTime + 10000) {
                 this.currentQuestion = null;
                 this._quizTimeout = null;
                 this._isShowingQuestion = false;
+                this._submitEndTime = null;
               }
             }
           } else {
@@ -1950,6 +1969,7 @@ export class GameServer extends CPUProtection {
       this.isQuizWaiting = false;
       this._isShowingQuestion = false;
       this._winnerProcessed = false;
+      this._submitEndTime = null;
       this.quizQuestionCache = {};
       this._questionPointer = 0;
 
@@ -2001,10 +2021,8 @@ export class GameServer extends CPUProtection {
       const timeLeft = this._getTimeLeftUntilNextQuiz();
       let message = "", canType = true, isQuizTime = timeInfo.isRunning;
       if (isQuizTime) {
-        if (this.currentQuestion && this._quizStartTime) {
-          const elapsed = (Date.now() - this._quizStartTime) / 1000;
-          const totalTime = (CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS + CONSTANTS.QUIZ_SUBMIT_TIME_MS) / 1000;
-          const left = Math.max(0, totalTime - elapsed);
+        if (this.currentQuestion && this._submitEndTime) {
+          const left = Math.max(0, Math.ceil((this._submitEndTime - Date.now()) / 1000));
           const minutes = Math.floor(left / 60), seconds = Math.floor(left % 60);
           message = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
           canType = false;
@@ -2059,10 +2077,8 @@ export class GameServer extends CPUProtection {
       const timeLeft = this._getTimeLeftUntilNextQuiz();
       let message = "", canType = true, isQuizTime = timeInfo.isRunning;
       if (isQuizTime) {
-        if (this.currentQuestion && this._quizStartTime) {
-          const elapsed = (Date.now() - this._quizStartTime) / 1000;
-          const totalTime = (CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS + CONSTANTS.QUIZ_SUBMIT_TIME_MS) / 1000;
-          const left = Math.max(0, totalTime - elapsed);
+        if (this.currentQuestion && this._submitEndTime) {
+          const left = Math.max(0, Math.ceil((this._submitEndTime - Date.now()) / 1000));
           const minutes = Math.floor(left / 60), seconds = Math.floor(left % 60);
           message = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
           canType = false;
