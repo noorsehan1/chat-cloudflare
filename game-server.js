@@ -53,8 +53,8 @@ const CONSTANTS = {
   ERROR_RECOVERY_DELAY_MS: 5000,
   MAX_UNHANDLED_ERRORS: 5,
   ERROR_RESET_INTERVAL_MS: 60000,
-  QUIZ_WAIT_BEFORE_SUBMIT_MS: 10000,
-  QUIZ_SUBMIT_TIME_MS: 10000,
+  QUIZ_WAIT_BEFORE_SUBMIT_MS: 5000,
+  QUIZ_SUBMIT_TIME_MS: 5000,
 };
 
 const QUIZ_SCHEDULE = {
@@ -1473,31 +1473,31 @@ export class GameServer extends CPUProtection {
         this._winnerProcessed = false;
         this._totalQuestionsAnswered++;
         
+        // ===== SOAL MASUK =====
         await this._broadcastQuizQuestion(this.currentQuestion.question, this.currentQuestion.options);
         
-        // ===== WAITING PHASE (10 detik) =====
-        this._broadcastToRoom(QUIZ_ROOM, ["quizWaitingStart", CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000]);
-        this._broadcastToRoom(QUIZ_ROOM, ["quizStatus", "waiting", CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000]);
+        // ===== NOTIF: JEDA 5 DETIK (tidak bisa submit) =====
+        this._broadcastToRoom(QUIZ_ROOM, ["quizWait", CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000]);
+        this._broadcastToRoom(QUIZ_ROOM, ["quizStatus", "wait", CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000]);
         
         this._broadcastQuizNotification("quizUpdate", {
           questionNumber: this._questionPointer,
           totalQuestions: this._allQuestions.length,
           hasWinner: false,
-          status: "waiting",
-          waitTime: CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000,
-          remainingTime: `${CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000}s waiting`
+          status: "wait",
+          waitTime: CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000
         });
         
         this._broadcastToRoom(QUIZ_ROOM, [
           "quizTimeLeft",
-          `Tunggu ${CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000} detik sebelum menjawab`,
+          `Wait ${CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS / 1000}s`,
           false
         ]);
         
         if (this._quizTimeout) clearTimeout(this._quizTimeout);
         if (this._quizBreakTimeout) clearTimeout(this._quizBreakTimeout);
         
-        // ===== Timer WAITING 10 detik =====
+        // ===== Timer JEDA 5 DETIK =====
         this._quizTimeout = setTimeout(async () => {
           try {
             if (this.closing || this.isDestroyed) { 
@@ -1509,28 +1509,27 @@ export class GameServer extends CPUProtection {
             // Reset waktu untuk fase submit
             this._quizStartTime = Date.now();
             
-            // ===== SUBMIT PHASE (10 detik) =====
-            this._broadcastToRoom(QUIZ_ROOM, ["quizSubmitStart", CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000]);
-            this._broadcastToRoom(QUIZ_ROOM, ["quizStatus", "submitting", CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000]);
+            // ===== NOTIF: 5 DETIK UNTUK MENJAWAB =====
+            this._broadcastToRoom(QUIZ_ROOM, ["quizSubmit", CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000]);
+            this._broadcastToRoom(QUIZ_ROOM, ["quizStatus", "submit", CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000]);
             
             this._broadcastQuizNotification("quizUpdate", {
               questionNumber: this._questionPointer,
               totalQuestions: this._allQuestions.length,
               hasWinner: false,
-              status: "submitting",
-              submitTime: CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000,
-              remainingTime: `${CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000}s remaining`
+              status: "submit",
+              submitTime: CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000
             });
             
             this._broadcastToRoom(QUIZ_ROOM, [
               "quizTimeLeft",
-              `${CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000}s tersisa untuk menjawab!`,
+              `${CONSTANTS.QUIZ_SUBMIT_TIME_MS / 1000}s left!`,
               false
             ]);
             
             this._quizTimeout = null;
             
-            // ===== Timer SUBMIT 10 detik =====
+            // ===== Timer SUBMIT 5 DETIK =====
             this._quizTimeout = setTimeout(async () => {
               try {
                 if (this.closing || this.isDestroyed) { 
@@ -1555,7 +1554,7 @@ export class GameServer extends CPUProtection {
                   this._broadcastToRoom(QUIZ_ROOM, ["quizTimeUp", correctAnswer]);
                   this._broadcastQuizNotification("quizTimeUp", {
                     correctAnswer: correctAnswer,
-                    message: "Waktu habis! Jawaban: " + correctAnswer
+                    message: "Time up! Answer: " + correctAnswer
                   });
                 }
                 
@@ -1579,7 +1578,7 @@ export class GameServer extends CPUProtection {
                 this.isQuizWaiting = false;
                 this._isShowingQuestion = false;
               }
-            }, CONSTANTS.QUIZ_SUBMIT_TIME_MS); // 10 detik
+            }, CONSTANTS.QUIZ_SUBMIT_TIME_MS); // 5 detik
             
           } catch(e) {
             this._quizTimeout = null;
@@ -1587,7 +1586,7 @@ export class GameServer extends CPUProtection {
             this.isQuizWaiting = false;
             this._isShowingQuestion = false;
           }
-        }, CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS); // 10 detik
+        }, CONSTANTS.QUIZ_WAIT_BEFORE_SUBMIT_MS); // 5 detik
         
       } catch(e) {
         this._isShowingQuestion = false;
@@ -1684,38 +1683,35 @@ export class GameServer extends CPUProtection {
       const submitTimeMs = CONSTANTS.QUIZ_SUBMIT_TIME_MS;
       const totalTimeMs = waitTimeMs + submitTimeMs;
       
-      // ===== CEK APAKAH MASIH FASE WAITING =====
+      // ===== CEK: Masih fase WAIT (5 detik) =====
       if (elapsed < waitTimeMs) {
         const remainingWait = Math.ceil((waitTimeMs - elapsed) / 1000);
-        this._safeSend(ws, ["quizError", `Tunggu ${remainingWait} detik lagi untuk menjawab!`]);
-        this._safeSend(ws, ["quizWaitingTime", remainingWait]);
+        this._safeSend(ws, ["quizError", `Wait ${remainingWait}s`]);
+        this._safeSend(ws, ["quizWaitTime", remainingWait]);
         return;
       }
       
-      // ===== CEK APAKAH MASIH DALAM FASE SUBMIT =====
+      // ===== CEK: Waktu submit sudah habis =====
       if (elapsed > totalTimeMs) {
         if (this.quizHasWinner && this.quizWinner) {
-          this._safeSend(ws, ["quizError", "Time is up! Winner: " + this.quizWinner]);
+          this._safeSend(ws, ["quizError", "Time up! Winner: " + this.quizWinner]);
         } else {
-          this._safeSend(ws, ["quizError", "Time is up!"]);
+          this._safeSend(ws, ["quizError", "Time up!"]);
           this._safeSend(ws, ["quizCorrectAnswer", this.currentQuestion.correct]);
         }
         return;
       }
       
-      // ===== CEK SUDAH ADA WINNER =====
       if (this.quizHasWinner) {
-        this._safeSend(ws, ["quizError", "Someone already answered correctly!"]);
+        this._safeSend(ws, ["quizError", "Already answered!"]);
         return;
       }
       
-      // ===== CEK USER SUDAH MENJAWAB =====
       if (this.quizAnswered.has(username)) {
-        this._safeSend(ws, ["quizError", "You already answered!"]);
+        this._safeSend(ws, ["quizError", "You answered!"]);
         return;
       }
       
-      // ===== VALIDASI JAWABAN =====
       const answerKey = answer ? answer.toUpperCase().trim() : '';
       const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
       
@@ -1729,15 +1725,12 @@ export class GameServer extends CPUProtection {
       const wsId = this._getWsId(ws);
       const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
       
-      // ===== LOG UNTUK DEBUG =====
-      console.log(`[QUIZ] ${username} answered ${answerKey}, correct: ${this.currentQuestion.correct}, isCorrect: ${isCorrect}, remaining: ${remainingSubmitTime}s`);
-      
       // ===== BROADCAST JAWABAN =====
       this._broadcastQuizNotification("quizAnswer", {
         username: username,
         answer: answerKey,
         isCorrect: isCorrect,
-        remainingTime: `${remainingSubmitTime}s remaining`,
+        remainingTime: `${remainingSubmitTime}s`,
         country: countryInfo.countryCode,
         countryName: countryInfo.countryName
       });
@@ -1747,12 +1740,11 @@ export class GameServer extends CPUProtection {
         answer: answerKey,
         isCorrect,
         correctAnswer: this.currentQuestion.correct,
-        remainingTime: `${remainingSubmitTime}s remaining`,
+        remainingTime: `${remainingSubmitTime}s`,
         country: countryInfo.countryCode,
         countryName: countryInfo.countryName
       });
       
-      // ===== TAMBAHKAN USER KE YANG SUDAH MENJAWAB =====
       this.quizAnswered.add(username);
       
       // ===== KIRIM KONFIRMASI KE USER =====
@@ -1760,35 +1752,29 @@ export class GameServer extends CPUProtection {
         answer: answerKey,
         isCorrect: isCorrect,
         correctAnswer: this.currentQuestion.correct,
-        remainingTime: `${remainingSubmitTime}s remaining`
+        remainingTime: `${remainingSubmitTime}s`
       }]);
       
-      // ===== CEK JIKA JAWABAN BENAR DAN BELUM ADA WINNER =====
       if (isCorrect && !this.quizHasWinner) {
         this.quizHasWinner = true;
         this.quizWinner = username;
         
-        this._broadcastQuizNotification("quizWinnerWithCountry", {
+        this._broadcastQuizNotification("quizWinner", {
           username: username,
           country: countryInfo.countryCode,
           countryName: countryInfo.countryName
         });
         
-        // ===== BROADCAST WINNER =====
         this._broadcastToRoom(QUIZ_ROOM, ["quizWinner", username]);
         this._broadcastToRoom(QUIZ_ROOM, ["quizCorrectAnswer", this.currentQuestion.correct]);
-        
-        console.log(`[QUIZ] WINNER: ${username} answered ${answerKey} correctly!`);
       } else if (!isCorrect) {
-        // ===== KALAU SALAH, TAMPILKAN PESAN =====
         this._safeSend(ws, ["quizWrongAnswer", {
           correctAnswer: this.currentQuestion.correct,
-          message: `Wrong! Correct answer is ${this.currentQuestion.correct}`
+          message: `Wrong! Correct: ${this.currentQuestion.correct}`
         }]);
       }
       
     } catch(e) {
-      console.error('[QUIZ] Error submitQuizAnswer:', e);
       this._safeSend(ws, ["quizError", e.message]);
     }
   }
