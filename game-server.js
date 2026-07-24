@@ -1005,7 +1005,7 @@ export class GameServer extends CPUProtection {
         timeLeft: timeLeft.text, 
         status: "ended"
       }]);
-      this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", message, true]);
+      this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", message, true, false]);
       this._broadcastQuizNotification("quizEnded", { 
         timeLeft: timeLeft.text
       });
@@ -1456,7 +1456,7 @@ export class GameServer extends CPUProtection {
       if (!this.quizAutoEnabled) {
         this.quizAutoEnabled = true;
         const clients = this.wsClients.get(QUIZ_ROOM);
-        if (clients?.size > 0) this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Quiz is starting soon!", true]);
+        if (clients?.size > 0) this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Quiz is starting soon!", true, true]);
         return;
       }
       
@@ -1523,8 +1523,13 @@ export class GameServer extends CPUProtection {
             message: "You can now answer!"
           });
           
-          // ===== KIRIM VIA quizTimeLeft UNTUK TIMER JAWAB =====
-          this._broadcastQuizNotification("quizTimeLeft", `${CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000}s remaining to answer!`, false);
+          // ===== KIRIM VIA quizTimeLeft DENGAN 3 PARAMETER =====
+          this._broadcastToRoom(QUIZ_ROOM, [
+            "quizTimeLeft", 
+            `${CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000}s remaining to answer!`, 
+            false,  // canType
+            true    // isQuizTime
+          ]);
           
         }, CONSTANTS.QUIZ_READING_TIME_MS);
         
@@ -1765,7 +1770,7 @@ export class GameServer extends CPUProtection {
             this.quizEndNotified = false;
             if (!this.quizAutoEnabled) {
               this.quizAutoEnabled = true;
-              this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Quiz is starting soon!", true]);
+              this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Quiz is starting soon!", true, true]);
             }
             if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout && !this._isShowingQuestion) {
               this._showQuestion();
