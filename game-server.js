@@ -1436,7 +1436,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ===== PERUBAHAN: Hanya kirim "quizNoWinner" untuk pesan baca =====
+  // ===== PERBAIKAN: Kirim pesan baca hanya melalui quizError =====
   async _showQuestion() {
     try {
       if (this._isShowingQuestion) return;
@@ -1505,21 +1505,8 @@ export class GameServer extends CPUProtection {
         
         await this._broadcastQuizQuestion(this.currentQuestion.question, this.currentQuestion.options);
         
-        // ===== HANYA KIRIM quizNoWinner =====
-        // Kirim notifikasi "Read the question first before answering" via quizNoWinner
-        this._broadcastQuizNotification("quizNoWinner", {
-          questionNumber: this._questionPointer,
-          totalQuestions: this._allQuestions.length,
-          readingTime: CONSTANTS.QUIZ_READING_TIME_MS / 1000,
-          message: "Read the question first before answering",
-          phase: "reading"
-        });
-        
-        this._broadcastToRoom(QUIZ_ROOM, [
-          "quizTimeLeft",
-          `Read the question... ${CONSTANTS.QUIZ_READING_TIME_MS / 1000}s`,
-          false
-        ]);
+        // ===== HANYA KIRIM VIA quizError UNTUK NOTIFIKASI BACA =====
+        this._broadcastQuizNotification("quizError", `Read the question... ${CONSTANTS.QUIZ_READING_TIME_MS / 1000}s`);
         
         // ===== SETELAH 20 DETIK =====
         setTimeout(() => {
@@ -1536,11 +1523,8 @@ export class GameServer extends CPUProtection {
             message: "You can now answer!"
           });
           
-          this._broadcastToRoom(QUIZ_ROOM, [
-            "quizTimeLeft",
-            `${CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000}s remaining to answer!`,
-            false
-          ]);
+          // ===== KIRIM VIA quizTimeLeft UNTUK TIMER JAWAB =====
+          this._broadcastQuizNotification("quizTimeLeft", `${CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000}s remaining to answer!`, false);
           
         }, CONSTANTS.QUIZ_READING_TIME_MS);
         
@@ -1572,11 +1556,7 @@ export class GameServer extends CPUProtection {
               await this._handleQuizWinner(this.quizWinner, correctAnswer);
             } else {
               // Kirim quizNoWinner jika tidak ada pemenang
-              this._broadcastQuizNotification("quizNoWinner", {
-                message: "No winner this round!",
-                correctAnswer: correctAnswer,
-                phase: "ended"
-              });
+              this._broadcastQuizNotification("quizNoWinner", `No winner this round! Correct answer: ${correctAnswer}`);
             }
             
             this._quizTimeout = null;
@@ -1636,11 +1616,7 @@ export class GameServer extends CPUProtection {
       if (this.quizHasWinner && this.quizWinner) {
         await this._handleQuizWinner(this.quizWinner, correctAnswer);
       } else {
-        this._broadcastQuizNotification("quizNoWinner", {
-          message: "No winner this round!",
-          correctAnswer: correctAnswer,
-          phase: "ended"
-        });
+        this._broadcastQuizNotification("quizNoWinner", `No winner this round! Correct answer: ${correctAnswer}`);
       }
       
       this.currentQuestion = null;
