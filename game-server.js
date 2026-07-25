@@ -504,8 +504,6 @@ export class GameServer extends CPUProtection {
       this._canSubmitAnswer = false;
 
       this._recordingEnabled = new Map();
-      // HAPUS CACHE WINNERS
-      // this._roomWinnersCache = new Map();
 
       this.countryQuizSystem = new CountryBasedQuizSystem(this);
 
@@ -538,13 +536,11 @@ export class GameServer extends CPUProtection {
       
       const game = this.activeGames.get(roomName);
       if (!game || !game._isActive || game._gameEnded) {
-        // Hapus flag jika ada
         const stopKey = `stopped_${roomName}`;
         this._gameStartFlags.set(stopKey, Date.now());
         return true;
       }
       
-      // Set flag bahwa game di-stop
       game._wasStopped = true;
       game._gameEnded = true;
       game._isActive = false;
@@ -554,7 +550,6 @@ export class GameServer extends CPUProtection {
       game.drawTimeExpired = true;
       game.evaluationLocked = true;
       
-      // Hapus semua timer
       const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
       for (const key of timers) {
         if (game[key]) { 
@@ -564,14 +559,12 @@ export class GameServer extends CPUProtection {
         }
       }
       
-      // Hapus bot timeouts
       if (game._botTimeouts) {
         for (const id of game._botTimeouts) clearTimeout(id);
         game._botTimeouts.clear();
         game._botTimeouts = null;
       }
       
-      // Kosongkan semua data
       if (game.players) { 
         game.players.clear(); 
         game.players = null; 
@@ -597,25 +590,19 @@ export class GameServer extends CPUProtection {
         game.playerWsId = null; 
       }
       
-      // Hapus dari active games
       this.activeGames.delete(roomName);
-      
-      // Hapus locks
       this._gameLocks.delete(roomName);
       this._joinLocks.delete(roomName);
       
-      // Set flag bahwa game di-stop (untuk mencegah restart langsung)
       const stopKey = `stopped_${roomName}`;
       this._gameStartFlags.set(stopKey, Date.now());
       this._gameStartFlags.delete(`start_${roomName}`);
       
-      // Hapus cleanup timer
       if (this._cleanupTimers.has(roomName)) {
         clearTimeout(this._cleanupTimers.get(roomName));
         this._cleanupTimers.delete(roomName);
       }
       
-      // Broadcast
       this._broadcastToRoom(roomName, ["gameLowCardEnd", []]);
       this._broadcastToRoom(roomName, ["gameLowCardError", `⛔ GAME STOPPED! ${reason}`]);
       this._broadcastToRoom(roomName, ["gameLowCardForceStop", {
@@ -636,16 +623,14 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== RECORDING WINNERS (NO CACHE + STOP GAME) ====================
+  // ==================== RECORDING WINNERS (NO CACHE + NO SPAM) ====================
 
   async _startRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
       
-      // HENTIKAN GAME YANG SEDANG BERJALAN
       await this._forceStopGame(roomName, "Recording started by admin");
       
-      // START RECORDING
       this._recordingEnabled.set(roomName, true);
       
       if (this.env?.QUESTIONS) {
@@ -655,6 +640,7 @@ export class GameServer extends CPUProtection {
         );
       }
       
+      // HANYA BROADCAST RECORDING STATUS
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: true,
         room: roomName,
@@ -672,22 +658,17 @@ export class GameServer extends CPUProtection {
     try {
       if (!roomName) return false;
       
-      // HENTIKAN GAME YANG SEDANG BERJALAN
       await this._forceStopGame(roomName, "Recording stopped by admin");
       
-      // STOP RECORDING
       this._recordingEnabled.set(roomName, false);
       
       if (this.env?.QUESTIONS) {
-        // HAPUS RECORDING STATUS
         await this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + roomName);
-        
-        // HAPUS DATA WINNERS DARI KV
         const winnerKey = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
         await this.env.QUESTIONS.delete(winnerKey);
       }
       
-      // Broadcast recording stopped
+      // HANYA BROADCAST RECORDING STATUS
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: false,
         room: roomName,
@@ -769,20 +750,16 @@ export class GameServer extends CPUProtection {
       
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       
-      // LANGSUNG AMBIL DARI KV
       let roomWinners = {};
       const existing = await this.env.QUESTIONS.get(key, 'json');
       if (existing && typeof existing === 'object') {
         roomWinners = existing;
       }
       
-      // Update winner
       roomWinners[username] = (roomWinners[username] || 0) + 1;
       
-      // SIMPAN LANGSUNG KE KV
       await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       
-      // Broadcast update
       const winnerData = {
         room: room,
         winners: roomWinners,
@@ -823,7 +800,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // LANGSUNG AMBIL DARI KV
       const winners = await this._getLowCardWinners(room);
       
       if (Object.keys(winners).length === 0) {
@@ -837,7 +813,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // Broadcast langsung
       const winnerData = {
         room: room,
         winners: winners || {},
@@ -879,7 +854,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== START GAME WITH RECORDING (ADMIN) ====================
+  // ==================== START GAME WITH RECORDING (ADMIN - NO SPAM) ====================
 
   async _startGameWithRecording(ws, room, bet, username) {
     try {
@@ -908,16 +883,13 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // Check if recording is enabled, if not enable it
       const recordingStatus = await this._getRecordingStatus(roomName);
       if (!recordingStatus.enabled) {
         await this._startRecordingWinners(roomName);
       }
       
-      // Cek apakah ada game yang sedang berjalan
       const existingGame = this.activeGames.get(roomName);
       if (existingGame && existingGame._isActive && !existingGame._gameEnded) {
-        // Hentikan game yang sedang berjalan
         await this._forceStopGame(roomName, "Admin starting new game with recording");
       }
       
@@ -987,14 +959,7 @@ export class GameServer extends CPUProtection {
         this.activeGames.set(roomName, game);
         this._addClient(roomName, ws, usernameClean, false);
         
-        this._broadcastToRoom(roomName, ["gameLowCardStart", betAmount]);
-        this._broadcastToRoom(roomName, ["gameLowCardStartSuccess", usernameClean, betAmount]);
-        this._broadcastToRoom(roomName, ["recordingStatus", {
-          enabled: true,
-          room: roomName,
-          message: "Admin started game with recording enabled"
-        }]);
-        
+        // HANYA KIRIM KE ADMIN, BUKAN BROADCAST
         this._safeSend(ws, ["adminGameStarted", {
           success: true,
           room: roomName,
@@ -1002,6 +967,22 @@ export class GameServer extends CPUProtection {
           username: usernameClean,
           recording: true,
           message: `Game started in ${roomName} with recording enabled`
+        }]);
+        
+        // BROADCAST KE ROOM (1x saja, tanpa spam)
+        this._broadcastToRoom(roomName, ["gameLowCardAdminStart", {
+          room: roomName,
+          bet: betAmount,
+          startedBy: usernameClean,
+          recording: true,
+          message: "Admin started a new game"
+        }]);
+        
+        // BROADCAST RECORDING STATUS (1x saja)
+        this._broadcastToRoom(roomName, ["recordingStatus", {
+          enabled: true,
+          room: roomName,
+          message: "Game started with recording enabled"
         }]);
         
         this._startRegistration(roomName, game);
@@ -3352,6 +3333,8 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  // ==================== START GAME (USER - NO SPAM) ====================
+
   async startGame(ws, bet, username) {
     try {
       if (this.isDestroyed) {
@@ -3373,39 +3356,29 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // CEK APAKAH GAME PERNAH DISTOP
       const stopKey = `stopped_${room}`;
       if (this._gameStartFlags.has(stopKey)) {
         const stopTime = this._gameStartFlags.get(stopKey);
         const now = Date.now();
-        // Tunggu 5 detik setelah stop sebelum bisa start lagi
         if ((now - stopTime) < 5000) {
           this._safeSend(ws, ["gameLowCardError", 
             "Game was just stopped. Please wait a moment before starting a new game."
           ]);
           return;
         }
-        // Hapus flag setelah 5 detik
         if ((now - stopTime) > 5000) {
           this._gameStartFlags.delete(stopKey);
         }
       }
 
-      // CEK RECORDING STATUS
       const recordingStatus = await this._getRecordingStatus(room);
       if (recordingStatus.enabled) {
         this._safeSend(ws, ["gameLowCardError", 
           "Recording is ACTIVE in this room! Users cannot start games."
         ]);
-        this._safeSend(ws, ["recordingStatus", {
-          enabled: true,
-          room: room,
-          message: "Game cannot be started by users while recording is active."
-        }]);
         return;
       }
 
-      // CEK APAKAH ADA GAME YANG SEDANG BERJALAN
       const existingGame = this.activeGames.get(room);
       if (existingGame && existingGame._isActive && !existingGame._gameEnded) {
         this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
@@ -3420,7 +3393,6 @@ export class GameServer extends CPUProtection {
 
       this._gameStartFlags.set(startKey, Date.now());
 
-      // Cleanup jika ada game lama yang tersisa
       if (existingGame) {
         await this._forceCleanupGame(room, existingGame);
       }
@@ -3470,8 +3442,11 @@ export class GameServer extends CPUProtection {
         game.playerWsId.set(usernameClean, wsId);
         this.activeGames.set(room, game);
         this._addClient(room, ws, usernameClean, false);
+        
+        // BROADCAST KE ROOM (1x saja)
         this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
         this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
+        
         this._startRegistration(room, game);
 
         setTimeout(() => {
