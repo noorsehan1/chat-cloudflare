@@ -510,7 +510,7 @@ export class GameServer extends CPUProtection {
       this._questionStartTime = null;
       this._canSubmitAnswer = false;
 
-      // ==================== LOWCARD RECORDING - PER ROOM ====================
+      // LOWCARD RECORDING - PER ROOM
       this._recordingEnabled = new Map();
       this._roomWinnersCache = new Map();
 
@@ -649,14 +649,12 @@ export class GameServer extends CPUProtection {
     try {
       if (!room || !username) return false;
       
-      // CEK: Apakah recording enabled untuk room ini?
       const status = await this._getRecordingStatus(room);
       if (!status.enabled) {
-        console.log('[LOWCARD] Recording DISABLED for room:', room, '- NOT saving winner');
+        console.log('[LOWCARD] Recording DISABLED for room:', room);
         return false;
       }
       
-      // CEK: Apakah room adalah Quiz room? Jangan catat
       if (room === QUIZ_ROOM) {
         console.log('[LOWCARD] Quiz room - NOT saving winner');
         return false;
@@ -687,14 +685,13 @@ export class GameServer extends CPUProtection {
       
       console.log('[LOWCARD] Winner recorded for room:', room, 'User:', username, 'Total wins:', roomWinners[username]);
       
-      // Kirim update ke semua user dalam room
+      // EVENT UNTUK ANDROID
       this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
         username: username,
         wins: roomWinners[username],
         room: room
       }]);
       
-      // Kirim data winners lengkap ke semua user dalam room
       await this._broadcastWinnersToRoom(room, roomWinners);
       
       return true;
@@ -728,7 +725,7 @@ export class GameServer extends CPUProtection {
       
       this._broadcastToRoom(room, ["lowCardWinnersData", winnerData]);
       
-      console.log('[LOWCARD] Winners data sent to room:', room, 'Total players:', Object.keys(winners).length);
+      console.log('[LOWCARD] Winners data sent to room:', room);
     } catch(e) {
       console.error('[LOWCARD] Error broadcasting winners:', e);
     }
@@ -2802,7 +2799,7 @@ export class GameServer extends CPUProtection {
         const winner = activePlayers[0]?.name || "Unknown";
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
         
-        // === CATAT PEMENANG (HANYA jika recording enabled untuk room ini) ===
+        // === CATAT PEMENANG (HANYA jika recording enabled) ===
         this._addLowCardWinner(room, winner);
         
         game._gameEnded = true;
@@ -2814,18 +2811,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  _findAllGamesByUsername(username) {
-    try {
-      if (!username) return [];
-      const result = [];
-      for (const [room, game] of this.activeGames) {
-        if (game?._isActive && !game._gameEnded && game.players?.has(username)) {
-          result.push({ game, room });
-        }
-      }
-      return result;
-    } catch(e) { return []; }
-  }
+  // ==================== GAME METHODS LAINNYA ====================
 
   _addBots(room, count) {
     try {
@@ -2978,7 +2964,7 @@ export class GameServer extends CPUProtection {
             const winner = newActive[0]?.name || "Unknown";
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
             
-            // === CATAT PEMENANG (HANYA jika recording enabled untuk room ini) ===
+            // === CATAT PEMENANG (HANYA jika recording enabled) ===
             this._addLowCardWinner(room, winner);
             
             game._gameEnded = true;
@@ -3097,7 +3083,7 @@ export class GameServer extends CPUProtection {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        // === CATAT PEMENANG (HANYA jika recording enabled untuk room ini) ===
+        // === CATAT PEMENANG (HANYA jika recording enabled) ===
         await this._addLowCardWinner(room, winnerName);
         
         game._gameEnded = true;
@@ -3143,7 +3129,7 @@ export class GameServer extends CPUProtection {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        // === CATAT PEMENANG (HANYA jika recording enabled untuk room ini) ===
+        // === CATAT PEMENANG (HANYA jika recording enabled) ===
         await this._addLowCardWinner(room, winnerName);
         
         game._gameEnded = true;
@@ -3568,6 +3554,121 @@ export class GameServer extends CPUProtection {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
 
+      // === LOWCARD WINNER EVENTS ===
+      if (evt === "startRecordingWinners") {
+        const roomName = data[1];
+        if (!roomName) {
+          this._safeSend(ws, ["recordingStatus", {
+            success: false,
+            enabled: false,
+            message: "Room name required"
+          }]);
+          return;
+        }
+        const success = await this._startRecordingWinners(roomName);
+        this._safeSend(ws, ["recordingStatus", {
+          success: success,
+          enabled: true,
+          room: roomName,
+          message: success ? "Pencatatan winner diaktifkan untuk " + roomName : "Gagal mengaktifkan pencatatan"
+        }]);
+        return;
+      }
+
+      if (evt === "stopRecordingWinners") {
+        const roomName = data[1];
+        if (!roomName) {
+          this._safeSend(ws, ["recordingStatus", {
+            success: false,
+            enabled: false,
+            message: "Room name required"
+          }]);
+          return;
+        }
+        const success = await this._stopRecordingWinners(roomName);
+        this._safeSend(ws, ["recordingStatus", {
+          success: success,
+          enabled: false,
+          room: roomName,
+          message: success ? "Pencatatan winner dihentikan untuk " + roomName : "Gagal menghentikan pencatatan"
+        }]);
+        return;
+      }
+
+      if (evt === "getRecordingStatus") {
+        const roomName = data[1];
+        if (!roomName) {
+          this._safeSend(ws, ["recordingStatus", {
+            enabled: false,
+            message: "Room name required"
+          }]);
+          return;
+        }
+        const status = await this._getRecordingStatus(roomName);
+        this._safeSend(ws, ["recordingStatus", {
+          enabled: status.enabled,
+          room: roomName,
+          message: status.enabled ? "Pencatatan winner aktif untuk " + roomName : "Pencatatan winner nonaktif untuk " + roomName
+        }]);
+        return;
+      }
+
+      if (evt === "getRoomWinners") {
+        const room = data[1];
+        if (!room) {
+          this._safeSend(ws, ["roomWinners", {
+            error: "Room name required"
+          }]);
+          return;
+        }
+        const winners = await this._getLowCardWinners(room);
+        const status = await this._getRecordingStatus(room);
+        this._safeSend(ws, ["roomWinners", {
+          room: room,
+          winners: winners,
+          totalPlayers: Object.keys(winners).length,
+          recording: status.enabled,
+          updatedAt: new Date().toISOString()
+        }]);
+        return;
+      }
+
+      if (evt === "sendWinnersToRoom") {
+        const room = data[1];
+        if (!room) {
+          this._safeSend(ws, ["sendWinnersResult", {
+            success: false,
+            message: "Room name required"
+          }]);
+          return;
+        }
+        await this._sendWinnersToRoom(room);
+        this._safeSend(ws, ["sendWinnersResult", {
+          success: true,
+          room: room,
+          message: "Winners data sent to room"
+        }]);
+        return;
+      }
+
+      if (evt === "resetRoomWinners") {
+        const room = data[1];
+        if (!room) {
+          this._safeSend(ws, ["resetRoomWinnersResult", {
+            success: false,
+            message: "Room name required"
+          }]);
+          return;
+        }
+        const success = await this._resetLowCardWinners(room);
+        this._safeSend(ws, ["resetRoomWinnersResult", {
+          success: success,
+          room: room,
+          message: success ? "Data winners untuk " + room + " telah direset" : "Gagal mereset data winners"
+        }]);
+        return;
+      }
+
       // === QUIZ EVENTS ===
       if (evt === "getUserCountryInfo") {
         const wsId = this._getWsId(ws);
@@ -3732,122 +3833,6 @@ export class GameServer extends CPUProtection {
           totalTimeLeft: Math.max(0, Math.round((CONSTANTS.QUIZ_TOTAL_TIME_MS - (Date.now() - this._questionStartTime)) / 1000))
         };
         this._safeSend(ws, ["quizStatus", status]);
-        return;
-      }
-
-      // ==================== LOWCARD WINNER EVENTS ====================
-      
-      if (evt === "startRecordingWinners") {
-        const roomName = data[1];
-        if (!roomName) {
-          this._safeSend(ws, ["recordingStatus", {
-            success: false,
-            enabled: false,
-            message: "Room name required"
-          }]);
-          return;
-        }
-        const success = await this._startRecordingWinners(roomName);
-        this._safeSend(ws, ["recordingStatus", {
-          success: success,
-          enabled: true,
-          room: roomName,
-          message: success ? "Pencatatan winner diaktifkan untuk " + roomName : "Gagal mengaktifkan pencatatan"
-        }]);
-        return;
-      }
-
-      if (evt === "stopRecordingWinners") {
-        const roomName = data[1];
-        if (!roomName) {
-          this._safeSend(ws, ["recordingStatus", {
-            success: false,
-            enabled: false,
-            message: "Room name required"
-          }]);
-          return;
-        }
-        const success = await this._stopRecordingWinners(roomName);
-        this._safeSend(ws, ["recordingStatus", {
-          success: success,
-          enabled: false,
-          room: roomName,
-          message: success ? "Pencatatan winner dihentikan untuk " + roomName : "Gagal menghentikan pencatatan"
-        }]);
-        return;
-      }
-
-      if (evt === "getRecordingStatus") {
-        const roomName = data[1];
-        if (!roomName) {
-          this._safeSend(ws, ["recordingStatus", {
-            enabled: false,
-            message: "Room name required"
-          }]);
-          return;
-        }
-        const status = await this._getRecordingStatus(roomName);
-        this._safeSend(ws, ["recordingStatus", {
-          enabled: status.enabled,
-          room: roomName,
-          message: status.enabled ? "Pencatatan winner aktif untuk " + roomName : "Pencatatan winner nonaktif untuk " + roomName
-        }]);
-        return;
-      }
-
-      if (evt === "getRoomWinners") {
-        const room = data[1];
-        if (!room) {
-          this._safeSend(ws, ["roomWinners", {
-            error: "Room name required"
-          }]);
-          return;
-        }
-        const winners = await this._getLowCardWinners(room);
-        const status = await this._getRecordingStatus(room);
-        this._safeSend(ws, ["roomWinners", {
-          room: room,
-          winners: winners,
-          totalPlayers: Object.keys(winners).length,
-          recording: status.enabled,
-          updatedAt: new Date().toISOString()
-        }]);
-        return;
-      }
-
-      if (evt === "sendWinnersToRoom") {
-        const room = data[1];
-        if (!room) {
-          this._safeSend(ws, ["sendWinnersResult", {
-            success: false,
-            message: "Room name required"
-          }]);
-          return;
-        }
-        await this._sendWinnersToRoom(room);
-        this._safeSend(ws, ["sendWinnersResult", {
-          success: true,
-          room: room,
-          message: "Winners data sent to room"
-        }]);
-        return;
-      }
-
-      if (evt === "resetRoomWinners") {
-        const room = data[1];
-        if (!room) {
-          this._safeSend(ws, ["resetRoomWinnersResult", {
-            success: false,
-            message: "Room name required"
-          }]);
-          return;
-        }
-        const success = await this._resetLowCardWinners(room);
-        this._safeSend(ws, ["resetRoomWinnersResult", {
-          success: success,
-          room: room,
-          message: success ? "Data winners untuk " + room + " telah direset" : "Gagal mereset data winners"
-        }]);
         return;
       }
 
