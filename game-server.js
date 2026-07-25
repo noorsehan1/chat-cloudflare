@@ -4446,5 +4446,3 @@ export class GameServer extends CPUProtection {
   }
 }
 
-// ==================== EXPORT ====================
-export { GameServer };
