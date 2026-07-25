@@ -532,8 +532,6 @@ export class GameServer extends CPUProtection {
 
   // ==================== RECORDING WINNERS ====================
 
-  // startGameWithRecording - TELAH DIHAPUS (NO AUTO-START)
-
   async _startRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
@@ -554,8 +552,6 @@ export class GameServer extends CPUProtection {
         room: roomName,
         message: "Recording enabled for " + roomName
       }]);
-      
-      // NO AUTO-START GAME HERE
       
       return true;
     } catch(e) {
@@ -811,6 +807,373 @@ export class GameServer extends CPUProtection {
       }]);
       
       return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  // ==================== START GAME WITH RECORDING ====================
+  // HANYA BISA JIKA RECORDING = TRUE
+  // HANYA ADMIN YANG BISA
+
+  async startGameWithRecording(room, bet, username) {
+    try {
+      if (this.isDestroyed) {
+        return { success: false, message: "Server is shutting down" };
+      }
+      if (!username?.trim()) {
+        return { success: false, message: "Username is required" };
+      }
+      if (!room?.trim()) {
+        return { success: false, message: "Room is required" };
+      }
+      
+      const usernameClean = username.trim();
+      const roomClean = room.trim();
+      
+      // ============ CEK RECORDING STATUS - HARUS TRUE ============
+      const status = await this._getRecordingStatus(roomClean);
+      if (!status.enabled) {
+        return { 
+          success: false, 
+          message: "Recording must be ENABLED (TRUE) to use startGameWithRecording" 
+        };
+      }
+      // ============================================================
+      
+      // CEK APAKAH GAME SUDAH BERJALAN
+      const existingGame = this.activeGames.get(roomClean);
+      if (existingGame?._isActive && !existingGame._gameEnded) {
+        return { success: false, message: "Game is already running in this room" };
+      }
+      
+      const startKey = `start_${roomClean}`;
+      if (this._gameStartFlags.has(startKey)) {
+        return { success: false, message: "Game is already starting..." };
+      }
+      this._gameStartFlags.set(startKey, Date.now());
+      
+      if (existingGame) {
+        await this._forceCleanupGame(roomClean, existingGame);
+      }
+      
+      const now = Date.now();
+      const lockTime = this._gameLocks.get(roomClean);
+      if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
+        this._gameStartFlags.delete(startKey);
+        return { success: false, message: "Game is starting, please wait" };
+      }
+      this._gameLocks.set(roomClean, now);
+      
+      try {
+        if (this.activeGames.size >= this._maxGames) {
+          this._gameLocks.delete(roomClean);
+          this._gameStartFlags.delete(startKey);
+          return { success: false, message: "Server is busy" };
+        }
+        
+        const betAmount = parseInt(bet, 10) || 0;
+        if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
+          this._gameLocks.delete(roomClean);
+          this._gameStartFlags.delete(startKey);
+          return { success: false, message: `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})` };
+        }
+        
+        const game = {
+          room: roomClean,
+          players: new Map(),
+          botPlayers: new Map(),
+          registrationOpen: true,
+          round: 1,
+          numbers: new Map(),
+          tanda: new Map(),
+          eliminated: new Set(),
+          betAmount,
+          hostId: usernameClean,
+          hostName: usernameClean,
+          useBots: false,
+          evaluationLocked: false,
+          drawTimeExpired: false,
+          _isActive: true,
+          _gameEnded: false,
+          _phase: 'registration',
+          _botTimeouts: new Set(),
+          _botsAdded: false,
+          _registrationTimer: null,
+          _drawTimer: null,
+          _evalTimer: null,
+          _safetyTimer: null,
+          _isEvaluating: false,
+          _createdAt: Date.now(),
+          _drawPhaseStart: null,
+          _endTime: null,
+          playerWsId: new Map(),
+          _startedByRecording: true,
+          _startedBy: 'admin'
+        };
+        
+        game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
+        
+        let hostWsId = null;
+        for (const [wsId, ws] of this.wsMap) {
+          if (ws.username === usernameClean) {
+            hostWsId = wsId;
+            break;
+          }
+        }
+        if (hostWsId) {
+          game.playerWsId.set(usernameClean, hostWsId);
+          const ws = this.wsMap.get(hostWsId);
+          if (ws) {
+            this._addClient(roomClean, ws, usernameClean, false);
+            ws.room = roomClean;
+            ws.roomname = roomClean;
+          }
+        }
+        
+        this.activeGames.set(roomClean, game);
+        
+        this._broadcastToRoom(roomClean, ["gameLowCardStart", betAmount]);
+        this._broadcastToRoom(roomClean, ["gameLowCardStartSuccess", usernameClean, betAmount]);
+        
+        this._broadcastToRoom(roomClean, ["recordingStatus", {
+          enabled: true,
+          room: roomClean,
+          message: "Game started with recording enabled"
+        }]);
+        
+        this._startRegistration(roomClean, game);
+        
+        setTimeout(() => {
+          try {
+            this._gameStartFlags.delete(startKey);
+            if (this._gameLocks.get(roomClean) === now) this._gameLocks.delete(roomClean);
+          } catch(e) {}
+        }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
+        
+        return { 
+          success: true, 
+          message: "Game started successfully with recording",
+          room: roomClean,
+          bet: betAmount
+        };
+        
+      } catch(e) {
+        this._deleteGame(roomClean, this.activeGames.get(roomClean));
+        this._gameLocks.delete(roomClean);
+        this._gameStartFlags.delete(startKey);
+        return { success: false, message: "Failed to start game" };
+      }
+    } catch(e) {
+      return { success: false, message: "Failed to start game" };
+    }
+  }
+
+  // ==================== START GAME (NORMAL) ====================
+  // HANYA BISA JIKA RECORDING = FALSE
+  // SEMUA USER BISA
+
+  async startGame(ws, bet, username) {
+    try {
+      if (this.isDestroyed) {
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]);
+        return;
+      }
+      if (!username?.trim()) {
+        this._safeSend(ws, ["gameLowCardError", "Username is required"]);
+        return;
+      }
+      const usernameClean = username.trim();
+      const room = this._ensureRoomConsistency(ws);
+      if (!room) {
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
+        return;
+      }
+      if (room === QUIZ_ROOM) {
+        this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]);
+        return;
+      }
+
+      // ============ CEK RECORDING STATUS - HARUS FALSE ============
+      const recordingStatus = await this._getRecordingStatus(room);
+      if (recordingStatus.enabled) {
+        this._safeSend(ws, ["gameLowCardError", 
+          "Recording is ACTIVE (TRUE) in this room! Use startGameWithRecording instead."
+        ]);
+        this._safeSend(ws, ["recordingStatus", {
+          enabled: true,
+          room: room,
+          message: "Recording is active. Use startGameWithRecording to start game."
+        }]);
+        return;
+      }
+      // ============================================================
+
+      const startKey = `start_${room}`;
+      if (this._gameStartFlags.has(startKey)) {
+        this._safeSend(ws, ["gameLowCardError", "Game is already starting..."]);
+        return;
+      }
+      
+      const existingGame = this.activeGames.get(room);
+      if (existingGame?._isActive && !existingGame._gameEnded) {
+        this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
+        return;
+      }
+      
+      this._gameStartFlags.set(startKey, Date.now());
+      
+      if (existingGame) {
+        await this._forceCleanupGame(room, existingGame);
+      }
+      
+      const now = Date.now();
+      const lockTime = this._gameLocks.get(room);
+      if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
+        this._safeSend(ws, ["gameLowCardError", "Game is starting, please wait"]);
+        this._gameStartFlags.delete(startKey);
+        return;
+      }
+      this._gameLocks.set(room, now);
+      
+      try {
+        if (this.activeGames.size >= this._maxGames) {
+          this._safeSend(ws, ["gameLowCardError", "Server is busy"]);
+          this._gameLocks.delete(room);
+          this._gameStartFlags.delete(startKey);
+          return;
+        }
+        
+        const betAmount = parseInt(bet, 10) || 0;
+        if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
+          this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
+          this._gameLocks.delete(room);
+          this._gameStartFlags.delete(startKey);
+          return;
+        }
+        
+        const wsId = this._getWsId(ws);
+        const game = {
+          room, players: new Map(), botPlayers: new Map(), registrationOpen: true,
+          round: 1, numbers: new Map(), tanda: new Map(), eliminated: new Set(),
+          betAmount, hostId: usernameClean, hostName: usernameClean, useBots: false,
+          evaluationLocked: false, drawTimeExpired: false,
+          _isActive: true, _gameEnded: false, _phase: 'registration',
+          _botTimeouts: new Set(), _botsAdded: false,
+          _registrationTimer: null, _drawTimer: null, _evalTimer: null, _safetyTimer: null,
+          _isEvaluating: false, _createdAt: Date.now(), _drawPhaseStart: null, _endTime: null,
+          playerWsId: new Map(),
+          _startedByRecording: false,
+          _startedBy: 'user'
+        };
+        
+        game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
+        game.playerWsId.set(usernameClean, wsId);
+        this.activeGames.set(room, game);
+        this._addClient(room, ws, usernameClean, false);
+        this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
+        this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
+        this._startRegistration(room, game);
+        
+        setTimeout(() => {
+          try {
+            this._gameStartFlags.delete(startKey);
+            if (this._gameLocks.get(room) === now) this._gameLocks.delete(room);
+          } catch(e) {}
+        }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
+        
+      } catch(e) {
+        this._deleteGame(room, this.activeGames.get(room));
+        this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
+        this._gameLocks.delete(room);
+        this._gameStartFlags.delete(startKey);
+      }
+    } catch(e) {
+      this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
+    }
+  }
+
+  // ==================== ADMIN VALIDATION ====================
+  // ADMIN = TRUE, USER = FALSE
+
+  _isAdmin(wsId) {
+    try {
+      if (!wsId) return false;
+      const ws = this.wsMap.get(wsId);
+      if (!ws) return false;
+      
+      // CEK APAKAH ADMIN DARI WS PROPERTY
+      if (ws.isAdmin === true) return true;
+      
+      // CEK DARI USERNAME
+      const username = ws.username;
+      if (!username) return false;
+      
+      // DAFTAR ADMIN USERNAME - TAMBAHKAN SESUAI KEBUTUHAN
+      const adminList = [
+        'admin', 
+        'Admin',
+        'OWNER',
+        'owner',
+        'administrator',
+        // TAMBAHKAN USERNAME ADMIN LAINNYA
+      ];
+      
+      // JIKA USERNAME ADA DI DAFTAR ADMIN → TRUE
+      if (adminList.includes(username)) return true;
+      
+      // CEK DARI KV STORE (jika ada)
+      // const isAdmin = await this.env.ADMINS?.get(username);
+      // if (isAdmin === 'true') return true;
+      
+      // DEFAULT: USER = FALSE
+      return false;
+      
+    } catch(e) {
+      // JIKA ERROR, ANGGAP USER = FALSE
+      return false;
+    }
+  }
+
+  // ==================== SET ADMIN ====================
+
+  setAdmin(wsId, isAdmin = true) {
+    try {
+      if (!wsId) return false;
+      const ws = this.wsMap.get(wsId);
+      if (!ws) return false;
+      
+      ws.isAdmin = isAdmin; // TRUE = ADMIN, FALSE = USER
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  setAdminByUsername(username, isAdmin = true) {
+    try {
+      if (!username) return false;
+      for (const [wsId, ws] of this.wsMap) {
+        if (ws.username === username) {
+          ws.isAdmin = isAdmin; // TRUE = ADMIN, FALSE = USER
+          return true;
+        }
+      }
+      return false;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  isUserAdmin(username) {
+    try {
+      if (!username) return false;
+      for (const [wsId, ws] of this.wsMap) {
+        if (ws.username === username) {
+          return ws.isAdmin === true || this._isAdmin(wsId);
+        }
+      }
+      return false;
     } catch(e) {
       return false;
     }
@@ -3144,124 +3507,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  async startGame(ws, bet, username) {
-    try {
-      if (this.isDestroyed) {
-        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]);
-        return;
-      }
-      if (!username?.trim()) {
-        this._safeSend(ws, ["gameLowCardError", "Username is required"]);
-        return;
-      }
-      const usernameClean = username.trim();
-      const room = this._ensureRoomConsistency(ws);
-      if (!room) {
-        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
-        return;
-      }
-      if (room === QUIZ_ROOM) {
-        this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]);
-        return;
-      }
-
-      const recordingStatus = await this._getRecordingStatus(room);
-      if (recordingStatus.enabled) {
-        this._safeSend(ws, ["gameLowCardError", 
-          "Recording is ACTIVE in this room! Users cannot start games."
-        ]);
-        this._safeSend(ws, ["recordingStatus", {
-          enabled: true,
-          room: room,
-          message: "Game cannot be started by users while recording is active."
-        }]);
-        return;
-      }
-
-      const startKey = `start_${room}`;
-      if (this._gameStartFlags.has(startKey)) {
-        this._safeSend(ws, ["gameLowCardError", "Game is already starting..."]);
-        return;
-      }
-      
-      const existingGame = this.activeGames.get(room);
-      if (existingGame?._isActive && !existingGame._gameEnded) {
-        this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
-        return;
-      }
-      
-      this._gameStartFlags.set(startKey, Date.now());
-      
-      if (existingGame) {
-        await this._forceCleanupGame(room, existingGame);
-      }
-      
-      const now = Date.now();
-      const lockTime = this._gameLocks.get(room);
-      if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
-        this._safeSend(ws, ["gameLowCardError", "Game is starting, please wait"]);
-        this._gameStartFlags.delete(startKey);
-        return;
-      }
-      this._gameLocks.set(room, now);
-      
-      try {
-        if (this.activeGames.size >= this._maxGames) {
-          this._safeSend(ws, ["gameLowCardError", "Server is busy"]);
-          this._gameLocks.delete(room);
-          this._gameStartFlags.delete(startKey);
-          return;
-        }
-        
-        const betAmount = parseInt(bet, 10) || 0;
-        if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
-          this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
-          this._gameLocks.delete(room);
-          this._gameStartFlags.delete(startKey);
-          return;
-        }
-        
-        const wsId = this._getWsId(ws);
-        const game = {
-          room, players: new Map(), botPlayers: new Map(), registrationOpen: true,
-          round: 1, numbers: new Map(), tanda: new Map(), eliminated: new Set(),
-          betAmount, hostId: usernameClean, hostName: usernameClean, useBots: false,
-          evaluationLocked: false, drawTimeExpired: false,
-          _isActive: true, _gameEnded: false, _phase: 'registration',
-          _botTimeouts: new Set(), _botsAdded: false,
-          _registrationTimer: null, _drawTimer: null, _evalTimer: null, _safetyTimer: null,
-          _isEvaluating: false, _createdAt: Date.now(), _drawPhaseStart: null, _endTime: null,
-          playerWsId: new Map(),
-          _startedByRecording: false,
-          _startedBy: 'user'
-        };
-        
-        game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
-        game.playerWsId.set(usernameClean, wsId);
-        this.activeGames.set(room, game);
-        this._addClient(room, ws, usernameClean, false);
-        this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
-        this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
-        this._startRegistration(room, game);
-        
-        setTimeout(() => {
-          try {
-            this._gameStartFlags.delete(startKey);
-            if (this._gameLocks.get(room) === now) this._gameLocks.delete(room);
-          } catch(e) {}
-        }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
-        
-      } catch(e) {
-        this._deleteGame(room, this.activeGames.get(room));
-        this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
-        this._gameLocks.delete(room);
-        this._gameStartFlags.delete(startKey);
-      }
-    } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
-    }
-  }
-
   async _forceCleanupGame(room, game) {
     try {
       if (!game) return;
@@ -3566,6 +3811,8 @@ export class GameServer extends CPUProtection {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
 
+      // ==================== RECORDING EVENTS ====================
+
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
@@ -3680,7 +3927,50 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // EVENT startGameWithRecording - TELAH DIHAPUS (NO AUTO-START)
+      // ==================== START GAME WITH RECORDING ====================
+      // HANYA ADMIN YANG BISA, DAN RECORDING HARUS TRUE
+
+      if (evt === "startGameWithRecording") {
+        const room = data[1];
+        const bet = data[2];
+        const username = data[3];
+        
+        if (!room || !username) {
+          this._safeSend(ws, ["startGameWithRecordingResult", {
+            success: false,
+            message: "Room and username required"
+          }]);
+          return;
+        }
+        
+        // ============ VALIDASI ADMIN ============
+        const wsId = this._getWsId(ws);
+        const isAdmin = this._isAdmin(wsId);
+        
+        if (!isAdmin) {
+          this._safeSend(ws, ["startGameWithRecordingResult", {
+            success: false,
+            message: "Only admin can start game with recording"
+          }]);
+          return;
+        }
+        // ========================================
+        
+        // startGameWithRecording HANYA BISA JIKA RECORDING = TRUE
+        const result = await this.startGameWithRecording(room, bet, username);
+        this._safeSend(ws, ["startGameWithRecordingResult", result]);
+        
+        if (result.success) {
+          this._broadcastToRoom(room, ["adminStartedGame", {
+            room: room,
+            bet: bet,
+            username: username,
+            success: true
+          }]);
+        }
+        
+        return;
+      }
 
       if (evt === "lowCardWinnerUpdate") {
         const room = data[1] || this._ensureRoomConsistency(ws);
@@ -3735,6 +4025,8 @@ export class GameServer extends CPUProtection {
         
         return;
       }
+
+      // ==================== QUIZ EVENTS ====================
 
       if (evt === "getUserCountryInfo") {
         const wsId = this._getWsId(ws);
@@ -3902,12 +4194,15 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== LOWCARD GAME EVENTS ====================
+
       const room = this._ensureRoomConsistency(ws);
       if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
       if (room === QUIZ_ROOM) { this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); return; }
 
       switch (evt) {
         case "gameLowCardStart":
+          // startGame SUDAH CEK RECORDING = FALSE
           await this.startGame(ws, data[1], data[2]);
           break;
         case "gameLowCardJoin":
