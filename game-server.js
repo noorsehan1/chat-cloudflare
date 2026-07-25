@@ -56,9 +56,7 @@ const CONSTANTS = {
   MAX_UNHANDLED_ERRORS: 5,
   ERROR_RESET_INTERVAL_MS: 60000,
   LOWCARD_WINNER_KEY: 'lowcard_winner_',
-  LOWCARD_RECORDING_KEY: 'lowcard_recording_status_',
-  // DAFTAR ADMIN
-  ADMIN_USERNAMES: ['Admin', 'admin', 'OWNER', 'Owner', 'Administrator', 'ADMIN']
+  LOWCARD_RECORDING_KEY: 'lowcard_recording_status_'
 };
 
 const QUIZ_SCHEDULE = {
@@ -540,14 +538,8 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== ADMIN CHECK ====================
-  
-  _isAdminUser(username) {
-    if (!username) return false;
-    return CONSTANTS.ADMIN_USERNAMES.includes(username);
-  }
-
   // ==================== RECORDING WINNERS ====================
+  // SIAPA PUN BISA PAKAI - TANPA CEK ADMIN
 
   async _startRecordingWinners(roomName, ws) {
     try {
@@ -560,15 +552,6 @@ export class GameServer extends CPUProtection {
         return false;
       }
       
-      // CEK ADMIN
-      if (!this._isAdminUser(ws?.username)) {
-        if (ws) this._safeSend(ws, ["gameLowCardError", 
-          "ACCESS DENIED: Only admin can start recording!"
-        ]);
-        return false;
-      }
-      
-      // Aktifkan recording
       this._recordingEnabled.set(roomName, true);
       this._gameBlocked.set(roomName, true);
       
@@ -581,7 +564,6 @@ export class GameServer extends CPUProtection {
       
       await this._loadRoomWinnersToCache(roomName);
       
-      // Hentikan game yang sedang berjalan
       const existingGame = this.activeGames.get(roomName);
       if (existingGame?._isActive && !existingGame._gameEnded) {
         await this._forceCleanupGame(roomName, existingGame);
@@ -590,7 +572,6 @@ export class GameServer extends CPUProtection {
         ]);
       }
       
-      // Broadcast ke room
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: true,
         room: roomName,
@@ -631,15 +612,6 @@ export class GameServer extends CPUProtection {
         return false;
       }
       
-      // CEK ADMIN
-      if (!this._isAdminUser(ws?.username)) {
-        if (ws) this._safeSend(ws, ["gameLowCardError", 
-          "ACCESS DENIED: Only admin can stop recording!"
-        ]);
-        return false;
-      }
-      
-      // Matikan recording
       this._recordingEnabled.set(roomName, false);
       this._gameBlocked.set(roomName, false);
       
@@ -647,7 +619,6 @@ export class GameServer extends CPUProtection {
         await this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + roomName);
       }
       
-      // Broadcast ke room
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: false,
         room: roomName,
@@ -917,19 +888,11 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== ADMIN START GAME WITH RECORDING ====================
+  // ==================== START GAME WITH RECORDING ====================
+  // SIAPA PUN BISA PAKAI - ASALKAN RECORDING AKTIF
 
   async _startGameWithRecording(ws, room, bet, username) {
     try {
-      // CEK ADMIN
-      if (!this._isAdminUser(ws.username)) {
-        this._safeSend(ws, ["gameLowCardError", 
-          "ACCESS DENIED: Only admin can start game with recording!"
-        ]);
-        return;
-      }
-
-      // VALIDASI PARAMETER
       if (!room || !username) {
         this._safeSend(ws, ["gameLowCardError", "Room and username required"]);
         return;
@@ -941,7 +904,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // CEK RECORDING HARUS AKTIF
       const recordingStatus = await this._getRecordingStatus(room);
       if (!recordingStatus.enabled) {
         this._safeSend(ws, ["gameLowCardError", 
@@ -950,7 +912,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // CEK GAME BERJALAN
       const existingGame = this.activeGames.get(room);
       if (existingGame?._isActive && !existingGame._gameEnded) {
         this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
@@ -961,7 +922,6 @@ export class GameServer extends CPUProtection {
         await this._forceCleanupGame(room, existingGame);
       }
       
-      // LOCK
       const now = Date.now();
       const lockTime = this._gameLocks.get(room);
       if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
@@ -1001,7 +961,7 @@ export class GameServer extends CPUProtection {
           _endTime: null,
           playerWsId: new Map(),
           _startedByRecording: true,
-          _startedBy: 'admin'
+          _startedBy: 'app'
         };
         
         game.players.set(username, { id: username, name: username });
@@ -1017,8 +977,7 @@ export class GameServer extends CPUProtection {
         this._broadcastToRoom(room, ["gameLowCardStartSuccess", username, betAmount]);
         this._broadcastToRoom(room, ["recordingGameStarted", {
           room: room,
-          startedBy: 'admin',
-          adminUsername: ws.username || 'Admin',
+          startedBy: 'app',
           host: username,
           bet: betAmount,
           timestamp: Date.now()
@@ -1031,8 +990,8 @@ export class GameServer extends CPUProtection {
           room: room,
           bet: betAmount,
           host: username,
-          startedBy: 'admin',
-          message: "Game started with recording by admin"
+          startedBy: 'app',
+          message: "Game started with recording"
         }]);
         
       } catch(e) {
@@ -1075,7 +1034,7 @@ export class GameServer extends CPUProtection {
         gameRunning: isGameRunning || false,
         room: roomName,
         message: isBlocked ? 
-          "Game is blocked. Recording is active. Wait for admin to stop recording." : 
+          "Game is blocked. Recording is active. Wait for recording to stop." : 
           "Game is available! You can start playing.",
         canStartGame: !isBlocked && !isGameRunning,
         canJoinGame: !isBlocked && isGameRunning
@@ -1119,29 +1078,33 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // CEK RECORDING STATUS
-      const recordingStatus = await this._getRecordingStatus(room);
-      
-      if (recordingStatus.gameBlocked || recordingStatus.enabled) {
+      const isBlocked = await this._isGameBlocked(room);
+      if (isBlocked) {
         this._safeSend(ws, ["gameLowCardError", 
-          "GAME IS BLOCKED! Recording is active in this room. Wait for admin to stop recording."
+          "GAME IS BLOCKED! Recording is active in this room. Wait for recording to stop."
         ]);
         this._safeSend(ws, ["gameBlocked", {
           blocked: true,
           room: room,
           reason: "Recording is active",
-          message: "Game is blocked while recording is active. Contact admin to stop recording."
-        }]);
-        this._safeSend(ws, ["recordingStatus", {
-          enabled: true,
-          room: room,
-          gameBlocked: true,
-          message: "Recording active - Game blocked"
+          message: "Game is blocked while recording is active"
         }]);
         return;
       }
 
-      // LANJUTKAN START GAME
+      const recordingStatus = await this._getRecordingStatus(room);
+      if (recordingStatus.enabled) {
+        this._safeSend(ws, ["gameLowCardError", 
+          "Recording is ACTIVE in this room! Users cannot start games."
+        ]);
+        this._safeSend(ws, ["recordingStatus", {
+          enabled: true,
+          room: room,
+          message: "Game cannot be started by users while recording is active."
+        }]);
+        return;
+      }
+
       const startKey = `start_${room}`;
       if (this._gameStartFlags.has(startKey)) {
         this._safeSend(ws, ["gameLowCardError", "Game is already starting..."]);
@@ -3042,6 +3005,8 @@ export class GameServer extends CPUProtection {
     } catch(e) { return false; }
   }
 
+  // ==================== GAME HELPER METHODS ====================
+
   _isGameActuallyRunning(game) { try { return game?._isActive === true && !game?._gameEnded; } catch(e) { return false; } }
 
   _isGameValid(game) { try { return game?._isActive === true && !game?._gameEnded && game?.players?.size > 0; } catch(e) { return false; } }
@@ -3839,6 +3804,8 @@ export class GameServer extends CPUProtection {
     } catch(e) { return array || []; }
   }
 
+  // ==================== EVENT HANDLER ====================
+
   async handleEvent(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data?.[0]) return;
@@ -3903,14 +3870,13 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== EVENT HANDLER (UTAMA) ====================
-
   async _handleEventInternal(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
 
       // ==================== RECORDING EVENTS ====================
+      // SIAPA PUN BISA - TANPA CEK ADMIN
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
@@ -3921,7 +3887,7 @@ export class GameServer extends CPUProtection {
           }]);
           return;
         }
-        const success = await this._startRecordingWinners(roomName, ws);
+        await this._startRecordingWinners(roomName, ws);
         return;
       }
 
@@ -3935,7 +3901,7 @@ export class GameServer extends CPUProtection {
           }]);
           return;
         }
-        const success = await this._stopRecordingWinners(roomName, ws);
+        await this._stopRecordingWinners(roomName, ws);
         return;
       }
 
@@ -4013,16 +3979,12 @@ export class GameServer extends CPUProtection {
           }]);
           return;
         }
-        const success = await this._resetLowCardWinners(room);
-        this._safeSend(ws, ["resetRoomWinnersResult", {
-          success: success,
-          room: room,
-          message: success ? "Winners data reset for " + room : "Failed to reset winners data"
-        }]);
+        await this._resetLowCardWinners(room);
         return;
       }
 
-      // ==================== ADMIN START GAME WITH RECORDING ====================
+      // ==================== START GAME WITH RECORDING ====================
+      // SIAPA PUN BISA - ASALKAN RECORDING AKTIF
       if (evt === "startGameWithRecording") {
         const [_, room, bet, username] = data;
         await this._startGameWithRecording(ws, room, bet, username);
@@ -4288,79 +4250,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  _checkStuckGames() {
-    try {
-      const now = Date.now();
-      for (const [room, game] of this.activeGames) {
-        if (!game?._isActive || game._gameEnded) continue;
-        if (game._phase === 'draw' && game._drawPhaseStart &&
-            (now - game._drawPhaseStart) > CONSTANTS.STUCK_DRAW_TIMEOUT_MS) {
-          this._broadcastToRoom(room, ["gameLowCardError", "Game stuck, forcing evaluation..."]);
-          this._closeDrawPhase(room, game);
-        }
-        if (game._phase === 'registration' && game.registrationOpen &&
-            game._createdAt && (now - game._createdAt) > CONSTANTS.STUCK_REGISTRATION_TIMEOUT_MS) {
-          this._broadcastToRoom(room, ["gameLowCardError", "Registration timeout"]);
-          this._closeRegistration(room, game);
-        }
-        if (game._phase !== 'registration' && !game.registrationOpen) {
-          const activePlayers = this._getActivePlayers(game);
-          if (activePlayers.length === 0 && !game._gameEnded) {
-            game._gameEnded = true;
-            game._isActive = false;
-            game._endTime = Date.now();
-            this._broadcastToRoom(room, ["gameLowCardEnd", []]);
-            this._scheduleGameCleanup(room, game);
-          }
-        }
-      }
-    } catch(e) {}
-  }
-
-  _cleanupStaleGames() {
-    try {
-      const now = Date.now();
-      for (const [room, game] of this.activeGames) {
-        if (!game) continue;
-        if (game._isActive && !game._gameEnded) continue;
-        if (game._gameEnded) {
-          const endTime = game._endTime || game._createdAt || now;
-          if ((now - endTime) > CONSTANTS.STALE_GAME_TIMEOUT_MS) this._scheduleGameCleanup(room, game);
-          continue;
-        }
-        if (!game._isActive && !game._gameEnded && game._createdAt && (now - game._createdAt) > 300000) {
-          game._gameEnded = true;
-          game._endTime = now;
-          this._scheduleGameCleanup(room, game);
-        }
-      }
-    } catch(e) {}
-  }
-
-  _cleanupDeadConnections() {
-    try {
-      const toRemove = [];
-      for (const [wsId, ws] of this.wsMap) {
-        if (!ws || ws.readyState !== 1 || ws._closing) toRemove.push(wsId);
-      }
-      for (const wsId of toRemove) {
-        const ws = this.wsMap.get(wsId);
-        if (ws) {
-          const room = this.clientRooms.get(wsId);
-          if (room) this._removeClientFromRoom(room, wsId);
-          this.clientRooms.delete(wsId);
-          this.wsMap.delete(wsId);
-          this.userLanguage.delete(wsId);
-          this.userCountry.delete(wsId);
-          this._quizTimeLeftNotified.delete(wsId);
-          this._nextQuizNotified.delete(wsId);
-          for (const [username, conn] of this.userConnections) {
-            if (conn?.wsId === wsId) { this.userConnections.delete(username); break; }
-          }
-        }
-      }
-    } catch(e) {}
-  }
+  // ==================== FETCH ====================
 
   async fetch(req) {
     try {
@@ -4555,3 +4445,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 }
+
+// ==================== EXPORT ====================
+export { GameServer };
