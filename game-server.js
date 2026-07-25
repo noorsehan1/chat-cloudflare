@@ -530,6 +530,8 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== RECORDING WINNERS ====================
+
   async startGameWithRecording(room, bet, username) {
     try {
       if (this.isDestroyed) {
@@ -717,6 +719,9 @@ export class GameServer extends CPUProtection {
       
       if (this.env?.QUESTIONS) {
         await this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + roomName);
+        
+        const winnerKey = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
+        await this.env.QUESTIONS.delete(winnerKey);
       }
       
       this._roomWinnersCache.delete(roomName);
@@ -724,7 +729,15 @@ export class GameServer extends CPUProtection {
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: false,
         room: roomName,
-        message: "Recording winners stopped for " + roomName
+        message: "Recording stopped and winners data deleted for " + roomName
+      }]);
+      
+      this._broadcastToRoom(roomName, ["lowCardWinnersData", {
+        room: roomName,
+        winners: {},
+        totalPlayers: 0,
+        recording: false,
+        updatedAt: new Date().toISOString()
       }]);
       
       return true;
@@ -951,6 +964,8 @@ export class GameServer extends CPUProtection {
       return false;
     }
   }
+
+  // ==================== QUIZ METHODS ====================
 
   async _handleQuizWinner(username, correctAnswer) {
     try {
@@ -2505,6 +2520,8 @@ export class GameServer extends CPUProtection {
     } catch(e) { return false; }
   }
 
+  // ==================== WEBSOCKET AND GAME METHODS ====================
+
   _getWsId(ws) { return ws?._wsId || null; }
 
   _getRoomForWs(ws) {
@@ -3713,7 +3730,7 @@ export class GameServer extends CPUProtection {
           success: success,
           enabled: true,
           room: roomName,
-          message: success ? "Recording winners enabled for " + roomName : "Failed to enable recording"
+          message: success ? "Recording enabled for " + roomName : "Failed to enable recording"
         }]);
         return;
       }
@@ -3733,7 +3750,7 @@ export class GameServer extends CPUProtection {
           success: success,
           enabled: false,
           room: roomName,
-          message: success ? "Recording winners stopped for " + roomName : "Failed to stop recording"
+          message: success ? "Recording stopped and winners deleted for " + roomName : "Failed to stop recording"
         }]);
         return;
       }
@@ -3809,6 +3826,24 @@ export class GameServer extends CPUProtection {
           room: room,
           message: success ? "Winners data reset for " + room : "Failed to reset winners data"
         }]);
+        return;
+      }
+
+      if (evt === "startGameWithRecording") {
+        const room = data[1];
+        const bet = data[2];
+        const username = data[3];
+        
+        if (!room || !username) {
+          this._safeSend(ws, ["startGameWithRecordingResult", {
+            success: false,
+            message: "Room and username required"
+          }]);
+          return;
+        }
+        
+        const result = await this.startGameWithRecording(room, bet, username);
+        this._safeSend(ws, ["startGameWithRecordingResult", result]);
         return;
       }
 
@@ -4053,7 +4088,6 @@ export class GameServer extends CPUProtection {
           await this.checkGameRunning(ws, data[1]);
           break;
         default:
-          this._safeSend(ws, ["gameLowCardError", `Unknown event: ${evt}`]);
           break;
       }
     } catch(e) {
