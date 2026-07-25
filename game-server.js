@@ -77,12 +77,6 @@ const COUNTRY_LANGUAGE_MAP = {
 
 const SUPPORTED_LANGUAGES = ['en', 'id'];
 
-const ADMIN_USERNAMES = new Set([
-  'admin',
-  'administrator',
-  'owner'
-]);
-
 class CPUProtection {
   constructor() {
     this._cpuStartTime = 0;
@@ -534,173 +528,6 @@ export class GameServer extends CPUProtection {
       }, 8000);
 
     } catch(e) {}
-  }
-
-  // ==================== ADMIN METHODS ====================
-
-  async _isAdminUser(username) {
-    try {
-      if (!username) return false;
-      
-      if (ADMIN_USERNAMES.has(username.toLowerCase())) {
-        return true;
-      }
-      
-      if (this.env?.ADMIN_USERS) {
-        const admins = await this.env.ADMIN_USERS.get('list', 'json');
-        if (admins && Array.isArray(admins)) {
-          return admins.some(admin => admin.toLowerCase() === username.toLowerCase());
-        }
-      }
-      
-      return false;
-    } catch(e) {
-      return false;
-    }
-  }
-
-  async _startGameWithRecording(room, bet, username) {
-    try {
-      const isAdmin = await this._isAdminUser(username);
-      if (!isAdmin) {
-        this._broadcastToRoom(room, ["adminError", {
-          message: "Unauthorized: Only admins can start recording games",
-          username: username
-        }]);
-        return false;
-      }
-
-      if (!room || room.trim() === "") {
-        this._broadcastToRoom(room, ["adminError", {
-          message: "Invalid room name",
-          username: username
-        }]);
-        return false;
-      }
-
-      if (bet < 0 || (bet !== 0 && bet < 100) || bet > CONSTANTS.MAX_BET) {
-        this._broadcastToRoom(room, ["adminError", {
-          message: `Invalid bet amount (0 or 100-${CONSTANTS.MAX_BET})`,
-          username: username
-        }]);
-        return false;
-      }
-
-      const existingGame = this.activeGames.get(room);
-      if (existingGame?._isActive && !existingGame._gameEnded) {
-        await this._forceCleanupGame(room, existingGame);
-      }
-
-      await this._startRecordingWinners(room);
-
-      const game = {
-        room: room,
-        players: new Map(),
-        botPlayers: new Map(),
-        registrationOpen: false,
-        round: 1,
-        numbers: new Map(),
-        tanda: new Map(),
-        eliminated: new Set(),
-        betAmount: bet,
-        hostId: username,
-        hostName: username,
-        useBots: true,
-        evaluationLocked: false,
-        drawTimeExpired: false,
-        _isActive: true,
-        _gameEnded: false,
-        _phase: 'draw',
-        _botTimeouts: new Set(),
-        _botsAdded: false,
-        _registrationTimer: null,
-        _drawTimer: null,
-        _evalTimer: null,
-        _safetyTimer: null,
-        _isEvaluating: false,
-        _createdAt: Date.now(),
-        _drawPhaseStart: null,
-        _endTime: null,
-        playerWsId: new Map(),
-        _startedByRecording: true,
-        _startedBy: 'admin',
-        _adminUsername: username
-      };
-
-      game.players.set(username, { id: username, name: username });
-      const wsId = this._getWsIdFromUsername(username);
-      if (wsId) {
-        game.playerWsId.set(username, wsId);
-      }
-
-      const botNames = ["moz1", "moz2", "moz3", "moz4"];
-      for (let i = 0; i < 4; i++) {
-        const botId = `BOT_${room}_${i}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-        const botName = botNames[i % botNames.length];
-        game.players.set(botId, { id: botId, name: botName });
-        game.botPlayers.set(botId, botName);
-      }
-
-      this.activeGames.set(room, game);
-      this._gameLocks.set(room, Date.now());
-
-      this._broadcastToRoom(room, ["gameLowCardStart", bet]);
-      this._broadcastToRoom(room, ["gameLowCardStartSuccess", username, bet]);
-      this._broadcastToRoom(room, ["recordingGameStarted", {
-        room: room,
-        bet: bet,
-        startedBy: username,
-        timestamp: Date.now(),
-        recording: true,
-        players: Array.from(game.players.keys())
-      }]);
-
-      this._startDrawPhase(room, game);
-
-      return true;
-    } catch(e) {
-      this._broadcastToRoom(room, ["adminError", {
-        message: "Failed to start recording game: " + e.message,
-        username: username
-      }]);
-      return false;
-    }
-  }
-
-  async _stopRecordingGame(room, username) {
-    try {
-      const isAdmin = await this._isAdminUser(username);
-      if (!isAdmin) {
-        return false;
-      }
-
-      const game = this.activeGames.get(room);
-      if (game) {
-        await this._forceCleanupGame(room, game);
-      }
-
-      await this._stopRecordingWinners(room);
-
-      this._broadcastToRoom(room, ["recordingGameStopped", {
-        room: room,
-        stoppedBy: username,
-        timestamp: Date.now()
-      }]);
-
-      return true;
-    } catch(e) {
-      return false;
-    }
-  }
-
-  _getWsIdFromUsername(username) {
-    try {
-      if (!username) return null;
-      const conn = this.userConnections.get(username);
-      return conn?.wsId || null;
-    } catch(e) {
-      return null;
-    }
   }
 
   // ==================== RECORDING WINNERS ====================
@@ -3313,6 +3140,156 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  // ==================== START GAME WITH RECORDING ====================
+
+  async _handleStartGameWithRecording(ws, room, bet, username) {
+    try {
+      if (this.isDestroyed) {
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]);
+        return;
+      }
+      
+      if (!room || !room.trim()) {
+        this._safeSend(ws, ["gameLowCardError", "Room name is required"]);
+        return;
+      }
+      
+      if (!username || !username.trim()) {
+        this._safeSend(ws, ["gameLowCardError", "Username is required"]);
+        return;
+      }
+      
+      const roomClean = room.trim();
+      const usernameClean = username.trim();
+      const wsId = this._getWsId(ws);
+      
+      // Get recording status
+      const recordingStatus = await this._getRecordingStatus(roomClean);
+      
+      // Enable recording if not already enabled
+      if (!recordingStatus.enabled) {
+        await this._startRecordingWinners(roomClean);
+      }
+      
+      // Check if game already exists
+      const existingGame = this.activeGames.get(roomClean);
+      if (existingGame?._isActive && !existingGame._gameEnded) {
+        // End existing game first
+        existingGame._gameEnded = true;
+        existingGame._isActive = false;
+        existingGame._endTime = Date.now();
+        this._broadcastToRoom(roomClean, ["gameLowCardEnd", []]);
+        this._scheduleGameCleanup(roomClean, existingGame);
+        
+        // Wait a moment for cleanup
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      
+      // Now start the game
+      const betAmount = parseInt(bet, 10) || 0;
+      if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
+        this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
+        return;
+      }
+      
+      // Check if room is already locked
+      const now = Date.now();
+      const lockTime = this._gameLocks.get(roomClean);
+      if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
+        this._safeSend(ws, ["gameLowCardError", "Game is starting, please wait"]);
+        return;
+      }
+      this._gameLocks.set(roomClean, now);
+      
+      try {
+        if (this.activeGames.size >= this._maxGames) {
+          this._safeSend(ws, ["gameLowCardError", "Server is busy"]);
+          this._gameLocks.delete(roomClean);
+          return;
+        }
+        
+        const game = {
+          room: roomClean,
+          players: new Map(),
+          botPlayers: new Map(),
+          registrationOpen: true,
+          round: 1,
+          numbers: new Map(),
+          tanda: new Map(),
+          eliminated: new Set(),
+          betAmount,
+          hostId: usernameClean,
+          hostName: usernameClean,
+          useBots: false,
+          evaluationLocked: false,
+          drawTimeExpired: false,
+          _isActive: true,
+          _gameEnded: false,
+          _phase: 'registration',
+          _botTimeouts: new Set(),
+          _botsAdded: false,
+          _registrationTimer: null,
+          _drawTimer: null,
+          _evalTimer: null,
+          _safetyTimer: null,
+          _isEvaluating: false,
+          _createdAt: Date.now(),
+          _drawPhaseStart: null,
+          _endTime: null,
+          playerWsId: new Map(),
+          _startedByRecording: true,
+          _startedBy: 'admin',
+          _recordingEnabled: true
+        };
+        
+        game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
+        game.playerWsId.set(usernameClean, wsId);
+        this.activeGames.set(roomClean, game);
+        
+        // Ensure client is in the room
+        this._addClient(roomClean, ws, usernameClean, false);
+        
+        // Broadcast game start
+        this._broadcastToRoom(roomClean, ["gameLowCardStart", betAmount]);
+        this._broadcastToRoom(roomClean, ["gameLowCardStartSuccess", usernameClean, betAmount]);
+        
+        // Start registration
+        this._startRegistration(roomClean, game);
+        
+        // Send success response to admin
+        this._safeSend(ws, ["gameLowCardAdminStartSuccess", {
+          room: roomClean,
+          bet: betAmount,
+          host: usernameClean,
+          recordingEnabled: true,
+          startedBy: 'admin'
+        }]);
+        
+        // Broadcast recording status
+        this._broadcastToRoom(roomClean, ["recordingStatus", {
+          enabled: true,
+          room: roomClean,
+          startedBy: 'admin',
+          message: "Game started by admin with recording enabled"
+        }]);
+        
+        setTimeout(() => {
+          try {
+            if (this._gameLocks.get(roomClean) === now) this._gameLocks.delete(roomClean);
+          } catch(e) {}
+        }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
+        
+      } catch(e) {
+        this._deleteGame(roomClean, this.activeGames.get(roomClean));
+        this._safeSend(ws, ["gameLowCardError", "Failed to start game: " + e.message]);
+        this._gameLocks.delete(roomClean);
+      }
+      
+    } catch(e) {
+      this._safeSend(ws, ["gameLowCardError", "Failed to start game with recording"]);
+    }
+  }
+
   async startGame(ws, bet, username) {
     try {
       if (this.isDestroyed) {
@@ -3735,53 +3712,6 @@ export class GameServer extends CPUProtection {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
 
-      // ==================== ADMIN EVENTS ====================
-      
-      if (evt === "startGameWithRecording") {
-        const room = data[1];
-        const bet = data[2];
-        const username = data[3];
-        
-        const success = await this._startGameWithRecording(room, bet, username);
-        
-        this._safeSend(ws, ["adminGameStartResult", {
-          success: success,
-          room: room,
-          bet: bet,
-          username: username,
-          timestamp: Date.now(),
-          message: success ? "Game started with recording" : "Failed to start game"
-        }]);
-        
-        return;
-      }
-
-      if (evt === "stopRecordingGame") {
-        const room = data[1];
-        const username = data[2];
-        
-        const success = await this._stopRecordingGame(room, username);
-        
-        this._safeSend(ws, ["adminGameStopResult", {
-          success: success,
-          room: room,
-          username: username,
-          timestamp: Date.now()
-        }]);
-        
-        return;
-      }
-
-      if (evt === "isAdmin") {
-        const username = data[1];
-        const isAdmin = await this._isAdminUser(username);
-        this._safeSend(ws, ["adminStatus", {
-          username: username,
-          isAdmin: isAdmin
-        }]);
-        return;
-      }
-
       // ==================== RECORDING EVENTS ====================
 
       if (evt === "startRecordingWinners") {
@@ -3895,6 +3825,14 @@ export class GameServer extends CPUProtection {
           room: room,
           message: success ? "Winners data reset for " + room : "Failed to reset winners data"
         }]);
+        return;
+      }
+
+      // ==================== START GAME WITH RECORDING ====================
+
+      if (evt === "startGameWithRecording") {
+        const [_, room, bet, username] = data;
+        await this._handleStartGameWithRecording(ws, room, bet, username);
         return;
       }
 
