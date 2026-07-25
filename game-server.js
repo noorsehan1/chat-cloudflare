@@ -700,7 +700,7 @@ export class GameServer extends CPUProtection {
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: true,
         room: roomName,
-        message: "Recording winners enabled for " + roomName
+        message: "Recording enabled for " + roomName
       }]);
       
       await this._sendWinnersToRoom(roomName);
@@ -719,7 +719,6 @@ export class GameServer extends CPUProtection {
       
       if (this.env?.QUESTIONS) {
         await this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + roomName);
-        
         const winnerKey = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
         await this.env.QUESTIONS.delete(winnerKey);
       }
@@ -729,7 +728,7 @@ export class GameServer extends CPUProtection {
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: false,
         room: roomName,
-        message: "Recording stopped and winners data deleted for " + roomName
+        message: "Recording stopped and winners deleted for " + roomName
       }]);
       
       this._broadcastToRoom(roomName, ["lowCardWinnersData", {
