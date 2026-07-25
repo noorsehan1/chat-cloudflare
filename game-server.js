@@ -504,7 +504,8 @@ export class GameServer extends CPUProtection {
       this._canSubmitAnswer = false;
 
       this._recordingEnabled = new Map();
-      this._roomWinnersCache = new Map();
+      // ============ HAPUS CACHE WINNERS ============
+      // this._roomWinnersCache = new Map(); // <-- DIHAPUS
 
       this.countryQuizSystem = new CountryBasedQuizSystem(this);
 
@@ -530,7 +531,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== RECORDING WINNERS ====================
+  // ==================== RECORDING WINNERS (NO CACHE) ====================
 
   async _startRecordingWinners(roomName) {
     try {
@@ -544,8 +545,6 @@ export class GameServer extends CPUProtection {
           'true'
         );
       }
-      
-      await this._loadRoomWinnersToCache(roomName);
       
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: true,
@@ -566,12 +565,15 @@ export class GameServer extends CPUProtection {
       this._recordingEnabled.set(roomName, false);
       
       if (this.env?.QUESTIONS) {
+        // HAPUS RECORDING STATUS
         await this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + roomName);
+        
+        // HAPUS DATA WINNERS DARI KV
         const winnerKey = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
         await this.env.QUESTIONS.delete(winnerKey);
+        
+        // TIDAK ADA LAGI HAPUS CACHE
       }
-      
-      this._roomWinnersCache.delete(roomName);
       
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: false,
@@ -616,26 +618,23 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  async _loadRoomWinnersToCache(roomName) {
+  // ============ LANGSUNG AMBIL DARI KV, TIDAK PAKAI CACHE ============
+  async _getLowCardWinners(room) {
     try {
-      if (!roomName) return;
-      if (!this.env?.QUESTIONS) return;
+      if (!room) return {};
+      if (!this.env?.QUESTIONS) return {};
       
-      const key = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
+      const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       const winners = await this.env.QUESTIONS.get(key, 'json');
       
       if (winners && typeof winners === 'object') {
-        this._roomWinnersCache.set(roomName, {
-          winners: winners,
-          lastUpdated: Date.now()
-        });
-      } else {
-        this._roomWinnersCache.set(roomName, {
-          winners: {},
-          lastUpdated: Date.now()
-        });
+        return winners;
       }
-    } catch(e) {}
+      
+      return {};
+    } catch(e) {
+      return {};
+    }
   }
 
   async _addLowCardWinner(room, username) {
@@ -655,25 +654,20 @@ export class GameServer extends CPUProtection {
       
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       
+      // LANGSUNG AMBIL DARI KV
       let roomWinners = {};
-      if (this._roomWinnersCache.has(room)) {
-        roomWinners = this._roomWinnersCache.get(room).winners || {};
-      } else {
-        const existing = await this.env.QUESTIONS.get(key, 'json');
-        if (existing && typeof existing === 'object') {
-          roomWinners = existing;
-        }
+      const existing = await this.env.QUESTIONS.get(key, 'json');
+      if (existing && typeof existing === 'object') {
+        roomWinners = existing;
       }
       
+      // Update winner
       roomWinners[username] = (roomWinners[username] || 0) + 1;
       
-      this._roomWinnersCache.set(room, {
-        winners: roomWinners,
-        lastUpdated: Date.now()
-      });
-      
+      // SIMPAN LANGSUNG KE KV
       await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       
+      // Broadcast update
       const winnerData = {
         room: room,
         winners: roomWinners,
@@ -700,23 +694,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  async _broadcastWinnersToRoom(room, winners) {
-    try {
-      if (!room) return;
-      
-      const winnerData = {
-        room: room,
-        winners: winners || {},
-        totalPlayers: winners ? Object.keys(winners).length : 0,
-        recording: true,
-        updatedAt: new Date().toISOString(),
-        type: 'fullRefresh'
-      };
-      
-      this._broadcastToRoom(room, ["lowCardWinnersData", winnerData]);
-    } catch(e) {}
-  }
-
   async _sendWinnersToRoom(room) {
     try {
       if (!room) return;
@@ -731,15 +708,8 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      let winners = {};
-      if (this._roomWinnersCache.has(room)) {
-        winners = this._roomWinnersCache.get(room).winners || {};
-      } else {
-        await this._loadRoomWinnersToCache(room);
-        if (this._roomWinnersCache.has(room)) {
-          winners = this._roomWinnersCache.get(room).winners || {};
-        }
-      }
+      // LANGSUNG AMBIL DARI KV
+      const winners = await this._getLowCardWinners(room);
       
       if (Object.keys(winners).length === 0) {
         this._broadcastToRoom(room, ["lowCardWinnersData", {
@@ -752,34 +722,18 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      await this._broadcastWinnersToRoom(room, winners);
+      // Broadcast langsung
+      const winnerData = {
+        room: room,
+        winners: winners || {},
+        totalPlayers: winners ? Object.keys(winners).length : 0,
+        recording: true,
+        updatedAt: new Date().toISOString(),
+        type: 'fullRefresh'
+      };
+      
+      this._broadcastToRoom(room, ["lowCardWinnersData", winnerData]);
     } catch(e) {}
-  }
-
-  async _getLowCardWinners(room) {
-    try {
-      if (!room) return {};
-      if (!this.env?.QUESTIONS) return {};
-      
-      if (this._roomWinnersCache.has(room)) {
-        return this._roomWinnersCache.get(room).winners || {};
-      }
-      
-      const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
-      const winners = await this.env.QUESTIONS.get(key, 'json');
-      
-      if (winners && typeof winners === 'object') {
-        this._roomWinnersCache.set(room, {
-          winners: winners,
-          lastUpdated: Date.now()
-        });
-        return winners;
-      }
-      
-      return {};
-    } catch(e) {
-      return {};
-    }
   }
 
   async _resetLowCardWinners(room) {
@@ -790,7 +744,7 @@ export class GameServer extends CPUProtection {
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       await this.env.QUESTIONS.delete(key);
       
-      this._roomWinnersCache.delete(room);
+      // TIDAK ADA LAGI HAPUS CACHE
       
       this._broadcastToRoom(room, ["resetRoomWinnersResult", {
         success: true,
@@ -821,7 +775,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // Validate room
       if (!room || room.trim() === "") {
         this._safeSend(ws, ["gameLowCardError", "Invalid room name"]);
         return;
@@ -829,7 +782,6 @@ export class GameServer extends CPUProtection {
       
       const roomName = room.trim();
       
-      // Validate username
       if (!username || username.trim() === "") {
         this._safeSend(ws, ["gameLowCardError", "Username is required"]);
         return;
@@ -837,7 +789,6 @@ export class GameServer extends CPUProtection {
       
       const usernameClean = username.trim();
       
-      // Validate bet
       const betAmount = parseInt(bet, 10) || 0;
       if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
         this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
@@ -850,7 +801,6 @@ export class GameServer extends CPUProtection {
         await this._startRecordingWinners(roomName);
       }
       
-      // Check if game already running
       const startKey = `start_${roomName}`;
       if (this._gameStartFlags.has(startKey)) {
         this._safeSend(ws, ["gameLowCardError", "Game is already starting..."]);
@@ -888,7 +838,6 @@ export class GameServer extends CPUProtection {
         
         const wsId = this._getWsId(ws);
         
-        // Create game with recording flag
         const game = {
           room: roomName, 
           players: new Map(), 
@@ -927,7 +876,6 @@ export class GameServer extends CPUProtection {
         this.activeGames.set(roomName, game);
         this._addClient(roomName, ws, usernameClean, false);
         
-        // Broadcast that admin started game with recording
         this._broadcastToRoom(roomName, ["gameLowCardStart", betAmount]);
         this._broadcastToRoom(roomName, ["gameLowCardStartSuccess", usernameClean, betAmount]);
         this._broadcastToRoom(roomName, ["recordingStatus", {
@@ -936,7 +884,6 @@ export class GameServer extends CPUProtection {
           message: "Admin started game with recording enabled"
         }]);
         
-        // Send confirmation to admin
         this._safeSend(ws, ["adminGameStarted", {
           success: true,
           room: roomName,
@@ -3732,13 +3679,11 @@ export class GameServer extends CPUProtection {
           return;
         }
         
-        // Check if recording is enabled, if not enable it
         const recordingStatus = await this._getRecordingStatus(room);
         if (!recordingStatus.enabled) {
           await this._startRecordingWinners(room);
         }
         
-        // Start game with recording
         await this._startGameWithRecording(ws, room, bet, username);
         return;
       }
