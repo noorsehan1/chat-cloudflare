@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS ====================
+// ==================== GAME-SERVER.JS - FULL CLASS ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -77,6 +77,8 @@ const COUNTRY_LANGUAGE_MAP = {
 };
 
 const SUPPORTED_LANGUAGES = ['en', 'id'];
+
+// ==================== CPU PROTECTION CLASS ====================
 
 class CPUProtection {
   constructor() {
@@ -186,6 +188,8 @@ class CPUProtection {
     }, CONSTANTS.CPU_CHECK_INTERVAL_MS);
   }
 }
+
+// ==================== COUNTRY BASED QUIZ SYSTEM ====================
 
 class CountryBasedQuizSystem {
   constructor(gameServer) {
@@ -402,6 +406,8 @@ class CountryBasedQuizSystem {
   }
 }
 
+// ==================== GAME SERVER CLASS ====================
+
 export class GameServer extends CPUProtection {
   constructor(state, env) {
     try {
@@ -504,8 +510,9 @@ export class GameServer extends CPUProtection {
       this._questionStartTime = null;
       this._canSubmitAnswer = false;
 
-      // LOWCARD RECORDING - PER ROOM
+      // ==================== LOWCARD RECORDING - PER ROOM ====================
       this._recordingEnabled = new Map();
+      this._roomWinnersCache = new Map();
 
       this.countryQuizSystem = new CountryBasedQuizSystem(this);
 
@@ -534,9 +541,6 @@ export class GameServer extends CPUProtection {
 
   // ==================== LOWCARD WINNER MANAGEMENT ====================
 
-  /**
-   * Start pencatatan winner untuk room tertentu
-   */
   async _startRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
@@ -550,11 +554,15 @@ export class GameServer extends CPUProtection {
         );
       }
       
+      await this._loadRoomWinnersToCache(roomName);
+      
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: true,
         room: roomName,
         message: "Pencatatan winner diaktifkan untuk room " + roomName
       }]);
+      
+      await this._sendWinnersToRoom(roomName);
       
       console.log('[LOWCARD] Recording winners started for room:', roomName);
       return true;
@@ -564,9 +572,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Stop pencatatan winner untuk room tertentu dan hapus semua data
-   */
   async _stopRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
@@ -574,13 +579,10 @@ export class GameServer extends CPUProtection {
       this._recordingEnabled.set(roomName, false);
       
       if (this.env?.QUESTIONS) {
-        // Hapus status recording
         await this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + roomName);
-        
-        // Hapus data winner untuk room ini
-        const key = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
-        await this.env.QUESTIONS.delete(key);
       }
+      
+      this._roomWinnersCache.delete(roomName);
       
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: false,
@@ -596,19 +598,14 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Cek status recording untuk room tertentu
-   */
   async _getRecordingStatus(roomName) {
     try {
       if (!roomName) return { enabled: false };
       
-      // Cek dari memory dulu
       if (this._recordingEnabled.has(roomName)) {
         return { enabled: this._recordingEnabled.get(roomName) };
       }
       
-      // Cek dari KV
       if (this.env?.QUESTIONS) {
         const status = await this.env.QUESTIONS.get(
           CONSTANTS.LOWCARD_RECORDING_KEY + roomName
@@ -624,17 +621,44 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Menambahkan kemenangan untuk player di room tertentu
-   */
+  async _loadRoomWinnersToCache(roomName) {
+    try {
+      if (!roomName) return;
+      if (!this.env?.QUESTIONS) return;
+      
+      const key = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
+      const winners = await this.env.QUESTIONS.get(key, 'json');
+      
+      if (winners && typeof winners === 'object') {
+        this._roomWinnersCache.set(roomName, {
+          winners: winners,
+          lastUpdated: Date.now()
+        });
+      } else {
+        this._roomWinnersCache.set(roomName, {
+          winners: {},
+          lastUpdated: Date.now()
+        });
+      }
+    } catch(e) {
+      console.error('[LOWCARD] Error loading room winners:', e);
+    }
+  }
+
   async _addLowCardWinner(room, username) {
     try {
       if (!room || !username) return false;
       
-      // Cek apakah recording enabled untuk room ini
+      // CEK: Apakah recording enabled untuk room ini?
       const status = await this._getRecordingStatus(room);
       if (!status.enabled) {
-        console.log('[LOWCARD] Recording disabled for room:', room);
+        console.log('[LOWCARD] Recording DISABLED for room:', room, '- NOT saving winner');
+        return false;
+      }
+      
+      // CEK: Apakah room adalah Quiz room? Jangan catat
+      if (room === QUIZ_ROOM) {
+        console.log('[LOWCARD] Quiz room - NOT saving winner');
         return false;
       }
       
@@ -642,15 +666,26 @@ export class GameServer extends CPUProtection {
       
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       
-      // Ambil data existing
-      let roomWinners = await this.env.QUESTIONS.get(key, 'json');
-      if (!roomWinners) roomWinners = {};
+      let roomWinners = {};
+      if (this._roomWinnersCache.has(room)) {
+        roomWinners = this._roomWinnersCache.get(room).winners || {};
+      } else {
+        const existing = await this.env.QUESTIONS.get(key, 'json');
+        if (existing && typeof existing === 'object') {
+          roomWinners = existing;
+        }
+      }
       
-      // Tambah win count
       roomWinners[username] = (roomWinners[username] || 0) + 1;
       
-      // Simpan ke KV
+      this._roomWinnersCache.set(room, {
+        winners: roomWinners,
+        lastUpdated: Date.now()
+      });
+      
       await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
+      
+      console.log('[LOWCARD] Winner recorded for room:', room, 'User:', username, 'Total wins:', roomWinners[username]);
       
       // Kirim update ke semua user dalam room
       this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
@@ -669,32 +704,36 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Broadcast hasil JSON pemenang ke semua user dalam room
-   */
   async _broadcastWinnersToRoom(room, winners) {
     try {
       if (!room) return;
-      if (!winners || Object.keys(winners).length === 0) return;
+      if (!winners || Object.keys(winners).length === 0) {
+        this._broadcastToRoom(room, ["lowCardWinnersData", {
+          room: room,
+          winners: {},
+          totalPlayers: 0,
+          recording: true,
+          updatedAt: new Date().toISOString()
+        }]);
+        return;
+      }
       
       const winnerData = {
         room: room,
         winners: winners,
         totalPlayers: Object.keys(winners).length,
+        recording: true,
         updatedAt: new Date().toISOString()
       };
       
       this._broadcastToRoom(room, ["lowCardWinnersData", winnerData]);
       
-      console.log('[LOWCARD] Winners data sent to room:', room);
+      console.log('[LOWCARD] Winners data sent to room:', room, 'Total players:', Object.keys(winners).length);
     } catch(e) {
       console.error('[LOWCARD] Error broadcasting winners:', e);
     }
   }
 
-  /**
-   * Mengambil dan mengirim data winners ke room
-   */
   async _sendWinnersToRoom(room) {
     try {
       if (!room) return;
@@ -709,12 +748,22 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      const winners = await this._getLowCardWinners(room);
+      let winners = {};
+      if (this._roomWinnersCache.has(room)) {
+        winners = this._roomWinnersCache.get(room).winners || {};
+      } else {
+        await this._loadRoomWinnersToCache(room);
+        if (this._roomWinnersCache.has(room)) {
+          winners = this._roomWinnersCache.get(room).winners || {};
+        }
+      }
+      
       if (Object.keys(winners).length === 0) {
         this._broadcastToRoom(room, ["lowCardWinnersData", {
           room: room,
           winners: {},
           totalPlayers: 0,
+          recording: true,
           message: "Belum ada pemenang"
         }]);
         return;
@@ -726,26 +775,33 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Mendapatkan daftar pemenang untuk room tertentu
-   */
   async _getLowCardWinners(room) {
     try {
       if (!room) return {};
       if (!this.env?.QUESTIONS) return {};
       
+      if (this._roomWinnersCache.has(room)) {
+        return this._roomWinnersCache.get(room).winners || {};
+      }
+      
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       const winners = await this.env.QUESTIONS.get(key, 'json');
-      return winners || {};
+      
+      if (winners && typeof winners === 'object') {
+        this._roomWinnersCache.set(room, {
+          winners: winners,
+          lastUpdated: Date.now()
+        });
+        return winners;
+      }
+      
+      return {};
     } catch(e) {
       console.error('[LOWCARD] Error getting winners:', e);
       return {};
     }
   }
 
-  /**
-   * Reset pemenang untuk room tertentu
-   */
   async _resetLowCardWinners(room) {
     try {
       if (!room) return false;
@@ -754,12 +810,23 @@ export class GameServer extends CPUProtection {
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       await this.env.QUESTIONS.delete(key);
       
+      this._roomWinnersCache.delete(room);
+      
       this._broadcastToRoom(room, ["resetRoomWinnersResult", {
         success: true,
         room: room,
         message: "Data winners untuk room " + room + " telah direset"
       }]);
       
+      this._broadcastToRoom(room, ["lowCardWinnersData", {
+        room: room,
+        winners: {},
+        totalPlayers: 0,
+        recording: true,
+        updatedAt: new Date().toISOString()
+      }]);
+      
+      console.log('[LOWCARD] Winners reset for room:', room);
       return true;
     } catch(e) {
       console.error('[LOWCARD] Error resetting winners:', e);
@@ -2734,6 +2801,10 @@ export class GameServer extends CPUProtection {
         if (notSubmitted.length > 0) { this._broadcastToRoom(room, ["gameLowCardTimeLeft", `Waiting for ${notSubmitted.length} player(s)`]); return; }
         const winner = activePlayers[0]?.name || "Unknown";
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
+        
+        // === CATAT PEMENANG (HANYA jika recording enabled untuk room ini) ===
+        this._addLowCardWinner(room, winner);
+        
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
@@ -2906,6 +2977,10 @@ export class GameServer extends CPUProtection {
           if (newActive.length === 1 && !game._gameEnded) {
             const winner = newActive[0]?.name || "Unknown";
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
+            
+            // === CATAT PEMENANG (HANYA jika recording enabled untuk room ini) ===
+            this._addLowCardWinner(room, winner);
+            
             game._gameEnded = true;
             game._isActive = false;
             game._endTime = Date.now();
@@ -3022,7 +3097,7 @@ export class GameServer extends CPUProtection {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        // === CATAT PEMENANG ===
+        // === CATAT PEMENANG (HANYA jika recording enabled untuk room ini) ===
         await this._addLowCardWinner(room, winnerName);
         
         game._gameEnded = true;
@@ -3068,7 +3143,7 @@ export class GameServer extends CPUProtection {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        // === CATAT PEMENANG ===
+        // === CATAT PEMENANG (HANYA jika recording enabled untuk room ini) ===
         await this._addLowCardWinner(room, winnerName);
         
         game._gameEnded = true;
@@ -3662,7 +3737,6 @@ export class GameServer extends CPUProtection {
 
       // ==================== LOWCARD WINNER EVENTS ====================
       
-      // START RECORDING WINNERS
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
@@ -3683,7 +3757,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // STOP RECORDING WINNERS
       if (evt === "stopRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
@@ -3704,7 +3777,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // GET RECORDING STATUS
       if (evt === "getRecordingStatus") {
         const roomName = data[1];
         if (!roomName) {
@@ -3723,7 +3795,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // GET ROOM WINNERS
       if (evt === "getRoomWinners") {
         const room = data[1];
         if (!room) {
@@ -3744,7 +3815,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // SEND WINNERS TO ROOM
       if (evt === "sendWinnersToRoom") {
         const room = data[1];
         if (!room) {
@@ -3763,7 +3833,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // RESET ROOM WINNERS
       if (evt === "resetRoomWinners") {
         const room = data[1];
         if (!room) {
