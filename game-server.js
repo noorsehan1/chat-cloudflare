@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS - FULL CLASS ====================
+// ==================== GAME-SERVER.JS - FULL CLASS WITH GAME BLOCKED ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -77,6 +77,7 @@ const COUNTRY_LANGUAGE_MAP = {
 
 const SUPPORTED_LANGUAGES = ['en', 'id'];
 
+// ==================== CPU PROTECTION CLASS ====================
 class CPUProtection {
   constructor() {
     this._cpuStartTime = 0;
@@ -186,6 +187,7 @@ class CPUProtection {
   }
 }
 
+// ==================== COUNTRY BASED QUIZ SYSTEM ====================
 class CountryBasedQuizSystem {
   constructor(gameServer) {
     this.gameServer = gameServer;
@@ -401,6 +403,7 @@ class CountryBasedQuizSystem {
   }
 }
 
+// ==================== MAIN GAME SERVER CLASS ====================
 export class GameServer extends CPUProtection {
   constructor(state, env) {
     try {
@@ -454,6 +457,7 @@ export class GameServer extends CPUProtection {
       this._tikCounter = 0;
       this._gameStartFlags = new Map();
 
+      // QUIZ PROPERTIES
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
@@ -503,8 +507,10 @@ export class GameServer extends CPUProtection {
       this._questionStartTime = null;
       this._canSubmitAnswer = false;
 
+      // RECORDING PROPERTIES
       this._recordingEnabled = new Map();
       this._roomWinnersCache = new Map();
+      this._gameBlocked = new Map(); // room -> boolean
 
       this.countryQuizSystem = new CountryBasedQuizSystem(this);
 
@@ -527,7 +533,9 @@ export class GameServer extends CPUProtection {
         }
       }, 8000);
 
-    } catch(e) {}
+    } catch(e) {
+      console.error("Constructor error:", e);
+    }
   }
 
   // ==================== RECORDING WINNERS ====================
@@ -536,7 +544,9 @@ export class GameServer extends CPUProtection {
     try {
       if (!roomName) return false;
       
+      // Aktifkan recording
       this._recordingEnabled.set(roomName, true);
+      this._gameBlocked.set(roomName, true);
       
       if (this.env?.QUESTIONS) {
         await this.env.QUESTIONS.put(
@@ -547,10 +557,27 @@ export class GameServer extends CPUProtection {
       
       await this._loadRoomWinnersToCache(roomName);
       
+      // Hentikan game yang sedang berjalan
+      const existingGame = this.activeGames.get(roomName);
+      if (existingGame?._isActive && !existingGame._gameEnded) {
+        await this._forceCleanupGame(roomName, existingGame);
+        this._broadcastToRoom(roomName, ["gameLowCardError", 
+          "Game stopped because recording was enabled"
+        ]);
+      }
+      
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: true,
         room: roomName,
-        message: "Recording enabled for " + roomName
+        gameBlocked: true,
+        message: "Recording enabled - GAME BLOCKED"
+      }]);
+      
+      this._broadcastToRoom(roomName, ["gameBlocked", {
+        blocked: true,
+        room: roomName,
+        reason: "Recording is active",
+        message: "Game is blocked while recording is active"
       }]);
       
       return true;
@@ -564,6 +591,7 @@ export class GameServer extends CPUProtection {
       if (!roomName) return false;
       
       this._recordingEnabled.set(roomName, false);
+      this._gameBlocked.set(roomName, false);
       
       if (this.env?.QUESTIONS) {
         await this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + roomName);
@@ -576,7 +604,14 @@ export class GameServer extends CPUProtection {
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: false,
         room: roomName,
-        message: "Recording stopped and winners deleted for " + roomName
+        gameBlocked: false,
+        message: "Recording stopped - GAME UNBLOCKED"
+      }]);
+      
+      this._broadcastToRoom(roomName, ["gameBlocked", {
+        blocked: false,
+        room: roomName,
+        message: "Game is now available"
       }]);
       
       this._broadcastToRoom(roomName, ["lowCardWinnersData", {
@@ -595,10 +630,12 @@ export class GameServer extends CPUProtection {
 
   async _getRecordingStatus(roomName) {
     try {
-      if (!roomName) return { enabled: false };
+      if (!roomName) return { enabled: false, gameBlocked: false };
       
       if (this._recordingEnabled.has(roomName)) {
-        return { enabled: this._recordingEnabled.get(roomName) };
+        const enabled = this._recordingEnabled.get(roomName);
+        const blocked = this._gameBlocked.get(roomName) || false;
+        return { enabled: enabled, gameBlocked: blocked };
       }
       
       if (this.env?.QUESTIONS) {
@@ -607,12 +644,26 @@ export class GameServer extends CPUProtection {
         );
         const enabled = status === 'true';
         this._recordingEnabled.set(roomName, enabled);
-        return { enabled: enabled };
+        this._gameBlocked.set(roomName, enabled);
+        return { enabled: enabled, gameBlocked: enabled };
       }
       
-      return { enabled: false };
+      return { enabled: false, gameBlocked: false };
     } catch(e) {
-      return { enabled: false };
+      return { enabled: false, gameBlocked: false };
+    }
+  }
+
+  async _isGameBlocked(roomName) {
+    try {
+      if (!roomName) return false;
+      if (this._gameBlocked.has(roomName)) {
+        return this._gameBlocked.get(roomName);
+      }
+      const status = await this._getRecordingStatus(roomName);
+      return status.gameBlocked || false;
+    } catch(e) {
+      return false;
     }
   }
 
@@ -812,43 +863,37 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== START GAME WITH RECORDING (ADMIN) ====================
+  // ==================== ADMIN START GAME WITH RECORDING ====================
 
   async _startGameWithRecording(ws, room, bet, username) {
     try {
-      // Validasi parameter
       if (!room || !username) {
         this._safeSend(ws, ["gameLowCardError", "Room and username required"]);
         return;
       }
       
-      // Validasi bet
       const betAmount = parseInt(bet, 10) || 0;
       if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
         this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
         return;
       }
       
-      // Cek apakah recording diaktifkan untuk room ini
       const recordingStatus = await this._getRecordingStatus(room);
       if (!recordingStatus.enabled) {
         this._safeSend(ws, ["gameLowCardError", "Recording must be enabled first! Use startRecordingWinners"]);
         return;
       }
       
-      // Cek apakah ada game yang sedang berjalan
       const existingGame = this.activeGames.get(room);
       if (existingGame?._isActive && !existingGame._gameEnded) {
         this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
         return;
       }
       
-      // Bersihkan game lama jika ada
       if (existingGame) {
         await this._forceCleanupGame(room, existingGame);
       }
       
-      // Cek lock
       const now = Date.now();
       const lockTime = this._gameLocks.get(room);
       if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
@@ -858,7 +903,6 @@ export class GameServer extends CPUProtection {
       this._gameLocks.set(room, now);
       
       try {
-        // Buat game baru dengan flag recording
         const game = {
           room, 
           players: new Map(), 
@@ -892,7 +936,6 @@ export class GameServer extends CPUProtection {
           _startedBy: 'admin'
         };
         
-        // Tambahkan host sebagai player
         game.players.set(username, { id: username, name: username });
         const wsId = this._getWsId(ws);
         if (wsId) {
@@ -900,10 +943,8 @@ export class GameServer extends CPUProtection {
           this._addClient(room, ws, username, false);
         }
         
-        // Simpan game ke activeGames
         this.activeGames.set(room, game);
         
-        // Broadcast ke room
         this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
         this._broadcastToRoom(room, ["gameLowCardStartSuccess", username, betAmount]);
         this._broadcastToRoom(room, ["recordingGameStarted", {
@@ -914,10 +955,8 @@ export class GameServer extends CPUProtection {
           timestamp: Date.now()
         }]);
         
-        // Mulai registrasi
         this._startRegistration(room, game);
         
-        // Kirim response ke admin
         this._safeSend(ws, ["gameStartWithRecordingSuccess", {
           room: room,
           bet: betAmount,
@@ -3264,6 +3303,8 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  // ==================== USER START GAME (MODIFIED - WITH BLOCK CHECK) ====================
+
   async startGame(ws, bet, username) {
     try {
       if (this.isDestroyed) {
@@ -3282,6 +3323,21 @@ export class GameServer extends CPUProtection {
       }
       if (room === QUIZ_ROOM) {
         this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]);
+        return;
+      }
+
+      // CEK APAKAH GAME DIBLOKIR
+      const isBlocked = await this._isGameBlocked(room);
+      if (isBlocked) {
+        this._safeSend(ws, ["gameLowCardError", 
+          "GAME IS BLOCKED! Recording is active in this room. Only admin can start games."
+        ]);
+        this._safeSend(ws, ["gameBlocked", {
+          blocked: true,
+          room: room,
+          reason: "Recording is active",
+          message: "Game is blocked while recording is active"
+        }]);
         return;
       }
 
@@ -3402,17 +3458,43 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== USER JOIN GAME (MODIFIED - WITH BLOCK CHECK) ====================
+
   async joinGame(ws, username) {
     try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
-      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username is required"]); return; }
+      if (this.isDestroyed) { 
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); 
+        return; 
+      }
+      if (!username?.trim()) { 
+        this._safeSend(ws, ["gameLowCardError", "Username is required"]); 
+        return; 
+      }
+      
       const usernameClean = username.trim();
       const wsId = this._getWsId(ws);
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
+      if (!room) { 
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
+        return; 
+      }
+
+      // CEK APAKAH GAME DIBLOKIR
+      const isBlocked = await this._isGameBlocked(room);
+      if (isBlocked) {
+        this._safeSend(ws, ["gameLowCardError", 
+          "GAME IS BLOCKED! Recording is active in this room."
+        ]);
+        return;
+      }
+      
       const lockKey = `join_${room}_${usernameClean}`;
-      if (this._joinLocks.has(lockKey)) { this._safeSend(ws, ["gameLowCardError", "Join in progress, please wait"]); return; }
+      if (this._joinLocks.has(lockKey)) { 
+        this._safeSend(ws, ["gameLowCardError", "Join in progress, please wait"]); 
+        return; 
+      }
       this._joinLocks.set(lockKey, Date.now());
+      
       try {
         const game = this.activeGames.get(room);
         if (!game?._isActive || game._gameEnded || !game.players) {
@@ -3451,14 +3533,36 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  // ==================== USER SUBMIT NUMBER (MODIFIED - WITH BLOCK CHECK) ====================
+
   async submitNumber(ws, number, tanda, username) {
     try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
-      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username is required"]); return; }
+      if (this.isDestroyed) { 
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); 
+        return; 
+      }
+      if (!username?.trim()) { 
+        this._safeSend(ws, ["gameLowCardError", "Username is required"]); 
+        return; 
+      }
+      
       const usernameClean = username.trim();
       const wsId = this._getWsId(ws);
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
+      if (!room) { 
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
+        return; 
+      }
+
+      // CEK APAKAH GAME DIBLOKIR
+      const isBlocked = await this._isGameBlocked(room);
+      if (isBlocked) {
+        this._safeSend(ws, ["gameLowCardError", 
+          "GAME IS BLOCKED! Recording is active in this room."
+        ]);
+        return;
+      }
+      
       const game = this.activeGames.get(room);
       if (!game?._isActive || game._gameEnded || !game.players) {
         this._safeSend(ws, ["gameLowCardError", "No active game"]);
@@ -3686,6 +3790,7 @@ export class GameServer extends CPUProtection {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
 
+      // ==================== RECORDING EVENTS ====================
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
@@ -3701,7 +3806,8 @@ export class GameServer extends CPUProtection {
           success: success,
           enabled: true,
           room: roomName,
-          message: success ? "Recording enabled for " + roomName : "Failed to enable recording"
+          gameBlocked: true,
+          message: success ? "Recording enabled - GAME BLOCKED" : "Failed to enable recording"
         }]);
         return;
       }
@@ -3721,7 +3827,8 @@ export class GameServer extends CPUProtection {
           success: success,
           enabled: false,
           room: roomName,
-          message: success ? "Recording stopped and winners deleted for " + roomName : "Failed to stop recording"
+          gameBlocked: false,
+          message: success ? "Recording stopped - GAME UNBLOCKED" : "Failed to stop recording"
         }]);
         return;
       }
@@ -3731,6 +3838,7 @@ export class GameServer extends CPUProtection {
         if (!roomName) {
           this._safeSend(ws, ["recordingStatus", {
             enabled: false,
+            gameBlocked: false,
             message: "Room name required"
           }]);
           return;
@@ -3738,8 +3846,9 @@ export class GameServer extends CPUProtection {
         const status = await this._getRecordingStatus(roomName);
         this._safeSend(ws, ["recordingStatus", {
           enabled: status.enabled,
+          gameBlocked: status.gameBlocked,
           room: roomName,
-          message: status.enabled ? "Recording active for " + roomName : "Recording inactive for " + roomName
+          message: status.enabled ? "Recording active - GAME BLOCKED" : "Recording inactive"
         }]);
         return;
       }
@@ -3759,6 +3868,7 @@ export class GameServer extends CPUProtection {
           winners: winners,
           totalPlayers: Object.keys(winners).length,
           recording: status.enabled,
+          gameBlocked: status.gameBlocked,
           updatedAt: new Date().toISOString()
         }]);
         return;
@@ -3800,13 +3910,14 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // START GAME WITH RECORDING - ADMIN EVENT
+      // ==================== ADMIN START GAME WITH RECORDING ====================
       if (evt === "startGameWithRecording") {
         const [_, room, bet, username] = data;
         await this._startGameWithRecording(ws, room, bet, username);
         return;
       }
 
+      // ==================== WINNER UPDATE EVENTS ====================
       if (evt === "lowCardWinnerUpdate") {
         const room = data[1] || this._ensureRoomConsistency(ws);
         if (!room) {
@@ -3827,6 +3938,7 @@ export class GameServer extends CPUProtection {
           winners: winners,
           totalPlayers: Object.keys(winners).length,
           recording: status.enabled,
+          gameBlocked: status.gameBlocked,
           updatedAt: new Date().toISOString(),
           type: 'refreshResponse'
         }]);
@@ -3854,6 +3966,7 @@ export class GameServer extends CPUProtection {
           winners: winners,
           totalPlayers: Object.keys(winners).length,
           recording: status.enabled,
+          gameBlocked: status.gameBlocked,
           updatedAt: new Date().toISOString(),
           type: 'refreshResponse'
         }]);
@@ -3861,6 +3974,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== COUNTRY & QUIZ EVENTS ====================
       if (evt === "getUserCountryInfo") {
         const wsId = this._getWsId(ws);
         const info = this.countryQuizSystem.getUserCountryInfo(wsId);
@@ -4027,9 +4141,16 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== GAME EVENTS ====================
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
-      if (room === QUIZ_ROOM) { this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); return; }
+      if (!room) { 
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
+        return; 
+      }
+      if (room === QUIZ_ROOM) { 
+        this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); 
+        return; 
+      }
 
       switch (evt) {
         case "gameLowCardStart":
@@ -4155,7 +4276,12 @@ export class GameServer extends CPUProtection {
             questionsCount: {
               en: this._questionsCache.en?.length || 0,
               id: this._questionsCache.id?.length || 0
-            }
+            },
+            recordingStatus: Array.from(this._recordingEnabled.entries()).map(([room, enabled]) => ({
+              room,
+              enabled,
+              gameBlocked: this._gameBlocked.get(room) || false
+            }))
           };
           return new Response(JSON.stringify(status), {
             headers: { 'Content-Type': 'application/json' }
