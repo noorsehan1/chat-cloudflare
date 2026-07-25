@@ -504,8 +504,8 @@ export class GameServer extends CPUProtection {
       this._canSubmitAnswer = false;
 
       this._recordingEnabled = new Map();
-      // ============ HAPUS CACHE WINNERS ============
-      // this._roomWinnersCache = new Map(); // <-- DIHAPUS
+      // HAPUS CACHE WINNERS
+      // this._roomWinnersCache = new Map();
 
       this.countryQuizSystem = new CountryBasedQuizSystem(this);
 
@@ -531,12 +531,121 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== RECORDING WINNERS (NO CACHE) ====================
+  // ==================== FORCE STOP GAME ====================
+  async _forceStopGame(roomName, reason = "Admin action") {
+    try {
+      if (!roomName) return false;
+      
+      const game = this.activeGames.get(roomName);
+      if (!game || !game._isActive || game._gameEnded) {
+        // Hapus flag jika ada
+        const stopKey = `stopped_${roomName}`;
+        this._gameStartFlags.set(stopKey, Date.now());
+        return true;
+      }
+      
+      // Set flag bahwa game di-stop
+      game._wasStopped = true;
+      game._gameEnded = true;
+      game._isActive = false;
+      game._endTime = Date.now();
+      game._phase = 'stopped';
+      game.registrationOpen = false;
+      game.drawTimeExpired = true;
+      game.evaluationLocked = true;
+      
+      // Hapus semua timer
+      const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
+      for (const key of timers) {
+        if (game[key]) { 
+          clearTimeout(game[key]); 
+          clearInterval(game[key]); 
+          game[key] = null; 
+        }
+      }
+      
+      // Hapus bot timeouts
+      if (game._botTimeouts) {
+        for (const id of game._botTimeouts) clearTimeout(id);
+        game._botTimeouts.clear();
+        game._botTimeouts = null;
+      }
+      
+      // Kosongkan semua data
+      if (game.players) { 
+        game.players.clear(); 
+        game.players = null; 
+      }
+      if (game.botPlayers) { 
+        game.botPlayers.clear(); 
+        game.botPlayers = null; 
+      }
+      if (game.numbers) { 
+        game.numbers.clear(); 
+        game.numbers = null; 
+      }
+      if (game.tanda) { 
+        game.tanda.clear(); 
+        game.tanda = null; 
+      }
+      if (game.eliminated) { 
+        game.eliminated.clear(); 
+        game.eliminated = null; 
+      }
+      if (game.playerWsId) { 
+        game.playerWsId.clear(); 
+        game.playerWsId = null; 
+      }
+      
+      // Hapus dari active games
+      this.activeGames.delete(roomName);
+      
+      // Hapus locks
+      this._gameLocks.delete(roomName);
+      this._joinLocks.delete(roomName);
+      
+      // Set flag bahwa game di-stop (untuk mencegah restart langsung)
+      const stopKey = `stopped_${roomName}`;
+      this._gameStartFlags.set(stopKey, Date.now());
+      this._gameStartFlags.delete(`start_${roomName}`);
+      
+      // Hapus cleanup timer
+      if (this._cleanupTimers.has(roomName)) {
+        clearTimeout(this._cleanupTimers.get(roomName));
+        this._cleanupTimers.delete(roomName);
+      }
+      
+      // Broadcast
+      this._broadcastToRoom(roomName, ["gameLowCardEnd", []]);
+      this._broadcastToRoom(roomName, ["gameLowCardError", `⛔ GAME STOPPED! ${reason}`]);
+      this._broadcastToRoom(roomName, ["gameLowCardForceStop", {
+        stopped: true,
+        reason: reason,
+        canRestart: false,
+        message: "Game has been stopped. Please start a new game."
+      }]);
+      this._broadcastToRoom(roomName, ["gameLowCardNoRestart", {
+        stopped: true,
+        permanent: true,
+        message: "Game stopped permanently. Please start a new game."
+      }]);
+      
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  // ==================== RECORDING WINNERS (NO CACHE + STOP GAME) ====================
 
   async _startRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
       
+      // HENTIKAN GAME YANG SEDANG BERJALAN
+      await this._forceStopGame(roomName, "Recording started by admin");
+      
+      // START RECORDING
       this._recordingEnabled.set(roomName, true);
       
       if (this.env?.QUESTIONS) {
@@ -549,7 +658,8 @@ export class GameServer extends CPUProtection {
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: true,
         room: roomName,
-        message: "Recording enabled for " + roomName
+        message: "Recording enabled for " + roomName,
+        gameStopped: true
       }]);
       
       return true;
@@ -562,6 +672,10 @@ export class GameServer extends CPUProtection {
     try {
       if (!roomName) return false;
       
+      // HENTIKAN GAME YANG SEDANG BERJALAN
+      await this._forceStopGame(roomName, "Recording stopped by admin");
+      
+      // STOP RECORDING
       this._recordingEnabled.set(roomName, false);
       
       if (this.env?.QUESTIONS) {
@@ -571,14 +685,15 @@ export class GameServer extends CPUProtection {
         // HAPUS DATA WINNERS DARI KV
         const winnerKey = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
         await this.env.QUESTIONS.delete(winnerKey);
-        
-        // TIDAK ADA LAGI HAPUS CACHE
       }
       
+      // Broadcast recording stopped
       this._broadcastToRoom(roomName, ["recordingStatus", {
         enabled: false,
         room: roomName,
-        message: "Recording stopped and winners deleted for " + roomName
+        message: "Recording stopped and winners deleted for " + roomName,
+        gameStopped: true,
+        gameCanRestart: false
       }]);
       
       this._broadcastToRoom(roomName, ["lowCardWinnersData", {
@@ -618,7 +733,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ============ LANGSUNG AMBIL DARI KV, TIDAK PAKAI CACHE ============
+  // LANGSUNG AMBIL DARI KV, TIDAK PAKAI CACHE
   async _getLowCardWinners(room) {
     try {
       if (!room) return {};
@@ -744,8 +859,6 @@ export class GameServer extends CPUProtection {
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       await this.env.QUESTIONS.delete(key);
       
-      // TIDAK ADA LAGI HAPUS CACHE
-      
       this._broadcastToRoom(room, ["resetRoomWinnersResult", {
         success: true,
         room: room,
@@ -801,23 +914,20 @@ export class GameServer extends CPUProtection {
         await this._startRecordingWinners(roomName);
       }
       
+      // Cek apakah ada game yang sedang berjalan
+      const existingGame = this.activeGames.get(roomName);
+      if (existingGame && existingGame._isActive && !existingGame._gameEnded) {
+        // Hentikan game yang sedang berjalan
+        await this._forceStopGame(roomName, "Admin starting new game with recording");
+      }
+      
       const startKey = `start_${roomName}`;
       if (this._gameStartFlags.has(startKey)) {
         this._safeSend(ws, ["gameLowCardError", "Game is already starting..."]);
         return;
       }
       
-      const existingGame = this.activeGames.get(roomName);
-      if (existingGame?._isActive && !existingGame._gameEnded) {
-        this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
-        return;
-      }
-      
       this._gameStartFlags.set(startKey, Date.now());
-      
-      if (existingGame) {
-        await this._forceCleanupGame(roomName, existingGame);
-      }
       
       const now = Date.now();
       const lockTime = this._gameLocks.get(roomName);
@@ -868,7 +978,8 @@ export class GameServer extends CPUProtection {
           _endTime: null,
           playerWsId: new Map(),
           _startedByRecording: true,
-          _startedBy: 'admin'
+          _startedBy: 'admin',
+          _wasStopped: false
         };
         
         game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
@@ -3262,6 +3373,25 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // CEK APAKAH GAME PERNAH DISTOP
+      const stopKey = `stopped_${room}`;
+      if (this._gameStartFlags.has(stopKey)) {
+        const stopTime = this._gameStartFlags.get(stopKey);
+        const now = Date.now();
+        // Tunggu 5 detik setelah stop sebelum bisa start lagi
+        if ((now - stopTime) < 5000) {
+          this._safeSend(ws, ["gameLowCardError", 
+            "Game was just stopped. Please wait a moment before starting a new game."
+          ]);
+          return;
+        }
+        // Hapus flag setelah 5 detik
+        if ((now - stopTime) > 5000) {
+          this._gameStartFlags.delete(stopKey);
+        }
+      }
+
+      // CEK RECORDING STATUS
       const recordingStatus = await this._getRecordingStatus(room);
       if (recordingStatus.enabled) {
         this._safeSend(ws, ["gameLowCardError", 
@@ -3275,24 +3405,26 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // CEK APAKAH ADA GAME YANG SEDANG BERJALAN
+      const existingGame = this.activeGames.get(room);
+      if (existingGame && existingGame._isActive && !existingGame._gameEnded) {
+        this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
+        return;
+      }
+
       const startKey = `start_${room}`;
       if (this._gameStartFlags.has(startKey)) {
         this._safeSend(ws, ["gameLowCardError", "Game is already starting..."]);
         return;
       }
-      
-      const existingGame = this.activeGames.get(room);
-      if (existingGame?._isActive && !existingGame._gameEnded) {
-        this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
-        return;
-      }
-      
+
       this._gameStartFlags.set(startKey, Date.now());
-      
+
+      // Cleanup jika ada game lama yang tersisa
       if (existingGame) {
         await this._forceCleanupGame(room, existingGame);
       }
-      
+
       const now = Date.now();
       const lockTime = this._gameLocks.get(room);
       if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
@@ -3301,7 +3433,7 @@ export class GameServer extends CPUProtection {
         return;
       }
       this._gameLocks.set(room, now);
-      
+
       try {
         if (this.activeGames.size >= this._maxGames) {
           this._safeSend(ws, ["gameLowCardError", "Server is busy"]);
@@ -3309,7 +3441,7 @@ export class GameServer extends CPUProtection {
           this._gameStartFlags.delete(startKey);
           return;
         }
-        
+
         const betAmount = parseInt(bet, 10) || 0;
         if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
           this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
@@ -3317,7 +3449,7 @@ export class GameServer extends CPUProtection {
           this._gameStartFlags.delete(startKey);
           return;
         }
-        
+
         const wsId = this._getWsId(ws);
         const game = {
           room, players: new Map(), botPlayers: new Map(), registrationOpen: true,
@@ -3330,9 +3462,10 @@ export class GameServer extends CPUProtection {
           _isEvaluating: false, _createdAt: Date.now(), _drawPhaseStart: null, _endTime: null,
           playerWsId: new Map(),
           _startedByRecording: false,
-          _startedBy: 'user'
+          _startedBy: 'user',
+          _wasStopped: false
         };
-        
+
         game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
         game.playerWsId.set(usernameClean, wsId);
         this.activeGames.set(room, game);
@@ -3340,14 +3473,14 @@ export class GameServer extends CPUProtection {
         this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
         this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
         this._startRegistration(room, game);
-        
+
         setTimeout(() => {
           try {
             this._gameStartFlags.delete(startKey);
             if (this._gameLocks.get(room) === now) this._gameLocks.delete(room);
           } catch(e) {}
         }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
-        
+
       } catch(e) {
         this._deleteGame(room, this.activeGames.get(room));
         this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
