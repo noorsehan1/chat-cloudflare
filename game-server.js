@@ -3292,6 +3292,8 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  // ==================== START GAME (USER) ====================
+
   async startGame(ws, bet, username) {
     try {
       if (this.isDestroyed) {
@@ -3313,10 +3315,11 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ✅ CEK RECORDING STATUS - TOLAK JIKA RECORDING AKTIF
       const recordingStatus = await this._getRecordingStatus(room);
       if (recordingStatus.enabled) {
         this._safeSend(ws, ["gameLowCardError", 
-          "Recording is ACTIVE in this room! Users cannot start games."
+          "❌ Recording is ACTIVE in this room! Users cannot start games."
         ]);
         this._safeSend(ws, ["recordingStatus", {
           enabled: true,
@@ -3645,6 +3648,8 @@ export class GameServer extends CPUProtection {
     } catch(e) { return array || []; }
   }
 
+  // ==================== EVENT HANDLING ====================
+
   async handleEvent(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data?.[0]) return;
@@ -3709,10 +3714,15 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== MAIN EVENT HANDLER ====================
+
   async _handleEventInternal(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
+
+      // ==================== RECORDING EVENTS ====================
+      // ✅ TIDAK ADA OTOMATIS START GAME
 
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
@@ -3827,6 +3837,9 @@ export class GameServer extends CPUProtection {
         }]);
         return;
       }
+
+      // ==================== ADMIN START GAME (DENGAN RECORDING) ====================
+      // ✅ HANYA INI YANG BISA START GAME DENGAN RECORDING
 
       if (evt === "startGameWithRecording") {
         const room = data[1];
@@ -4066,6 +4079,8 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== GAME EVENTS ====================
+
       const room = this._ensureRoomConsistency(ws);
       if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
       if (room === QUIZ_ROOM) { this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); return; }
@@ -4167,6 +4182,8 @@ export class GameServer extends CPUProtection {
       }
     } catch(e) {}
   }
+
+  // ==================== FETCH HANDLER ====================
 
   async fetch(req) {
     try {
