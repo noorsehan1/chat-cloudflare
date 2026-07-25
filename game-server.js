@@ -3140,7 +3140,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== START GAME WITH RECORDING ====================
+  // ==================== START GAME WITH RECORDING - FIXED ====================
 
   async _handleStartGameWithRecording(ws, room, bet, username) {
     try {
@@ -3163,6 +3163,11 @@ export class GameServer extends CPUProtection {
       const usernameClean = username.trim();
       const wsId = this._getWsId(ws);
       
+      if (!wsId) {
+        this._safeSend(ws, ["gameLowCardError", "Invalid WebSocket connection"]);
+        return;
+      }
+      
       // Get recording status
       const recordingStatus = await this._getRecordingStatus(roomClean);
       
@@ -3171,40 +3176,63 @@ export class GameServer extends CPUProtection {
         await this._startRecordingWinners(roomClean);
       }
       
-      // Check if game already exists
+      // ============ FORCE CLEANUP EXISTING GAME ============
       const existingGame = this.activeGames.get(roomClean);
-      if (existingGame?._isActive && !existingGame._gameEnded) {
-        // End existing game first
+      if (existingGame) {
+        // Hapus semua timer
+        const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
+        for (const key of timers) {
+          if (existingGame[key]) {
+            clearTimeout(existingGame[key]);
+            clearInterval(existingGame[key]);
+            existingGame[key] = null;
+          }
+        }
+        
+        // Hapus bot timeouts
+        if (existingGame._botTimeouts) {
+          for (const id of existingGame._botTimeouts) clearTimeout(id);
+          existingGame._botTimeouts.clear();
+        }
+        
+        // Tandai game ended
         existingGame._gameEnded = true;
         existingGame._isActive = false;
         existingGame._endTime = Date.now();
-        this._broadcastToRoom(roomClean, ["gameLowCardEnd", []]);
-        this._scheduleGameCleanup(roomClean, existingGame);
         
-        // Wait a moment for cleanup
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Hapus dari activeGames
+        this.activeGames.delete(roomClean);
+        
+        // Hapus cleanup timer
+        if (this._cleanupTimers.has(roomClean)) {
+          clearTimeout(this._cleanupTimers.get(roomClean));
+          this._cleanupTimers.delete(roomClean);
+        }
+        
+        // Broadcast game ended
+        this._broadcastToRoom(roomClean, ["gameLowCardEnd", []]);
+        
+        // Tunggu sebentar untuk cleanup
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
       
-      // Now start the game
+      // ============ HAPUS SEMUA LOCK ============
+      this._gameLocks.delete(roomClean);
+      this._joinLocks.delete(roomClean);
+      const startKey = `start_${roomClean}`;
+      this._gameStartFlags.delete(startKey);
+      
+      // ============ VALIDASI BET ============
       const betAmount = parseInt(bet, 10) || 0;
       if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
         this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
         return;
       }
       
-      // Check if room is already locked
-      const now = Date.now();
-      const lockTime = this._gameLocks.get(roomClean);
-      if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
-        this._safeSend(ws, ["gameLowCardError", "Game is starting, please wait"]);
-        return;
-      }
-      this._gameLocks.set(roomClean, now);
-      
+      // ============ START GAME BARU ============
       try {
         if (this.activeGames.size >= this._maxGames) {
           this._safeSend(ws, ["gameLowCardError", "Server is busy"]);
-          this._gameLocks.delete(roomClean);
           return;
         }
         
@@ -3242,27 +3270,31 @@ export class GameServer extends CPUProtection {
           _recordingEnabled: true
         };
         
+        // Tambahkan host sebagai player
         game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
         game.playerWsId.set(usernameClean, wsId);
-        this.activeGames.set(roomClean, game);
         
-        // Ensure client is in the room
+        // Pastikan client ada di room
         this._addClient(roomClean, ws, usernameClean, false);
+        
+        // Simpan game
+        this.activeGames.set(roomClean, game);
         
         // Broadcast game start
         this._broadcastToRoom(roomClean, ["gameLowCardStart", betAmount]);
         this._broadcastToRoom(roomClean, ["gameLowCardStartSuccess", usernameClean, betAmount]);
         
-        // Start registration
+        // ============ MULAI REGISTRASI ============
         this._startRegistration(roomClean, game);
         
-        // Send success response to admin
+        // ============ SEND SUCCESS ============
         this._safeSend(ws, ["gameLowCardAdminStartSuccess", {
           room: roomClean,
           bet: betAmount,
           host: usernameClean,
           recordingEnabled: true,
-          startedBy: 'admin'
+          startedBy: 'admin',
+          message: "Game started successfully!"
         }]);
         
         // Broadcast recording status
@@ -3273,22 +3305,17 @@ export class GameServer extends CPUProtection {
           message: "Game started by admin with recording enabled"
         }]);
         
-        setTimeout(() => {
-          try {
-            if (this._gameLocks.get(roomClean) === now) this._gameLocks.delete(roomClean);
-          } catch(e) {}
-        }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
-        
       } catch(e) {
         this._deleteGame(roomClean, this.activeGames.get(roomClean));
         this._safeSend(ws, ["gameLowCardError", "Failed to start game: " + e.message]);
-        this._gameLocks.delete(roomClean);
       }
       
     } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Failed to start game with recording"]);
+      this._safeSend(ws, ["gameLowCardError", "Failed to start game with recording: " + e.message]);
     }
   }
+
+  // ==================== ORIGINAL START GAME ====================
 
   async startGame(ws, bet, username) {
     try {
