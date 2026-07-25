@@ -532,155 +532,7 @@ export class GameServer extends CPUProtection {
 
   // ==================== RECORDING WINNERS ====================
 
-  async startGameWithRecording(room, bet, username) {
-    try {
-      if (this.isDestroyed) {
-        return { success: false, message: "Server is shutting down" };
-      }
-      if (!username?.trim()) {
-        return { success: false, message: "Username is required" };
-      }
-      if (!room?.trim()) {
-        return { success: false, message: "Room is required" };
-      }
-      
-      const usernameClean = username.trim();
-      const roomClean = room.trim();
-      
-      const status = await this._getRecordingStatus(roomClean);
-      if (!status.enabled) {
-        return { 
-          success: false, 
-          message: "Recording must be enabled to use startGameWithRecording" 
-        };
-      }
-      
-      const existingGame = this.activeGames.get(roomClean);
-      if (existingGame?._isActive && !existingGame._gameEnded) {
-        return { success: false, message: "Game is already running in this room" };
-      }
-      
-      const startKey = `start_${roomClean}`;
-      if (this._gameStartFlags.has(startKey)) {
-        return { success: false, message: "Game is already starting..." };
-      }
-      this._gameStartFlags.set(startKey, Date.now());
-      
-      if (existingGame) {
-        await this._forceCleanupGame(roomClean, existingGame);
-      }
-      
-      const now = Date.now();
-      const lockTime = this._gameLocks.get(roomClean);
-      if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
-        this._gameStartFlags.delete(startKey);
-        return { success: false, message: "Game is starting, please wait" };
-      }
-      this._gameLocks.set(roomClean, now);
-      
-      try {
-        if (this.activeGames.size >= this._maxGames) {
-          this._gameLocks.delete(roomClean);
-          this._gameStartFlags.delete(startKey);
-          return { success: false, message: "Server is busy" };
-        }
-        
-        const betAmount = parseInt(bet, 10) || 0;
-        if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
-          this._gameLocks.delete(roomClean);
-          this._gameStartFlags.delete(startKey);
-          return { success: false, message: `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})` };
-        }
-        
-        const game = {
-          room: roomClean,
-          players: new Map(),
-          botPlayers: new Map(),
-          registrationOpen: true,
-          round: 1,
-          numbers: new Map(),
-          tanda: new Map(),
-          eliminated: new Set(),
-          betAmount,
-          hostId: usernameClean,
-          hostName: usernameClean,
-          useBots: false,
-          evaluationLocked: false,
-          drawTimeExpired: false,
-          _isActive: true,
-          _gameEnded: false,
-          _phase: 'registration',
-          _botTimeouts: new Set(),
-          _botsAdded: false,
-          _registrationTimer: null,
-          _drawTimer: null,
-          _evalTimer: null,
-          _safetyTimer: null,
-          _isEvaluating: false,
-          _createdAt: Date.now(),
-          _drawPhaseStart: null,
-          _endTime: null,
-          playerWsId: new Map(),
-          _startedByRecording: true,
-          _startedBy: 'internal'
-        };
-        
-        game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
-        
-        let hostWsId = null;
-        for (const [wsId, ws] of this.wsMap) {
-          if (ws.username === usernameClean) {
-            hostWsId = wsId;
-            break;
-          }
-        }
-        if (hostWsId) {
-          game.playerWsId.set(usernameClean, hostWsId);
-          const ws = this.wsMap.get(hostWsId);
-          if (ws) {
-            this._addClient(roomClean, ws, usernameClean, false);
-            ws.room = roomClean;
-            ws.roomname = roomClean;
-          }
-        }
-        
-        this.activeGames.set(roomClean, game);
-        
-        this._broadcastToRoom(roomClean, ["gameLowCardStart", betAmount]);
-        this._broadcastToRoom(roomClean, ["gameLowCardStartSuccess", usernameClean, betAmount]);
-        
-        this._broadcastToRoom(roomClean, ["recordingStatus", {
-          enabled: true,
-          room: roomClean,
-          message: "Game started with recording enabled"
-        }]);
-        
-        this._startRegistration(roomClean, game);
-        
-        setTimeout(() => {
-          try {
-            this._gameStartFlags.delete(startKey);
-            if (this._gameLocks.get(roomClean) === now) this._gameLocks.delete(roomClean);
-          } catch(e) {}
-        }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
-        
-        return { 
-          success: true, 
-          message: "Game started successfully with recording",
-          room: roomClean,
-          bet: betAmount
-        };
-        
-      } catch(e) {
-        this._deleteGame(roomClean, this.activeGames.get(roomClean));
-        this._gameLocks.delete(roomClean);
-        this._gameStartFlags.delete(startKey);
-        return { success: false, message: "Failed to start game" };
-      }
-    } catch(e) {
-      return { success: false, message: "Failed to start game" };
-    }
-  }
+  // startGameWithRecording - TELAH DIHAPUS (NO AUTO-START)
 
   async _startRecordingWinners(roomName) {
     try {
@@ -703,7 +555,7 @@ export class GameServer extends CPUProtection {
         message: "Recording enabled for " + roomName
       }]);
       
-      await this._sendWinnersToRoom(roomName);
+      // NO AUTO-START GAME HERE
       
       return true;
     } catch(e) {
@@ -3292,8 +3144,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== START GAME (USER) ====================
-
   async startGame(ws, bet, username) {
     try {
       if (this.isDestroyed) {
@@ -3315,11 +3165,10 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ✅ CEK RECORDING STATUS - TOLAK JIKA RECORDING AKTIF
       const recordingStatus = await this._getRecordingStatus(room);
       if (recordingStatus.enabled) {
         this._safeSend(ws, ["gameLowCardError", 
-          "❌ Recording is ACTIVE in this room! Users cannot start games."
+          "Recording is ACTIVE in this room! Users cannot start games."
         ]);
         this._safeSend(ws, ["recordingStatus", {
           enabled: true,
@@ -3648,8 +3497,6 @@ export class GameServer extends CPUProtection {
     } catch(e) { return array || []; }
   }
 
-  // ==================== EVENT HANDLING ====================
-
   async handleEvent(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data?.[0]) return;
@@ -3714,15 +3561,10 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== MAIN EVENT HANDLER ====================
-
   async _handleEventInternal(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
-
-      // ==================== RECORDING EVENTS ====================
-      // ✅ TIDAK ADA OTOMATIS START GAME
 
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
@@ -3838,26 +3680,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== ADMIN START GAME (DENGAN RECORDING) ====================
-      // ✅ HANYA INI YANG BISA START GAME DENGAN RECORDING
-
-      if (evt === "startGameWithRecording") {
-        const room = data[1];
-        const bet = data[2];
-        const username = data[3];
-        
-        if (!room || !username) {
-          this._safeSend(ws, ["startGameWithRecordingResult", {
-            success: false,
-            message: "Room and username required"
-          }]);
-          return;
-        }
-        
-        const result = await this.startGameWithRecording(room, bet, username);
-        this._safeSend(ws, ["startGameWithRecordingResult", result]);
-        return;
-      }
+      // EVENT startGameWithRecording - TELAH DIHAPUS (NO AUTO-START)
 
       if (evt === "lowCardWinnerUpdate") {
         const room = data[1] || this._ensureRoomConsistency(ws);
@@ -4079,8 +3902,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== GAME EVENTS ====================
-
       const room = this._ensureRoomConsistency(ws);
       if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
       if (room === QUIZ_ROOM) { this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); return; }
@@ -4182,8 +4003,6 @@ export class GameServer extends CPUProtection {
       }
     } catch(e) {}
   }
-
-  // ==================== FETCH HANDLER ====================
 
   async fetch(req) {
     try {
