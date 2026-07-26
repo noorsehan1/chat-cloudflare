@@ -55,7 +55,7 @@ const CONSTANTS = {
   ERROR_RECOVERY_DELAY_MS: 5000,
   MAX_UNHANDLED_ERRORS: 5,
   ERROR_RESET_INTERVAL_MS: 60000,
-  // LowCard Winner Recording - Sesuai dengan struktur KV
+  // LowCard Winner Recording
   LOWCARD_WINNER_KEY: 'lowcard_winner_',
   LOWCARD_RECORDING_STATUS_KEY: 'lowcard_recording_status_',
 };
@@ -743,19 +743,25 @@ export class GameServer extends CPUProtection {
   }
 
   /**
-   * START RECORDING - Set recording aktif
+   * START RECORDING - Set recording aktif (TANPA game otomatis)
    */
   async _startRecordingWinners(room) {
     try {
+      // Set recording status ke true di KV
       await this._setRecordingStatus(room, true);
       
+      // Pastikan data winners ada (kosong)
       const winners = await this._getLowCardWinners(room);
       if (Object.keys(winners).length === 0) {
         await this._setLowCardWinners(room, {});
       }
       
+      // Broadcast status
       this._broadcastToRoom(room, ["recordingStatus", true, room, "Recording winners started"]);
       this._broadcastLowCardWinners(room);
+      
+      // ❌ TIDAK ADA GAME OTOMATIS DIMULAI
+      // Game harus dimulai manual oleh user dengan .start
       
       return true;
     } catch(e) {
@@ -765,21 +771,26 @@ export class GameServer extends CPUProtection {
   }
 
   /**
-   * STOP RECORDING - Hapus semua data
+   * STOP RECORDING - Hapus semua data (TANPA game otomatis)
    * Menghapus:
    * 1. lowcard_recording_status_{room}
    * 2. lowcard_winner_{room}
    */
   async _stopRecordingWinners(room) {
     try {
+      // 1. Hapus status recording dari KV
       await this._deleteRecordingStatus(room);
       
+      // 2. Hapus data winners dari KV
       await this._deleteLowCardWinners(room);
       
+      // Broadcast status berhenti
       this._broadcastToRoom(room, ["recordingStatus", false, room, "Recording stopped and data cleared"]);
       
+      // Broadcast data kosong
       this._broadcastToRoom(room, ["lowCardWinnersData", room, {}, 0, false]);
       
+      // Broadcast room winners kosong
       this._broadcastToRoom(room, ["roomWinners", {
         room: room,
         winners: {},
@@ -787,6 +798,10 @@ export class GameServer extends CPUProtection {
         recording: false,
         message: "Recording stopped and data cleared"
       }]);
+      
+      // ❌ TIDAK ADA GAME YANG DIHENTIKAN
+      // Game tetap berjalan jika ada
+      // Hanya data recording yang dihapus
       
       return true;
     } catch(e) {
@@ -3777,15 +3792,6 @@ export class GameServer extends CPUProtection {
         }
         return;
       }
-
-      // ==== HAPUS: resetRoomWinners ====
-      // if (evt === "resetRoomWinners") {
-      //   const room = data[1];
-      //   if (room) {
-      //     await this._resetRoomWinners(room);
-      //   }
-      //   return;
-      // }
 
       if (evt === "sendWinnersToRoom") {
         const room = data[1];
