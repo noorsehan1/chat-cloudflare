@@ -547,13 +547,6 @@ export class GameServer extends CPUProtection {
       
       await this._loadRoomWinnersToCache(roomName);
       
-      // BROADCAST RECORDING STATUS DIHAPUS
-      // this._broadcastToRoom(roomName, ["recordingStatus", {
-      //   enabled: true,
-      //   room: roomName,
-      //   message: "Recording enabled for " + roomName
-      // }]);
-      
       return true;
     } catch(e) {
       return false;
@@ -573,13 +566,6 @@ export class GameServer extends CPUProtection {
       }
       
       this._roomWinnersCache.delete(roomName);
-      
-      // BROADCAST RECORDING STATUS DIHAPUS
-      // this._broadcastToRoom(roomName, ["recordingStatus", {
-      //   enabled: false,
-      //   room: roomName,
-      //   message: "Recording stopped and winners deleted for " + roomName
-      // }]);
       
       this._broadcastToRoom(roomName, ["lowCardWinnersData", {
         room: roomName,
@@ -788,6 +774,32 @@ export class GameServer extends CPUProtection {
       return true;
     } catch(e) {
       return false;
+    }
+  }
+
+  // ==================== GET RECORDING STATUS ====================
+
+  async getRecordingStatus(ws, roomName) {
+    try {
+      if (!roomName || roomName.trim() === "") {
+        this._safeSend(ws, ["recordingStatus", {
+          success: false,
+          enabled: false
+        }]);
+        return;
+      }
+      
+      const isRecordingEnabled = this._recordingEnabled.get(roomName) || false;
+      
+      this._safeSend(ws, ["recordingStatus", {
+        success: true,
+        enabled: isRecordingEnabled
+      }]);
+    } catch(e) {
+      this._safeSend(ws, ["recordingStatus", {
+        success: false,
+        enabled: false
+      }]);
     }
   }
 
@@ -2711,9 +2723,21 @@ export class GameServer extends CPUProtection {
     } catch(e) { return false; }
   }
 
-  _isGameActuallyRunning(game) { try { return game?._isActive === true && !game?._gameEnded; } catch(e) { return false; } }
+  _isGameActuallyRunning(game) { 
+    try { 
+      return game?._isActive === true && !game?._gameEnded; 
+    } catch(e) { 
+      return false; 
+    } 
+  }
 
-  _isGameValid(game) { try { return game?._isActive === true && !game?._gameEnded && game?.players?.size > 0; } catch(e) { return false; } }
+  _isGameValid(game) { 
+    try { 
+      return game?._isActive === true && !game?._gameEnded && game?.players?.size > 0; 
+    } catch(e) { 
+      return false; 
+    } 
+  }
 
   _getActivePlayers(game) {
     try {
@@ -2731,9 +2755,21 @@ export class GameServer extends CPUProtection {
     } catch(e) { return []; }
   }
 
-  _getRandomCardTanda() { try { return ["C1", "C2", "C3", "C4"][Math.floor(Math.random() * 4)]; } catch(e) { return "C1"; } }
+  _getRandomCardTanda() { 
+    try { 
+      return ["C1", "C2", "C3", "C4"][Math.floor(Math.random() * 4)]; 
+    } catch(e) { 
+      return "C1"; 
+    } 
+  }
 
-  _getRandomDrawDelay() { try { return (Math.floor(Math.random() * 14) + 2) * 1000; } catch(e) { return 5000; } }
+  _getRandomDrawDelay() { 
+    try { 
+      return (Math.floor(Math.random() * 14) + 2) * 1000; 
+    } catch(e) { 
+      return 5000; 
+    } 
+  }
 
   _getBotNumberByRound(round) {
     try {
@@ -2765,7 +2801,10 @@ export class GameServer extends CPUProtection {
       const timer = setTimeout(() => {
         try {
           const currentGame = this.activeGames.get(room);
-          if (currentGame?._isActive && !currentGame._gameEnded) { this._cleanupTimers.delete(room); return; }
+          if (currentGame?._isActive && !currentGame._gameEnded) { 
+            this._cleanupTimers.delete(room); 
+            return; 
+          }
           this._cleanupTimers.delete(room);
           const gameToDelete = this.activeGames.get(room);
           if (gameToDelete) this._deleteGame(room, gameToDelete);
@@ -2781,7 +2820,11 @@ export class GameServer extends CPUProtection {
       if (game._isActive && !game._gameEnded) return;
       const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
       for (const key of timers) {
-        if (game[key]) { clearTimeout(game[key]); clearInterval(game[key]); game[key] = null; }
+        if (game[key]) { 
+          clearTimeout(game[key]); 
+          clearInterval(game[key]); 
+          game[key] = null; 
+        }
       }
       if (game._botTimeouts) {
         for (const id of game._botTimeouts) clearTimeout(id);
@@ -2803,7 +2846,10 @@ export class GameServer extends CPUProtection {
     try {
       if (!room || !game) return;
       if (game?._isActive && !game._gameEnded) return;
-      if (this._cleanupTimers.has(room)) { clearTimeout(this._cleanupTimers.get(room)); this._cleanupTimers.delete(room); }
+      if (this._cleanupTimers.has(room)) { 
+        clearTimeout(this._cleanupTimers.get(room)); 
+        this._cleanupTimers.delete(room); 
+      }
       this._roomBroadcastCount.delete(room);
       this._roomBroadcastReset.delete(room);
       if (game) {
@@ -2859,7 +2905,10 @@ export class GameServer extends CPUProtection {
         const activeIds = this._getActivePlayerIds(game);
         const submittedIds = Array.from(game.numbers?.keys() || []);
         const notSubmitted = activeIds.filter(id => !submittedIds.includes(id));
-        if (notSubmitted.length > 0) { this._broadcastToRoom(room, ["gameLowCardTimeLeft", `Waiting for ${notSubmitted.length} player(s)`]); return; }
+        if (notSubmitted.length > 0) { 
+          this._broadcastToRoom(room, ["gameLowCardTimeLeft", `Waiting for ${notSubmitted.length} player(s)`]); 
+          return; 
+        }
         const winner = activePlayers[0]?.name || "Unknown";
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
         
@@ -2935,7 +2984,11 @@ export class GameServer extends CPUProtection {
       if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired && this._isGameActuallyRunning(game)) {
         game.evaluationLocked = true;
         this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
-        game._evalTimer = setTimeout(() => { try { this._evaluateRound(room, game); } catch(e) {} }, CONSTANTS.EVALUATION_DELAY_MS);
+        game._evalTimer = setTimeout(() => { 
+          try { 
+            this._evaluateRound(room, game); 
+          } catch(e) {} 
+        }, CONSTANTS.EVALUATION_DELAY_MS);
       }
     } catch(e) {}
   }
@@ -2956,7 +3009,10 @@ export class GameServer extends CPUProtection {
   _startRegistration(room, game) {
     try {
       if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
-      if (game._registrationTimer) { clearInterval(game._registrationTimer); game._registrationTimer = null; }
+      if (game._registrationTimer) { 
+        clearInterval(game._registrationTimer); 
+        game._registrationTimer = null; 
+      }
       let timeLeft = 20;
       const timer = setInterval(() => {
         try {
@@ -2975,7 +3031,10 @@ export class GameServer extends CPUProtection {
             this._closeRegistration(room, game);
           }
           timeLeft--;
-        } catch(e) { clearInterval(timer); if (game._registrationTimer === timer) game._registrationTimer = null; }
+        } catch(e) { 
+          clearInterval(timer); 
+          if (game._registrationTimer === timer) game._registrationTimer = null; 
+        }
       }, 1000);
       game._registrationTimer = timer;
     } catch(e) {}
@@ -2985,14 +3044,23 @@ export class GameServer extends CPUProtection {
     try {
       if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
       game.registrationOpen = false;
-      if (game._registrationTimer) { clearInterval(game._registrationTimer); game._registrationTimer = null; }
+      if (game._registrationTimer) { 
+        clearInterval(game._registrationTimer); 
+        game._registrationTimer = null; 
+      }
       const humanPlayers = Array.from(game.players.keys()).filter(id => !id.startsWith('BOT_'));
       const humanCount = humanPlayers.length;
       if (!game._botsAdded) {
-        if (humanCount === 1 || humanCount === 0) { this._addBots(room, 4); game._botsAdded = true; }
+        if (humanCount === 1 || humanCount === 0) { 
+          this._addBots(room, 4); 
+          game._botsAdded = true; 
+        }
         else if (game.players.size < 2) {
           const needed = Math.min(4 - game.players.size, CONSTANTS.MAX_BOTS_PER_GAME);
-          if (needed > 0) { this._addBots(room, needed); game._botsAdded = true; }
+          if (needed > 0) { 
+            this._addBots(room, needed); 
+            game._botsAdded = true; 
+          }
         }
       }
       if (this._isGameActuallyRunning(game) && game.players.size >= 2) {
@@ -3010,14 +3078,26 @@ export class GameServer extends CPUProtection {
   _startDrawPhase(room, game) {
     try {
       if (!this._isGameActuallyRunning(game)) return;
-      if (game._drawTimer) { clearInterval(game._drawTimer); game._drawTimer = null; }
-      if (game._evalTimer) { clearTimeout(game._evalTimer); game._evalTimer = null; }
-      if (game._botTimeouts) { for (const id of game._botTimeouts) clearTimeout(id); game._botTimeouts.clear(); }
+      if (game._drawTimer) { 
+        clearInterval(game._drawTimer); 
+        game._drawTimer = null; 
+      }
+      if (game._evalTimer) { 
+        clearTimeout(game._evalTimer); 
+        game._evalTimer = null; 
+      }
+      if (game._botTimeouts) { 
+        for (const id of game._botTimeouts) clearTimeout(id); 
+        game._botTimeouts.clear(); 
+      }
       const activePlayers = this._getActivePlayers(game);
       if (activePlayers.length < 2) {
         if (!game._botsAdded) {
           const needed = Math.min(4 - activePlayers.length, CONSTANTS.MAX_BOTS_PER_GAME);
-          if (needed > 0) { this._addBots(room, needed); game._botsAdded = true; }
+          if (needed > 0) { 
+            this._addBots(room, needed); 
+            game._botsAdded = true; 
+          }
         }
         const newActive = this._getActivePlayers(game);
         if (newActive.length < 2) {
@@ -3058,7 +3138,10 @@ export class GameServer extends CPUProtection {
   _startDrawCountdown(room, game) {
     try {
       if (!this._isGameActuallyRunning(game)) return;
-      if (game._drawTimer) { clearInterval(game._drawTimer); game._drawTimer = null; }
+      if (game._drawTimer) { 
+        clearInterval(game._drawTimer); 
+        game._drawTimer = null; 
+      }
       let timeLeft = 20;
       const timer = setInterval(() => {
         try {
@@ -3077,7 +3160,10 @@ export class GameServer extends CPUProtection {
             this._closeDrawPhase(room, game);
           }
           timeLeft--;
-        } catch(e) { clearInterval(timer); if (game._drawTimer === timer) game._drawTimer = null; }
+        } catch(e) { 
+          clearInterval(timer); 
+          if (game._drawTimer === timer) game._drawTimer = null; 
+        }
       }, 1000);
       game._drawTimer = timer;
     } catch(e) {}
@@ -3088,14 +3174,20 @@ export class GameServer extends CPUProtection {
       if (!this._isGameActuallyRunning(game) || game.drawTimeExpired || game.evaluationLocked) return;
       game.drawTimeExpired = true;
       game.evaluationLocked = true;
-      if (game._drawTimer) { clearInterval(game._drawTimer); game._drawTimer = null; }
+      if (game._drawTimer) { 
+        clearInterval(game._drawTimer); 
+        game._drawTimer = null; 
+      }
       if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) {
         const activeBotIds = Array.from(game.botPlayers.keys())
           .filter(id => !game.eliminated?.has(id) && !game.numbers?.has(id));
         for (const botId of activeBotIds) this._forceBotDraw(room, botId, game);
       }
       this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
-      if (game._evalTimer) { clearTimeout(game._evalTimer); game._evalTimer = null; }
+      if (game._evalTimer) { 
+        clearTimeout(game._evalTimer); 
+        game._evalTimer = null; 
+      }
       game._evalTimer = setTimeout(() => {
         try {
           const currentGame = this.activeGames.get(room);
@@ -3114,10 +3206,21 @@ export class GameServer extends CPUProtection {
       if (currentGame !== game) return;
       game._isEvaluating = true;
       game._safetyTimer = setTimeout(() => {
-        try { if (game?._isEvaluating) { game._isEvaluating = false; this._scheduleGameCleanup(room, game); } } catch(e) {}
+        try { 
+          if (game?._isEvaluating) { 
+            game._isEvaluating = false; 
+            this._scheduleGameCleanup(room, game); 
+          } 
+        } catch(e) {}
       }, CONSTANTS.EVALUATION_TIMEOUT_MS);
-      if (game._evalTimer) { clearTimeout(game._evalTimer); game._evalTimer = null; }
-      if (game._botTimeouts) { for (const id of game._botTimeouts) clearTimeout(id); game._botTimeouts.clear(); }
+      if (game._evalTimer) { 
+        clearTimeout(game._evalTimer); 
+        game._evalTimer = null; 
+      }
+      if (game._botTimeouts) { 
+        for (const id of game._botTimeouts) clearTimeout(id); 
+        game._botTimeouts.clear(); 
+      }
       const numbers = game.numbers || new Map();
       const players = game.players || new Map();
       const eliminated = game.eliminated || new Set();
@@ -3130,7 +3233,10 @@ export class GameServer extends CPUProtection {
       }
       if (entries.length === 0) {
         game._isEvaluating = false;
-        if (game._safetyTimer) { clearTimeout(game._safetyTimer); game._safetyTimer = null; }
+        if (game._safetyTimer) { 
+          clearTimeout(game._safetyTimer); 
+          game._safetyTimer = null; 
+        }
         this._broadcastToRoom(room, ["gameLowCardError", "No numbers drawn this round"]);
         game._gameEnded = true;
         game._isActive = false;
@@ -3149,7 +3255,10 @@ export class GameServer extends CPUProtection {
         game._isActive = false;
         game._endTime = Date.now();
         game._isEvaluating = false;
-        if (game._safetyTimer) { clearTimeout(game._safetyTimer); game._safetyTimer = null; }
+        if (game._safetyTimer) { 
+          clearTimeout(game._safetyTimer); 
+          game._safetyTimer = null; 
+        }
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         this._scheduleGameCleanup(room, game);
         return;
@@ -3165,7 +3274,10 @@ export class GameServer extends CPUProtection {
       const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
       if (allSame && remaining.length >= 2) {
         game._isEvaluating = false;
-        if (game._safetyTimer) { clearTimeout(game._safetyTimer); game._safetyTimer = null; }
+        if (game._safetyTimer) { 
+          clearTimeout(game._safetyTimer); 
+          game._safetyTimer = null; 
+        }
         numbers.clear();
         tanda.clear();
         game.round++;
@@ -3194,14 +3306,20 @@ export class GameServer extends CPUProtection {
         game._isActive = false;
         game._endTime = Date.now();
         game._isEvaluating = false;
-        if (game._safetyTimer) { clearTimeout(game._safetyTimer); game._safetyTimer = null; }
+        if (game._safetyTimer) { 
+          clearTimeout(game._safetyTimer); 
+          game._safetyTimer = null; 
+        }
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         this._scheduleGameCleanup(room, game);
         return;
       }
       if (remaining.length === 0) {
         game._isEvaluating = false;
-        if (game._safetyTimer) { clearTimeout(game._safetyTimer); game._safetyTimer = null; }
+        if (game._safetyTimer) { 
+          clearTimeout(game._safetyTimer); 
+          game._safetyTimer = null; 
+        }
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
@@ -3223,10 +3341,19 @@ export class GameServer extends CPUProtection {
       game.tanda = new Map();
       game._botTimeouts = new Set();
       game._isEvaluating = false;
-      if (game._safetyTimer) { clearTimeout(game._safetyTimer); game._safetyTimer = null; }
+      if (game._safetyTimer) { 
+        clearTimeout(game._safetyTimer); 
+        game._safetyTimer = null; 
+      }
       if (this._isGameActuallyRunning(game) && !game._gameEnded) this._startDrawPhase(room, game);
     } catch(e) {
-      if (game) { game._isEvaluating = false; if (game._safetyTimer) { clearTimeout(game._safetyTimer); game._safetyTimer = null; } }
+      if (game) { 
+        game._isEvaluating = false; 
+        if (game._safetyTimer) { 
+          clearTimeout(game._safetyTimer); 
+          game._safetyTimer = null; 
+        } 
+      }
       this._scheduleGameCleanup(room, game);
     }
   }
@@ -3257,12 +3384,6 @@ export class GameServer extends CPUProtection {
         this._safeSend(ws, ["gameLowCardError", 
           "Recording is ACTIVE in this room! Users cannot start games."
         ]);
-        // BROADCAST RECORDING STATUS DIHAPUS
-        // this._safeSend(ws, ["recordingStatus", {
-        //   enabled: true,
-        //   room: room,
-        //   message: "Game cannot be started by users while recording is active."
-        // }]);
         return;
       }
 
@@ -3355,15 +3476,25 @@ export class GameServer extends CPUProtection {
       if (!game) return;
       const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
       for (const key of timers) {
-        if (game[key]) { clearTimeout(game[key]); clearInterval(game[key]); game[key] = null; }
+        if (game[key]) { 
+          clearTimeout(game[key]); 
+          clearInterval(game[key]); 
+          game[key] = null; 
+        }
       }
-      if (game._botTimeouts) { for (const id of game._botTimeouts) clearTimeout(id); game._botTimeouts.clear(); }
+      if (game._botTimeouts) { 
+        for (const id of game._botTimeouts) clearTimeout(id); 
+        game._botTimeouts.clear(); 
+      }
       game._gameEnded = true;
       game._isActive = false;
       game._endTime = Date.now();
       this._broadcastToRoom(room, ["gameLowCardEnd", []]);
       this.activeGames.delete(room);
-      if (this._cleanupTimers.has(room)) { clearTimeout(this._cleanupTimers.get(room)); this._cleanupTimers.delete(room); }
+      if (this._cleanupTimers.has(room)) { 
+        clearTimeout(this._cleanupTimers.get(room)); 
+        this._cleanupTimers.delete(room); 
+      }
       this._gameLocks.delete(room);
       this._joinLocks.delete(room);
       this._gameStartFlags.delete(`start_${room}`);
@@ -3372,14 +3503,26 @@ export class GameServer extends CPUProtection {
 
   async joinGame(ws, username) {
     try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
-      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username is required"]); return; }
+      if (this.isDestroyed) { 
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); 
+        return; 
+      }
+      if (!username?.trim()) { 
+        this._safeSend(ws, ["gameLowCardError", "Username is required"]); 
+        return; 
+      }
       const usernameClean = username.trim();
       const wsId = this._getWsId(ws);
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
+      if (!room) { 
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
+        return; 
+      }
       const lockKey = `join_${room}_${usernameClean}`;
-      if (this._joinLocks.has(lockKey)) { this._safeSend(ws, ["gameLowCardError", "Join in progress, please wait"]); return; }
+      if (this._joinLocks.has(lockKey)) { 
+        this._safeSend(ws, ["gameLowCardError", "Join in progress, please wait"]); 
+        return; 
+      }
       this._joinLocks.set(lockKey, Date.now());
       try {
         const game = this.activeGames.get(room);
@@ -3421,12 +3564,21 @@ export class GameServer extends CPUProtection {
 
   async submitNumber(ws, number, tanda, username) {
     try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
-      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username is required"]); return; }
+      if (this.isDestroyed) { 
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); 
+        return; 
+      }
+      if (!username?.trim()) { 
+        this._safeSend(ws, ["gameLowCardError", "Username is required"]); 
+        return; 
+      }
       const usernameClean = username.trim();
       const wsId = this._getWsId(ws);
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
+      if (!room) { 
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
+        return; 
+      }
       const game = this.activeGames.get(room);
       if (!game?._isActive || game._gameEnded || !game.players) {
         this._safeSend(ws, ["gameLowCardError", "No active game"]);
@@ -3470,7 +3622,10 @@ export class GameServer extends CPUProtection {
       if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired &&
           this._isGameActuallyRunning(game) && game._isActive && !game._gameEnded) {
         game.evaluationLocked = true;
-        if (game._evalTimer) { clearTimeout(game._evalTimer); game._evalTimer = null; }
+        if (game._evalTimer) { 
+          clearTimeout(game._evalTimer); 
+          game._evalTimer = null; 
+        }
         this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
         game._evalTimer = setTimeout(() => {
           try {
@@ -3488,11 +3643,20 @@ export class GameServer extends CPUProtection {
 
   async leaveGame(ws, username) {
     try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
-      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username is required"]); return; }
+      if (this.isDestroyed) { 
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); 
+        return; 
+      }
+      if (!username?.trim()) { 
+        this._safeSend(ws, ["gameLowCardError", "Username is required"]); 
+        return; 
+      }
       const usernameClean = username.trim();
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
+      if (!room) { 
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
+        return; 
+      }
       const game = this.activeGames.get(room);
       if (!game?._isActive || game._gameEnded || !game.players) {
         this._safeSend(ws, ["gameLowCardError", "No active game in this room"]);
@@ -3510,10 +3674,16 @@ export class GameServer extends CPUProtection {
 
   async checkGameRunning(ws, roomname) {
     try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameStatus", { running: "false" }]); return; }
+      if (this.isDestroyed) { 
+        this._safeSend(ws, ["gameStatus", { running: "false" }]); 
+        return; 
+      }
       let room = roomname;
       if (!room) room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameStatus", { running: "false" }]); return; }
+      if (!room) { 
+        this._safeSend(ws, ["gameStatus", { running: "false" }]); 
+        return; 
+      }
       const game = this.activeGames.get(room);
       const isRunning = game?._isActive && !game._gameEnded && game.players?.size > 0;
       this._safeSend(ws, ["gameStatus", { running: isRunning ? "true" : "false" }]);
@@ -3714,6 +3884,13 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== HANDLER getRecordingStatus ====================
+      if (evt === "getRecordingStatus") {
+        const roomName = data[1];
+        await this.getRecordingStatus(ws, roomName);
+        return;
+      }
+
       if (evt === "sendWinnersToRoom") {
         const room = data[1];
         if (!room) {
@@ -3750,7 +3927,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // START GAME WITH RECORDING - ADMIN EVENT
       if (evt === "startGameWithRecording") {
         const [_, room, bet, username] = data;
         await this._startGameWithRecording(ws, room, bet, username);
@@ -3978,8 +4154,14 @@ export class GameServer extends CPUProtection {
       }
 
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
-      if (room === QUIZ_ROOM) { this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); return; }
+      if (!room) { 
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
+        return; 
+      }
+      if (room === QUIZ_ROOM) { 
+        this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); 
+        return; 
+      }
 
       switch (evt) {
         case "gameLowCardStart":
