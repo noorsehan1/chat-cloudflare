@@ -969,9 +969,10 @@ export class GameServer extends CPUProtection {
         
         this.activeGames.set(room, game);
         
-        this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
-        this._broadcastToRoom(room, ["gameLowCardStartSuccess", username, betAmount]);
-        this._broadcastToRoom(room, ["recordingGameStarted", {
+        // HANYA RESPONSE KE CLIENT YANG CALL, TIDAK BROADCAST KE SEMUA
+        this._safeSend(ws, ["gameLowCardStart", betAmount]);
+        this._safeSend(ws, ["gameLowCardStartSuccess", username, betAmount]);
+        this._safeSend(ws, ["recordingGameStarted", {
           room: room,
           startedBy: 'app',
           host: username,
@@ -4253,6 +4254,7 @@ export class GameServer extends CPUProtection {
               en: this._questionsCache.en?.length || 0,
               id: this._questionsCache.id?.length || 0
             },
+            // TETAP TAMPILKAN DI HEALTH CHECK TAPI TIDAK DI BROADCAST
             recordingStatus: Array.from(this._recordingEnabled.entries()).map(([room, enabled]) => ({
               room,
               enabled,
