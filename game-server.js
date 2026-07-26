@@ -634,8 +634,6 @@ export class GameServer extends CPUProtection {
       
       await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       
-      // ❌ TIDAK BROADCAST DI SINI (SUDAH DI _evaluateRound)
-      
       return true;
     } catch(e) {
       return false;
@@ -2814,7 +2812,7 @@ export class GameServer extends CPUProtection {
     } catch(e) { return false; }
   }
 
-  // ==================== _checkGameCanContinue (TIDAK BROADCAST lowCardWinnerUpdate) ====================
+  // ==================== _checkGameCanContinue (HANYA SAVE, TIDAK BROADCAST) ====================
   async _checkGameCanContinue(room, game) {
     try {
       if (!game?._isActive || game._gameEnded || !game.players || game._isEvaluating || game.evaluationLocked || game.registrationOpen) return;
@@ -2846,11 +2844,11 @@ export class GameServer extends CPUProtection {
           await this._addLowCardWinner(room, winner);
         }
         
-        // ❌ TIDAK BROADCAST lowCardWinnerUpdate DI SINI
-        
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
+        
+        // ✅ HANYA 1 BROADCAST gameLowCardWinner
         this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
         this._scheduleGameCleanup(room, game);
       }
@@ -3009,7 +3007,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== _startDrawPhase (TIDAK BROADCAST lowCardWinnerUpdate) ====================
+  // ==================== _startDrawPhase (HANYA SAVE, TIDAK BROADCAST) ====================
   async _startDrawPhase(room, game) {
     try {
       if (!this._isGameActuallyRunning(game)) return;
@@ -3044,11 +3042,11 @@ export class GameServer extends CPUProtection {
               await this._addLowCardWinner(room, winner);
             }
             
-            // ❌ TIDAK BROADCAST lowCardWinnerUpdate DI SINI
-            
             game._gameEnded = true;
             game._isActive = false;
             game._endTime = Date.now();
+            
+            // ✅ HANYA 1 BROADCAST gameLowCardWinner
             this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
             this._scheduleGameCleanup(room, game);
           } else {
@@ -3138,7 +3136,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== _evaluateRound (HANYA DI SINI BROADCAST lowCardWinnerUpdate 1 KALI) ====================
+  // ==================== _evaluateRound (BROADCAST gameLowCardWinner SAJA) ====================
   async _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
@@ -3185,38 +3183,17 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // === KONDISI PEMENANG (HANYA 1 KALI BROADCAST) ===
+      // === KONDISI PEMENANG ===
       if (entries.length === 1 && eliminated.size === activeIds.length - 1) {
         const winnerId = entries[0][0];
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        // AMBIL SEMUA WINNER DARI KV
-        const allWinners = await this._getLowCardWinners(room);
-        const winnersWithX = {};
-        for (const [name, count] of Object.entries(allWinners)) {
-          winnersWithX[name] = count + "x";
-        }
-        
-        // SIMPAN KE KV (JIKA RECORDING)
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
         }
         
-        // ✅ HANYA 1 KALI BROADCAST lowCardWinnerUpdate
-        this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-          username: winnerName,
-          wins: (game._startedByRecording ? 
-            (allWinners[winnerName] ? allWinners[winnerName] + "x" : "1x") : 
-            "1x"),
-          room: room,
-          totalWinners: Object.keys(winnersWithX).length,
-          winners: winnersWithX,
-          recording: game._startedByRecording,
-          updatedAt: new Date().toISOString(),
-          type: 'winnerUpdate'
-        }]);
-        
+        // ✅ HANYA 1 BROADCAST gameLowCardWinner (TANPA lowCardWinnerUpdate)
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
         game._gameEnded = true;
@@ -3268,32 +3245,11 @@ export class GameServer extends CPUProtection {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        // AMBIL SEMUA WINNER DARI KV
-        const allWinners = await this._getLowCardWinners(room);
-        const winnersWithX = {};
-        for (const [name, count] of Object.entries(allWinners)) {
-          winnersWithX[name] = count + "x";
-        }
-        
-        // SIMPAN KE KV (JIKA RECORDING)
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
         }
         
-        // ✅ HANYA 1 KALI BROADCAST lowCardWinnerUpdate
-        this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-          username: winnerName,
-          wins: (game._startedByRecording ? 
-            (allWinners[winnerName] ? allWinners[winnerName] + "x" : "1x") : 
-            "1x"),
-          room: room,
-          totalWinners: Object.keys(winnersWithX).length,
-          winners: winnersWithX,
-          recording: game._startedByRecording,
-          updatedAt: new Date().toISOString(),
-          type: 'winnerUpdate'
-        }]);
-        
+        // ✅ HANYA 1 BROADCAST gameLowCardWinner (TANPA lowCardWinnerUpdate)
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
         game._gameEnded = true;
