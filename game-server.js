@@ -782,17 +782,15 @@ export class GameServer extends CPUProtection {
   async getRecordingStatus(ws, roomName) {
     try {
       if (!roomName || roomName.trim() === "") {
-        // Kirim boolean false langsung
         this._safeSend(ws, ["recordingStatus", false]);
         return;
       }
       
       const isRecordingEnabled = this._recordingEnabled.get(roomName) || false;
       
-      // Kirim boolean langsung: true jika aktif, false jika tidak
+      // Kirim boolean langsung
       this._safeSend(ws, ["recordingStatus", isRecordingEnabled]);
     } catch(e) {
-      // Kirim false jika error
       this._safeSend(ws, ["recordingStatus", false]);
     }
   }
@@ -3818,6 +3816,7 @@ export class GameServer extends CPUProtection {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
 
+      // ==================== START RECORDING ====================
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
@@ -3838,6 +3837,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== STOP RECORDING ====================
       if (evt === "stopRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
@@ -3858,6 +3858,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== GET ROOM WINNERS ====================
       if (evt === "getRoomWinners") {
         const room = data[1];
         if (!room) {
@@ -3878,7 +3879,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== HANDLER getRecordingStatus ====================
+      // ==================== GET RECORDING STATUS ====================
       // KIRIM BOOLEAN LANGSUNG
       if (evt === "getRecordingStatus") {
         const roomName = data[1];
@@ -3886,6 +3887,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== SEND WINNERS TO ROOM ====================
       if (evt === "sendWinnersToRoom") {
         const room = data[1];
         if (!room) {
@@ -3904,6 +3906,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== RESET ROOM WINNERS ====================
       if (evt === "resetRoomWinners") {
         const room = data[1];
         if (!room) {
@@ -3922,12 +3925,14 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== START GAME WITH RECORDING (ADMIN) ====================
       if (evt === "startGameWithRecording") {
         const [_, room, bet, username] = data;
         await this._startGameWithRecording(ws, room, bet, username);
         return;
       }
 
+      // ==================== LOWCARD WINNER UPDATE ====================
       if (evt === "lowCardWinnerUpdate") {
         const room = data[1] || this._ensureRoomConsistency(ws);
         if (!room) {
@@ -3955,6 +3960,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== LOWCARD WINNERS DATA ====================
       if (evt === "lowCardWinnersData") {
         const room = data[1] || this._ensureRoomConsistency(ws);
         if (!room) {
@@ -3982,6 +3988,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== USER COUNTRY INFO ====================
       if (evt === "getUserCountryInfo") {
         const wsId = this._getWsId(ws);
         const info = this.countryQuizSystem.getUserCountryInfo(wsId);
@@ -3989,6 +3996,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== COUNTRY QUESTIONS ====================
       if (evt === "getCountryQuestions") {
         const countryCode = data[1] || 'ID';
         const questions = await this.countryQuizSystem.getQuestionsForCountry(countryCode);
@@ -4000,6 +4008,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== COUNTRY QUIZ STATUS ====================
       if (evt === "getCountryQuizStatus") {
         const countryCode = data[1] || 'ID';
         const info = COUNTRY_LANGUAGE_MAP[countryCode];
@@ -4014,24 +4023,28 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== TRANSLATION STATUS ====================
       if (evt === "getTranslationStatus") {
         const status = this.countryQuizSystem.getTranslationStatus();
         this._safeSend(ws, ["translationStatus", status]);
         return;
       }
 
+      // ==================== SWITCH ROOM ====================
       if (evt === "switchRoom") {
         const [_, room, username] = data;
         await this.switchRoom(ws, room, username);
         return;
       }
 
+      // ==================== SUBMIT QUIZ ANSWER ====================
       if (evt === "submitQuizAnswer") {
         const [_, username, answer] = data;
         await this.submitQuizAnswer(ws, username, answer);
         return;
       }
 
+      // ==================== GET QUIZ LAST WEEK WINNER ====================
       if (evt === "getQuizLastWeekWinner") {
         try {
           const winner = await this.env.QUESTIONS.get(CONSTANTS.QUIZ_LAST_WEEK_WINNER, 'json');
@@ -4046,6 +4059,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== GET QUIZ LEADERBOARD ====================
       if (evt === "getQuizLeaderboard") {
         try {
           let limit = data.length > 1 && typeof data[1] === 'number' ? Math.min(data[1], 30) : 10;
@@ -4063,6 +4077,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== DELETE QUIZ LAST WEEK WINNER ====================
       if (evt === "deleteQuizLastWeekWinner") {
         try {
           if (this.env?.QUESTIONS) {
@@ -4083,12 +4098,14 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== GET SUPPORTED LANGUAGES ====================
       if (evt === "getSupportedLanguages") {
         const languages = this.countryQuizSystem.getTranslationStatus();
         this._safeSend(ws, ["supportedLanguages", languages]);
         return;
       }
 
+      // ==================== GET USER LANGUAGE ====================
       if (evt === "getUserLanguage") {
         const wsId = this._getWsId(ws);
         const country = this.userCountry.get(wsId) || 'US';
@@ -4102,6 +4119,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== GET QUIZ NOTIFICATION ====================
       if (evt === "getQuizNotification") {
         const remaining = this._getQuestionRemainingTime();
         const remainingText = `${remaining}s remaining`;
@@ -4130,6 +4148,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== GET QUIZ STATUS ====================
       if (evt === "getQuizStatus") {
         const isQuizTime = this._isQuizTime();
         const timeLeft = this._getTimeLeftUntilNextQuiz();
@@ -4148,6 +4167,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== GAME EVENTS ====================
       const room = this._ensureRoomConsistency(ws);
       if (!room) { 
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
