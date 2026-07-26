@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS - FULL CLASS ====================
+// ==================== GAME-SERVER.JS ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -55,9 +55,9 @@ const CONSTANTS = {
   ERROR_RECOVERY_DELAY_MS: 5000,
   MAX_UNHANDLED_ERRORS: 5,
   ERROR_RESET_INTERVAL_MS: 60000,
+  // LowCard Winner Recording - Sesuai dengan struktur KV
   LOWCARD_WINNER_KEY: 'lowcard_winner_',
-  LOWCARD_RECORDING_KEY: 'lowcard_recording_status_',
-  RECORDING_BLOCK_DURATION_MS: 5000
+  LOWCARD_RECORDING_STATUS_KEY: 'lowcard_recording_status_',
 };
 
 const QUIZ_SCHEDULE = {
@@ -78,7 +78,6 @@ const COUNTRY_LANGUAGE_MAP = {
 
 const SUPPORTED_LANGUAGES = ['en', 'id'];
 
-// ==================== CPU PROTECTION CLASS ====================
 class CPUProtection {
   constructor() {
     this._cpuStartTime = 0;
@@ -188,7 +187,6 @@ class CPUProtection {
   }
 }
 
-// ==================== COUNTRY BASED QUIZ SYSTEM ====================
 class CountryBasedQuizSystem {
   constructor(gameServer) {
     this.gameServer = gameServer;
@@ -404,7 +402,6 @@ class CountryBasedQuizSystem {
   }
 }
 
-// ==================== MAIN GAME SERVER CLASS ====================
 export class GameServer extends CPUProtection {
   constructor(state, env) {
     try {
@@ -458,7 +455,6 @@ export class GameServer extends CPUProtection {
       this._tikCounter = 0;
       this._gameStartFlags = new Map();
 
-      // QUIZ PROPERTIES
       this.quizAnswered = new Set();
       this.quizHasWinner = false;
       this.quizWinner = null;
@@ -508,18 +504,14 @@ export class GameServer extends CPUProtection {
       this._questionStartTime = null;
       this._canSubmitAnswer = false;
 
-      // RECORDING PROPERTIES
-      this._recordingEnabled = new Map();
-      this._roomWinnersCache = new Map();
-      this._gameBlocked = new Map();
-      
-      // ====== FLAG UNTUK MENCEGAH AUTO-START ======
-      this._blockGameStart = new Map(); // room -> timestamp
-      this._recordingOperation = new Map(); // room -> boolean
+      // LowCard Recording Cache
+      this._lowcardRecordingCache = new Map();
+      this._lowcardWinnerCache = new Map();
 
       this.countryQuizSystem = new CountryBasedQuizSystem(this);
 
       this._loadAllQuestionsToMemory();
+
       this._initAsync();
       this._startCPUMonitor();
       this._startHealthCheck();
@@ -532,275 +524,56 @@ export class GameServer extends CPUProtection {
         } catch(e) {}
       }, 5000);
 
-      // TIDAK ADA AUTO-START GAME DI SINI
-
-    } catch(e) {
-      console.error("Constructor error:", e);
-    }
-  }
-
-  // ==================== RECORDING WINNERS ====================
-
-  async _startRecordingWinners(roomName, ws) {
-    try {
-      if (!roomName) {
-        if (ws) this._safeSend(ws, ["recordingStatus", {
-          success: false,
-          enabled: false,
-          message: "Room name required"
-        }]);
-        return false;
-      }
-      
-      // BLOKIR GAME START
-      this._blockGameStart.set(roomName, Date.now() + CONSTANTS.RECORDING_BLOCK_DURATION_MS);
-      this._recordingOperation.set(roomName, true);
-      
-      const existingGame = this.activeGames.get(roomName);
-      if (existingGame?._isActive && !existingGame._gameEnded) {
-        await this._forceCleanupGame(roomName, existingGame);
-        this._broadcastToRoom(roomName, ["gameLowCardError", 
-          "Game stopped because recording was enabled"
-        ]);
-      }
-      
-      this._recordingEnabled.set(roomName, true);
-      this._gameBlocked.set(roomName, true);
-      
-      if (this.env?.QUESTIONS) {
-        await this.env.QUESTIONS.put(
-          CONSTANTS.LOWCARD_RECORDING_KEY + roomName, 
-          'true'
-        );
-      }
-      
-      await this._loadRoomWinnersToCache(roomName);
-      
-      this._broadcastToRoom(roomName, ["recordingStatus", {
-        enabled: true,
-        room: roomName,
-        gameBlocked: true,
-        message: "Recording enabled - GAME BLOCKED"
-      }]);
-      
-      this._broadcastToRoom(roomName, ["gameBlocked", {
-        blocked: true,
-        room: roomName,
-        reason: "Recording is active",
-        message: "Game is blocked while recording is active. Use startGameWithRecording to start."
-      }]);
-      
-      if (ws) {
-        this._safeSend(ws, ["recordingStarted", {
-          success: true,
-          room: roomName,
-          message: "Recording started - Game blocked. Use startGameWithRecording to start game."
-        }]);
-      }
-      
-      // HAPUS FLAG
       setTimeout(() => {
-        this._blockGameStart.delete(roomName);
-        this._recordingOperation.delete(roomName);
-      }, CONSTANTS.RECORDING_BLOCK_DURATION_MS);
-      
-      return true;
-    } catch(e) {
-      if (ws) this._safeSend(ws, ["gameLowCardError", "Failed to start recording: " + e.message]);
-      this._blockGameStart.delete(roomName);
-      this._recordingOperation.delete(roomName);
-      return false;
-    }
-  }
+        if (!this.closing && !this.isDestroyed && !this._isShowingQuestion) {
+          this.forceStartQuiz();
+        }
+      }, 8000);
 
-  async _stopRecordingWinners(roomName, ws) {
-    try {
-      if (!roomName) {
-        if (ws) this._safeSend(ws, ["recordingStatus", {
-          success: false,
-          enabled: false,
-          message: "Room name required"
-        }]);
-        return false;
-      }
-      
-      // BLOKIR GAME START
-      this._blockGameStart.set(roomName, Date.now() + CONSTANTS.RECORDING_BLOCK_DURATION_MS);
-      this._recordingOperation.set(roomName, true);
-      
-      const existingGame = this.activeGames.get(roomName);
-      if (existingGame?._isActive && !existingGame._gameEnded) {
-        await this._forceCleanupGame(roomName, existingGame);
-        this._broadcastToRoom(roomName, ["gameLowCardError", 
-          "Game stopped because recording was disabled"
-        ]);
-      }
-      
-      this._recordingEnabled.set(roomName, false);
-      this._gameBlocked.set(roomName, false);
-      
-      if (this.env?.QUESTIONS) {
-        await this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + roomName);
-      }
-      
-      this._broadcastToRoom(roomName, ["recordingStatus", {
-        enabled: false,
-        room: roomName,
-        gameBlocked: false,
-        message: "Recording stopped - GAME UNBLOCKED"
-      }]);
-      
-      this._broadcastToRoom(roomName, ["gameBlocked", {
-        blocked: false,
-        room: roomName,
-        message: "Game is now available! Use startGame or startGameWithRecording to play."
-      }]);
-      
-      this._broadcastToRoom(roomName, ["gameAvailable", {
-        available: true,
-        room: roomName,
-        message: "Game is now available! Use startGame or startGameWithRecording to start."
-      }]);
-      
-      if (ws) {
-        this._safeSend(ws, ["recordingStopped", {
-          success: true,
-          room: roomName,
-          message: "Recording stopped successfully - Game is now available"
-        }]);
-      }
-      
-      // HAPUS FLAG
-      setTimeout(() => {
-        this._blockGameStart.delete(roomName);
-        this._recordingOperation.delete(roomName);
-      }, CONSTANTS.RECORDING_BLOCK_DURATION_MS);
-      
-      return true;
-    } catch(e) {
-      if (ws) this._safeSend(ws, ["gameLowCardError", "Failed to stop recording: " + e.message]);
-      this._blockGameStart.delete(roomName);
-      this._recordingOperation.delete(roomName);
-      return false;
-    }
-  }
-
-  async _getRecordingStatus(roomName) {
-    try {
-      if (!roomName) return { enabled: false, gameBlocked: false };
-      
-      if (this._recordingEnabled.has(roomName)) {
-        const enabled = this._recordingEnabled.get(roomName);
-        const blocked = this._gameBlocked.get(roomName) || false;
-        return { enabled: enabled, gameBlocked: blocked };
-      }
-      
-      if (this.env?.QUESTIONS) {
-        const status = await this.env.QUESTIONS.get(
-          CONSTANTS.LOWCARD_RECORDING_KEY + roomName
-        );
-        const enabled = status === 'true';
-        this._recordingEnabled.set(roomName, enabled);
-        this._gameBlocked.set(roomName, enabled);
-        return { enabled: enabled, gameBlocked: enabled };
-      }
-      
-      return { enabled: false, gameBlocked: false };
-    } catch(e) {
-      return { enabled: false, gameBlocked: false };
-    }
-  }
-
-  async _isGameBlocked(roomName) {
-    try {
-      if (!roomName) return false;
-      if (this._gameBlocked.has(roomName)) {
-        return this._gameBlocked.get(roomName);
-      }
-      const status = await this._getRecordingStatus(roomName);
-      return status.gameBlocked || false;
-    } catch(e) {
-      return false;
-    }
-  }
-
-  async _loadRoomWinnersToCache(roomName) {
-    try {
-      if (!roomName) return;
-      if (!this.env?.QUESTIONS) return;
-      
-      const key = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
-      const winners = await this.env.QUESTIONS.get(key, 'json');
-      
-      if (winners && typeof winners === 'object') {
-        this._roomWinnersCache.set(roomName, {
-          winners: winners,
-          lastUpdated: Date.now()
-        });
-      } else {
-        this._roomWinnersCache.set(roomName, {
-          winners: {},
-          lastUpdated: Date.now()
-        });
-      }
     } catch(e) {}
   }
 
-  async _addLowCardWinner(room, username) {
+  // ==================== LOWCARD WINNER RECORDING ====================
+
+  /**
+   * Ambil status recording dari KV
+   * Key: lowcard_recording_status_{room}
+   */
+  async _getRecordingStatus(room) {
     try {
-      if (!room || !username) return false;
-      
-      const status = await this._getRecordingStatus(room);
-      if (!status.enabled) {
-        return false;
-      }
-      
-      if (room === QUIZ_ROOM) {
-        return false;
-      }
-      
       if (!this.env?.QUESTIONS) return false;
       
-      const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
-      
-      let roomWinners = {};
-      if (this._roomWinnersCache.has(room)) {
-        roomWinners = this._roomWinnersCache.get(room).winners || {};
-      } else {
-        const existing = await this.env.QUESTIONS.get(key, 'json');
-        if (existing && typeof existing === 'object') {
-          roomWinners = existing;
-        }
+      const cacheKey = `recording_${room}`;
+      if (this._lowcardRecordingCache.has(cacheKey)) {
+        return this._lowcardRecordingCache.get(cacheKey);
       }
       
-      roomWinners[username] = (roomWinners[username] || 0) + 1;
+      const key = `${CONSTANTS.LOWCARD_RECORDING_STATUS_KEY}${room}`;
+      const data = await this.env.QUESTIONS.get(key);
       
-      this._roomWinnersCache.set(room, {
-        winners: roomWinners,
-        lastUpdated: Date.now()
-      });
+      const status = data === 'true' || data === true;
       
-      await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
+      this._lowcardRecordingCache.set(cacheKey, status);
       
-      const winnerData = {
-        room: room,
-        winners: roomWinners,
-        totalPlayers: Object.keys(roomWinners).length,
-        recording: true,
-        updatedAt: new Date().toISOString(),
-        lastWinner: username,
-        lastWinnerWins: roomWinners[username],
-        type: 'winnerUpdate'
-      };
+      return status;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  /**
+   * Set status recording ke KV
+   * Key: lowcard_recording_status_{room}
+   */
+  async _setRecordingStatus(room, enabled) {
+    try {
+      if (!this.env?.QUESTIONS) return false;
       
-      this._broadcastToRoom(room, ["lowCardWinnersData", winnerData]);
-      this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-        username: username,
-        wins: roomWinners[username],
-        room: room,
-        totalWinners: Object.keys(roomWinners).length,
-        winners: roomWinners
-      }]);
+      const key = `${CONSTANTS.LOWCARD_RECORDING_STATUS_KEY}${room}`;
+      await this.env.QUESTIONS.put(key, enabled ? 'true' : 'false');
+      
+      const cacheKey = `recording_${room}`;
+      this._lowcardRecordingCache.set(cacheKey, enabled);
       
       return true;
     } catch(e) {
@@ -808,448 +581,248 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  async _broadcastWinnersToRoom(room, winners) {
+  /**
+   * Hapus status recording dari KV
+   * Key: lowcard_recording_status_{room}
+   */
+  async _deleteRecordingStatus(room) {
     try {
-      if (!room) return;
-      
-      const winnerData = {
-        room: room,
-        winners: winners || {},
-        totalPlayers: winners ? Object.keys(winners).length : 0,
-        recording: true,
-        updatedAt: new Date().toISOString(),
-        type: 'fullRefresh'
-      };
-      
-      this._broadcastToRoom(room, ["lowCardWinnersData", winnerData]);
-    } catch(e) {}
-  }
-
-  async _sendWinnersToRoom(room) {
-    try {
-      if (!room) return;
-      
-      const status = await this._getRecordingStatus(room);
-      if (!status.enabled) {
-        this._broadcastToRoom(room, ["lowCardWinnersData", {
-          room: room,
-          recording: false,
-          message: "Recording disabled for this room"
-        }]);
-        return;
-      }
-      
-      let winners = {};
-      if (this._roomWinnersCache.has(room)) {
-        winners = this._roomWinnersCache.get(room).winners || {};
-      } else {
-        await this._loadRoomWinnersToCache(room);
-        if (this._roomWinnersCache.has(room)) {
-          winners = this._roomWinnersCache.get(room).winners || {};
-        }
-      }
-      
-      if (Object.keys(winners).length === 0) {
-        this._broadcastToRoom(room, ["lowCardWinnersData", {
-          room: room,
-          winners: {},
-          totalPlayers: 0,
-          recording: true,
-          message: "No winners yet"
-        }]);
-        return;
-      }
-      
-      await this._broadcastWinnersToRoom(room, winners);
-    } catch(e) {}
-  }
-
-  async _getLowCardWinners(room) {
-    try {
-      if (!room) return {};
-      if (!this.env?.QUESTIONS) return {};
-      
-      if (this._roomWinnersCache.has(room)) {
-        return this._roomWinnersCache.get(room).winners || {};
-      }
-      
-      const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
-      const winners = await this.env.QUESTIONS.get(key, 'json');
-      
-      if (winners && typeof winners === 'object') {
-        this._roomWinnersCache.set(room, {
-          winners: winners,
-          lastUpdated: Date.now()
-        });
-        return winners;
-      }
-      
-      return {};
-    } catch(e) {
-      return {};
-    }
-  }
-
-  async _resetLowCardWinners(room) {
-    try {
-      if (!room) return false;
       if (!this.env?.QUESTIONS) return false;
       
-      const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
+      const key = `${CONSTANTS.LOWCARD_RECORDING_STATUS_KEY}${room}`;
       await this.env.QUESTIONS.delete(key);
       
-      this._roomWinnersCache.delete(room);
+      const cacheKey = `recording_${room}`;
+      this._lowcardRecordingCache.delete(cacheKey);
       
-      this._broadcastToRoom(room, ["resetRoomWinnersResult", {
-        success: true,
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  /**
+   * Ambil data winners dari KV
+   * Key: lowcard_winner_{room}
+   * Format: {"player1": 3, "player2": 1}
+   */
+  async _getLowCardWinners(room) {
+    try {
+      if (!this.env?.QUESTIONS) return {};
+      
+      const cacheKey = `winner_${room}`;
+      if (this._lowcardWinnerCache.has(cacheKey)) {
+        return this._lowcardWinnerCache.get(cacheKey);
+      }
+      
+      const key = `${CONSTANTS.LOWCARD_WINNER_KEY}${room}`;
+      const data = await this.env.QUESTIONS.get(key, 'json');
+      
+      const winners = data || {};
+      
+      this._lowcardWinnerCache.set(cacheKey, winners);
+      
+      return winners;
+    } catch(e) {
+      return {};
+    }
+  }
+
+  /**
+   * Set data winners ke KV
+   * Key: lowcard_winner_{room}
+   * Format: {"player1": 3, "player2": 1}
+   */
+  async _setLowCardWinners(room, winners) {
+    try {
+      if (!this.env?.QUESTIONS) return false;
+      
+      const key = `${CONSTANTS.LOWCARD_WINNER_KEY}${room}`;
+      await this.env.QUESTIONS.put(key, JSON.stringify(winners));
+      
+      const cacheKey = `winner_${room}`;
+      this._lowcardWinnerCache.set(cacheKey, winners);
+      
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  /**
+   * Hapus data winners dari KV
+   * Key: lowcard_winner_{room}
+   */
+  async _deleteLowCardWinners(room) {
+    try {
+      if (!this.env?.QUESTIONS) return false;
+      
+      const key = `${CONSTANTS.LOWCARD_WINNER_KEY}${room}`;
+      await this.env.QUESTIONS.delete(key);
+      
+      const cacheKey = `winner_${room}`;
+      this._lowcardWinnerCache.delete(cacheKey);
+      
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  /**
+   * Record winner ke KV
+   * Menambah count winner di lowcard_winner_{room}
+   */
+  async _recordWinner(room, winner, totalCoin) {
+    try {
+      const isRecording = await this._getRecordingStatus(room);
+      if (!isRecording) {
+        return false;
+      }
+
+      const winners = await this._getLowCardWinners(room);
+      
+      winners[winner] = (winners[winner] || 0) + 1;
+      
+      await this._setLowCardWinners(room, winners);
+      
+      this._broadcastLowCardWinners(room);
+      
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  /**
+   * Broadcast data winners ke room
+   */
+  async _broadcastLowCardWinners(room) {
+    try {
+      const winners = await this._getLowCardWinners(room);
+      const isRecording = await this._getRecordingStatus(room);
+      
+      const totalPlayers = Object.keys(winners).length;
+      
+      this._broadcastToRoom(room, [
+        "lowCardWinnersData",
+        room,
+        winners,
+        totalPlayers,
+        isRecording
+      ]);
+
+      this._broadcastToRoom(room, [
+        "recordingStatus",
+        isRecording,
+        room,
+        isRecording ? "Recording winners" : "Recording stopped"
+      ]);
+
+    } catch(e) {}
+  }
+
+  /**
+   * Kirim data winners ke room
+   */
+  async _sendRoomWinners(room) {
+    try {
+      const winners = await this._getLowCardWinners(room);
+      const isRecording = await this._getRecordingStatus(room);
+      const totalPlayers = Object.keys(winners).length;
+      
+      this._broadcastToRoom(room, ["roomWinners", {
         room: room,
-        message: "Winners data reset for " + room
+        winners: winners,
+        totalPlayers: totalPlayers,
+        recording: isRecording,
+        totalGames: 0
       }]);
+
+    } catch(e) {}
+  }
+
+  /**
+   * START RECORDING - Set recording aktif
+   */
+  async _startRecordingWinners(room) {
+    try {
+      await this._setRecordingStatus(room, true);
       
-      this._broadcastToRoom(room, ["lowCardWinnersData", {
+      const winners = await this._getLowCardWinners(room);
+      if (Object.keys(winners).length === 0) {
+        await this._setLowCardWinners(room, {});
+      }
+      
+      this._broadcastToRoom(room, ["recordingStatus", true, room, "Recording winners started"]);
+      this._broadcastLowCardWinners(room);
+      
+      return true;
+    } catch(e) {
+      this._broadcastToRoom(room, ["recordingStatus", false, room, "Failed to start recording: " + e.message]);
+      return false;
+    }
+  }
+
+  /**
+   * STOP RECORDING - Hapus semua data
+   * Menghapus:
+   * 1. lowcard_recording_status_{room}
+   * 2. lowcard_winner_{room}
+   */
+  async _stopRecordingWinners(room) {
+    try {
+      await this._deleteRecordingStatus(room);
+      
+      await this._deleteLowCardWinners(room);
+      
+      this._broadcastToRoom(room, ["recordingStatus", false, room, "Recording stopped and data cleared"]);
+      
+      this._broadcastToRoom(room, ["lowCardWinnersData", room, {}, 0, false]);
+      
+      this._broadcastToRoom(room, ["roomWinners", {
         room: room,
         winners: {},
         totalPlayers: 0,
-        recording: true,
-        updatedAt: new Date().toISOString()
+        recording: false,
+        message: "Recording stopped and data cleared"
       }]);
       
       return true;
     } catch(e) {
+      this._broadcastToRoom(room, ["recordingStatus", false, room, "Failed to stop recording: " + e.message]);
       return false;
     }
   }
 
-  // ==================== START GAME WITH RECORDING ====================
-
-  async _startGameWithRecording(ws, room, bet, username) {
+  /**
+   * Ambil data lengkap dari KV
+   */
+  async _getRoomWinnersFromKV(room) {
     try {
-      if (!room || !username) {
-        this._safeSend(ws, ["gameLowCardError", "Room and username required"]);
-        return;
-      }
+      const winners = await this._getLowCardWinners(room);
+      const isRecording = await this._getRecordingStatus(room);
+      const totalPlayers = Object.keys(winners).length;
       
-      // CEK BLOCK
-      if (this._blockGameStart.get(room)) {
-        this._safeSend(ws, ["gameLowCardError", 
-          "Recording operation in progress. Please wait."
-        ]);
-        return;
-      }
-      
-      const betAmount = parseInt(bet, 10) || 0;
-      if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
-        this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
-        return;
-      }
-      
-      const recordingStatus = await this._getRecordingStatus(room);
-      if (!recordingStatus.enabled) {
-        this._safeSend(ws, ["gameLowCardError", 
-          "Recording must be enabled first! Use startRecordingWinners"
-        ]);
-        return;
-      }
-      
-      const existingGame = this.activeGames.get(room);
-      if (existingGame?._isActive && !existingGame._gameEnded) {
-        this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
-        return;
-      }
-      
-      if (existingGame) {
-        await this._forceCleanupGame(room, existingGame);
-      }
-      
-      const now = Date.now();
-      const lockTime = this._gameLocks.get(room);
-      if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
-        this._safeSend(ws, ["gameLowCardError", "Game is starting, please wait"]);
-        return;
-      }
-      this._gameLocks.set(room, now);
-      
-      try {
-        const game = {
-          room, 
-          players: new Map(), 
-          botPlayers: new Map(), 
-          registrationOpen: true,
-          round: 1, 
-          numbers: new Map(), 
-          tanda: new Map(), 
-          eliminated: new Set(),
-          betAmount, 
-          hostId: username, 
-          hostName: username, 
-          useBots: false,
-          evaluationLocked: false, 
-          drawTimeExpired: false,
-          _isActive: true, 
-          _gameEnded: false, 
-          _phase: 'registration',
-          _botTimeouts: new Set(), 
-          _botsAdded: false,
-          _registrationTimer: null, 
-          _drawTimer: null, 
-          _evalTimer: null, 
-          _safetyTimer: null,
-          _isEvaluating: false, 
-          _createdAt: Date.now(), 
-          _drawPhaseStart: null, 
-          _endTime: null,
-          playerWsId: new Map(),
-          _startedByRecording: true,
-          _startedBy: 'app'
-        };
-        
-        game.players.set(username, { id: username, name: username });
-        const wsId = this._getWsId(ws);
-        if (wsId) {
-          game.playerWsId.set(username, wsId);
-          this._addClient(room, ws, username, false);
-        }
-        
-        this.activeGames.set(room, game);
-        
-        this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
-        this._broadcastToRoom(room, ["gameLowCardStartSuccess", username, betAmount]);
-        this._broadcastToRoom(room, ["recordingGameStarted", {
-          room: room,
-          startedBy: 'app',
-          host: username,
-          bet: betAmount,
-          timestamp: Date.now()
-        }]);
-        
-        this._startRegistration(room, game);
-        
-        this._safeSend(ws, ["gameStartWithRecordingSuccess", {
-          success: true,
-          room: room,
-          bet: betAmount,
-          host: username,
-          startedBy: 'app',
-          message: "Game started with recording"
-        }]);
-        
-      } catch(e) {
-        this._deleteGame(room, this.activeGames.get(room));
-        this._safeSend(ws, ["gameLowCardError", "Failed to start game: " + e.message]);
-        this._gameLocks.delete(room);
-      }
-      
+      return {
+        room: room,
+        winners: winners,
+        totalPlayers: totalPlayers,
+        recording: isRecording,
+        totalGames: 0
+      };
     } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Failed to start game with recording"]);
+      return null;
     }
   }
 
-  // ==================== CHECK GAME AVAILABILITY ====================
-
-  async _checkGameAvailability(ws, roomName) {
-    try {
-      if (!roomName) {
-        roomName = this._ensureRoomConsistency(ws);
-      }
-      if (!roomName) {
-        this._safeSend(ws, ["gameAvailability", {
-          available: false,
-          message: "Please switch to a room first"
-        }]);
-        return;
-      }
-      
-      const status = await this._getRecordingStatus(roomName);
-      const isBlocked = status.gameBlocked || false;
-      const isEnabled = status.enabled || false;
-      
-      const game = this.activeGames.get(roomName);
-      const isGameRunning = game?._isActive && !game._gameEnded && game.players?.size > 0;
-      
-      this._safeSend(ws, ["gameAvailability", {
-        available: !isBlocked,
-        recordingEnabled: isEnabled,
-        gameBlocked: isBlocked,
-        gameRunning: isGameRunning || false,
-        room: roomName,
-        message: isBlocked ? 
-          "Game is blocked. Recording is active. Wait for recording to stop." : 
-          "Game is available! You can start playing.",
-        canStartGame: !isBlocked && !isGameRunning,
-        canJoinGame: !isBlocked && isGameRunning,
-        canStartWithRecording: isEnabled && !isGameRunning
-      }]);
-      
-      this._safeSend(ws, ["recordingStatus", {
-        enabled: isEnabled,
-        gameBlocked: isBlocked,
-        room: roomName,
-        message: isEnabled ? "Recording active - GAME BLOCKED" : "Recording inactive"
-      }]);
-      
-    } catch(e) {
-      this._safeSend(ws, ["gameAvailability", {
-        available: false,
-        message: "Error checking game status"
-      }]);
-    }
-  }
-
-  // ==================== USER START GAME ====================
-
-  async startGame(ws, bet, username) {
-    try {
-      if (this.isDestroyed) {
-        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]);
-        return;
-      }
-      if (!username?.trim()) {
-        this._safeSend(ws, ["gameLowCardError", "Username is required"]);
-        return;
-      }
-      const usernameClean = username.trim();
-      const room = this._ensureRoomConsistency(ws);
-      if (!room) {
-        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
-        return;
-      }
-      if (room === QUIZ_ROOM) {
-        this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]);
-        return;
-      }
-
-      // CEK BLOCK GAME START
-      if (this._blockGameStart.get(room)) {
-        this._safeSend(ws, ["gameLowCardError", 
-          "Recording operation in progress. Please wait."
-        ]);
-        return;
-      }
-
-      const isBlocked = await this._isGameBlocked(room);
-      if (isBlocked) {
-        this._safeSend(ws, ["gameLowCardError", 
-          "GAME IS BLOCKED! Recording is active in this room."
-        ]);
-        this._safeSend(ws, ["gameBlocked", {
-          blocked: true,
-          room: room,
-          reason: "Recording is active",
-          message: "Game is blocked while recording is active"
-        }]);
-        return;
-      }
-
-      const recordingStatus = await this._getRecordingStatus(room);
-      if (recordingStatus.enabled) {
-        this._safeSend(ws, ["gameLowCardError", 
-          "Recording is ACTIVE in this room! Use startGameWithRecording instead."
-        ]);
-        this._safeSend(ws, ["recordingStatus", {
-          enabled: true,
-          room: room,
-          message: "Game cannot be started by users while recording is active."
-        }]);
-        return;
-      }
-
-      const startKey = `start_${room}`;
-      if (this._gameStartFlags.has(startKey)) {
-        this._safeSend(ws, ["gameLowCardError", "Game is already starting..."]);
-        return;
-      }
-      
-      const existingGame = this.activeGames.get(room);
-      if (existingGame?._isActive && !existingGame._gameEnded) {
-        this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
-        return;
-      }
-      
-      this._gameStartFlags.set(startKey, Date.now());
-      
-      if (existingGame) {
-        await this._forceCleanupGame(room, existingGame);
-      }
-      
-      const now = Date.now();
-      const lockTime = this._gameLocks.get(room);
-      if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
-        this._safeSend(ws, ["gameLowCardError", "Game is starting, please wait"]);
-        this._gameStartFlags.delete(startKey);
-        return;
-      }
-      this._gameLocks.set(room, now);
-      
-      try {
-        if (this.activeGames.size >= this._maxGames) {
-          this._safeSend(ws, ["gameLowCardError", "Server is busy"]);
-          this._gameLocks.delete(room);
-          this._gameStartFlags.delete(startKey);
-          return;
-        }
-        
-        const betAmount = parseInt(bet, 10) || 0;
-        if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
-          this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
-          this._gameLocks.delete(room);
-          this._gameStartFlags.delete(startKey);
-          return;
-        }
-        
-        const wsId = this._getWsId(ws);
-        const game = {
-          room, players: new Map(), botPlayers: new Map(), registrationOpen: true,
-          round: 1, numbers: new Map(), tanda: new Map(), eliminated: new Set(),
-          betAmount, hostId: usernameClean, hostName: usernameClean, useBots: false,
-          evaluationLocked: false, drawTimeExpired: false,
-          _isActive: true, _gameEnded: false, _phase: 'registration',
-          _botTimeouts: new Set(), _botsAdded: false,
-          _registrationTimer: null, _drawTimer: null, _evalTimer: null, _safetyTimer: null,
-          _isEvaluating: false, _createdAt: Date.now(), _drawPhaseStart: null, _endTime: null,
-          playerWsId: new Map(),
-          _startedByRecording: false,
-          _startedBy: 'user'
-        };
-        
-        game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
-        game.playerWsId.set(usernameClean, wsId);
-        this.activeGames.set(room, game);
-        this._addClient(room, ws, usernameClean, false);
-        this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
-        this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
-        this._startRegistration(room, game);
-        
-        this._safeSend(ws, ["gameStarted", {
-          success: true,
-          room: room,
-          bet: betAmount,
-          host: usernameClean,
-          message: "Game started successfully!"
-        }]);
-        
-        setTimeout(() => {
-          try {
-            this._gameStartFlags.delete(startKey);
-            if (this._gameLocks.get(room) === now) this._gameLocks.delete(room);
-          } catch(e) {}
-        }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
-        
-      } catch(e) {
-        this._deleteGame(room, this.activeGames.get(room));
-        this._safeSend(ws, ["gameLowCardError", "Failed to start game: " + e.message]);
-        this._gameLocks.delete(room);
-        this._gameStartFlags.delete(startKey);
-      }
-    } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
-    }
-  }
-
-  // ==================== QUIZ METHODS ====================
+  // ==================== HANDLER QUIZ WINNER ====================
 
   async _handleQuizWinner(username, correctAnswer) {
     try {
-      if (this._winnerProcessed) return;
+      if (this._winnerProcessed) {
+        return;
+      }
       
       this._winnerProcessed = true;
       
@@ -1422,6 +995,25 @@ export class GameServer extends CPUProtection {
     } catch(e) {
       return { hours: 0, minutes: 0, totalMinutes: 0, formatted: '00:00' };
     }
+  }
+
+  _getCurrentWITAHour() {
+    try {
+      return (new Date().getUTCHours() + QUIZ_SCHEDULE.TIMEZONE_OFFSET) % 24;
+    } catch(e) { return 0; }
+  }
+
+  _getCurrentWITAMinutes() {
+    try {
+      return new Date().getUTCMinutes();
+    } catch(e) { return 0; }
+  }
+
+  _formatWITATime(hours, minutes) {
+    try {
+      const h = hours % 24;
+      return `${String(h).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+    } catch(e) { return '00:00'; }
   }
 
   _isQuizTime() {
@@ -1763,7 +1355,6 @@ export class GameServer extends CPUProtection {
       if (this._initializing) return;
       if (this._initialized && !this._isRecovering) return;
       this._initializing = true;
-      
       await this.countryQuizSystem.loadAllQuestions();
       await this._initQuiz();
       this._startQuizScheduler();
@@ -3053,7 +2644,7 @@ export class GameServer extends CPUProtection {
     } catch(e) { return false; }
   }
 
-  // ==================== GAME HELPER METHODS ====================
+  // ==================== GAME METHODS ====================
 
   _isGameActuallyRunning(game) { try { return game?._isActive === true && !game?._gameEnded; } catch(e) { return false; } }
 
@@ -3206,9 +2797,6 @@ export class GameServer extends CPUProtection {
         if (notSubmitted.length > 0) { this._broadcastToRoom(room, ["gameLowCardTimeLeft", `Waiting for ${notSubmitted.length} player(s)`]); return; }
         const winner = activePlayers[0]?.name || "Unknown";
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
-        
-        this._addLowCardWinner(room, winner);
-        
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
@@ -3216,6 +2804,19 @@ export class GameServer extends CPUProtection {
         this._scheduleGameCleanup(room, game);
       }
     } catch(e) {}
+  }
+
+  _findAllGamesByUsername(username) {
+    try {
+      if (!username) return [];
+      const result = [];
+      for (const [room, game] of this.activeGames) {
+        if (game?._isActive && !game._gameEnded && game.players?.has(username)) {
+          result.push({ game, room });
+        }
+      }
+      return result;
+    } catch(e) { return []; }
   }
 
   _addBots(room, count) {
@@ -3368,9 +2969,6 @@ export class GameServer extends CPUProtection {
           if (newActive.length === 1 && !game._gameEnded) {
             const winner = newActive[0]?.name || "Unknown";
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
-            
-            this._addLowCardWinner(room, winner);
-            
             game._gameEnded = true;
             game._isActive = false;
             game._endTime = Date.now();
@@ -3451,7 +3049,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  async _evaluateRound(room, game) {
+  _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
       const currentGame = this.activeGames.get(room);
@@ -3486,14 +3084,15 @@ export class GameServer extends CPUProtection {
         const winnerId = entries[0][0];
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
-        
-        await this._addLowCardWinner(room, winnerName);
-        
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
         game._isEvaluating = false;
         if (game._safetyTimer) { clearTimeout(game._safetyTimer); game._safetyTimer = null; }
+        
+        // === RECORD WINNER ===
+        this._recordWinner(room, winnerName, totalCoin);
+        
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         this._scheduleGameCleanup(room, game);
         return;
@@ -3531,14 +3130,15 @@ export class GameServer extends CPUProtection {
         const winnerId = remaining[0];
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
-        
-        await this._addLowCardWinner(room, winnerName);
-        
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
         game._isEvaluating = false;
         if (game._safetyTimer) { clearTimeout(game._safetyTimer); game._safetyTimer = null; }
+        
+        // === RECORD WINNER ===
+        this._recordWinner(room, winnerName, totalCoin);
+        
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         this._scheduleGameCleanup(room, game);
         return;
@@ -3575,6 +3175,81 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  async startGame(ws, bet, username) {
+    try {
+      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
+      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username is required"]); return; }
+      const usernameClean = username.trim();
+      const room = this._ensureRoomConsistency(ws);
+      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
+      if (room === QUIZ_ROOM) { this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); return; }
+      const startKey = `start_${room}`;
+      if (this._gameStartFlags.has(startKey)) { this._safeSend(ws, ["gameLowCardError", "Game is already starting..."]); return; }
+      const existingGame = this.activeGames.get(room);
+      if (existingGame?._isActive && !existingGame._gameEnded) {
+        this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
+        return;
+      }
+      this._gameStartFlags.set(startKey, Date.now());
+      if (existingGame) await this._forceCleanupGame(room, existingGame);
+      const now = Date.now();
+      const lockTime = this._gameLocks.get(room);
+      if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
+        this._safeSend(ws, ["gameLowCardError", "Game is starting, please wait"]);
+        this._gameStartFlags.delete(startKey);
+        return;
+      }
+      this._gameLocks.set(room, now);
+      try {
+        if (this.activeGames.size >= this._maxGames) {
+          this._safeSend(ws, ["gameLowCardError", "Server is busy"]);
+          this._gameLocks.delete(room);
+          this._gameStartFlags.delete(startKey);
+          return;
+        }
+        const betAmount = parseInt(bet, 10) || 0;
+        if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
+          this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
+          this._gameLocks.delete(room);
+          this._gameStartFlags.delete(startKey);
+          return;
+        }
+        const wsId = this._getWsId(ws);
+        const game = {
+          room, players: new Map(), botPlayers: new Map(), registrationOpen: true,
+          round: 1, numbers: new Map(), tanda: new Map(), eliminated: new Set(),
+          betAmount, hostId: usernameClean, hostName: usernameClean, useBots: false,
+          evaluationLocked: false, drawTimeExpired: false,
+          _isActive: true, _gameEnded: false, _phase: 'registration',
+          _botTimeouts: new Set(), _botsAdded: false,
+          _registrationTimer: null, _drawTimer: null, _evalTimer: null, _safetyTimer: null,
+          _isEvaluating: false, _createdAt: Date.now(), _drawPhaseStart: null, _endTime: null,
+          playerWsId: new Map()
+        };
+        game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
+        game.playerWsId.set(usernameClean, wsId);
+        this.activeGames.set(room, game);
+        this._addClient(room, ws, usernameClean, false);
+        this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
+        this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
+        this._startRegistration(room, game);
+        setTimeout(() => {
+          try {
+            this._gameStartFlags.delete(startKey);
+            if (this._gameLocks.get(room) === now) this._gameLocks.delete(room);
+          } catch(e) {}
+        }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
+      } catch(e) {
+        this._deleteGame(room, this.activeGames.get(room));
+        this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
+        this._gameLocks.delete(room);
+        this._gameStartFlags.delete(startKey);
+      }
+    } catch(e) {
+      this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
+    }
+  }
+
   async _forceCleanupGame(room, game) {
     try {
       if (!game) return;
@@ -3597,38 +3272,15 @@ export class GameServer extends CPUProtection {
 
   async joinGame(ws, username) {
     try {
-      if (this.isDestroyed) { 
-        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); 
-        return; 
-      }
-      if (!username?.trim()) { 
-        this._safeSend(ws, ["gameLowCardError", "Username is required"]); 
-        return; 
-      }
-      
+      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
+      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username is required"]); return; }
       const usernameClean = username.trim();
       const wsId = this._getWsId(ws);
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { 
-        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
-        return; 
-      }
-
-      const isBlocked = await this._isGameBlocked(room);
-      if (isBlocked) {
-        this._safeSend(ws, ["gameLowCardError", 
-          "GAME IS BLOCKED! Recording is active in this room."
-        ]);
-        return;
-      }
-      
+      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
       const lockKey = `join_${room}_${usernameClean}`;
-      if (this._joinLocks.has(lockKey)) { 
-        this._safeSend(ws, ["gameLowCardError", "Join in progress, please wait"]); 
-        return; 
-      }
+      if (this._joinLocks.has(lockKey)) { this._safeSend(ws, ["gameLowCardError", "Join in progress, please wait"]); return; }
       this._joinLocks.set(lockKey, Date.now());
-      
       try {
         const game = this.activeGames.get(room);
         if (!game?._isActive || game._gameEnded || !game.players) {
@@ -3669,31 +3321,12 @@ export class GameServer extends CPUProtection {
 
   async submitNumber(ws, number, tanda, username) {
     try {
-      if (this.isDestroyed) { 
-        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); 
-        return; 
-      }
-      if (!username?.trim()) { 
-        this._safeSend(ws, ["gameLowCardError", "Username is required"]); 
-        return; 
-      }
-      
+      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
+      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username is required"]); return; }
       const usernameClean = username.trim();
       const wsId = this._getWsId(ws);
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { 
-        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
-        return; 
-      }
-
-      const isBlocked = await this._isGameBlocked(room);
-      if (isBlocked) {
-        this._safeSend(ws, ["gameLowCardError", 
-          "GAME IS BLOCKED! Recording is active in this room."
-        ]);
-        return;
-      }
-      
+      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
       const game = this.activeGames.get(room);
       if (!game?._isActive || game._gameEnded || !game.players) {
         this._safeSend(ws, ["gameLowCardError", "No active game"]);
@@ -3852,47 +3485,7 @@ export class GameServer extends CPUProtection {
     } catch(e) { return array || []; }
   }
 
-  // ==================== GET GAME STATUS ====================
-
-  async getGameStatus(ws, roomName) {
-    try {
-      if (!roomName) {
-        roomName = this._ensureRoomConsistency(ws);
-      }
-      if (!roomName) {
-        this._safeSend(ws, ["gameStatus", {
-          available: false,
-          message: "Please switch to a room first"
-        }]);
-        return;
-      }
-      
-      const status = await this._getRecordingStatus(roomName);
-      const game = this.activeGames.get(roomName);
-      const isGameRunning = game?._isActive && !game._gameEnded && game.players?.size > 0;
-      
-      this._safeSend(ws, ["gameStatus", {
-        room: roomName,
-        recordingEnabled: status.enabled,
-        gameBlocked: status.gameBlocked,
-        gameRunning: isGameRunning,
-        available: !status.gameBlocked && !isGameRunning,
-        canStartWithRecording: status.enabled && !isGameRunning,
-        message: status.gameBlocked ? 
-          "Game blocked - Recording active. Use startGameWithRecording" :
-          isGameRunning ? 
-          "Game is running" : 
-          "Game available"
-      }]);
-    } catch(e) {
-      this._safeSend(ws, ["gameStatus", {
-        available: false,
-        error: e.message
-      }]);
-    }
-  }
-
-  // ==================== EVENT HANDLER ====================
+  // ==================== EVENT HANDLING ====================
 
   async handleEvent(ws, data) {
     try {
@@ -3963,211 +3556,6 @@ export class GameServer extends CPUProtection {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
 
-      // ==================== RECORDING EVENTS ====================
-      if (evt === "startRecordingWinners") {
-        const roomName = data[1];
-        if (!roomName) {
-          this._safeSend(ws, ["recordingStatus", {
-            success: false,
-            enabled: false,
-            message: "Room name required"
-          }]);
-          return;
-        }
-        await this._startRecordingWinners(roomName, ws);
-        return;
-      }
-
-      if (evt === "stopRecordingWinners") {
-        const roomName = data[1];
-        if (!roomName) {
-          this._safeSend(ws, ["recordingStatus", {
-            success: false,
-            enabled: false,
-            message: "Room name required"
-          }]);
-          return;
-        }
-        await this._stopRecordingWinners(roomName, ws);
-        return;
-      }
-
-      // ==================== BLOKIR GAME START SELAMA RECORDING ====================
-      if (evt === "gameLowCardStart") {
-        let roomName = data[2];
-        if (!roomName) roomName = this._ensureRoomConsistency(ws);
-        
-        if (roomName) {
-          // CEK BLOCK
-          if (this._blockGameStart.get(roomName)) {
-            this._safeSend(ws, ["gameLowCardError", 
-              "Recording operation in progress. Please wait."
-            ]);
-            return;
-          }
-          
-          // CEK RECORDING STATUS
-          const status = await this._getRecordingStatus(roomName);
-          if (status.enabled) {
-            this._safeSend(ws, ["gameLowCardError", 
-              "Recording is ACTIVE! Use startGameWithRecording."
-            ]);
-            return;
-          }
-        }
-      }
-
-      // ==================== CHECK GAME AVAILABILITY ====================
-      if (evt === "checkGameAvailability") {
-        const roomName = data[1] || this._ensureRoomConsistency(ws);
-        await this._checkGameAvailability(ws, roomName);
-        return;
-      }
-
-      if (evt === "getRecordingStatus") {
-        const roomName = data[1] || this._ensureRoomConsistency(ws);
-        if (!roomName) {
-          this._safeSend(ws, ["recordingStatus", {
-            enabled: false,
-            gameBlocked: false,
-            message: "Room name required"
-          }]);
-          return;
-        }
-        const status = await this._getRecordingStatus(roomName);
-        this._safeSend(ws, ["recordingStatus", {
-          enabled: status.enabled,
-          gameBlocked: status.gameBlocked,
-          room: roomName,
-          message: status.enabled ? "Recording active - GAME BLOCKED" : "Recording inactive - GAME AVAILABLE"
-        }]);
-        return;
-      }
-
-      if (evt === "getRoomWinners") {
-        const room = data[1];
-        if (!room) {
-          this._safeSend(ws, ["roomWinners", {
-            error: "Room name required"
-          }]);
-          return;
-        }
-        const winners = await this._getLowCardWinners(room);
-        const status = await this._getRecordingStatus(room);
-        this._safeSend(ws, ["roomWinners", {
-          room: room,
-          winners: winners,
-          totalPlayers: Object.keys(winners).length,
-          recording: status.enabled,
-          gameBlocked: status.gameBlocked,
-          updatedAt: new Date().toISOString()
-        }]);
-        return;
-      }
-
-      if (evt === "sendWinnersToRoom") {
-        const room = data[1];
-        if (!room) {
-          this._safeSend(ws, ["sendWinnersResult", {
-            success: false,
-            message: "Room name required"
-          }]);
-          return;
-        }
-        await this._sendWinnersToRoom(room);
-        this._safeSend(ws, ["sendWinnersResult", {
-          success: true,
-          room: room,
-          message: "Winners data sent to room"
-        }]);
-        return;
-      }
-
-      if (evt === "resetRoomWinners") {
-        const room = data[1];
-        if (!room) {
-          this._safeSend(ws, ["resetRoomWinnersResult", {
-            success: false,
-            message: "Room name required"
-          }]);
-          return;
-        }
-        await this._resetLowCardWinners(room);
-        return;
-      }
-
-      // ==================== START GAME WITH RECORDING ====================
-      if (evt === "startGameWithRecording") {
-        const [_, room, bet, username] = data;
-        await this._startGameWithRecording(ws, room, bet, username);
-        return;
-      }
-
-      // ==================== WINNER UPDATE EVENTS ====================
-      if (evt === "lowCardWinnerUpdate") {
-        const room = data[1] || this._ensureRoomConsistency(ws);
-        if (!room) {
-          this._safeSend(ws, ["lowCardWinnerUpdate", {
-            error: "Room name required",
-            success: false
-          }]);
-          return;
-        }
-        
-        await this._sendWinnersToRoom(room);
-        
-        const status = await this._getRecordingStatus(room);
-        const winners = await this._getLowCardWinners(room);
-        
-        this._safeSend(ws, ["lowCardWinnersData", {
-          room: room,
-          winners: winners,
-          totalPlayers: Object.keys(winners).length,
-          recording: status.enabled,
-          gameBlocked: status.gameBlocked,
-          updatedAt: new Date().toISOString(),
-          type: 'refreshResponse'
-        }]);
-        
-        return;
-      }
-
-      if (evt === "lowCardWinnersData") {
-        const room = data[1] || this._ensureRoomConsistency(ws);
-        if (!room) {
-          this._safeSend(ws, ["lowCardWinnersData", {
-            error: "Room name required",
-            success: false
-          }]);
-          return;
-        }
-        
-        await this._sendWinnersToRoom(room);
-        
-        const status = await this._getRecordingStatus(room);
-        const winners = await this._getLowCardWinners(room);
-        
-        this._safeSend(ws, ["lowCardWinnersData", {
-          room: room,
-          winners: winners,
-          totalPlayers: Object.keys(winners).length,
-          recording: status.enabled,
-          gameBlocked: status.gameBlocked,
-          updatedAt: new Date().toISOString(),
-          type: 'refreshResponse'
-        }]);
-        
-        return;
-      }
-
-      // ==================== GET GAME STATUS ====================
-      if (evt === "getGameStatus") {
-        const roomName = data[1] || this._ensureRoomConsistency(ws);
-        await this.getGameStatus(ws, roomName);
-        return;
-      }
-
-      // ==================== COUNTRY & QUIZ EVENTS ====================
       if (evt === "getUserCountryInfo") {
         const wsId = this._getWsId(ws);
         const info = this.countryQuizSystem.getUserCountryInfo(wsId);
@@ -4334,16 +3722,84 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== LOWCARD WINNER RECORDING EVENTS ====================
+
+      if (evt === "getRoomWinners") {
+        const room = data[1];
+        if (room) {
+          const dataWinners = await this._getRoomWinnersFromKV(room);
+          if (dataWinners) {
+            this._broadcastToRoom(room, ["roomWinners", dataWinners]);
+          } else {
+            this._broadcastToRoom(room, ["roomWinners", {
+              room: room,
+              winners: {},
+              totalPlayers: 0,
+              recording: false,
+              message: "No data found"
+            }]);
+          }
+        }
+        return;
+      }
+
+      if (evt === "startRecordingWinners") {
+        const room = data[1];
+        if (room) {
+          await this._startRecordingWinners(room);
+        }
+        return;
+      }
+
+      if (evt === "stopRecordingWinners") {
+        const room = data[1];
+        if (room) {
+          await this._stopRecordingWinners(room);
+        }
+        return;
+      }
+
+      if (evt === "getRecordingStatus") {
+        const room = data[1];
+        if (room) {
+          const isRecording = await this._getRecordingStatus(room);
+          const winners = await this._getLowCardWinners(room);
+          const totalPlayers = Object.keys(winners).length;
+          
+          this._broadcastToRoom(room, [
+            "recordingStatus", 
+            isRecording, 
+            room, 
+            isRecording ? "Recording winners" : "Recording stopped",
+            winners,
+            totalPlayers
+          ]);
+        }
+        return;
+      }
+
+      // ==== HAPUS: resetRoomWinners ====
+      // if (evt === "resetRoomWinners") {
+      //   const room = data[1];
+      //   if (room) {
+      //     await this._resetRoomWinners(room);
+      //   }
+      //   return;
+      // }
+
+      if (evt === "sendWinnersToRoom") {
+        const room = data[1];
+        if (room) {
+          await this._sendRoomWinners(room);
+        }
+        return;
+      }
+
       // ==================== GAME EVENTS ====================
+
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { 
-        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
-        return; 
-      }
-      if (room === QUIZ_ROOM) { 
-        this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); 
-        return; 
-      }
+      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
+      if (room === QUIZ_ROOM) { this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); return; }
 
       switch (evt) {
         case "gameLowCardStart":
@@ -4362,6 +3818,7 @@ export class GameServer extends CPUProtection {
           await this.checkGameRunning(ws, data[1]);
           break;
         default:
+          this._safeSend(ws, ["gameLowCardError", `Unknown event: ${evt}`]);
           break;
       }
     } catch(e) {
@@ -4369,7 +3826,81 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== FETCH ====================
+  _checkStuckGames() {
+    try {
+      const now = Date.now();
+      for (const [room, game] of this.activeGames) {
+        if (!game?._isActive || game._gameEnded) continue;
+        if (game._phase === 'draw' && game._drawPhaseStart &&
+            (now - game._drawPhaseStart) > CONSTANTS.STUCK_DRAW_TIMEOUT_MS) {
+          this._broadcastToRoom(room, ["gameLowCardError", "Game stuck, forcing evaluation..."]);
+          this._closeDrawPhase(room, game);
+        }
+        if (game._phase === 'registration' && game.registrationOpen &&
+            game._createdAt && (now - game._createdAt) > CONSTANTS.STUCK_REGISTRATION_TIMEOUT_MS) {
+          this._broadcastToRoom(room, ["gameLowCardError", "Registration timeout"]);
+          this._closeRegistration(room, game);
+        }
+        if (game._phase !== 'registration' && !game.registrationOpen) {
+          const activePlayers = this._getActivePlayers(game);
+          if (activePlayers.length === 0 && !game._gameEnded) {
+            game._gameEnded = true;
+            game._isActive = false;
+            game._endTime = Date.now();
+            this._broadcastToRoom(room, ["gameLowCardEnd", []]);
+            this._scheduleGameCleanup(room, game);
+          }
+        }
+      }
+    } catch(e) {}
+  }
+
+  _cleanupStaleGames() {
+    try {
+      const now = Date.now();
+      for (const [room, game] of this.activeGames) {
+        if (!game) continue;
+        if (game._isActive && !game._gameEnded) continue;
+        if (game._gameEnded) {
+          const endTime = game._endTime || game._createdAt || now;
+          if ((now - endTime) > CONSTANTS.STALE_GAME_TIMEOUT_MS) this._scheduleGameCleanup(room, game);
+          continue;
+        }
+        if (!game._isActive && !game._gameEnded && game._createdAt && (now - game._createdAt) > 300000) {
+          game._gameEnded = true;
+          game._endTime = now;
+          this._scheduleGameCleanup(room, game);
+        }
+      }
+    } catch(e) {}
+  }
+
+  _cleanupDeadConnections() {
+    try {
+      const toRemove = [];
+      for (const [wsId, ws] of this.wsMap) {
+        if (!ws || ws.readyState !== 1 || ws._closing) toRemove.push(wsId);
+      }
+      for (const wsId of toRemove) {
+        const ws = this.wsMap.get(wsId);
+        if (ws) {
+          const room = this.clientRooms.get(wsId);
+          if (room) this._removeClientFromRoom(room, wsId);
+          this.clientRooms.delete(wsId);
+          this.wsMap.delete(wsId);
+          this.userLanguage.delete(wsId);
+          this.userCountry.delete(wsId);
+          this._quizTimeLeftNotified.delete(wsId);
+          this._nextQuizNotified.delete(wsId);
+          for (const [username, conn] of this.userConnections) {
+            if (conn?.wsId === wsId) { this.userConnections.delete(username); break; }
+          }
+        }
+      }
+    } catch(e) {}
+  }
+
+  // ==================== FETCH HANDLER ====================
 
   async fetch(req) {
     try {
@@ -4397,12 +3928,7 @@ export class GameServer extends CPUProtection {
             questionsCount: {
               en: this._questionsCache.en?.length || 0,
               id: this._questionsCache.id?.length || 0
-            },
-            recordingStatus: Array.from(this._recordingEnabled.entries()).map(([room, enabled]) => ({
-              room,
-              enabled,
-              gameBlocked: this._gameBlocked.get(room) || false
-            }))
+            }
           };
           return new Response(JSON.stringify(status), {
             headers: { 'Content-Type': 'application/json' }
