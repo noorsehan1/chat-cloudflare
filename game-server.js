@@ -582,12 +582,6 @@ export class GameServer extends CPUProtection {
           gameBlocked: true,
           message: "Recording enabled - GAME BLOCKED"
         }]);
-        
-        this._safeSend(ws, ["recordingStarted", {
-          success: true,
-          room: roomName,
-          message: "Recording started - Game blocked"
-        }]);
       }
       
       return true;
@@ -626,12 +620,6 @@ export class GameServer extends CPUProtection {
           enabled: false,
           room: roomName,
           gameBlocked: false,
-          message: "Recording stopped - All winners data deleted"
-        }]);
-        
-        this._safeSend(ws, ["recordingStopped", {
-          success: true,
-          room: roomName,
           message: "Recording stopped - All winners data deleted"
         }]);
       }
