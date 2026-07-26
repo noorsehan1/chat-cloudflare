@@ -866,7 +866,6 @@ export class GameServer extends CPUProtection {
   }
 
   // ==================== QUIZ METHODS ====================
-  // (Semua method quiz sama seperti sebelumnya)
   
   async _loadAllQuestionsToMemory() {
     try {
@@ -1058,6 +1057,45 @@ export class GameServer extends CPUProtection {
     } catch(e) {
       return { hours: 0, minutes: 0, totalMs: 0, text: '0h 0m', isRunning: false };
     }
+  }
+
+  // ==================== QUIZ BROADCAST METHODS ====================
+
+  _broadcastQuizNotification(type, data) {
+    try {
+      const wsIds = this.wsClients.get(QUIZ_ROOM);
+      if (!wsIds?.size) return;
+      const notification = {
+        type: type,
+        timestamp: Date.now(),
+        data: data || {}
+      };
+      const msgStr = JSON.stringify(["quizNotification", notification]);
+      const wsIdArray = Array.from(wsIds);
+      for (const wsId of wsIdArray) {
+        try {
+          const ws = this.wsMap.get(wsId);
+          if (ws && ws.readyState === 1) {
+            ws.send(msgStr);
+          }
+        } catch(e) {}
+      }
+    } catch(e) {}
+  }
+
+  async _broadcastQuizResult(type, data) {
+    try {
+      const wsIds = this.wsClients.get(QUIZ_ROOM);
+      if (!wsIds?.size) return;
+      const msgStr = JSON.stringify([type, data]);
+      const wsIdArray = Array.from(wsIds);
+      for (const wsId of wsIdArray) {
+        try {
+          const ws = this.wsMap.get(wsId);
+          if (ws && ws.readyState === 1) ws.send(msgStr);
+        } catch(e) {}
+      }
+    } catch(e) {}
   }
 
   // ==================== WEBSOCKET AND GAME METHODS ====================
@@ -1649,23 +1687,49 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  // ==================== START GAME (TANPA CEK RECORDING) ====================
+
   async startGame(ws, bet, username) {
     try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
-      if (!username?.trim()) { this._safeSend(ws, ["gameLowCardError", "Username is required"]); return; }
+      if (this.isDestroyed) { 
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); 
+        return; 
+      }
+      
+      if (!username?.trim()) { 
+        this._safeSend(ws, ["gameLowCardError", "Username is required"]); 
+        return; 
+      }
+      
       const usernameClean = username.trim();
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
-      if (room === QUIZ_ROOM) { this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); return; }
+      
+      if (!room) { 
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
+        return; 
+      }
+      
+      if (room === QUIZ_ROOM) { 
+        this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); 
+        return; 
+      }
+      
       const startKey = `start_${room}`;
-      if (this._gameStartFlags.has(startKey)) { this._safeSend(ws, ["gameLowCardError", "Game is already starting..."]); return; }
+      if (this._gameStartFlags.has(startKey)) { 
+        this._safeSend(ws, ["gameLowCardError", "Game is already starting..."]); 
+        return; 
+      }
+      
       const existingGame = this.activeGames.get(room);
       if (existingGame?._isActive && !existingGame._gameEnded) {
         this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
         return;
       }
+      
       this._gameStartFlags.set(startKey, Date.now());
+      
       if (existingGame) await this._forceCleanupGame(room, existingGame);
+      
       const now = Date.now();
       const lockTime = this._gameLocks.get(room);
       if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
@@ -1673,7 +1737,9 @@ export class GameServer extends CPUProtection {
         this._gameStartFlags.delete(startKey);
         return;
       }
+      
       this._gameLocks.set(room, now);
+      
       try {
         if (this.activeGames.size >= this._maxGames) {
           this._safeSend(ws, ["gameLowCardError", "Server is busy"]);
@@ -1681,6 +1747,7 @@ export class GameServer extends CPUProtection {
           this._gameStartFlags.delete(startKey);
           return;
         }
+        
         const betAmount = parseInt(bet, 10) || 0;
         if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
           this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
@@ -1688,31 +1755,57 @@ export class GameServer extends CPUProtection {
           this._gameStartFlags.delete(startKey);
           return;
         }
+        
         const wsId = this._getWsId(ws);
         const game = {
-          room, players: new Map(), botPlayers: new Map(), registrationOpen: true,
-          round: 1, numbers: new Map(), tanda: new Map(), eliminated: new Set(),
-          betAmount, hostId: usernameClean, hostName: usernameClean, useBots: false,
-          evaluationLocked: false, drawTimeExpired: false,
-          _isActive: true, _gameEnded: false, _phase: 'registration',
-          _botTimeouts: new Set(), _botsAdded: false,
-          _registrationTimer: null, _drawTimer: null, _evalTimer: null, _safetyTimer: null,
-          _isEvaluating: false, _createdAt: Date.now(), _drawPhaseStart: null, _endTime: null,
+          room, 
+          players: new Map(), 
+          botPlayers: new Map(), 
+          registrationOpen: true,
+          round: 1, 
+          numbers: new Map(), 
+          tanda: new Map(), 
+          eliminated: new Set(),
+          betAmount, 
+          hostId: usernameClean, 
+          hostName: usernameClean, 
+          useBots: false,
+          evaluationLocked: false, 
+          drawTimeExpired: false,
+          _isActive: true, 
+          _gameEnded: false, 
+          _phase: 'registration',
+          _botTimeouts: new Set(), 
+          _botsAdded: false,
+          _registrationTimer: null, 
+          _drawTimer: null, 
+          _evalTimer: null, 
+          _safetyTimer: null,
+          _isEvaluating: false, 
+          _createdAt: Date.now(), 
+          _drawPhaseStart: null, 
+          _endTime: null,
           playerWsId: new Map()
         };
+        
         game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
         game.playerWsId.set(usernameClean, wsId);
         this.activeGames.set(room, game);
         this._addClient(room, ws, usernameClean, false);
+        
+        // ✅ TIDAK ADA CEK RECORDING DI SINI
         this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
         this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
+        
         this._startRegistration(room, game);
+        
         setTimeout(() => {
           try {
             this._gameStartFlags.delete(startKey);
             if (this._gameLocks.get(room) === now) this._gameLocks.delete(room);
           } catch(e) {}
         }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
+        
       } catch(e) {
         this._deleteGame(room, this.activeGames.get(room));
         this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
@@ -2191,6 +2284,72 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  // ==================== QUIZ SUBMIT ANSWER ====================
+
+  async submitQuizAnswer(ws, username, answer) {
+    try {
+      if (!ws || !username) {
+        this._safeSend(ws, ["quizError", "Invalid request"]);
+        return;
+      }
+      
+      const room = this._ensureRoomConsistency(ws);
+      if (room !== QUIZ_ROOM) {
+        this._safeSend(ws, ["quizError", "Quiz only available in Quiz room"]);
+        return;
+      }
+      
+      if (!this._isQuizTime()) {
+        this._safeSend(ws, ["quizError", "Quiz is not active"]);
+        return;
+      }
+      
+      if (!this.currentQuestion) {
+        this._safeSend(ws, ["quizError", "No question available"]);
+        return;
+      }
+      
+      if (!this._canSubmitAnswer) {
+        this._safeSend(ws, ["quizError", "Reading time, please wait"]);
+        return;
+      }
+      
+      if (this.quizHasWinner) {
+        this._safeSend(ws, ["quizError", "Someone already answered correctly!"]);
+        return;
+      }
+      
+      if (this.quizAnswered.has(username)) {
+        this._safeSend(ws, ["quizError", "You already answered!"]);
+        return;
+      }
+      
+      const answerKey = answer ? answer.toUpperCase().trim() : '';
+      const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
+      const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
+      
+      this._broadcastQuizResult("quizAnswerResult", {
+        username,
+        answer: isValidAnswer ? answerKey : "?",
+        isCorrect,
+        correctAnswer: this.currentQuestion.correct
+      });
+      
+      this.quizAnswered.add(username);
+      
+      if (isCorrect && !this.quizHasWinner) {
+        this.quizHasWinner = true;
+        this.quizWinner = username;
+        this._broadcastQuizNotification("quizWinner", {
+          username: username
+        });
+      }
+      
+    } catch(e) {
+      this._safeSend(ws, ["quizError", e.message]);
+    }
+  }
+
   // ==================== FETCH HANDLER ====================
 
   async fetch(req) {
@@ -2279,8 +2438,6 @@ export class GameServer extends CPUProtection {
                   if (conn?.wsId === wsId) this.userConnections.delete(username);
                 }
               }
-              const clients = this.wsClients.get(QUIZ_ROOM);
-              if (clients?.size > 0) this.ensureQuizRunning();
             } catch(e) {}
           });
           server.addEventListener("error", () => {
@@ -2350,8 +2507,6 @@ export class GameServer extends CPUProtection {
       ws.roomname = null;
       ws._wsId = null;
       ws.username = null;
-      const clients = this.wsClients.get(QUIZ_ROOM);
-      if (clients?.size > 0) this.ensureQuizRunning();
     } catch(e) {}
   }
 
