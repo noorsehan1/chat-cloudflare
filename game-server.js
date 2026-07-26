@@ -566,11 +566,6 @@ export class GameServer extends CPUProtection {
       const existingGame = this.activeGames.get(roomName);
       if (existingGame?._isActive && !existingGame._gameEnded) {
         await this._forceCleanupGame(roomName, existingGame);
-        if (ws) {
-          this._safeSend(ws, ["gameLowCardError", 
-            "Game stopped because recording was enabled"
-          ]);
-        }
       }
       
       // HANYA RESPONSE KE CLIENT YANG CALL
@@ -689,7 +684,6 @@ export class GameServer extends CPUProtection {
       
       await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       
-      // TIDAK ADA BROADCAST OTOMATIS
       return true;
     } catch(e) {
       return false;
@@ -969,7 +963,7 @@ export class GameServer extends CPUProtection {
         
         this.activeGames.set(room, game);
         
-        // HANYA RESPONSE KE CLIENT YANG CALL, TIDAK BROADCAST KE SEMUA
+        // HANYA RESPONSE KE CLIENT YANG CALL
         this._safeSend(ws, ["gameLowCardStart", betAmount]);
         this._safeSend(ws, ["gameLowCardStartSuccess", username, betAmount]);
         this._safeSend(ws, ["recordingGameStarted", {
@@ -4253,13 +4247,8 @@ export class GameServer extends CPUProtection {
             questionsCount: {
               en: this._questionsCache.en?.length || 0,
               id: this._questionsCache.id?.length || 0
-            },
-            // TETAP TAMPILKAN DI HEALTH CHECK TAPI TIDAK DI BROADCAST
-            recordingStatus: Array.from(this._recordingEnabled.entries()).map(([room, enabled]) => ({
-              room,
-              enabled,
-              gameBlocked: this._gameBlocked.get(room) || false
-            }))
+            }
+            // HAPUS RECORDING STATUS DARI HEALTH CHECK
           };
           return new Response(JSON.stringify(status), {
             headers: { 'Content-Type': 'application/json' }
