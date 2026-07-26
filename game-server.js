@@ -623,12 +623,12 @@ export class GameServer extends CPUProtection {
         // HAPUS status recording
         await this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + roomName);
         
-        // ============ HAPUS DATA WINNERS DARI KV ============
+        // HAPUS DATA WINNERS DARI KV
         const winnerKey = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
         await this.env.QUESTIONS.delete(winnerKey);
       }
       
-      // ============ HAPUS DATA WINNERS DARI CACHE ============
+      // HAPUS DATA WINNERS DARI CACHE
       this._roomWinnersCache.delete(roomName);
       
       // Broadcast - TIDAK AUTO START GAME
@@ -649,16 +649,6 @@ export class GameServer extends CPUProtection {
         available: true,
         room: roomName,
         message: "Game is now available! Start playing now!"
-      }]);
-      
-      // Kirim data winners kosong
-      this._broadcastToRoom(roomName, ["lowCardWinnersData", {
-        room: roomName,
-        winners: {},
-        totalPlayers: 0,
-        recording: false,
-        updatedAt: new Date().toISOString(),
-        message: "All winners data has been deleted"
       }]);
       
       if (ws) {
@@ -773,29 +763,135 @@ export class GameServer extends CPUProtection {
       
       await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       
-      const winnerData = {
-        room: room,
-        winners: roomWinners,
-        totalPlayers: Object.keys(roomWinners).length,
-        recording: true,
-        updatedAt: new Date().toISOString(),
-        lastWinner: username,
-        lastWinnerWins: roomWinners[username],
-        type: 'winnerUpdate'
-      };
-      
-      this._broadcastToRoom(room, ["lowCardWinnersData", winnerData]);
+      // ============ HANYA KIRIM lowCardWinnerUpdate SAAT ADA WINNER ============
       this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
         username: username,
         wins: roomWinners[username],
         room: room,
         totalWinners: Object.keys(roomWinners).length,
-        winners: roomWinners
+        winners: roomWinners,
+        timestamp: Date.now()
       }]);
       
       return true;
     } catch(e) {
       return false;
+    }
+  }
+
+  async _getRoomWinners(ws, room) {
+    try {
+      if (!room) {
+        this._safeSend(ws, ["roomWinners", {
+          error: "Room name required"
+        }]);
+        return;
+      }
+      
+      const winners = await this._getLowCardWinners(room);
+      const status = await this._getRecordingStatus(room);
+      
+      // ============ KIRIM lowCardWinnersData KE CLIENT YANG MINTA ============
+      this._safeSend(ws, ["lowCardWinnersData", {
+        room: room,
+        winners: winners,
+        totalPlayers: Object.keys(winners).length,
+        recording: status.enabled,
+        gameBlocked: status.gameBlocked,
+        updatedAt: new Date().toISOString(),
+        type: 'getRoomWinners'
+      }]);
+    } catch(e) {
+      this._safeSend(ws, ["roomWinners", {
+        error: e.message
+      }]);
+    }
+  }
+
+  async _sendWinnersToRoom(ws, room) {
+    try {
+      if (!room) {
+        this._safeSend(ws, ["sendWinnersResult", {
+          success: false,
+          message: "Room name required"
+        }]);
+        return;
+      }
+      
+      const status = await this._getRecordingStatus(room);
+      if (!status.enabled) {
+        this._safeSend(ws, ["sendWinnersResult", {
+          success: false,
+          room: room,
+          message: "Recording disabled for this room"
+        }]);
+        return;
+      }
+      
+      let winners = {};
+      if (this._roomWinnersCache.has(room)) {
+        winners = this._roomWinnersCache.get(room).winners || {};
+      } else {
+        await this._loadRoomWinnersToCache(room);
+        if (this._roomWinnersCache.has(room)) {
+          winners = this._roomWinnersCache.get(room).winners || {};
+        }
+      }
+      
+      // ============ KIRIM lowCardWinnersData KE SEMUA CLIENT DI ROOM ============
+      this._broadcastToRoom(room, ["lowCardWinnersData", {
+        room: room,
+        winners: winners,
+        totalPlayers: Object.keys(winners).length,
+        recording: true,
+        updatedAt: new Date().toISOString(),
+        type: 'sendWinnersToRoom'
+      }]);
+      
+      this._safeSend(ws, ["sendWinnersResult", {
+        success: true,
+        room: room,
+        message: "Winners data sent to room"
+      }]);
+    } catch(e) {
+      this._safeSend(ws, ["sendWinnersResult", {
+        success: false,
+        message: e.message
+      }]);
+    }
+  }
+
+  async _handleLowCardWinnersData(ws, room) {
+    try {
+      if (!room) {
+        room = this._ensureRoomConsistency(ws);
+      }
+      if (!room) {
+        this._safeSend(ws, ["lowCardWinnersData", {
+          error: "Room name required",
+          success: false
+        }]);
+        return;
+      }
+      
+      const status = await this._getRecordingStatus(room);
+      const winners = await this._getLowCardWinners(room);
+      
+      // ============ KIRIM HANYA KE CLIENT YANG MINTA ============
+      this._safeSend(ws, ["lowCardWinnersData", {
+        room: room,
+        winners: winners,
+        totalPlayers: Object.keys(winners).length,
+        recording: status.enabled,
+        gameBlocked: status.gameBlocked,
+        updatedAt: new Date().toISOString(),
+        type: 'refreshResponse'
+      }]);
+    } catch(e) {
+      this._safeSend(ws, ["lowCardWinnersData", {
+        error: e.message,
+        success: false
+      }]);
     }
   }
 
@@ -813,45 +909,6 @@ export class GameServer extends CPUProtection {
       };
       
       this._broadcastToRoom(room, ["lowCardWinnersData", winnerData]);
-    } catch(e) {}
-  }
-
-  async _sendWinnersToRoom(room) {
-    try {
-      if (!room) return;
-      
-      const status = await this._getRecordingStatus(room);
-      if (!status.enabled) {
-        this._broadcastToRoom(room, ["lowCardWinnersData", {
-          room: room,
-          recording: false,
-          message: "Recording disabled for this room"
-        }]);
-        return;
-      }
-      
-      let winners = {};
-      if (this._roomWinnersCache.has(room)) {
-        winners = this._roomWinnersCache.get(room).winners || {};
-      } else {
-        await this._loadRoomWinnersToCache(room);
-        if (this._roomWinnersCache.has(room)) {
-          winners = this._roomWinnersCache.get(room).winners || {};
-        }
-      }
-      
-      if (Object.keys(winners).length === 0) {
-        this._broadcastToRoom(room, ["lowCardWinnersData", {
-          room: room,
-          winners: {},
-          totalPlayers: 0,
-          recording: true,
-          message: "No winners yet"
-        }]);
-        return;
-      }
-      
-      await this._broadcastWinnersToRoom(room, winners);
     } catch(e) {}
   }
 
@@ -912,7 +969,6 @@ export class GameServer extends CPUProtection {
   }
 
   // ==================== START GAME WITH RECORDING ====================
-  // KHUSUS ADMIN - SIAPA PUN BISA PAKAI ASALKAN RECORDING AKTIF
 
   async _startGameWithRecording(ws, room, bet, username) {
     try {
@@ -3830,6 +3886,8 @@ export class GameServer extends CPUProtection {
     } catch(e) { return array || []; }
   }
 
+  // ==================== EVENT HANDLER ====================
+
   async handleEvent(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data?.[0]) return;
@@ -3954,45 +4012,28 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ============ GET ROOM WINNERS - DARI CLIENT JAVA ============
       if (evt === "getRoomWinners") {
         const room = data[1];
-        if (!room) {
-          this._safeSend(ws, ["roomWinners", {
-            error: "Room name required"
-          }]);
-          return;
-        }
-        const winners = await this._getLowCardWinners(room);
-        const status = await this._getRecordingStatus(room);
-        this._safeSend(ws, ["roomWinners", {
-          room: room,
-          winners: winners,
-          totalPlayers: Object.keys(winners).length,
-          recording: status.enabled,
-          gameBlocked: status.gameBlocked,
-          updatedAt: new Date().toISOString()
-        }]);
+        await this._getRoomWinners(ws, room);
         return;
       }
 
+      // ============ SEND WINNERS TO ROOM - DARI CLIENT JAVA ============
       if (evt === "sendWinnersToRoom") {
         const room = data[1];
-        if (!room) {
-          this._safeSend(ws, ["sendWinnersResult", {
-            success: false,
-            message: "Room name required"
-          }]);
-          return;
-        }
-        await this._sendWinnersToRoom(room);
-        this._safeSend(ws, ["sendWinnersResult", {
-          success: true,
-          room: room,
-          message: "Winners data sent to room"
-        }]);
+        await this._sendWinnersToRoom(ws, room);
         return;
       }
 
+      // ============ LOW CARD WINNERS DATA - DARI CLIENT JAVA ============
+      if (evt === "lowCardWinnersData") {
+        const room = data[1];
+        await this._handleLowCardWinnersData(ws, room);
+        return;
+      }
+
+      // ============ RESET ROOM WINNERS ============
       if (evt === "resetRoomWinners") {
         const room = data[1];
         if (!room) {
@@ -4006,71 +4047,18 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== START GAME WITH RECORDING ====================
+      // ============ START GAME WITH RECORDING ============
       if (evt === "startGameWithRecording") {
         const [_, room, bet, username] = data;
         await this._startGameWithRecording(ws, room, bet, username);
         return;
       }
 
-      // ==================== WINNER UPDATE EVENTS ====================
-      if (evt === "lowCardWinnerUpdate") {
-        const room = data[1] || this._ensureRoomConsistency(ws);
-        if (!room) {
-          this._safeSend(ws, ["lowCardWinnerUpdate", {
-            error: "Room name required",
-            success: false
-          }]);
-          return;
-        }
-        
-        await this._sendWinnersToRoom(room);
-        
-        const status = await this._getRecordingStatus(room);
-        const winners = await this._getLowCardWinners(room);
-        
-        this._safeSend(ws, ["lowCardWinnersData", {
-          room: room,
-          winners: winners,
-          totalPlayers: Object.keys(winners).length,
-          recording: status.enabled,
-          gameBlocked: status.gameBlocked,
-          updatedAt: new Date().toISOString(),
-          type: 'refreshResponse'
-        }]);
-        
-        return;
-      }
+      // ============ LOW CARD WINNER UPDATE - HANYA DARI SERVER ============
+      // TIDAK ADA handler untuk lowCardWinnerUpdate dari client
+      // HANYA server yang mengirim ini saat ada winner
 
-      if (evt === "lowCardWinnersData") {
-        const room = data[1] || this._ensureRoomConsistency(ws);
-        if (!room) {
-          this._safeSend(ws, ["lowCardWinnersData", {
-            error: "Room name required",
-            success: false
-          }]);
-          return;
-        }
-        
-        await this._sendWinnersToRoom(room);
-        
-        const status = await this._getRecordingStatus(room);
-        const winners = await this._getLowCardWinners(room);
-        
-        this._safeSend(ws, ["lowCardWinnersData", {
-          room: room,
-          winners: winners,
-          totalPlayers: Object.keys(winners).length,
-          recording: status.enabled,
-          gameBlocked: status.gameBlocked,
-          updatedAt: new Date().toISOString(),
-          type: 'refreshResponse'
-        }]);
-        
-        return;
-      }
-
-      // ==================== COUNTRY & QUIZ EVENTS ====================
+      // ============ COUNTRY & QUIZ EVENTS ============
       if (evt === "getUserCountryInfo") {
         const wsId = this._getWsId(ws);
         const info = this.countryQuizSystem.getUserCountryInfo(wsId);
@@ -4270,6 +4258,80 @@ export class GameServer extends CPUProtection {
     } catch(e) {
       this._safeSend(ws, ["gameLowCardError", "Error processing event"]);
     }
+  }
+
+  _checkStuckGames() {
+    try {
+      const now = Date.now();
+      for (const [room, game] of this.activeGames) {
+        if (!game?._isActive || game._gameEnded) continue;
+        if (game._phase === 'draw' && game._drawPhaseStart &&
+            (now - game._drawPhaseStart) > CONSTANTS.STUCK_DRAW_TIMEOUT_MS) {
+          this._broadcastToRoom(room, ["gameLowCardError", "Game stuck, forcing evaluation..."]);
+          this._closeDrawPhase(room, game);
+        }
+        if (game._phase === 'registration' && game.registrationOpen &&
+            game._createdAt && (now - game._createdAt) > CONSTANTS.STUCK_REGISTRATION_TIMEOUT_MS) {
+          this._broadcastToRoom(room, ["gameLowCardError", "Registration timeout"]);
+          this._closeRegistration(room, game);
+        }
+        if (game._phase !== 'registration' && !game.registrationOpen) {
+          const activePlayers = this._getActivePlayers(game);
+          if (activePlayers.length === 0 && !game._gameEnded) {
+            game._gameEnded = true;
+            game._isActive = false;
+            game._endTime = Date.now();
+            this._broadcastToRoom(room, ["gameLowCardEnd", []]);
+            this._scheduleGameCleanup(room, game);
+          }
+        }
+      }
+    } catch(e) {}
+  }
+
+  _cleanupStaleGames() {
+    try {
+      const now = Date.now();
+      for (const [room, game] of this.activeGames) {
+        if (!game) continue;
+        if (game._isActive && !game._gameEnded) continue;
+        if (game._gameEnded) {
+          const endTime = game._endTime || game._createdAt || now;
+          if ((now - endTime) > CONSTANTS.STALE_GAME_TIMEOUT_MS) this._scheduleGameCleanup(room, game);
+          continue;
+        }
+        if (!game._isActive && !game._gameEnded && game._createdAt && (now - game._createdAt) > 300000) {
+          game._gameEnded = true;
+          game._endTime = now;
+          this._scheduleGameCleanup(room, game);
+        }
+      }
+    } catch(e) {}
+  }
+
+  _cleanupDeadConnections() {
+    try {
+      const toRemove = [];
+      for (const [wsId, ws] of this.wsMap) {
+        if (!ws || ws.readyState !== 1 || ws._closing) toRemove.push(wsId);
+      }
+      for (const wsId of toRemove) {
+        const ws = this.wsMap.get(wsId);
+        if (ws) {
+          const room = this.clientRooms.get(wsId);
+          if (room) this._removeClientFromRoom(room, wsId);
+          this.clientRooms.delete(wsId);
+          this.wsMap.delete(wsId);
+          this.userLanguage.delete(wsId);
+          this.userCountry.delete(wsId);
+          this._quizTimeLeftNotified.delete(wsId);
+          this._nextQuizNotified.delete(wsId);
+          for (const [username, conn] of this.userConnections) {
+            if (conn?.wsId === wsId) { this.userConnections.delete(username); break; }
+          }
+        }
+      }
+    } catch(e) {}
   }
 
   // ==================== FETCH ====================
