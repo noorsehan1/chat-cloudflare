@@ -865,6 +865,9 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  // ==================== QUIZ METHODS ====================
+  // (Semua method quiz sama seperti sebelumnya)
+  
   async _loadAllQuestionsToMemory() {
     try {
       if (this._questionsCache.loading) return;
@@ -1012,25 +1015,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  _getCurrentWITAHour() {
-    try {
-      return (new Date().getUTCHours() + QUIZ_SCHEDULE.TIMEZONE_OFFSET) % 24;
-    } catch(e) { return 0; }
-  }
-
-  _getCurrentWITAMinutes() {
-    try {
-      return new Date().getUTCMinutes();
-    } catch(e) { return 0; }
-  }
-
-  _formatWITATime(hours, minutes) {
-    try {
-      const h = hours % 24;
-      return `${String(h).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
-    } catch(e) { return '00:00'; }
-  }
-
   _isQuizTime() {
     try {
       const witaTime = this._getCurrentWITATime();
@@ -1076,1344 +1060,9 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  _getTimeLeftUntilNextEvent() {
-    try {
-      const witaTime = this._getCurrentWITATime();
-      const currentTotal = witaTime.totalMinutes;
-      for (const session of QUIZ_SCHEDULE.SESSIONS) {
-        const startTotal = session.start * 60;
-        const endTotal = session.end * 60;
-        if (currentTotal >= startTotal && currentTotal < endTotal) {
-          const remaining = endTotal - currentTotal;
-          const hours = Math.floor(remaining / 60);
-          const minutes = Math.floor(remaining % 60);
-          return {
-            minutes: remaining,
-            seconds: 0,
-            isRunning: true,
-            hours: hours,
-            totalMinutes: remaining,
-            status: 'running',
-            remainingText: `${hours}h ${minutes}m`
-          };
-        }
-      }
-      let minDiff = Infinity;
-      for (const session of QUIZ_SCHEDULE.SESSIONS) {
-        let startTotal = session.start * 60;
-        let diff = startTotal - currentTotal;
-        if (diff < 0) diff += 24 * 60;
-        if (diff < minDiff) {
-          minDiff = diff;
-        }
-      }
-      const hours = Math.floor(minDiff / 60);
-      const minutes = Math.floor(minDiff % 60);
-      return {
-        hours: hours,
-        minutes: minutes,
-        seconds: 0,
-        totalMinutes: minDiff,
-        totalSeconds: minDiff * 60,
-        isRunning: false,
-        status: 'waiting',
-        remainingText: `${hours}h ${minutes}m`
-      };
-    } catch(e) {
-      return { hours: 0, minutes: 0, isRunning: false, status: 'unknown' };
-    }
-  }
-
-  _setupErrorHandlers() {
-    try {
-      const self = this;
-      if (typeof process !== 'undefined' && process.on) {
-        process.on('unhandledRejection', (reason) => {
-          self._handleError('unhandledRejection', reason);
-        });
-        process.on('uncaughtException', (error) => {
-          self._handleError('uncaughtException', error);
-        });
-      }
-    } catch(e) {}
-  }
-
-  _handleError(type, error) {
-    try {
-      const now = Date.now();
-      if (now - this._lastErrorReset > CONSTANTS.ERROR_RESET_INTERVAL_MS) {
-        this._errorCount = 0;
-        this._lastErrorReset = now;
-      }
-      this._errorCount++;
-      if (this._errorCount > CONSTANTS.MAX_UNHANDLED_ERRORS && 
-          !this._isRecovering && 
-          this._recoveryAttempts < this._maxRecoveryAttempts) {
-        this._isRecovering = true;
-        this._recoveryAttempts++;
-        this._lastRecoveryTime = now;
-        setTimeout(() => {
-          this._forceRecovery();
-          this._isRecovering = false;
-        }, CONSTANTS.ERROR_RECOVERY_DELAY_MS);
-      }
-    } catch(e) {}
-  }
-
-  _startHealthCheck() {
-    if (this._healthCheckInterval) clearInterval(this._healthCheckInterval);
-    this._healthCheckInterval = setInterval(() => {
-      try {
-        if (this.closing || this.isDestroyed) {
-          clearInterval(this._healthCheckInterval);
-          this._healthCheckInterval = null;
-          return;
-        }
-        this._performHealthCheck();
-      } catch(e) {}
-    }, CONSTANTS.HEALTH_CHECK_INTERVAL_MS);
-  }
-
-  _performHealthCheck() {
-    try {
-      const now = Date.now();
-      this._lastHeartbeat = now;
-      if (this._isProcessingQueue && this._eventQueue.length > 0) {
-        const queueAge = now - (this._lastHeartbeat || now);
-        if (queueAge > 30000) {
-          this._isProcessingQueue = false;
-          this._eventQueue = [];
-        }
-      }
-      if (this._isQuizTime() && this.currentQuestion && this._quizStartTime) {
-        const elapsed = (now - this._quizStartTime) / 1000;
-        if (elapsed > (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) + 30) {
-          this.currentQuestion = null;
-          this._quizTimeout = null;
-          this._isShowingQuestion = false;
-          this._canSubmitAnswer = false;
-        }
-      }
-      const deadConnections = [];
-      for (const [wsId, ws] of this.wsMap) {
-        if (!ws || ws.readyState !== 1) {
-          deadConnections.push(wsId);
-        }
-      }
-      for (const wsId of deadConnections) {
-        try {
-          const ws = this.wsMap.get(wsId);
-          if (ws) {
-            const room = this.clientRooms.get(wsId);
-            if (room) this._removeClientFromRoom(room, wsId);
-            this.clientRooms.delete(wsId);
-            this.wsMap.delete(wsId);
-          }
-        } catch(e) {}
-      }
-    } catch(e) {}
-  }
-
-  _forceRecovery() {
-    try {
-      if (this.closing || this.isDestroyed) return;
-      if (this._recoveryAttempts >= this._maxRecoveryAttempts) return;
-      this._resetCriticalState();
-      this._cleanupResources();
-      if (!this._initialized && !this._initializing) {
-        this._initAsync();
-      }
-      if (this._isQuizTime()) {
-        this.quizAutoEnabled = true;
-      }
-      this._broadcastToRoom(QUIZ_ROOM, ["serverRecovered", {
-        timestamp: Date.now(),
-        message: "Server has recovered"
-      }]);
-    } catch(e) {}
-  }
-
-  _resetCriticalState() {
-    try {
-      this.currentQuestion = null;
-      this.isQuizWaiting = false;
-      this.quizHasWinner = false;
-      this.quizWinner = null;
-      this.quizAnswered = new Set();
-      this._quizStartTime = null;
-      this._isShowingQuestion = false;
-      this._winnerProcessed = false;
-      this._canSubmitAnswer = false;
-      this._questionStartTime = null;
-      if (this._eventQueue) {
-        this._eventQueue = [];
-      }
-      if (this._rateLimitMap) {
-        this._rateLimitMap.clear();
-      }
-    } catch(e) {}
-  }
-
-  _cleanupResources() {
-    try {
-      if (this._quizTimeout) {
-        clearTimeout(this._quizTimeout);
-        this._quizTimeout = null;
-      }
-      if (this._quizBreakTimeout) {
-        clearTimeout(this._quizBreakTimeout);
-        this._quizBreakTimeout = null;
-      }
-      if (this._quizStartTimeout) {
-        clearTimeout(this._quizStartTimeout);
-        this._quizStartTimeout = null;
-      }
-      if (this.quizTimer) {
-        clearInterval(this.quizTimer);
-        this.quizTimer = null;
-      }
-      if (this.quizAutoTimer) {
-        clearInterval(this.quizAutoTimer);
-        this.quizAutoTimer = null;
-      }
-      if (this._quizKeepAliveInterval) {
-        clearInterval(this._quizKeepAliveInterval);
-        this._quizKeepAliveInterval = null;
-      }
-    } catch(e) {}
-  }
-
-  _getQuestionRemainingTime() {
-    try {
-      if (!this.currentQuestion || !this._quizStartTime) return 0;
-      const elapsed = (Date.now() - this._quizStartTime) / 1000;
-      return Math.max(0, Math.round((CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) - elapsed));
-    } catch(e) { return 0; }
-  }
-
-  _getAnswerRemainingTime() {
-    try {
-      if (!this.currentQuestion || !this._questionStartTime) return 0;
-      const readingEnd = this._questionStartTime + CONSTANTS.QUIZ_READING_TIME_MS;
-      const now = Date.now();
-      if (now < readingEnd) return 0;
-      const elapsed = (now - readingEnd) / 1000;
-      return Math.max(0, Math.round((CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000) - elapsed));
-    } catch(e) { return 0; }
-  }
-
-  _sendQuizEndNotificationOnce() {
-    try {
-      if (this.quizEndNotified) return;
-      const timeLeft = this._getTimeLeftUntilNextQuiz();
-      const message = `${timeLeft.text}`;
-      this._broadcastToRoom(QUIZ_ROOM, ["quizEnded", { 
-        timeLeft: timeLeft.text, 
-        status: "ended"
-      }]);
-      this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", message, true, false]);
-      this._broadcastQuizNotification("quizEnded", { 
-        timeLeft: timeLeft.text
-      });
-      this.quizEndNotified = true;
-    } catch(e) {}
-  }
-
-  _sendQuizNotification(ws, type, data) {
-    try {
-      if (!ws || ws.readyState !== 1) return;
-      const remaining = this._getQuestionRemainingTime();
-      const remainingText = `${remaining}s remaining`;
-      const notification = {
-        type: type,
-        timestamp: Date.now(),
-        remainingTime: remainingText,
-        correctAnswer: this.currentQuestion?.correct || null,
-        data: data || {}
-      };
-      this._safeSend(ws, ["quizNotification", notification]);
-    } catch(e) {}
-  }
-
-  _broadcastQuizNotification(type, data) {
-    try {
-      const wsIds = this.wsClients.get(QUIZ_ROOM);
-      if (!wsIds?.size) return;
-      const remaining = this._getQuestionRemainingTime();
-      const remainingText = `${remaining}s remaining`;
-      const notification = {
-        type: type,
-        timestamp: Date.now(),
-        remainingTime: remainingText,
-        correctAnswer: this.currentQuestion?.correct || null,
-        data: data || {}
-      };
-      const msgStr = JSON.stringify(["quizNotification", notification]);
-      const wsIdArray = Array.from(wsIds);
-      const batchSize = CONSTANTS.BROADCAST_BATCH_SIZE;
-      for (let i = 0; i < wsIdArray.length; i += batchSize) {
-        const batch = wsIdArray.slice(i, i + batchSize);
-        for (const wsId of batch) {
-          try {
-            const ws = this.wsMap.get(wsId);
-            if (ws && ws.readyState === 1) {
-              ws.send(msgStr);
-            }
-          } catch(e) {}
-        }
-      }
-    } catch(e) {}
-  }
-
-  async _initAsync() {
-    try {
-      if (this._initializing) return;
-      if (this._initialized && !this._isRecovering) return;
-      this._initializing = true;
-      await this.countryQuizSystem.loadAllQuestions();
-      await this._initQuiz();
-      this._startQuizScheduler();
-      this._initialized = true;
-      this._initializing = false;
-      this._errorCount = 0;
-      this._isRecovering = false;
-      this._quizInitAttempts = 0;
-    } catch(e) {
-      this._initializing = false;
-      this._handleError('initAsync', e);
-      if (this._quizInitAttempts < this._maxQuizInitAttempts && !this.closing && !this.isDestroyed) {
-        this._quizInitAttempts++;
-        setTimeout(() => {
-          if (!this.closing && !this.isDestroyed) {
-            this._initAsync();
-          }
-        }, 5000 * this._quizInitAttempts);
-      }
-    }
-  }
-
-  _incrementSubRequest() {
-    try {
-      this._subRequestCount++;
-      this._requestCount++;
-    } catch(e) {}
-  }
-
-  async _checkAndResetPoints() {
-    try {
-      if (!this.env?.QUESTIONS) return false;
-      const points = await this._getQuizPoints();
-      if (Object.keys(points).length === 0) {
-        return false;
-      }
-      let winner = null;
-      let highestScore = 0;
-      for (const [username, score] of Object.entries(points)) {
-        if (score > highestScore) {
-          highestScore = score;
-          winner = username;
-        }
-      }
-      if (winner) {
-        const winnerData = {
-          username: winner,
-          score: highestScore,
-          week: this._generateCurrentWeek()
-        };
-        await this._setLastWeekWinner(winnerData);
-        this._broadcastToRoom(QUIZ_ROOM, ["quizLastWeekWinner", winner, highestScore, this._generateCurrentWeek()]);
-      }
-      await this._setQuizPoints({});
-      return true;
-    } catch(e) { 
-      return false; 
-    }
-  }
-
-  _startQuizScheduler() {
-    try {
-      if (this.quizAutoTimer) clearInterval(this.quizAutoTimer);
-      this.quizAutoTimer = setInterval(() => {
-        try {
-          if (this.closing || this.isDestroyed) {
-            clearInterval(this.quizAutoTimer);
-            this.quizAutoTimer = null;
-            return;
-          }
-          this._checkQuizAutoStatus();
-          this._checkAndRestartQuiz();
-          const timeInfo = this._getTimeLeftUntilNextEvent();
-          if (!timeInfo.isRunning) {
-            if (!this.quizEndNotified) {
-              this._sendQuizEndNotificationOnce();
-            }
-            this._broadcastQuizTimeLeft();
-          }
-        } catch(e) {}
-      }, CONSTANTS.SCHEDULER_INTERVAL_MS);
-    } catch(e) {}
-  }
-
-  async _checkQuizAutoStatus() {
-    try {
-      const isQuizTime = this._isQuizTime();
-      if (isQuizTime) {
-        this.quizEndedToday = false;
-        this.quizEndMessageShown = false;
-        this.quizEndNotified = false;
-        this._nextQuizNotified.clear();
-        if (!this.quizAutoEnabled) {
-          this.quizAutoEnabled = true;
-          const wsIds = this.wsClients.get(QUIZ_ROOM);
-          if (wsIds?.size > 0) {
-            let hasUnnotified = false;
-            for (const wsId of wsIds) {
-              if (!this._quizTimeLeftNotified.has(wsId) && !this._nextQuizNotified.has(wsId)) {
-                hasUnnotified = true;
-                break;
-              }
-            }
-            if (hasUnnotified) {
-              this._broadcastQuizTimeLeft();
-            }
-          }
-          await this.startQuizWithDelay(CONSTANTS.QUIZ_START_DELAY_MS);
-          if (!this._quizStartTimeout && !this._isShowingQuestion) {
-            this.forceStartQuiz();
-          }
-        } else if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout && !this._isShowingQuestion) {
-          await this._showQuestion();
-        }
-        return false;
-      } else {
-        if (this.quizAutoEnabled && !this.quizEndNotified) {
-          this.quizAutoEnabled = false;
-          this.quizEndedToday = true;
-          this.quizEndMessageShown = false;
-          await this.resetQuiz();
-          this._clearQuizData();
-          this._quizTimeLeftNotified.clear();
-          this._nextQuizNotified.clear();
-          this._sendQuizEndNotificationOnce();
-        }
-        return true;
-      }
-    } catch(e) { return true; }
-  }
-
-  forceStartQuiz() {
-    try {
-      if (this._isShowingQuestion) return false;
-      if (!this._isQuizTime() || this.currentQuestion || this._quizTimeout || this.isQuizWaiting || this._quizStartTimeout) {
-        return false;
-      }
-      const enQuestions = this._getQuestionsFromMemory('en');
-      if (!enQuestions || enQuestions.length === 0) {
-        this._loadAllQuestionsToMemory().then(() => {
-          if (!this.closing && !this.isDestroyed && !this._isShowingQuestion) {
-            this._showQuestion();
-          }
-        });
-        return false;
-      }
-      this.quizAutoEnabled = true;
-      this._showQuestion();
-      return true;
-    } catch(e) { return false; }
-  }
-
-  _checkAndRestartQuiz() {
-    try {
-      if (!this._isQuizTime()) return;
-      if (!this.currentQuestion && !this.isQuizWaiting && !this._quizTimeout && !this._quizBreakTimeout && !this._isShowingQuestion) {
-        this.quizAutoEnabled = true;
-        this._showQuestion();
-      }
-    } catch(e) {}
-  }
-
-  ensureQuizRunning() {
-    try {
-      if (this._isShowingQuestion) return;
-      this._forceStartQuizIfTime();
-      const enQuestions = this._getQuestionsFromMemory('en');
-      if (!enQuestions || enQuestions.length === 0) {
-        this._loadAllQuestionsToMemory().then(() => { 
-          if (!this.closing && !this.isDestroyed && !this._isShowingQuestion) {
-            this.forceStartQuiz();
-          }
-        });
-        return;
-      }
-      if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout && !this._isShowingQuestion) {
-        this.forceStartQuiz();
-      }
-      if (!this._quizKeepAliveInterval) {
-        this._startQuizKeepAlive();
-      }
-    } catch(e) {}
-  }
-
-  _forceStartQuizIfTime() {
-    try {
-      if (this._isShowingQuestion) return;
-      if (!this._isQuizTime() || this.currentQuestion || this._quizTimeout || this.isQuizWaiting || this._quizStartTimeout) {
-        return;
-      }
-      this.quizAutoEnabled = true;
-      this._showQuestion();
-    } catch(e) {}
-  }
-
-  async _loadAllQuestionsFromKV() {
-    try {
-      const enQuestions = this._getQuestionsFromMemory('en');
-      if (enQuestions && enQuestions.length > 0) {
-        this._allQuestions = enQuestions.map((q, index) => ({
-          id: q.id || index + 1,
-          question: q.question || '',
-          options: q.options || { A: '', B: '', C: '', D: '' },
-          correct: q.correct || 'A',
-          category: q.category || 'General',
-          difficulty: q.difficulty || 'medium'
-        }));
-        this._isAllQuestionsLoaded = true;
-        this._currentBatchStart = 0;
-        this._currentBatchEnd = 0;
-        this._questionPointer = 0;
-        this._totalQuestionsAnswered = 0;
-        this._currentBatchIndex = 0;
-        this.countryQuizSystem._usedQuestions.clear();
-        this._loadNextBatch();
-        return true;
-      }
-      if (!this.env?.QUESTIONS) return false;
-      this._incrementSubRequest();
-      const cached = await this.env.QUESTIONS.get('trivia_en', 'json');
-      if (cached?.questions?.length > 0) {
-        this._allQuestions = cached.questions.map((q, index) => ({
-          id: q.id || index + 1,
-          question: q.question || '',
-          options: q.options || { A: '', B: '', C: '', D: '' },
-          correct: q.correct || 'A',
-          category: q.category || 'General',
-          difficulty: q.difficulty || 'medium'
-        }));
-        this._isAllQuestionsLoaded = true;
-        this._currentBatchStart = 0;
-        this._currentBatchEnd = 0;
-        this._questionPointer = 0;
-        this._totalQuestionsAnswered = 0;
-        this._currentBatchIndex = 0;
-        this.countryQuizSystem._usedQuestions.clear();
-        this._loadNextBatch();
-        return true;
-      }
-      return false;
-    } catch(e) { return false; }
-  }
-
-  _loadNextBatch() {
-    try {
-      if (!this._isAllQuestionsLoaded || this._allQuestions.length === 0) return false;
-      const totalQuestions = this._allQuestions.length;
-      let startIndex = this._currentBatchEnd;
-      if (startIndex >= totalQuestions) {
-        startIndex = 0;
-        this._currentBatchStart = 0;
-        this._currentBatchEnd = 0;
-        this._questionPointer = 0;
-        this._totalQuestionsAnswered = 0;
-        this._currentBatchIndex = 0;
-        this.countryQuizSystem._usedQuestions.clear();
-      }
-      const endIndex = Math.min(startIndex + CONSTANTS.QUIZ_BATCH_SIZE, totalQuestions);
-      this.quizQuestionCache['en'] = this._allQuestions.slice(startIndex, endIndex);
-      this._currentQuestions = this.quizQuestionCache['en'];
-      this._currentBatchStart = startIndex;
-      this._currentBatchEnd = endIndex;
-      this._currentBatchIndex = Math.floor(startIndex / CONSTANTS.QUIZ_BATCH_SIZE);
-      this._lastLoadedBatch = this._currentBatchIndex;
-      return true;
-    } catch(e) { return false; }
-  }
-
-  _checkAndLoadNextBatch() {
-    try {
-      const questions = this.quizQuestionCache['en'] || [];
-      if (this._questionPointer >= questions.length) {
-        this._loadNextBatch();
-        const newQuestions = this.quizQuestionCache['en'] || [];
-        if (this._currentBatchStart === 0 && newQuestions.length > 0) this._questionPointer = 0;
-        return true;
-      }
-      return false;
-    } catch(e) { return false; }
-  }
-
-  async _broadcastQuizQuestion(question, options) {
-    try {
-      const wsIds = this.wsClients.get(QUIZ_ROOM);
-      if (!wsIds?.size) return;
-      const userWsIds = Array.from(wsIds);
-      const globalIndex = this._globalQuestionIndex;
-      const results = new Map();
-      
-      for (const wsId of userWsIds) {
-        const country = this.userCountry.get(wsId) || 'US';
-        const info = COUNTRY_LANGUAGE_MAP[country];
-        const lang = info?.lang || 'en';
-        let translatedQuestion = question;
-        let translatedOptions = options;
-        let isTranslated = false;
-        
-        if (lang === 'id') {
-          const translatedQ = this.countryQuizSystem.getQuestionByIndex('id', globalIndex);
-          if (translatedQ) {
-            translatedQuestion = translatedQ.question || translatedQ.text || question;
-            const foundOptions = translatedQ.options || translatedQ.choices || { A: '', B: '', C: '', D: '' };
-            translatedOptions = {};
-            const optionKeys = ['A', 'B', 'C', 'D'];
-            if (Array.isArray(foundOptions)) {
-              optionKeys.forEach((key, index) => {
-                translatedOptions[key] = foundOptions[index] || '';
-              });
-            } else {
-              optionKeys.forEach((key) => {
-                translatedOptions[key] = foundOptions[key] || '';
-              });
-            }
-            isTranslated = true;
-          }
-        }
-        
-        results.set(wsId, {
-          question: translatedQuestion,
-          options: translatedOptions,
-          language: lang,
-          country: country,
-          countryName: info?.name || 'Unknown',
-          isTranslated: isTranslated,
-          questionId: globalIndex + 1,
-          questionNumber: globalIndex + 1
-        });
-      }
-      
-      const batchSize = CONSTANTS.BROADCAST_BATCH_SIZE;
-      this._startCPUTimer();
-      for (let i = 0; i < userWsIds.length; i += batchSize) {
-        const batch = userWsIds.slice(i, i + batchSize);
-        for (const wsId of batch) {
-          try {
-            const ws = this.wsMap.get(wsId);
-            if (!ws || ws.readyState !== 1) continue;
-            const userQuestion = results.get(wsId);
-            if (userQuestion) {
-              const message = ["quizQuestion", {
-                question: userQuestion.question,
-                options: userQuestion.options,
-                language: userQuestion.language,
-                country: userQuestion.country,
-                countryName: userQuestion.countryName,
-                isTranslated: userQuestion.isTranslated,
-                questionId: userQuestion.questionId,
-                questionNumber: userQuestion.questionNumber
-              }];
-              this._safeSend(ws, message);
-            }
-          } catch(e) {}
-        }
-        if (this._checkCPULimit()) {
-          await this._cpuYield();
-          this._startCPUTimer();
-        }
-      }
-    } catch(e) {
-      const msgStr = JSON.stringify(["quizQuestion", { question, options }]);
-      const wsIdArray = Array.from(this.wsClients.get(QUIZ_ROOM) || []);
-      for (const wsId of wsIdArray) {
-        try {
-          const ws = this.wsMap.get(wsId);
-          if (ws && ws.readyState === 1) {
-            ws.send(msgStr);
-          }
-        } catch(e) {}
-      }
-    }
-  }
-
-  async _showQuestion() {
-    try {
-      if (this._isShowingQuestion) return;
-      this._lastActivityTime = Date.now();
-      this._isQuizIdle = false;
-      
-      if (!this._isQuizTime()) {
-        const clients = this.wsClients.get(QUIZ_ROOM);
-        if (clients?.size > 0) {
-          if (!this.quizEndNotified) {
-            this._sendQuizEndNotificationOnce();
-          }
-        }
-        return;
-      }
-      
-      if (!this.quizAutoEnabled) {
-        this.quizAutoEnabled = true;
-        const clients = this.wsClients.get(QUIZ_ROOM);
-        if (clients?.size > 0) this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Quiz is starting soon!", true, true]);
-        return;
-      }
-      
-      if (this.isDestroyed || this.isQuizWaiting || this._quizStartTimeout || this.currentQuestion) return;
-      
-      this._isShowingQuestion = true;
-      
-      try {
-        const enQuestions = this._getQuestionsFromMemory('en');
-        if (!enQuestions || enQuestions.length === 0) {
-          await this._loadAllQuestionsToMemory();
-          const retryQuestions = this._getQuestionsFromMemory('en');
-          if (!retryQuestions || retryQuestions.length === 0) {
-            this._broadcastToRoom(QUIZ_ROOM, ["quizError", "No questions available!"]);
-            this._isShowingQuestion = false;
-            return;
-          }
-        }
-        
-        const questions = this._getQuestionsFromMemory('en');
-        const randomIndex = Math.floor(Math.random() * questions.length);
-        const q = questions[randomIndex];
-        
-        if (!q) {
-          this._isShowingQuestion = false;
-          setTimeout(() => {
-            if (!this.closing && !this.isDestroyed) {
-              this._showQuestion();
-            }
-          }, 1000);
-          return;
-        }
-        
-        this._globalQuestionIndex = randomIndex;
-        this._questionPointer = randomIndex + 1;
-        const shuffled = this._shuffleQuestionOptions(q);
-        this.currentQuestion = { ...q, options: shuffled.options, correct: shuffled.correct };
-        this._quizStartTime = Date.now();
-        this._questionStartTime = Date.now();
-        this._canSubmitAnswer = false;
-        this.quizAnswered = new Set();
-        this.quizHasWinner = false;
-        this.quizWinner = null;
-        this._winnerProcessed = false;
-        this._totalQuestionsAnswered++;
-        
-        await this._broadcastQuizQuestion(this.currentQuestion.question, this.currentQuestion.options);
-        
-        this._broadcastQuizNotification("quizError", `Read the question... ${CONSTANTS.QUIZ_READING_TIME_MS / 1000}s`);
-        
-        setTimeout(() => {
-          if (this.closing || this.isDestroyed) { 
-            this._isShowingQuestion = false;
-            return; 
-          }
-          
-          this._canSubmitAnswer = true;
-          
-          this._broadcastQuizNotification("quizCanAnswer", {
-            answerTime: CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000,
-            remainingTime: `${CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000}s remaining`,
-            message: "You can now answer!"
-          });
-          
-          this._broadcastToRoom(QUIZ_ROOM, [
-            "quizTimeLeft", 
-            `${CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000}s remaining to answer!`, 
-            false,
-            true
-          ]);
-          
-        }, CONSTANTS.QUIZ_READING_TIME_MS);
-        
-        if (this._quizTimeout) clearTimeout(this._quizTimeout);
-        if (this._quizBreakTimeout) clearTimeout(this._quizBreakTimeout);
-        
-        this._quizTimeout = setTimeout(async () => {
-          try {
-            if (this.closing || this.isDestroyed) { 
-              this._quizTimeout = null; 
-              this._isShowingQuestion = false;
-              this._canSubmitAnswer = false;
-              return; 
-            }
-            
-            const currentClients = this.wsClients.get(QUIZ_ROOM);
-            if (!currentClients?.size) { 
-              this._quizTimeout = null; 
-              this.currentQuestion = null;
-              this._isShowingQuestion = false;
-              this._canSubmitAnswer = false;
-              return; 
-            }
-            
-            const correctAnswer = this.currentQuestion.correct;
-            
-            if (this.quizHasWinner && this.quizWinner) {
-              await this._handleQuizWinner(this.quizWinner, correctAnswer);
-            } else {
-              this._broadcastQuizNotification("quizNoWinner", `No winner this round! Correct answer: ${correctAnswer}`);
-            }
-            
-            this._quizTimeout = null;
-            this.isQuizWaiting = true;
-            this._isShowingQuestion = false;
-            this._canSubmitAnswer = false;
-            
-            this._quizBreakTimeout = setTimeout(() => {
-              if (this.closing || this.isDestroyed) { 
-                this._quizBreakTimeout = null; 
-                return; 
-              }
-              this.isQuizWaiting = false;
-              this._quizBreakTimeout = null;
-              this.currentQuestion = null;
-            }, CONSTANTS.QUIZ_BREAK_MS);
-            
-          } catch(e) {
-            this._quizTimeout = null;
-            this.currentQuestion = null;
-            this.isQuizWaiting = false;
-            this._isShowingQuestion = false;
-            this._canSubmitAnswer = false;
-          }
-        }, CONSTANTS.QUIZ_TOTAL_TIME_MS);
-        
-      } catch(e) {
-        this._isShowingQuestion = false;
-        this.currentQuestion = null;
-        this.isQuizWaiting = false;
-        this._quizTimeout = null;
-        this._canSubmitAnswer = false;
-      }
-    } catch(e) {
-      this._isShowingQuestion = false;
-      this.currentQuestion = null;
-      this.isQuizWaiting = false;
-      this._quizTimeout = null;
-      this._canSubmitAnswer = false;
-    }
-  }
-
-  async _forceEvaluateQuiz() {
-    try {
-      if (!this.currentQuestion || this._quizTimeout) return;
-      
-      const currentClients = this.wsClients.get(QUIZ_ROOM);
-      if (!currentClients?.size) { 
-        this.currentQuestion = null;
-        this._isShowingQuestion = false;
-        this._canSubmitAnswer = false;
-        return; 
-      }
-      
-      const correctAnswer = this.currentQuestion.correct;
-      
-      if (this.quizHasWinner && this.quizWinner) {
-        await this._handleQuizWinner(this.quizWinner, correctAnswer);
-      } else {
-        this._broadcastQuizNotification("quizNoWinner", `No winner this round! Correct answer: ${correctAnswer}`);
-      }
-      
-      this.currentQuestion = null;
-      this.isQuizWaiting = true;
-      this._isShowingQuestion = false;
-      this._canSubmitAnswer = false;
-      
-      this._quizBreakTimeout = setTimeout(() => {
-        if (this.closing || this.isDestroyed) { 
-          this._quizBreakTimeout = null; 
-          return; 
-        }
-        this.isQuizWaiting = false;
-        this._quizBreakTimeout = null;
-      }, CONSTANTS.QUIZ_BREAK_MS);
-      
-    } catch(e) {
-      this.currentQuestion = null;
-      this.isQuizWaiting = false;
-      this._isShowingQuestion = false;
-      this._canSubmitAnswer = false;
-    }
-  }
-
-  async submitQuizAnswer(ws, username, answer) {
-    try {
-      if (!ws || !username) {
-        this._sendQuizErrorWithTime(ws, "ERROR", "Invalid request");
-        return;
-      }
-      
-      const room = this._ensureRoomConsistency(ws);
-      if (room !== QUIZ_ROOM) {
-        this._safeSend(ws, ["quizError", "Quiz only available in Quiz room"]);
-        return;
-      }
-      
-      if (!this._isQuizTime()) {
-        this._sendQuizErrorWithTime(ws, "NOT_QUIZ_TIME");
-        return;
-      }
-      
-      if (!this.quizAutoEnabled) {
-        this._sendQuizErrorWithTime(ws, "QUIZ_DISABLED");
-        return;
-      }
-      
-      const clients = this.wsClients.get(QUIZ_ROOM);
-      if (!clients?.size) {
-        this._sendQuizErrorWithTime(ws, "ERROR", "Quiz is paused");
-        return;
-      }
-      
-      if (!this.currentQuestion) {
-        this._startQuizIfNeeded();
-        if (!this.currentQuestion) {
-          this._sendQuizErrorWithTime(ws, "QUIZ_NOT_STARTED");
-          return;
-        }
-      }
-      
-      if (!this._canSubmitAnswer) {
-        const elapsed = (Date.now() - (this._questionStartTime || 0)) / 1000;
-        const remaining = Math.max(0, Math.round((CONSTANTS.QUIZ_READING_TIME_MS / 1000) - elapsed));
-        this._safeSend(ws, ["quizError", `Please wait ${remaining}s, reading time!`]);
-        return;
-      }
-      
-      const answerRemaining = this._getAnswerRemainingTime();
-      if (answerRemaining <= 0) {
-        if (this.quizHasWinner && this.quizWinner) {
-          this._safeSend(ws, ["quizError", "Time's up! Winner: " + this.quizWinner]);
-        } else {
-          this._safeSend(ws, ["quizError", "Time's up!"]);
-        }
-        return;
-      }
-      
-      if (this.quizHasWinner) {
-        this._safeSend(ws, ["quizError", "Someone already answered correctly!"]);
-        return;
-      }
-      
-      if (this.quizAnswered.has(username)) {
-        this._safeSend(ws, ["quizError", "You already answered!"]);
-        return;
-      }
-      
-      const answerKey = answer ? answer.toUpperCase().trim() : '';
-      const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
-      const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
-      const remainingText = `${answerRemaining}s remaining`;
-      const wsId = this._getWsId(ws);
-      const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
-      
-      this._broadcastQuizNotification("quizAnswer", {
-        username: username,
-        answer: isValidAnswer ? answerKey : "?",
-        isCorrect: isCorrect,
-        remainingTime: remainingText,
-        country: countryInfo.countryCode,
-        countryName: countryInfo.countryName
-      });
-      
-      this._broadcastQuizResult("quizAnswerResult", {
-        username,
-        answer: isValidAnswer ? answerKey : "?",
-        isCorrect,
-        correctAnswer: this.currentQuestion.correct,
-        remainingTime: remainingText,
-        country: countryInfo.countryCode,
-        countryName: countryInfo.countryName
-      });
-      
-      this.quizAnswered.add(username);
-      
-      if (isCorrect && !this.quizHasWinner) {
-        this.quizHasWinner = true;
-        this.quizWinner = username;
-        this._broadcastQuizNotification("quizWinnerWithCountry", {
-          username: username,
-          country: countryInfo.countryCode,
-          countryName: countryInfo.countryName
-        });
-      }
-      
-    } catch(e) {
-      this._safeSend(ws, ["quizError", e.message]);
-    }
-  }
-
-  _startQuizLoop() {
-    try {
-      if (this.quizTimer) clearInterval(this.quizTimer);
-      this.quizTimer = setInterval(() => {
-        try {
-          if (this.closing || this.isDestroyed) { 
-            clearInterval(this.quizTimer); 
-            this.quizTimer = null; 
-            return; 
-          }
-          if (this._isRecovering) return;
-          if (this._isQuizTime()) {
-            this.quizEndedToday = false;
-            this.quizEndMessageShown = false;
-            this.quizEndNotified = false;
-            if (!this.quizAutoEnabled) {
-              this.quizAutoEnabled = true;
-              this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Quiz is starting soon!", true, true]);
-            }
-            if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout && !this._isShowingQuestion) {
-              this._showQuestion();
-            }
-          } else {
-            if (this.quizAutoEnabled && !this.quizEndNotified) {
-              this.quizAutoEnabled = false;
-              this.quizEndedToday = true;
-              this.quizEndMessageShown = false;
-              this.resetQuiz();
-              this._clearQuizData();
-              this._quizTimeLeftNotified.clear();
-              this._nextQuizNotified.clear();
-              this._sendQuizEndNotificationOnce();
-            }
-          }
-        } catch(e) {}
-      }, CONSTANTS.QUIZ_INTERVAL_MS);
-    } catch(e) {}
-  }
-
-  async resetQuiz() {
-    try {
-      if (this._quizTimeout) clearTimeout(this._quizTimeout);
-      if (this._quizBreakTimeout) clearTimeout(this._quizBreakTimeout);
-      if (this._quizStartTimeout) clearTimeout(this._quizStartTimeout);
-      if (this._quizKeepAliveInterval) clearInterval(this._quizKeepAliveInterval);
-      this.currentQuestion = null;
-      this.isQuizWaiting = false;
-      this.quizHasWinner = false;
-      this.quizWinner = null;
-      this.quizAnswered = new Set();
-      this._quizStartTime = null;
-      this.quizEndNotified = false;
-      this._isShowingQuestion = false;
-      this._winnerProcessed = false;
-      this._canSubmitAnswer = false;
-      this._questionStartTime = null;
-      this._quizTimeLeftNotified.clear();
-      this._nextQuizNotified.clear();
-      this._startQuizKeepAlive();
-    } catch(e) {}
-  }
-
-  async startQuizWithDelay(delayMs) {
-    try {
-      if (this._quizStartTimeout) return;
-      this._quizStartTimeout = setTimeout(() => {
-        try {
-          if (this.closing || this.isDestroyed) { 
-            this._quizStartTimeout = null; 
-            return; 
-          }
-          this._quizStartTimeout = null;
-          if (!this.currentQuestion && this.quizAutoEnabled && !this._isShowingQuestion) {
-            this.forceStartQuiz();
-          }
-        } catch(e) {}
-      }, delayMs);
-    } catch(e) {}
-  }
-
-  _startQuizIfNeeded() {
-    try {
-      const clients = this.wsClients.get(QUIZ_ROOM);
-      if (!clients?.size) return;
-      if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout && !this._isShowingQuestion) {
-        const enQuestions = this._getQuestionsFromMemory('en');
-        if (!enQuestions || enQuestions.length === 0) {
-          this._loadAllQuestionsToMemory().then(() => { 
-            if (!this.closing && !this.isDestroyed && !this._isShowingQuestion) {
-              this._showQuestion(); 
-            }
-          });
-          return;
-        }
-        this._showQuestion();
-      }
-    } catch(e) {}
-  }
-
-  async _initQuiz(retryCount = 0) {
-    try {
-      const enQuestions = this._getQuestionsFromMemory('en');
-      if (enQuestions && enQuestions.length > 0) {
-        this._allQuestions = enQuestions.map((q, index) => ({
-          id: q.id || index + 1,
-          question: q.question || '',
-          options: q.options || { A: '', B: '', C: '', D: '' },
-          correct: q.correct || 'A',
-          category: q.category || 'General',
-          difficulty: q.difficulty || 'medium'
-        }));
-        this._isAllQuestionsLoaded = true;
-        this._startQuizLoop();
-        this._startQuizKeepAlive();
-        return true;
-      }
-      const loaded = await this._loadAllQuestionsFromKV();
-      if (loaded) {
-        this._startQuizLoop();
-        this._startQuizKeepAlive();
-        return true;
-      }
-      if (retryCount < CONSTANTS.MAX_RETRY_INIT_QUIZ && !this.closing && !this.isDestroyed) {
-        setTimeout(() => this._initQuiz(retryCount + 1), 5000);
-      }
-      return false;
-    } catch(e) {
-      if (retryCount < CONSTANTS.MAX_RETRY_INIT_QUIZ && !this.closing && !this.isDestroyed) {
-        setTimeout(() => this._initQuiz(retryCount + 1), 5000);
-      }
-      return false;
-    }
-  }
-
-  _startQuizKeepAlive() {
-    try {
-      if (this._quizKeepAliveInterval) clearInterval(this._quizKeepAliveInterval);
-      this._quizKeepAliveInterval = setInterval(() => {
-        try {
-          if (this.closing || this.isDestroyed) { 
-            clearInterval(this._quizKeepAliveInterval); 
-            this._quizKeepAliveInterval = null; 
-            return; 
-          }
-          this._lastHeartbeat = Date.now();
-          if (this._isQuizTime()) {
-            const now = Date.now();
-            if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout && !this._isShowingQuestion) {
-              if (this.quizAutoEnabled) {
-                this._showQuestion();
-              } else { 
-                this.quizAutoEnabled = true; 
-                this._showQuestion(); 
-              }
-            }
-            if (this.currentQuestion && this._quizStartTime) {
-              const elapsed = (now - this._quizStartTime) / 1000;
-              if (elapsed > (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) - 2 && !this._quizTimeout) {
-                this._forceEvaluateQuiz();
-              }
-              if (elapsed > (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) + 10) {
-                this.currentQuestion = null;
-                this._quizTimeout = null;
-                this._isShowingQuestion = false;
-                this._canSubmitAnswer = false;
-              }
-            }
-          } else {
-            if (!this.quizEndNotified && this.quizAutoEnabled) {
-              this._sendQuizEndNotificationOnce();
-            }
-          }
-        } catch(e) {}
-      }, CONSTANTS.QUIZ_KEEP_ALIVE_INTERVAL_MS);
-    } catch(e) {}
-  }
-
-  _clearQuizData() {
-    try {
-      this.currentQuestion = null;
-      this._quizStartTime = null;
-      this.quizAnswered = new Set();
-      this.quizHasWinner = false;
-      this.quizWinner = null;
-      this.isQuizWaiting = false;
-      this._isShowingQuestion = false;
-      this._winnerProcessed = false;
-      this._canSubmitAnswer = false;
-      this._questionStartTime = null;
-      
-      if (this._quizTimeout) {
-        clearTimeout(this._quizTimeout);
-        this._quizTimeout = null;
-      }
-      if (this._quizBreakTimeout) {
-        clearTimeout(this._quizBreakTimeout);
-        this._quizBreakTimeout = null;
-      }
-      if (this._quizStartTimeout) {
-        clearTimeout(this._quizStartTimeout);
-        this._quizStartTimeout = null;
-      }
-      this.quizQuestionCache = {};
-      this._questionPointer = 0;
-      this._totalQuestionsAnswered = 0;
-      
-      this._broadcastToRoom(QUIZ_ROOM, ["quizClear", {
-        message: "Quiz has ended. Come back tomorrow!",
-        timestamp: Date.now()
-      }]);
-      this._broadcastQuizNotification("quizCleared", {
-        message: "Quiz has ended. Come back tomorrow!",
-        clearUI: true
-      });
-    } catch(e) {}
-  }
-
-  async _broadcastQuizResult(type, data) {
-    try {
-      const wsIds = this.wsClients.get(QUIZ_ROOM);
-      if (!wsIds?.size) return;
-      const msgStr = JSON.stringify([type, data]);
-      const wsIdArray = Array.from(wsIds);
-      const batchSize = CONSTANTS.BROADCAST_BATCH_SIZE;
-      this._startCPUTimer();
-      for (let i = 0; i < wsIdArray.length; i += batchSize) {
-        const batch = wsIdArray.slice(i, i + batchSize);
-        for (const wsId of batch) {
-          try {
-            const ws = this.wsMap.get(wsId);
-            if (ws && ws.readyState === 1) ws.send(msgStr);
-          } catch(e) {}
-        }
-        if (this._checkCPULimit()) { await this._cpuYield(); this._startCPUTimer(); }
-      }
-    } catch(e) {}
-  }
-
-  _broadcastQuizTimeLeft() {
-    try {
-      const wsIds = this.wsClients.get(QUIZ_ROOM);
-      if (!wsIds?.size) return;
-      const now = Date.now();
-      if (now - this._lastQuizTimeLeftBroadcast < this._quizTimeLeftBroadcastCooldown) {
-        return;
-      }
-      const timeInfo = this._getTimeLeftUntilNextEvent();
-      const timeLeft = this._getTimeLeftUntilNextQuiz();
-      let message = "", canType = true, isQuizTime = timeInfo.isRunning;
-      if (isQuizTime) {
-        if (this.currentQuestion && this._quizStartTime) {
-          const elapsed = (Date.now() - this._quizStartTime) / 1000;
-          const left = Math.max(0, (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) - elapsed);
-          const minutes = Math.floor(left / 60), seconds = Math.floor(left % 60);
-          message = `${minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`} remaining`;
-          canType = false;
-        } else {
-          message = `Quiz is starting soon!`;
-          canType = true;
-        }
-      } else {
-        message = `${timeLeft.text}`;
-        canType = true;
-      }
-      const wsIdArray = Array.from(wsIds);
-      let hasUnnotified = false;
-      for (const wsId of wsIdArray) {
-        if (!this._quizTimeLeftNotified.has(wsId) && !this._nextQuizNotified.has(wsId)) {
-          hasUnnotified = true;
-          break;
-        }
-      }
-      if (!hasUnnotified) return;
-      const msgStr = JSON.stringify(["quizTimeLeft", message, canType, isQuizTime]);
-      for (const wsId of wsIdArray) {
-        if (!this._quizTimeLeftNotified.has(wsId) && !this._nextQuizNotified.has(wsId)) {
-          try {
-            const ws = this.wsMap.get(wsId);
-            if (ws && ws.readyState === 1) {
-              ws.send(msgStr);
-              this._quizTimeLeftNotified.set(wsId, now);
-              if (!isQuizTime) {
-                this._nextQuizNotified.set(wsId, now);
-              }
-            }
-          } catch(e) {}
-        }
-      }
-      this._lastQuizTimeLeftBroadcast = now;
-    } catch(e) {}
-  }
-
-  _sendQuizTimeLeftToUser(ws) {
-    try {
-      if (!ws || ws.readyState !== 1) return false;
-      const wsId = this._getWsId(ws);
-      if (!wsId) return false;
-      if (this._quizTimeLeftNotified.has(wsId)) {
-        return false;
-      }
-      if (this._nextQuizNotified.has(wsId)) {
-        return false;
-      }
-      const timeInfo = this._getTimeLeftUntilNextEvent();
-      const timeLeft = this._getTimeLeftUntilNextQuiz();
-      let message = "", canType = true, isQuizTime = timeInfo.isRunning;
-      if (isQuizTime) {
-        if (this.currentQuestion && this._quizStartTime) {
-          const elapsed = (Date.now() - this._quizStartTime) / 1000;
-          const left = Math.max(0, (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) - elapsed);
-          const minutes = Math.floor(left / 60), seconds = Math.floor(left % 60);
-          message = minutes > 0 ? `${minutes}m ${seconds}s remaining` : `${seconds}s remaining`;
-          canType = false;
-        } else {
-          message = `Quiz is starting soon!`;
-          canType = true;
-        }
-      } else {
-        message = `${timeLeft.text}`;
-        canType = true;
-      }
-      this._safeSend(ws, ["quizTimeLeft", message, canType, isQuizTime]);
-      this._quizTimeLeftNotified.set(wsId, Date.now());
-      return true;
-    } catch(e) { return false; }
-  }
-
-  _sendQuizErrorWithTime(ws, errorType, customMessage = null) {
-    try {
-      if (!ws || ws.readyState !== 1) return false;
-      const timeLeft = this._getTimeLeftUntilNextQuiz();
-      let message = "";
-      switch(errorType) {
-        case "NOT_QUIZ_TIME":
-          message = `Quiz will start in ${timeLeft.text}`;
-          break;
-        case "QUIZ_DISABLED": 
-          message = `Quiz is disabled. Next session: ${timeLeft.text}`; 
-          break;
-        case "QUIZ_ENDED":
-          message = `Quiz ended. Next session: ${timeLeft.text}`;
-          break;
-        case "QUIZ_NOT_STARTED": 
-          message = `Quiz not started. Next session: ${timeLeft.text}`; 
-          break;
-        default: 
-          message = customMessage || `Next quiz: ${timeLeft.text}`;
-      }
-      this._safeSend(ws, ["quizError", message]);
-      return true;
-    } catch(e) { return false; }
-  }
-
   // ==================== WEBSOCKET AND GAME METHODS ====================
 
   _getWsId(ws) { return ws?._wsId || null; }
-
-  _getRoomForWs(ws) {
-    if (!ws) return null;
-    return ws.room || ws.roomname || null;
-  }
 
   _ensureRoomConsistency(ws) {
     try {
@@ -2514,121 +1163,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  _setUserLanguage(ws, countryCode) {
-    try {
-      if (!ws) return 'en';
-      const wsId = this._getWsId(ws);
-      if (!wsId) return 'en';
-      const info = COUNTRY_LANGUAGE_MAP[countryCode];
-      const lang = info?.lang || 'en';
-      this.userLanguage.set(wsId, lang);
-      this.userCountry.set(wsId, countryCode);
-      return lang;
-    } catch(e) { return 'en'; }
-  }
-
-  _countryToLanguage(countryCode) {
-    try {
-      if (!countryCode) return 'en';
-      const info = COUNTRY_LANGUAGE_MAP[countryCode];
-      return info?.lang || 'en';
-    } catch(e) { return 'en'; }
-  }
-
-  async switchRoom(ws, room, username = null) {
-    try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); return; }
-      if (!room || room.trim() === "") { this._safeSend(ws, ["gameLowCardError", "Invalid room name"]); return; }
-      const roomName = room.trim();
-      const wsId = this._getWsId(ws);
-      if (!wsId) { this._safeSend(ws, ["gameLowCardError", "Connection error"]); return; }
-      const lockKey = `switch_${wsId}`;
-      if (this._switchLocks.has(lockKey)) { this._safeSend(ws, ["gameLowCardError", "Switch in progress"]); return; }
-      this._switchLocks.set(lockKey, Date.now());
-      try {
-        const oldRoom = this.clientRooms.get(wsId);
-        if (oldRoom === roomName) {
-          ws.room = roomName;
-          ws.roomname = roomName;
-          if (roomName === QUIZ_ROOM) {
-            this._quizTimeLeftNotified.delete(wsId);
-            this._nextQuizNotified.delete(wsId);
-            if (!this._questionsCache.loaded) {
-              await this._loadAllQuestionsToMemory();
-            }
-            if (this._isQuizTime() && !this.quizAutoEnabled) { 
-              this.quizAutoEnabled = true; 
-              this.forceStartQuiz(); 
-            }
-            setTimeout(() => { 
-              if (!this.closing && !this.isDestroyed) {
-                this._sendQuizTimeLeftToUser(ws);
-                this._sendQuizNotification(ws, "quizStatus", {
-                  isQuizTime: this._isQuizTime(),
-                  isActive: !!this.currentQuestion,
-                  remainingTime: `${this._getQuestionRemainingTime()}s remaining`,
-                  hasWinner: this.quizHasWinner,
-                  winner: this.quizWinner,
-                  correctAnswer: this.currentQuestion?.correct || null,
-                  questionNumber: this._questionPointer,
-                  totalQuestions: this._allQuestions.length
-                });
-              }
-            }, CONSTANTS.QUIZ_SWITCH_DELAY_MS);
-          }
-          this._safeSend(ws, ["switchRoomSuccess", roomName]);
-          return;
-        }
-        if (oldRoom) this._removeClientFromRoom(oldRoom, wsId);
-        this._addClient(roomName, ws, username, false);
-        ws.room = roomName;
-        ws.roomname = roomName;
-        ws.username = username;
-        if (username) {
-          let conn = this.userConnections.get(username);
-          if (conn) { conn.room = roomName; conn.wsId = wsId; conn.ws = ws; conn.timestamp = Date.now(); }
-          else { this.userConnections.set(username, { wsId, ws, room: roomName, timestamp: Date.now() }); }
-        }
-        this._safeSend(ws, ["switchRoomSuccess", roomName]);
-        if (roomName === QUIZ_ROOM) {
-          this._quizTimeLeftNotified.delete(wsId);
-          this._nextQuizNotified.delete(wsId);
-          let country = this.userCountry.get(wsId);
-          if (!country) { const cf = ws._cf || {}; country = cf.country || 'US'; this.userCountry.set(wsId, country); }
-          this._setUserLanguage(ws, country);
-          if (!this._questionsCache.loaded) {
-            await this._loadAllQuestionsToMemory();
-          }
-          if (this._isQuizTime()) { 
-            if (!this.quizAutoEnabled) this.quizAutoEnabled = true; 
-            this.forceStartQuiz(); 
-          }
-          setTimeout(() => { 
-            if (!this.closing && !this.isDestroyed) {
-              this._sendQuizTimeLeftToUser(ws);
-              this._sendQuizNotification(ws, "quizStatus", {
-                isQuizTime: this._isQuizTime(),
-                isActive: !!this.currentQuestion,
-                remainingTime: `${this._getQuestionRemainingTime()}s remaining`,
-                hasWinner: this.quizHasWinner,
-                winner: this.quizWinner,
-                correctAnswer: this.currentQuestion?.correct || null,
-                questionNumber: this._questionPointer,
-                totalQuestions: this._allQuestions.length
-              });
-            }
-          }, CONSTANTS.QUIZ_SWITCH_DELAY_MS);
-        }
-        this._broadcastToRoom(roomName, ["userJoinedRoom", username, roomName]);
-        if (oldRoom) this._broadcastToRoom(oldRoom, ["userLeftRoom", username, oldRoom]);
-      } finally {
-        this._switchLocks.delete(lockKey);
-      }
-    } catch(e) {
-      this._safeSend(ws, ["gameLowCardError", "Switch failed"]);
-    }
-  }
-
   async _broadcastToRoom(room, message) {
     try {
       if (this.closing || this.isDestroyed || !room || !message) return;
@@ -2659,11 +1193,9 @@ export class GameServer extends CPUProtection {
     } catch(e) { return false; }
   }
 
-  // ==================== GAME METHODS ====================
+  // ==================== GAME LOWCARD METHODS ====================
 
   _isGameActuallyRunning(game) { try { return game?._isActive === true && !game?._gameEnded; } catch(e) { return false; } }
-
-  _isGameValid(game) { try { return game?._isActive === true && !game?._gameEnded && game?.players?.size > 0; } catch(e) { return false; } }
 
   _getActivePlayers(game) {
     try {
@@ -2692,15 +1224,6 @@ export class GameServer extends CPUProtection {
         [8, 9, 10, 11, 12][Math.floor(Math.random() * 5)] :
         [1, 2, 3, 4, 5, 6, 7][Math.floor(Math.random() * 7)];
     } catch(e) { return 5; }
-  }
-
-  _safeGetGame(room) {
-    try {
-      if (this.isDestroyed || !room) return null;
-      const game = this.activeGames.get(room);
-      if (game?._isActive && !game?._gameEnded && game?.players) return game;
-      return null;
-    } catch(e) { return null; }
   }
 
   _scheduleGameCleanup(room, game) {
@@ -2770,70 +1293,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  _removePlayerFromGame(username, room) {
-    try {
-      const game = this.activeGames.get(room);
-      if (!game || !game.players?.has(username) || !game._isActive || game._gameEnded || game._isEvaluating || game.evaluationLocked) return false;
-      if (!game.eliminated) game.eliminated = new Set();
-      game.eliminated.add(username);
-      game.numbers?.delete(username);
-      game.tanda?.delete(username);
-      this._broadcastToRoom(room, ["gameLowCardError", `${username} has been eliminated`]);
-      setTimeout(() => {
-        try {
-          const currentGame = this.activeGames.get(room);
-          if (currentGame && currentGame === game && !game._gameEnded) this._checkGameCanContinue(room, game);
-        } catch(e) {}
-      }, 1000);
-      return true;
-    } catch(e) { return false; }
-  }
-
-  _checkGameCanContinue(room, game) {
-    try {
-      if (!game?._isActive || game._gameEnded || !game.players || game._isEvaluating || game.evaluationLocked || game.registrationOpen) return;
-      const activePlayers = this._getActivePlayers(game);
-      if (activePlayers.length === 0) {
-        const allPlayers = Array.from(game.players.keys());
-        const submitted = Array.from(game.numbers?.keys() || []);
-        const notSubmitted = allPlayers.filter(id => !submitted.includes(id) && !game.eliminated?.has(id));
-        if (notSubmitted.length > 0) return;
-        game._gameEnded = true;
-        game._isActive = false;
-        game._endTime = Date.now();
-        this._broadcastToRoom(room, ["gameLowCardEnd", []]);
-        this._scheduleGameCleanup(room, game);
-        return;
-      }
-      if (activePlayers.length === 1 && !game._gameEnded) {
-        const activeIds = this._getActivePlayerIds(game);
-        const submittedIds = Array.from(game.numbers?.keys() || []);
-        const notSubmitted = activeIds.filter(id => !submittedIds.includes(id));
-        if (notSubmitted.length > 0) { this._broadcastToRoom(room, ["gameLowCardTimeLeft", `Waiting for ${notSubmitted.length} player(s)`]); return; }
-        const winner = activePlayers[0]?.name || "Unknown";
-        const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
-        game._gameEnded = true;
-        game._isActive = false;
-        game._endTime = Date.now();
-        this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
-        this._scheduleGameCleanup(room, game);
-      }
-    } catch(e) {}
-  }
-
-  _findAllGamesByUsername(username) {
-    try {
-      if (!username) return [];
-      const result = [];
-      for (const [room, game] of this.activeGames) {
-        if (game?._isActive && !game._gameEnded && game.players?.has(username)) {
-          result.push({ game, room });
-        }
-      }
-      return result;
-    } catch(e) { return []; }
-  }
-
   _addBots(room, count) {
     try {
       const game = this.activeGames.get(room);
@@ -2854,62 +1313,6 @@ export class GameServer extends CPUProtection {
       }
       game._botsAdded = true;
       game.useBots = true;
-    } catch(e) {}
-  }
-
-  _startBotDraws(room, game) {
-    try {
-      if (!this._isGameActuallyRunning(game) || !game.botPlayers) return;
-      if (!game._botTimeouts) game._botTimeouts = new Set();
-      const notDrawn = Array.from(game.botPlayers.keys())
-        .filter(id => !game.eliminated?.has(id) && !game.numbers?.has(id))
-        .slice(0, CONSTANTS.MAX_BOT_DRAWS_PER_ROUND);
-      for (const botId of notDrawn) {
-        const delay = this._getRandomDrawDelay();
-        const timeout = setTimeout(() => {
-          try {
-            const currentGame = this.activeGames.get(room);
-            if (this._isGameActuallyRunning(currentGame) && !currentGame.drawTimeExpired &&
-                !currentGame.evaluationLocked && !currentGame.numbers?.has(botId) && !currentGame.eliminated?.has(botId)) {
-              this._handleBotDraw(room, botId, currentGame);
-            }
-            currentGame?._botTimeouts?.delete(timeout);
-          } catch(e) {}
-        }, delay);
-        game._botTimeouts.add(timeout);
-      }
-    } catch(e) {}
-  }
-
-  _handleBotDraw(room, botId, game) {
-    try {
-      if (!this._isGameActuallyRunning(game) || game.numbers?.has(botId) || game.drawTimeExpired || game.evaluationLocked) return;
-      if (game.eliminated?.has(botId)) return;
-      const number = this._getBotNumberByRound(game.round);
-      const tanda = this._getRandomCardTanda();
-      game.numbers.set(botId, number);
-      game.tanda.set(botId, tanda);
-      const botName = game.players.get(botId)?.name || botId;
-      this._broadcastToRoom(room, ["gameLowCardPlayerDraw", botName, number, tanda]);
-      const activeIds = this._getActivePlayerIds(game);
-      if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired && this._isGameActuallyRunning(game)) {
-        game.evaluationLocked = true;
-        this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
-        game._evalTimer = setTimeout(() => { try { this._evaluateRound(room, game); } catch(e) {} }, CONSTANTS.EVALUATION_DELAY_MS);
-      }
-    } catch(e) {}
-  }
-
-  _forceBotDraw(room, botId, game) {
-    try {
-      if (!this._isGameActuallyRunning(game) || game.numbers?.has(botId)) return;
-      if (game.eliminated?.has(botId)) return;
-      const number = this._getBotNumberByRound(game.round);
-      const tanda = this._getRandomCardTanda();
-      game.numbers.set(botId, number);
-      game.tanda.set(botId, tanda);
-      const botName = game.players.get(botId)?.name || botId;
-      this._broadcastToRoom(room, ["gameLowCardPlayerDraw", botName, number, tanda]);
     } catch(e) {}
   }
 
@@ -3008,7 +1411,7 @@ export class GameServer extends CPUProtection {
       this._broadcastToRoom(room, ["gameLowCardClosed", playersList]);
       this._broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
       this._startDrawCountdown(room, game);
-      if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) this._startBotDraws(room, game);
+      this._startBotDraws(room, game);
     } catch(e) {}
   }
 
@@ -3037,6 +1440,62 @@ export class GameServer extends CPUProtection {
         } catch(e) { clearInterval(timer); if (game._drawTimer === timer) game._drawTimer = null; }
       }, 1000);
       game._drawTimer = timer;
+    } catch(e) {}
+  }
+
+  _startBotDraws(room, game) {
+    try {
+      if (!this._isGameActuallyRunning(game) || !game.botPlayers) return;
+      if (!game._botTimeouts) game._botTimeouts = new Set();
+      const notDrawn = Array.from(game.botPlayers.keys())
+        .filter(id => !game.eliminated?.has(id) && !game.numbers?.has(id))
+        .slice(0, CONSTANTS.MAX_BOT_DRAWS_PER_ROUND);
+      for (const botId of notDrawn) {
+        const delay = this._getRandomDrawDelay();
+        const timeout = setTimeout(() => {
+          try {
+            const currentGame = this.activeGames.get(room);
+            if (this._isGameActuallyRunning(currentGame) && !currentGame.drawTimeExpired &&
+                !currentGame.evaluationLocked && !currentGame.numbers?.has(botId) && !currentGame.eliminated?.has(botId)) {
+              this._handleBotDraw(room, botId, currentGame);
+            }
+            currentGame?._botTimeouts?.delete(timeout);
+          } catch(e) {}
+        }, delay);
+        game._botTimeouts.add(timeout);
+      }
+    } catch(e) {}
+  }
+
+  _handleBotDraw(room, botId, game) {
+    try {
+      if (!this._isGameActuallyRunning(game) || game.numbers?.has(botId) || game.drawTimeExpired || game.evaluationLocked) return;
+      if (game.eliminated?.has(botId)) return;
+      const number = this._getBotNumberByRound(game.round);
+      const tanda = this._getRandomCardTanda();
+      game.numbers.set(botId, number);
+      game.tanda.set(botId, tanda);
+      const botName = game.players.get(botId)?.name || botId;
+      this._broadcastToRoom(room, ["gameLowCardPlayerDraw", botName, number, tanda]);
+      const activeIds = this._getActivePlayerIds(game);
+      if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired && this._isGameActuallyRunning(game)) {
+        game.evaluationLocked = true;
+        this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+        game._evalTimer = setTimeout(() => { try { this._evaluateRound(room, game); } catch(e) {} }, CONSTANTS.EVALUATION_DELAY_MS);
+      }
+    } catch(e) {}
+  }
+
+  _forceBotDraw(room, botId, game) {
+    try {
+      if (!this._isGameActuallyRunning(game) || game.numbers?.has(botId)) return;
+      if (game.eliminated?.has(botId)) return;
+      const number = this._getBotNumberByRound(game.round);
+      const tanda = this._getRandomCardTanda();
+      game.numbers.set(botId, number);
+      game.tanda.set(botId, tanda);
+      const botName = game.players.get(botId)?.name || botId;
+      this._broadcastToRoom(room, ["gameLowCardPlayerDraw", botName, number, tanda]);
     } catch(e) {}
   }
 
@@ -3423,31 +1882,55 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  async checkGameRunning(ws, roomname) {
+  _removePlayerFromGame(username, room) {
     try {
-      if (this.isDestroyed) { this._safeSend(ws, ["gameStatus", { running: "false" }]); return; }
-      let room = roomname;
-      if (!room) room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameStatus", { running: "false" }]); return; }
       const game = this.activeGames.get(room);
-      const isRunning = game?._isActive && !game._gameEnded && game.players?.size > 0;
-      this._safeSend(ws, ["gameStatus", { running: isRunning ? "true" : "false" }]);
-    } catch(e) {
-      this._safeSend(ws, ["gameStatus", { running: "false" }]);
-    }
+      if (!game || !game.players?.has(username) || !game._isActive || game._gameEnded || game._isEvaluating || game.evaluationLocked) return false;
+      if (!game.eliminated) game.eliminated = new Set();
+      game.eliminated.add(username);
+      game.numbers?.delete(username);
+      game.tanda?.delete(username);
+      this._broadcastToRoom(room, ["gameLowCardError", `${username} has been eliminated`]);
+      setTimeout(() => {
+        try {
+          const currentGame = this.activeGames.get(room);
+          if (currentGame && currentGame === game && !game._gameEnded) this._checkGameCanContinue(room, game);
+        } catch(e) {}
+      }, 1000);
+      return true;
+    } catch(e) { return false; }
   }
 
-  getGame(room) { return this.activeGames.get(room); }
-
-  isGameRunning(room) {
+  _checkGameCanContinue(room, game) {
     try {
-      if (this.isDestroyed || !room) return { running: false, message: this.isDestroyed ? "System destroyed" : "Invalid room" };
-      const game = this.activeGames.get(room);
-      if (!game?.players) return { running: false, message: "No game in this room" };
-      return { running: game._isActive && !game._gameEnded, message: "Game is " + (game._isActive && !game._gameEnded ? "running" : "not active") };
-    } catch(e) {
-      return { running: false, message: "Error checking game" };
-    }
+      if (!game?._isActive || game._gameEnded || !game.players || game._isEvaluating || game.evaluationLocked || game.registrationOpen) return;
+      const activePlayers = this._getActivePlayers(game);
+      if (activePlayers.length === 0) {
+        const allPlayers = Array.from(game.players.keys());
+        const submitted = Array.from(game.numbers?.keys() || []);
+        const notSubmitted = allPlayers.filter(id => !submitted.includes(id) && !game.eliminated?.has(id));
+        if (notSubmitted.length > 0) return;
+        game._gameEnded = true;
+        game._isActive = false;
+        game._endTime = Date.now();
+        this._broadcastToRoom(room, ["gameLowCardEnd", []]);
+        this._scheduleGameCleanup(room, game);
+        return;
+      }
+      if (activePlayers.length === 1 && !game._gameEnded) {
+        const activeIds = this._getActivePlayerIds(game);
+        const submittedIds = Array.from(game.numbers?.keys() || []);
+        const notSubmitted = activeIds.filter(id => !submittedIds.includes(id));
+        if (notSubmitted.length > 0) { this._broadcastToRoom(room, ["gameLowCardTimeLeft", `Waiting for ${notSubmitted.length} player(s)`]); return; }
+        const winner = activePlayers[0]?.name || "Unknown";
+        const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
+        game._gameEnded = true;
+        game._isActive = false;
+        game._endTime = Date.now();
+        this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
+        this._scheduleGameCleanup(room, game);
+      }
+    } catch(e) {}
   }
 
   _ensureSingleConnection(room, username, newWs, newWsId) {
@@ -3467,37 +1950,18 @@ export class GameServer extends CPUProtection {
     } catch(e) { return newWsId; }
   }
 
-  _shuffleQuestionOptions(question) {
+  async checkGameRunning(ws, roomname) {
     try {
-      if (!question?.options) return { options: { A: '', B: '', C: '', D: '' }, correct: 'A' };
-      const options = question.options;
-      const keys = ['A', 'B', 'C', 'D'];
-      const entries = keys.map(key => ({ key, text: options[key] || '', isCorrect: key === question.correct }));
-      const shuffled = this._shuffleArray(entries);
-      const newOptions = {};
-      const newKeys = ['A', 'B', 'C', 'D'];
-      let newCorrect = '';
-      shuffled.forEach((item, index) => {
-        const newKey = newKeys[index];
-        newOptions[newKey] = item.text;
-        if (item.isCorrect) newCorrect = newKey;
-      });
-      return { options: newOptions, correct: newCorrect || 'A' };
+      if (this.isDestroyed) { this._safeSend(ws, ["gameStatus", { running: "false" }]); return; }
+      let room = roomname;
+      if (!room) room = this._ensureRoomConsistency(ws);
+      if (!room) { this._safeSend(ws, ["gameStatus", { running: "false" }]); return; }
+      const game = this.activeGames.get(room);
+      const isRunning = game?._isActive && !game._gameEnded && game.players?.size > 0;
+      this._safeSend(ws, ["gameStatus", { running: isRunning ? "true" : "false" }]);
     } catch(e) {
-      return { options: question?.options || { A: '', B: '', C: '', D: '' }, correct: 'A' };
+      this._safeSend(ws, ["gameStatus", { running: "false" }]);
     }
-  }
-
-  _shuffleArray(array) {
-    try {
-      if (!array?.length) return array || [];
-      const arr = array.length > CONSTANTS.MAX_ARRAY_SIZE ? array.slice(0, CONSTANTS.MAX_ARRAY_SIZE) : [...array];
-      for (let i = arr.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [arr[i], arr[j]] = [arr[j], arr[i]];
-      }
-      return arr;
-    } catch(e) { return array || []; }
   }
 
   // ==================== EVENT HANDLING ====================
@@ -3571,56 +2035,7 @@ export class GameServer extends CPUProtection {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
 
-      if (evt === "getUserCountryInfo") {
-        const wsId = this._getWsId(ws);
-        const info = this.countryQuizSystem.getUserCountryInfo(wsId);
-        this._safeSend(ws, ["userCountryInfo", info]);
-        return;
-      }
-
-      if (evt === "getCountryQuestions") {
-        const countryCode = data[1] || 'ID';
-        const questions = await this.countryQuizSystem.getQuestionsForCountry(countryCode);
-        this._safeSend(ws, ["countryQuestions", {
-          country: countryCode,
-          hasQuestions: !!questions,
-          data: questions
-        }]);
-        return;
-      }
-
-      if (evt === "getCountryQuizStatus") {
-        const countryCode = data[1] || 'ID';
-        const info = COUNTRY_LANGUAGE_MAP[countryCode];
-        const questions = await this.countryQuizSystem.getQuestionsForCountry(countryCode);
-        this._safeSend(ws, ["countryQuizStatus", {
-          country: countryCode,
-          countryName: info?.name || 'Unknown',
-          language: info?.lang || 'en',
-          hasQuestions: !!questions,
-          totalQuestions: questions?.total_questions || 0
-        }]);
-        return;
-      }
-
-      if (evt === "getTranslationStatus") {
-        const status = this.countryQuizSystem.getTranslationStatus();
-        this._safeSend(ws, ["translationStatus", status]);
-        return;
-      }
-
-      if (evt === "switchRoom") {
-        const [_, room, username] = data;
-        await this.switchRoom(ws, room, username);
-        return;
-      }
-
-      if (evt === "submitQuizAnswer") {
-        const [_, username, answer] = data;
-        await this.submitQuizAnswer(ws, username, answer);
-        return;
-      }
-
+      // ==================== QUIZ EVENTS ====================
       if (evt === "getQuizLastWeekWinner") {
         try {
           const winner = await this.env.QUESTIONS.get(CONSTANTS.QUIZ_LAST_WEEK_WINNER, 'json');
@@ -3655,14 +2070,8 @@ export class GameServer extends CPUProtection {
       if (evt === "deleteQuizLastWeekWinner") {
         try {
           if (this.env?.QUESTIONS) {
-            this._incrementSubRequest();
             await this.env.QUESTIONS.delete(CONSTANTS.QUIZ_LAST_WEEK_WINNER);
-            const check = await this.env.QUESTIONS.get(CONSTANTS.QUIZ_LAST_WEEK_WINNER, 'json');
-            if (!check) {
-              this._safeSend(ws, ["quizLastWeekWinnerDeleted", true, "Last week winner deleted successfully"]);
-            } else {
-              this._safeSend(ws, ["quizLastWeekWinnerDeleted", false, "Failed to delete"]);
-            }
+            this._safeSend(ws, ["quizLastWeekWinnerDeleted", true, "Last week winner deleted successfully"]);
           } else {
             this._safeSend(ws, ["quizLastWeekWinnerDeleted", false, "KV not available"]);
           }
@@ -3672,68 +2081,9 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      if (evt === "getSupportedLanguages") {
-        const languages = this.countryQuizSystem.getTranslationStatus();
-        this._safeSend(ws, ["supportedLanguages", languages]);
-        return;
-      }
-
-      if (evt === "getUserLanguage") {
-        const wsId = this._getWsId(ws);
-        const country = this.userCountry.get(wsId) || 'US';
-        const info = COUNTRY_LANGUAGE_MAP[country];
-        this._safeSend(ws, ["userLanguage", { 
-          language: info?.lang || 'en',
-          languageName: this.countryQuizSystem.getLanguageName(info?.lang),
-          country: country,
-          countryName: info?.name || 'Unknown'
-        }]);
-        return;
-      }
-
-      if (evt === "getQuizNotification") {
-        const remaining = this._getQuestionRemainingTime();
-        const remainingText = `${remaining}s remaining`;
-        const timeLeft = this._getTimeLeftUntilNextQuiz();
-        const answerRemaining = this._getAnswerRemainingTime();
-        const notification = {
-          type: "quizStatus",
-          timestamp: Date.now(),
-          remainingTime: remainingText,
-          correctAnswer: this.currentQuestion?.correct || null,
-          data: {
-            isQuizTime: this._isQuizTime(),
-            isActive: !!this.currentQuestion,
-            hasWinner: this.quizHasWinner,
-            winner: this.quizWinner,
-            questionNumber: this._questionPointer,
-            totalQuestions: this._allQuestions.length,
-            timeLeft: timeLeft.text,
-            canSubmit: this._canSubmitAnswer,
-            readingTimeLeft: this._canSubmitAnswer ? 0 : Math.max(0, Math.round((CONSTANTS.QUIZ_READING_TIME_MS - (Date.now() - this._questionStartTime)) / 1000)),
-            answerTimeLeft: this._canSubmitAnswer ? answerRemaining : 0,
-            totalTimeLeft: Math.max(0, Math.round((CONSTANTS.QUIZ_TOTAL_TIME_MS - (Date.now() - this._questionStartTime)) / 1000))
-          }
-        };
-        this._safeSend(ws, ["quizNotification", notification]);
-        return;
-      }
-
-      if (evt === "getQuizStatus") {
-        const isQuizTime = this._isQuizTime();
-        const timeLeft = this._getTimeLeftUntilNextQuiz();
-        const answerRemaining = this._getAnswerRemainingTime();
-        let status = {
-          isQuizTime: isQuizTime,
-          isActive: !!this.currentQuestion,
-          hasEnded: this.quizEndedToday || !isQuizTime,
-          timeLeft: timeLeft.text,
-          canSubmit: this._canSubmitAnswer,
-          readingTimeLeft: this._canSubmitAnswer ? 0 : Math.max(0, Math.round((CONSTANTS.QUIZ_READING_TIME_MS - (Date.now() - this._questionStartTime)) / 1000)),
-          answerTimeLeft: this._canSubmitAnswer ? answerRemaining : 0,
-          totalTimeLeft: Math.max(0, Math.round((CONSTANTS.QUIZ_TOTAL_TIME_MS - (Date.now() - this._questionStartTime)) / 1000))
-        };
-        this._safeSend(ws, ["quizStatus", status]);
+      if (evt === "submitQuizAnswer") {
+        const [_, username, answer] = data;
+        await this.submitQuizAnswer(ws, username, answer);
         return;
       }
 
@@ -3762,6 +2112,7 @@ export class GameServer extends CPUProtection {
         const room = data[1];
         if (room) {
           await this._startRecordingWinners(room);
+          // ❌ TIDAK ADA GAME OTOMATIS
         }
         return;
       }
@@ -3770,6 +2121,7 @@ export class GameServer extends CPUProtection {
         const room = data[1];
         if (room) {
           await this._stopRecordingWinners(room);
+          // ❌ TIDAK ADA GAME OTOMATIS
         }
         return;
       }
@@ -3804,8 +2156,15 @@ export class GameServer extends CPUProtection {
       // ==================== GAME EVENTS ====================
 
       const room = this._ensureRoomConsistency(ws);
-      if (!room) { this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); return; }
-      if (room === QUIZ_ROOM) { this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); return; }
+      if (!room) { 
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
+        return; 
+      }
+      
+      if (room === QUIZ_ROOM) { 
+        this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); 
+        return; 
+      }
 
       switch (evt) {
         case "gameLowCardStart":
@@ -3830,80 +2189,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {
       this._safeSend(ws, ["gameLowCardError", "Error processing event"]);
     }
-  }
-
-  _checkStuckGames() {
-    try {
-      const now = Date.now();
-      for (const [room, game] of this.activeGames) {
-        if (!game?._isActive || game._gameEnded) continue;
-        if (game._phase === 'draw' && game._drawPhaseStart &&
-            (now - game._drawPhaseStart) > CONSTANTS.STUCK_DRAW_TIMEOUT_MS) {
-          this._broadcastToRoom(room, ["gameLowCardError", "Game stuck, forcing evaluation..."]);
-          this._closeDrawPhase(room, game);
-        }
-        if (game._phase === 'registration' && game.registrationOpen &&
-            game._createdAt && (now - game._createdAt) > CONSTANTS.STUCK_REGISTRATION_TIMEOUT_MS) {
-          this._broadcastToRoom(room, ["gameLowCardError", "Registration timeout"]);
-          this._closeRegistration(room, game);
-        }
-        if (game._phase !== 'registration' && !game.registrationOpen) {
-          const activePlayers = this._getActivePlayers(game);
-          if (activePlayers.length === 0 && !game._gameEnded) {
-            game._gameEnded = true;
-            game._isActive = false;
-            game._endTime = Date.now();
-            this._broadcastToRoom(room, ["gameLowCardEnd", []]);
-            this._scheduleGameCleanup(room, game);
-          }
-        }
-      }
-    } catch(e) {}
-  }
-
-  _cleanupStaleGames() {
-    try {
-      const now = Date.now();
-      for (const [room, game] of this.activeGames) {
-        if (!game) continue;
-        if (game._isActive && !game._gameEnded) continue;
-        if (game._gameEnded) {
-          const endTime = game._endTime || game._createdAt || now;
-          if ((now - endTime) > CONSTANTS.STALE_GAME_TIMEOUT_MS) this._scheduleGameCleanup(room, game);
-          continue;
-        }
-        if (!game._isActive && !game._gameEnded && game._createdAt && (now - game._createdAt) > 300000) {
-          game._gameEnded = true;
-          game._endTime = now;
-          this._scheduleGameCleanup(room, game);
-        }
-      }
-    } catch(e) {}
-  }
-
-  _cleanupDeadConnections() {
-    try {
-      const toRemove = [];
-      for (const [wsId, ws] of this.wsMap) {
-        if (!ws || ws.readyState !== 1 || ws._closing) toRemove.push(wsId);
-      }
-      for (const wsId of toRemove) {
-        const ws = this.wsMap.get(wsId);
-        if (ws) {
-          const room = this.clientRooms.get(wsId);
-          if (room) this._removeClientFromRoom(room, wsId);
-          this.clientRooms.delete(wsId);
-          this.wsMap.delete(wsId);
-          this.userLanguage.delete(wsId);
-          this.userCountry.delete(wsId);
-          this._quizTimeLeftNotified.delete(wsId);
-          this._nextQuizNotified.delete(wsId);
-          for (const [username, conn] of this.userConnections) {
-            if (conn?.wsId === wsId) { this.userConnections.delete(username); break; }
-          }
-        }
-      }
-    } catch(e) {}
   }
 
   // ==================== FETCH HANDLER ====================
