@@ -782,24 +782,18 @@ export class GameServer extends CPUProtection {
   async getRecordingStatus(ws, roomName) {
     try {
       if (!roomName || roomName.trim() === "") {
-        this._safeSend(ws, ["recordingStatus", {
-          success: false,
-          enabled: false
-        }]);
+        // Kirim boolean false langsung
+        this._safeSend(ws, ["recordingStatus", false]);
         return;
       }
       
       const isRecordingEnabled = this._recordingEnabled.get(roomName) || false;
       
-      this._safeSend(ws, ["recordingStatus", {
-        success: true,
-        enabled: isRecordingEnabled
-      }]);
+      // Kirim boolean langsung: true jika aktif, false jika tidak
+      this._safeSend(ws, ["recordingStatus", isRecordingEnabled]);
     } catch(e) {
-      this._safeSend(ws, ["recordingStatus", {
-        success: false,
-        enabled: false
-      }]);
+      // Kirim false jika error
+      this._safeSend(ws, ["recordingStatus", false]);
     }
   }
 
@@ -3885,6 +3879,7 @@ export class GameServer extends CPUProtection {
       }
 
       // ==================== HANDLER getRecordingStatus ====================
+      // KIRIM BOOLEAN LANGSUNG
       if (evt === "getRecordingStatus") {
         const roomName = data[1];
         await this.getRecordingStatus(ws, roomName);
