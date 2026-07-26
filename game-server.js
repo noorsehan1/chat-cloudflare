@@ -537,7 +537,6 @@ export class GameServer extends CPUProtection {
   async _initRecordingStatusFromKV() {
     try {
       if (!this.env?.QUESTIONS) return;
-      // Initialize on-demand when getRecordingStatus is called
     } catch(e) {}
   }
 
@@ -578,7 +577,8 @@ export class GameServer extends CPUProtection {
       
       await this._loadRoomWinnersToCache(roomName);
       
-      // HANYA BROADCAST lowCardWinnersData
+      this._broadcastToRoom(roomName, ["recordingStatus", true]);
+      
       this._broadcastToRoom(roomName, ["lowCardWinnersData", {
         room: roomName,
         winners: {},
@@ -607,7 +607,8 @@ export class GameServer extends CPUProtection {
       
       this._roomWinnersCache.delete(roomName);
       
-      // HANYA BROADCAST lowCardWinnersData
+      this._broadcastToRoom(roomName, ["recordingStatus", false]);
+      
       this._broadcastToRoom(roomName, ["lowCardWinnersData", {
         room: roomName,
         winners: {},
@@ -788,37 +789,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  async _resetLowCardWinners(room) {
-    try {
-      if (!room) return false;
-      if (!this.env?.QUESTIONS) return false;
-      
-      const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
-      await this.env.QUESTIONS.delete(key);
-      
-      this._roomWinnersCache.delete(room);
-      
-      this._broadcastToRoom(room, ["resetRoomWinnersResult", {
-        success: true,
-        room: room,
-        message: "Winners data reset for " + room
-      }]);
-      
-      this._broadcastToRoom(room, ["lowCardWinnersData", {
-        room: room,
-        winners: {},
-        totalPlayers: 0,
-        recording: true,
-        updatedAt: new Date().toISOString()
-      }]);
-      
-      return true;
-    } catch(e) {
-      return false;
-    }
-  }
-
-  // ==================== GET RECORDING STATUS - KIRIM BOOLEAN ====================
+  // ==================== GET RECORDING STATUS ====================
 
   async getRecordingStatus(ws, roomName) {
     try {
@@ -829,7 +800,6 @@ export class GameServer extends CPUProtection {
 
       const isRecordingEnabled = await this._getRecordingStatusFromKV(roomName);
       
-      // Kirim boolean langsung (sesuai client Java)
       this._safeSend(ws, ["recordingStatus", isRecordingEnabled]);
 
     } catch(e) {
@@ -929,7 +899,7 @@ export class GameServer extends CPUProtection {
           timestamp: Date.now()
         }]);
         
-        this._startRegistration(room, game);
+        this._broadcastToRoom(room, ["systemMessage", `🎮 ADMIN started a RECORDING game! Bet: ${betAmount} coins`]);
         
         this._safeSend(ws, ["gameStartWithRecordingSuccess", {
           room: room,
@@ -937,6 +907,8 @@ export class GameServer extends CPUProtection {
           host: username,
           message: "Game started with recording"
         }]);
+        
+        this._startRegistration(room, game);
         
       } catch(e) {
         this._deleteGame(room, this.activeGames.get(room));
@@ -2946,7 +2918,14 @@ export class GameServer extends CPUProtection {
         const winner = activePlayers[0]?.name || "Unknown";
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
         
-        this._addLowCardWinner(room, winner);
+        // === BROADCAST lowCardWinnerUpdate ===
+        this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
+          username: winner,
+          room: room,
+          totalCoin: totalCoin,
+          timestamp: Date.now(),
+          isWinner: true
+        }]);
         
         game._gameEnded = true;
         game._isActive = false;
@@ -3139,7 +3118,14 @@ export class GameServer extends CPUProtection {
             const winner = newActive[0]?.name || "Unknown";
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
             
-            this._addLowCardWinner(room, winner);
+            // === BROADCAST lowCardWinnerUpdate ===
+            this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
+              username: winner,
+              room: room,
+              totalCoin: totalCoin,
+              timestamp: Date.now(),
+              isWinner: true
+            }]);
             
             game._gameEnded = true;
             game._isActive = false;
@@ -3283,7 +3269,14 @@ export class GameServer extends CPUProtection {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        await this._addLowCardWinner(room, winnerName);
+        // === BROADCAST lowCardWinnerUpdate ===
+        this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
+          username: winnerName,
+          room: room,
+          totalCoin: totalCoin,
+          timestamp: Date.now(),
+          isWinner: true
+        }]);
         
         game._gameEnded = true;
         game._isActive = false;
@@ -3334,7 +3327,14 @@ export class GameServer extends CPUProtection {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        await this._addLowCardWinner(room, winnerName);
+        // === BROADCAST lowCardWinnerUpdate ===
+        this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
+          username: winnerName,
+          room: room,
+          totalCoin: totalCoin,
+          timestamp: Date.now(),
+          isWinner: true
+        }]);
         
         game._gameEnded = true;
         game._isActive = false;
@@ -3869,13 +3869,28 @@ export class GameServer extends CPUProtection {
           }]);
           return;
         }
+        
         const success = await this._startRecordingWinners(roomName);
+        
+        this._broadcastToRoom(roomName, ["startRecordingResult", {
+          success: success,
+          enabled: true,
+          room: roomName,
+          message: success ? "Recording ENABLED for " + roomName : "Failed to enable recording",
+          timestamp: Date.now()
+        }]);
+        
         this._safeSend(ws, ["startRecordingResult", {
           success: success,
           enabled: true,
           room: roomName,
           message: success ? "Recording enabled for " + roomName : "Failed to enable recording"
         }]);
+        
+        if (success) {
+          this._broadcastToRoom(roomName, ["recordingStatus", true]);
+          this._broadcastToRoom(roomName, ["systemMessage", "📢 ADMIN has ENABLED winner recording for this room!"]);
+        }
         return;
       }
 
@@ -3890,13 +3905,35 @@ export class GameServer extends CPUProtection {
           }]);
           return;
         }
+        
         const success = await this._stopRecordingWinners(roomName);
+        
+        this._broadcastToRoom(roomName, ["stopRecordingResult", {
+          success: success,
+          enabled: false,
+          room: roomName,
+          message: success ? "Recording STOPPED and winners DELETED for " + roomName : "Failed to stop recording",
+          timestamp: Date.now()
+        }]);
+        
         this._safeSend(ws, ["stopRecordingResult", {
           success: success,
           enabled: false,
           room: roomName,
           message: success ? "Recording stopped and winners deleted for " + roomName : "Failed to stop recording"
         }]);
+        
+        if (success) {
+          this._broadcastToRoom(roomName, ["recordingStatus", false]);
+          this._broadcastToRoom(roomName, ["systemMessage", "📢 ADMIN has DISABLED winner recording for this room!"]);
+          this._broadcastToRoom(roomName, ["lowCardWinnersData", {
+            room: roomName,
+            winners: {},
+            totalPlayers: 0,
+            recording: false,
+            updatedAt: new Date().toISOString()
+          }]);
+        }
         return;
       }
 
@@ -3921,7 +3958,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== GET RECORDING STATUS - KIRIM BOOLEAN ====================
+      // ==================== GET RECORDING STATUS ====================
       if (evt === "getRecordingStatus") {
         const roomName = data[1];
         await this.getRecordingStatus(ws, roomName);
@@ -3938,30 +3975,27 @@ export class GameServer extends CPUProtection {
           }]);
           return;
         }
+        
         await this._sendWinnersToRoom(room);
+        
+        const winners = await this._getLowCardWinners(room);
+        const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
+        
+        this._broadcastToRoom(room, ["lowCardWinnersData", {
+          room: room,
+          winners: winners,
+          totalPlayers: Object.keys(winners).length,
+          recording: isRecordingEnabled,
+          updatedAt: new Date().toISOString(),
+          type: 'adminRefresh'
+        }]);
+        
+        this._broadcastToRoom(room, ["systemMessage", `📊 ADMIN refreshed winner data for this room! (${Object.keys(winners).length} winners)`]);
+        
         this._safeSend(ws, ["sendWinnersResult", {
           success: true,
           room: room,
           message: "Winners data sent to room"
-        }]);
-        return;
-      }
-
-      // ==================== RESET ROOM WINNERS ====================
-      if (evt === "resetRoomWinners") {
-        const room = data[1];
-        if (!room) {
-          this._safeSend(ws, ["resetRoomWinnersResult", {
-            success: false,
-            message: "Room name required"
-          }]);
-          return;
-        }
-        const success = await this._resetLowCardWinners(room);
-        this._safeSend(ws, ["resetRoomWinnersResult", {
-          success: success,
-          room: room,
-          message: success ? "Winners data reset for " + room : "Failed to reset winners data"
         }]);
         return;
       }
