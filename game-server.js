@@ -535,10 +535,6 @@ export class GameServer extends CPUProtection {
 
   // ==================== LOWCARD WINNER RECORDING ====================
 
-  /**
-   * Ambil status recording dari KV
-   * Key: lowcard_recording_status_{room}
-   */
   async _getRecordingStatus(room) {
     try {
       if (!this.env?.QUESTIONS) return false;
@@ -561,10 +557,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Set status recording ke KV
-   * Key: lowcard_recording_status_{room}
-   */
   async _setRecordingStatus(room, enabled) {
     try {
       if (!this.env?.QUESTIONS) return false;
@@ -581,10 +573,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Hapus status recording dari KV
-   * Key: lowcard_recording_status_{room}
-   */
   async _deleteRecordingStatus(room) {
     try {
       if (!this.env?.QUESTIONS) return false;
@@ -601,11 +589,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Ambil data winners dari KV
-   * Key: lowcard_winner_{room}
-   * Format: {"player1": 3, "player2": 1}
-   */
   async _getLowCardWinners(room) {
     try {
       if (!this.env?.QUESTIONS) return {};
@@ -628,11 +611,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Set data winners ke KV
-   * Key: lowcard_winner_{room}
-   * Format: {"player1": 3, "player2": 1}
-   */
   async _setLowCardWinners(room, winners) {
     try {
       if (!this.env?.QUESTIONS) return false;
@@ -649,10 +627,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Hapus data winners dari KV
-   * Key: lowcard_winner_{room}
-   */
   async _deleteLowCardWinners(room) {
     try {
       if (!this.env?.QUESTIONS) return false;
@@ -669,10 +643,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Record winner ke KV
-   * Menambah count winner di lowcard_winner_{room}
-   */
   async _recordWinner(room, winner, totalCoin) {
     try {
       const isRecording = await this._getRecordingStatus(room);
@@ -694,9 +664,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Broadcast data winners ke room
-   */
   async _broadcastLowCardWinners(room) {
     try {
       const winners = await this._getLowCardWinners(room);
@@ -722,9 +689,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  /**
-   * Kirim data winners ke room
-   */
   async _sendRoomWinners(room) {
     try {
       const winners = await this._getLowCardWinners(room);
@@ -742,26 +706,17 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  /**
-   * START RECORDING - Set recording aktif (TANPA game otomatis)
-   */
   async _startRecordingWinners(room) {
     try {
-      // Set recording status ke true di KV
       await this._setRecordingStatus(room, true);
       
-      // Pastikan data winners ada (kosong)
       const winners = await this._getLowCardWinners(room);
       if (Object.keys(winners).length === 0) {
         await this._setLowCardWinners(room, {});
       }
       
-      // Broadcast status
       this._broadcastToRoom(room, ["recordingStatus", true, room, "Recording winners started"]);
       this._broadcastLowCardWinners(room);
-      
-      // ❌ TIDAK ADA GAME OTOMATIS DIMULAI
-      // Game harus dimulai manual oleh user dengan .start
       
       return true;
     } catch(e) {
@@ -770,27 +725,13 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * STOP RECORDING - Hapus semua data (TANPA game otomatis)
-   * Menghapus:
-   * 1. lowcard_recording_status_{room}
-   * 2. lowcard_winner_{room}
-   */
   async _stopRecordingWinners(room) {
     try {
-      // 1. Hapus status recording dari KV
       await this._deleteRecordingStatus(room);
-      
-      // 2. Hapus data winners dari KV
       await this._deleteLowCardWinners(room);
       
-      // Broadcast status berhenti
       this._broadcastToRoom(room, ["recordingStatus", false, room, "Recording stopped and data cleared"]);
-      
-      // Broadcast data kosong
       this._broadcastToRoom(room, ["lowCardWinnersData", room, {}, 0, false]);
-      
-      // Broadcast room winners kosong
       this._broadcastToRoom(room, ["roomWinners", {
         room: room,
         winners: {},
@@ -799,10 +740,6 @@ export class GameServer extends CPUProtection {
         message: "Recording stopped and data cleared"
       }]);
       
-      // ❌ TIDAK ADA GAME YANG DIHENTIKAN
-      // Game tetap berjalan jika ada
-      // Hanya data recording yang dihapus
-      
       return true;
     } catch(e) {
       this._broadcastToRoom(room, ["recordingStatus", false, room, "Failed to stop recording: " + e.message]);
@@ -810,9 +747,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Ambil data lengkap dari KV
-   */
   async _getRoomWinnersFromKV(room) {
     try {
       const winners = await this._getLowCardWinners(room);
@@ -828,6 +762,53 @@ export class GameServer extends CPUProtection {
       };
     } catch(e) {
       return null;
+    }
+  }
+
+  // ==================== AUTO SYNC ROOM ====================
+
+  /**
+   * Cari Game WebSocket berdasarkan username
+   */
+  _findGameWebSocketByUsername(username) {
+    try {
+      if (!username) return null;
+      
+      for (const [wsId, ws] of this.wsMap) {
+        if (ws._isGameWs && ws.username === username) {
+          return ws;
+        }
+      }
+      
+      return null;
+    } catch(e) {
+      return null;
+    }
+  }
+
+  /**
+   * Sinkronkan room ke game websocket untuk user yang sama
+   */
+  async _syncRoomToGameWebSocket(username, room) {
+    try {
+      if (!username || !room) return false;
+      
+      const gameWs = this._findGameWebSocketByUsername(username);
+      if (!gameWs) {
+        return false;
+      }
+      
+      const gameRoom = this._getRoomForWs(gameWs);
+      if (gameRoom === room) {
+        return true;
+      }
+      
+      await this.switchRoom(gameWs, room, username);
+      console.log(`[SYNC] Game WebSocket for ${username} synced to room: ${room}`);
+      return true;
+    } catch(e) {
+      console.error('[SYNC] Error syncing room:', e);
+      return false;
     }
   }
 
@@ -866,7 +847,7 @@ export class GameServer extends CPUProtection {
   }
 
   // ==================== QUIZ METHODS ====================
-  
+
   async _loadAllQuestionsToMemory() {
     try {
       if (this._questionsCache.loading) return;
@@ -1059,8 +1040,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== QUIZ BROADCAST METHODS ====================
-
   _broadcastQuizNotification(type, data) {
     try {
       const wsIds = this.wsClients.get(QUIZ_ROOM);
@@ -1101,6 +1080,11 @@ export class GameServer extends CPUProtection {
   // ==================== WEBSOCKET AND GAME METHODS ====================
 
   _getWsId(ws) { return ws?._wsId || null; }
+
+  _getRoomForWs(ws) {
+    if (!ws) return null;
+    return ws.room || ws.roomname || null;
+  }
 
   _ensureRoomConsistency(ws) {
     try {
@@ -1229,6 +1213,94 @@ export class GameServer extends CPUProtection {
       ws.send(JSON.stringify(message));
       return true;
     } catch(e) { return false; }
+  }
+
+  // ==================== SWITCH ROOM (DENGAN AUTO SYNC) ====================
+
+  async switchRoom(ws, room, username = null) {
+    try {
+      if (this.isDestroyed) { 
+        this._safeSend(ws, ["gameLowCardError", "Server is shutting down"]); 
+        return; 
+      }
+      if (!room || room.trim() === "") { 
+        this._safeSend(ws, ["gameLowCardError", "Invalid room name"]); 
+        return; 
+      }
+      const roomName = room.trim();
+      const wsId = this._getWsId(ws);
+      if (!wsId) { 
+        this._safeSend(ws, ["gameLowCardError", "Connection error"]); 
+        return; 
+      }
+      
+      if (!username) {
+        username = ws.username;
+      }
+      
+      const lockKey = `switch_${wsId}`;
+      if (this._switchLocks.has(lockKey)) { 
+        this._safeSend(ws, ["gameLowCardError", "Switch in progress"]); 
+        return; 
+      }
+      this._switchLocks.set(lockKey, Date.now());
+      
+      try {
+        const oldRoom = this.clientRooms.get(wsId);
+        
+        if (oldRoom === roomName) {
+          ws.room = roomName;
+          ws.roomname = roomName;
+          if (username) {
+            ws.username = username;
+            const conn = this.userConnections.get(username);
+            if (conn) {
+              conn.room = roomName;
+              conn.ws = ws;
+              conn.wsId = wsId;
+            }
+          }
+          this._safeSend(ws, ["switchRoomSuccess", roomName]);
+          return;
+        }
+        
+        if (oldRoom) this._removeClientFromRoom(oldRoom, wsId);
+        
+        this._addClient(roomName, ws, username, false);
+        ws.room = roomName;
+        ws.roomname = roomName;
+        ws.username = username;
+        
+        if (username) {
+          let conn = this.userConnections.get(username);
+          if (conn) { 
+            conn.room = roomName; 
+            conn.wsId = wsId; 
+            conn.ws = ws; 
+            conn.timestamp = Date.now(); 
+          } else { 
+            this.userConnections.set(username, { wsId, ws, room: roomName, timestamp: Date.now() }); 
+          }
+        }
+        
+        this._safeSend(ws, ["switchRoomSuccess", roomName]);
+        
+        this._broadcastToRoom(roomName, ["userJoinedRoom", username, roomName]);
+        if (oldRoom) this._broadcastToRoom(oldRoom, ["userLeftRoom", username, oldRoom]);
+        
+        // ✅ AUTO SYNC KE GAME WEBSOCKET (hanya untuk chat websocket)
+        if (!ws._isGameWs && username) {
+          setTimeout(async () => {
+            await this._syncRoomToGameWebSocket(username, roomName);
+          }, 500);
+        }
+        
+      } finally {
+        this._switchLocks.delete(lockKey);
+      }
+    } catch(e) {
+      this._safeSend(ws, ["gameLowCardError", "Switch failed"]);
+    }
   }
 
   // ==================== GAME LOWCARD METHODS ====================
@@ -1602,7 +1674,6 @@ export class GameServer extends CPUProtection {
         game._isEvaluating = false;
         if (game._safetyTimer) { clearTimeout(game._safetyTimer); game._safetyTimer = null; }
         
-        // === RECORD WINNER ===
         this._recordWinner(room, winnerName, totalCoin);
         
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
@@ -1648,7 +1719,6 @@ export class GameServer extends CPUProtection {
         game._isEvaluating = false;
         if (game._safetyTimer) { clearTimeout(game._safetyTimer); game._safetyTimer = null; }
         
-        // === RECORD WINNER ===
         this._recordWinner(room, winnerName, totalCoin);
         
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
@@ -1687,7 +1757,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== START GAME (TANPA CEK RECORDING) ====================
+  // ==================== START GAME ====================
 
   async startGame(ws, bet, username) {
     try {
@@ -1793,7 +1863,6 @@ export class GameServer extends CPUProtection {
         this.activeGames.set(room, game);
         this._addClient(room, ws, usernameClean, false);
         
-        // ✅ TIDAK ADA CEK RECORDING DI SINI
         this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
         this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
         
@@ -2205,7 +2274,6 @@ export class GameServer extends CPUProtection {
         const room = data[1];
         if (room) {
           await this._startRecordingWinners(room);
-          // ❌ TIDAK ADA GAME OTOMATIS
         }
         return;
       }
@@ -2214,7 +2282,6 @@ export class GameServer extends CPUProtection {
         const room = data[1];
         if (room) {
           await this._stopRecordingWinners(room);
-          // ❌ TIDAK ADA GAME OTOMATIS
         }
         return;
       }
@@ -2243,6 +2310,14 @@ export class GameServer extends CPUProtection {
         if (room) {
           await this._sendRoomWinners(room);
         }
+        return;
+      }
+
+      // ==================== SWITCH ROOM ====================
+
+      if (evt === "switchRoom") {
+        const [_, room, username] = data;
+        await this.switchRoom(ws, room, username);
         return;
       }
 
@@ -2284,7 +2359,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== QUIZ SUBMIT ANSWER ====================
+  // ==================== SUBMIT QUIZ ANSWER ====================
 
   async submitQuizAnswer(ws, username, answer) {
     try {
@@ -2398,12 +2473,17 @@ export class GameServer extends CPUProtection {
           const pair = new WebSocketPair();
           const [client, server] = [pair[0], pair[1]];
           const wsId = ++this._wsIdCounter;
+          
           server._wsId = wsId;
           server._closing = false;
           server.room = null;
           server.roomname = null;
           server._createdAt = Date.now();
           server.username = null;
+          
+          // ✅ TANDAI INI GAME WEBSOCKET
+          server._isGameWs = true;
+          
           const cf = req.cf || {};
           const country = cf?.country || 'US';
           const info = COUNTRY_LANGUAGE_MAP[country];
@@ -2414,13 +2494,16 @@ export class GameServer extends CPUProtection {
           server._cf = cf;
           server._country = country;
           server._language = lang;
+          
           try { this.state.acceptWebSocket(server); } catch(e) { return new Response("WebSocket acceptance failed", { status: 500 }); }
+          
           server.addEventListener("message", async (event) => {
             try {
               const data = JSON.parse(event.data);
               if (Array.isArray(data) && data.length > 0) await this.handleEvent(server, data);
             } catch(e) { this._safeSend(server, ["gameLowCardError", e.message || "Error"]); }
           });
+          
           server.addEventListener("close", () => {
             try {
               if (server.room || server.roomname) {
@@ -2440,6 +2523,7 @@ export class GameServer extends CPUProtection {
               }
             } catch(e) {}
           });
+          
           server.addEventListener("error", () => {
             try {
               if (server.room || server.roomname) {
@@ -2459,6 +2543,7 @@ export class GameServer extends CPUProtection {
               }
             } catch(e) {}
           });
+          
           return new Response(null, { status: 101, webSocket: client });
         } catch(e) {
           return new Response("WebSocket creation failed", { status: 500 });
