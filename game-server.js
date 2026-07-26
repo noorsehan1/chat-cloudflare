@@ -504,7 +504,6 @@ export class GameServer extends CPUProtection {
       this._canSubmitAnswer = false;
 
       this._recordingEnabled = new Map();
-      this._roomWinnersCache = new Map();
 
       this.countryQuizSystem = new CountryBasedQuizSystem(this);
 
@@ -575,9 +574,23 @@ export class GameServer extends CPUProtection {
         );
       }
       
-      await this._loadRoomWinnersToCache(roomName);
+      // === AMBIL LANGSUNG DARI KV ===
+      const winners = await this._getLowCardWinners(roomName);
       
       this._broadcastToRoom(roomName, ["recordingStatus", true]);
+      
+      if (Object.keys(winners).length > 0) {
+        this._broadcastToRoom(roomName, ["lowCardWinnerUpdate", {
+          username: "",
+          wins: "0x",
+          room: roomName,
+          totalWinners: Object.keys(winners).length,
+          winners: winners,
+          recording: true,
+          updatedAt: new Date().toISOString(),
+          type: 'recordingStarted'
+        }]);
+      }
       
       return true;
     } catch(e) {
@@ -597,36 +610,12 @@ export class GameServer extends CPUProtection {
         await this.env.QUESTIONS.delete(winnerKey);
       }
       
-      this._roomWinnersCache.delete(roomName);
-      
       this._broadcastToRoom(roomName, ["recordingStatus", false]);
       
       return true;
     } catch(e) {
       return false;
     }
-  }
-
-  async _loadRoomWinnersToCache(roomName) {
-    try {
-      if (!roomName) return;
-      if (!this.env?.QUESTIONS) return;
-      
-      const key = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
-      const winners = await this.env.QUESTIONS.get(key, 'json');
-      
-      if (winners && typeof winners === 'object') {
-        this._roomWinnersCache.set(roomName, {
-          winners: winners,
-          lastUpdated: Date.now()
-        });
-      } else {
-        this._roomWinnersCache.set(roomName, {
-          winners: {},
-          lastUpdated: Date.now()
-        });
-      }
-    } catch(e) {}
   }
 
   async _addLowCardWinner(room, username) {
@@ -646,38 +635,30 @@ export class GameServer extends CPUProtection {
       
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       
-      let roomWinners = {};
-      if (this._roomWinnersCache.has(room)) {
-        roomWinners = this._roomWinnersCache.get(room).winners || {};
-      } else {
-        const existing = await this.env.QUESTIONS.get(key, 'json');
-        if (existing && typeof existing === 'object') {
-          roomWinners = existing;
-        }
+      // === AMBIL LANGSUNG DARI KV ===
+      let roomWinners = await this.env.QUESTIONS.get(key, 'json') || {};
+      
+      // === UPDATE JUMLAH KEMENANGAN ===
+      let currentCount = 0;
+      if (roomWinners[username]) {
+        const valStr = String(roomWinners[username]);
+        currentCount = parseInt(valStr.replace("x", "").replace("X", "")) || 0;
       }
+      const newCount = currentCount + 1;
       
-      roomWinners[username] = (roomWinners[username] || 0) + 1;
+      // === SIMPAN KE KV DENGAN FORMAT "X" ===
+      roomWinners[username] = newCount + "x";
       
-      this._roomWinnersCache.set(room, {
-        winners: roomWinners,
-        lastUpdated: Date.now()
-      });
-      
+      // === SIMPAN KE KV ===
       await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       
-      // === TAMBAHKAN "X" DI BELAKANG ANGKA ===
-      const winnersWithX = {};
-      for (const [name, count] of Object.entries(roomWinners)) {
-        winnersWithX[name] = count + "x";
-      }
-      
-      // === HANYA lowCardWinnerUpdate ===
+      // === BROADCAST lowCardWinnerUpdate ===
       this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
         username: username,
-        wins: roomWinners[username] + "x",
+        wins: newCount + "x",
         room: room,
         totalWinners: Object.keys(roomWinners).length,
-        winners: winnersWithX,
+        winners: roomWinners,
         recording: true,
         updatedAt: new Date().toISOString(),
         type: 'winnerUpdate'
@@ -709,15 +690,8 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      let winners = {};
-      if (this._roomWinnersCache.has(room)) {
-        winners = this._roomWinnersCache.get(room).winners || {};
-      } else {
-        await this._loadRoomWinnersToCache(room);
-        if (this._roomWinnersCache.has(room)) {
-          winners = this._roomWinnersCache.get(room).winners || {};
-        }
-      }
+      // === AMBIL LANGSUNG DARI KV ===
+      const winners = await this._getLowCardWinners(room);
       
       if (Object.keys(winners).length === 0) {
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
@@ -734,18 +708,12 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // === TAMBAHKAN "X" DI BELAKANG ANGKA ===
-      const winnersWithX = {};
-      for (const [name, count] of Object.entries(winners)) {
-        winnersWithX[name] = count + "x";
-      }
-      
       this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
         username: "",
         wins: "0x",
         room: room,
         totalWinners: Object.keys(winners).length,
-        winners: winnersWithX,
+        winners: winners,
         recording: true,
         updatedAt: new Date().toISOString(),
         type: 'sendWinnersToRoom'
@@ -759,19 +727,21 @@ export class GameServer extends CPUProtection {
       if (!room) return {};
       if (!this.env?.QUESTIONS) return {};
       
-      if (this._roomWinnersCache.has(room)) {
-        return this._roomWinnersCache.get(room).winners || {};
-      }
-      
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       const winners = await this.env.QUESTIONS.get(key, 'json');
       
       if (winners && typeof winners === 'object') {
-        this._roomWinnersCache.set(room, {
-          winners: winners,
-          lastUpdated: Date.now()
-        });
-        return winners;
+        // === PASTIKAN FORMAT "X" ===
+        const formattedWinners = {};
+        for (const [name, value] of Object.entries(winners)) {
+          const valStr = String(value);
+          if (!valStr.endsWith("x") && !valStr.endsWith("X")) {
+            formattedWinners[name] = valStr + "x";
+          } else {
+            formattedWinners[name] = valStr;
+          }
+        }
+        return formattedWinners;
       }
       
       return {};
@@ -2910,14 +2880,21 @@ export class GameServer extends CPUProtection {
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
         
         // === BROADCAST lowCardWinnerUpdate ===
+        // Ambil dari KV
+        const winners = await this._getLowCardWinners(room);
         const winnersWithX = {};
-        winnersWithX[winner] = "1x";
+        for (const [name, count] of Object.entries(winners)) {
+          winnersWithX[name] = count;
+        }
+        if (!winnersWithX[winner]) {
+          winnersWithX[winner] = "1x";
+        }
         
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
           username: winner,
-          wins: "1x",
+          wins: winnersWithX[winner] || "1x",
           room: room,
-          totalWinners: 1,
+          totalWinners: Object.keys(winnersWithX).length,
           winners: winnersWithX,
           recording: true,
           updatedAt: new Date().toISOString(),
@@ -3116,14 +3093,20 @@ export class GameServer extends CPUProtection {
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
             
             // === BROADCAST lowCardWinnerUpdate ===
+            const winners = await this._getLowCardWinners(room);
             const winnersWithX = {};
-            winnersWithX[winner] = "1x";
+            for (const [name, count] of Object.entries(winners)) {
+              winnersWithX[name] = count;
+            }
+            if (!winnersWithX[winner]) {
+              winnersWithX[winner] = "1x";
+            }
             
             this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
               username: winner,
-              wins: "1x",
+              wins: winnersWithX[winner] || "1x",
               room: room,
-              totalWinners: 1,
+              totalWinners: Object.keys(winnersWithX).length,
               winners: winnersWithX,
               recording: true,
               updatedAt: new Date().toISOString(),
@@ -3273,14 +3256,20 @@ export class GameServer extends CPUProtection {
         const totalCoin = (game.betAmount || 0) * players.size;
         
         // === BROADCAST lowCardWinnerUpdate ===
+        const winners = await this._getLowCardWinners(room);
         const winnersWithX = {};
-        winnersWithX[winnerName] = "1x";
+        for (const [name, count] of Object.entries(winners)) {
+          winnersWithX[name] = count;
+        }
+        if (!winnersWithX[winnerName]) {
+          winnersWithX[winnerName] = "1x";
+        }
         
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
           username: winnerName,
-          wins: "1x",
+          wins: winnersWithX[winnerName] || "1x",
           room: room,
-          totalWinners: 1,
+          totalWinners: Object.keys(winnersWithX).length,
           winners: winnersWithX,
           recording: true,
           updatedAt: new Date().toISOString(),
@@ -3337,14 +3326,20 @@ export class GameServer extends CPUProtection {
         const totalCoin = (game.betAmount || 0) * players.size;
         
         // === BROADCAST lowCardWinnerUpdate ===
+        const winners = await this._getLowCardWinners(room);
         const winnersWithX = {};
-        winnersWithX[winnerName] = "1x";
+        for (const [name, count] of Object.entries(winners)) {
+          winnersWithX[name] = count;
+        }
+        if (!winnersWithX[winnerName]) {
+          winnersWithX[winnerName] = "1x";
+        }
         
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
           username: winnerName,
-          wins: "1x",
+          wins: winnersWithX[winnerName] || "1x",
           room: room,
-          totalWinners: 1,
+          totalWinners: Object.keys(winnersWithX).length,
           winners: winnersWithX,
           recording: true,
           updatedAt: new Date().toISOString(),
@@ -3973,17 +3968,12 @@ export class GameServer extends CPUProtection {
             message: "No winners yet"
           }]);
         } else {
-          const winnersWithX = {};
-          for (const [name, count] of Object.entries(winners)) {
-            winnersWithX[name] = count + "x";
-          }
-          
           this._safeSend(ws, ["lowCardWinnerUpdate", {
             username: "",
             wins: "0x",
             room: room,
             totalWinners: Object.keys(winners).length,
-            winners: winnersWithX,
+            winners: winners,
             recording: isRecordingEnabled,
             updatedAt: new Date().toISOString(),
             type: 'getRoomWinners'
@@ -4056,17 +4046,12 @@ export class GameServer extends CPUProtection {
             message: "No winners yet"
           }]);
         } else {
-          const winnersWithX = {};
-          for (const [name, count] of Object.entries(winners)) {
-            winnersWithX[name] = count + "x";
-          }
-          
           this._safeSend(ws, ["lowCardWinnerUpdate", {
             username: "",
             wins: "0x",
             room: room,
             totalWinners: Object.keys(winners).length,
-            winners: winnersWithX,
+            winners: winners,
             recording: isRecordingEnabled,
             updatedAt: new Date().toISOString(),
             type: 'refreshResponse'
