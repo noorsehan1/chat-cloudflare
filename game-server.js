@@ -2812,7 +2812,7 @@ export class GameServer extends CPUProtection {
     } catch(e) { return false; }
   }
 
-  // ==================== _checkGameCanContinue (HANYA SAVE, TIDAK BROADCAST) ====================
+  // ==================== _checkGameCanContinue ====================
   async _checkGameCanContinue(room, game) {
     try {
       if (!game?._isActive || game._gameEnded || !game.players || game._isEvaluating || game.evaluationLocked || game.registrationOpen) return;
@@ -2840,15 +2840,25 @@ export class GameServer extends CPUProtection {
         const winner = activePlayers[0]?.name || "Unknown";
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
         
+        // SAVE WINNER KE KV JIKA RECORDING ACTIVE
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winner);
+          // ✅ BROADCAST lowCardWinnerUpdate HANYA JIKA RECORDING ACTIVE
+          this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
+            username: winner,
+            wins: "1x",
+            room: room,
+            recording: true,
+            updatedAt: new Date().toISOString(),
+            type: 'winnerUpdate'
+          }]);
         }
         
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
         
-        // ✅ HANYA 1 BROADCAST gameLowCardWinner
+        // ✅ BROADCAST gameLowCardWinner (notifikasi)
         this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
         this._scheduleGameCleanup(room, game);
       }
@@ -3007,7 +3017,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== _startDrawPhase (HANYA SAVE, TIDAK BROADCAST) ====================
+  // ==================== _startDrawPhase ====================
   async _startDrawPhase(room, game) {
     try {
       if (!this._isGameActuallyRunning(game)) return;
@@ -3038,15 +3048,25 @@ export class GameServer extends CPUProtection {
             const winner = newActive[0]?.name || "Unknown";
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
             
+            // SAVE WINNER KE KV JIKA RECORDING ACTIVE
             if (game._startedByRecording) {
               await this._addLowCardWinner(room, winner);
+              // ✅ BROADCAST lowCardWinnerUpdate HANYA JIKA RECORDING ACTIVE
+              this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
+                username: winner,
+                wins: "1x",
+                room: room,
+                recording: true,
+                updatedAt: new Date().toISOString(),
+                type: 'winnerUpdate'
+              }]);
             }
             
             game._gameEnded = true;
             game._isActive = false;
             game._endTime = Date.now();
             
-            // ✅ HANYA 1 BROADCAST gameLowCardWinner
+            // ✅ BROADCAST gameLowCardWinner (notifikasi)
             this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
             this._scheduleGameCleanup(room, game);
           } else {
@@ -3136,7 +3156,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== _evaluateRound (BROADCAST gameLowCardWinner SAJA) ====================
+  // ==================== _evaluateRound ====================
   async _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
@@ -3189,11 +3209,21 @@ export class GameServer extends CPUProtection {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
+        // SAVE WINNER KE KV JIKA RECORDING ACTIVE
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
+          // ✅ BROADCAST lowCardWinnerUpdate HANYA JIKA RECORDING ACTIVE
+          this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
+            username: winnerName,
+            wins: "1x",
+            room: room,
+            recording: true,
+            updatedAt: new Date().toISOString(),
+            type: 'winnerUpdate'
+          }]);
         }
         
-        // ✅ HANYA 1 BROADCAST gameLowCardWinner (TANPA lowCardWinnerUpdate)
+        // ✅ BROADCAST gameLowCardWinner (notifikasi)
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
         game._gameEnded = true;
@@ -3245,11 +3275,21 @@ export class GameServer extends CPUProtection {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
+        // SAVE WINNER KE KV JIKA RECORDING ACTIVE
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
+          // ✅ BROADCAST lowCardWinnerUpdate HANYA JIKA RECORDING ACTIVE
+          this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
+            username: winnerName,
+            wins: "1x",
+            room: room,
+            recording: true,
+            updatedAt: new Date().toISOString(),
+            type: 'winnerUpdate'
+          }]);
         }
         
-        // ✅ HANYA 1 BROADCAST gameLowCardWinner (TANPA lowCardWinnerUpdate)
+        // ✅ BROADCAST gameLowCardWinner (notifikasi)
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
         game._gameEnded = true;
