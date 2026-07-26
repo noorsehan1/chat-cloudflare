@@ -637,7 +637,7 @@ export class GameServer extends CPUProtection {
       
       await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       
-      // BROADCAST lowCardWinnerUpdate dengan semua winners
+      // BROADCAST lowCardWinnerUpdate
       this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
         username: username,
         wins: newCount + "x",
@@ -2828,7 +2828,7 @@ export class GameServer extends CPUProtection {
     } catch(e) { return false; }
   }
 
-  // ==================== _checkGameCanContinue (FIXED - ASYNC) ====================
+  // ==================== _checkGameCanContinue (HANYA SAVE, TIDAK BROADCAST) ====================
   async _checkGameCanContinue(room, game) {
     try {
       if (!game?._isActive || game._gameEnded || !game.players || game._isEvaluating || game.evaluationLocked || game.registrationOpen) return;
@@ -2861,21 +2861,13 @@ export class GameServer extends CPUProtection {
           await this._addLowCardWinner(room, winner);
         }
         
-        // === BROADCAST lowCardWinnerUpdate ===
-        this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-          username: winner,
-          wins: "1x",
-          room: room,
-          totalWinners: 0,
-          winners: {},
-          recording: game._startedByRecording,
-          updatedAt: new Date().toISOString(),
-          type: 'winnerUpdate'
-        }]);
+        // ❌ HAPUS BROADCAST lowCardWinnerUpdate DI SINI
         
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
+        
+        // ✅ HANYA gameLowCardWinner
         this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
         this._scheduleGameCleanup(room, game);
       }
@@ -3034,7 +3026,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== _startDrawPhase (FIXED - ASYNC) ====================
+  // ==================== _startDrawPhase (HANYA SAVE, TIDAK BROADCAST) ====================
   async _startDrawPhase(room, game) {
     try {
       if (!this._isGameActuallyRunning(game)) return;
@@ -3070,21 +3062,13 @@ export class GameServer extends CPUProtection {
               await this._addLowCardWinner(room, winner);
             }
             
-            // === BROADCAST lowCardWinnerUpdate ===
-            this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-              username: winner,
-              wins: "1x",
-              room: room,
-              totalWinners: 0,
-              winners: {},
-              recording: game._startedByRecording,
-              updatedAt: new Date().toISOString(),
-              type: 'winnerUpdate'
-            }]);
+            // ❌ HAPUS BROADCAST lowCardWinnerUpdate DI SINI
             
             game._gameEnded = true;
             game._isActive = false;
             game._endTime = Date.now();
+            
+            // ✅ HANYA gameLowCardWinner
             this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
             this._scheduleGameCleanup(room, game);
           } else {
@@ -3174,6 +3158,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== _evaluateRound (BROADCAST lowCardWinnerUpdate + gameLowCardWinner) ====================
   async _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
@@ -3219,6 +3204,8 @@ export class GameServer extends CPUProtection {
         this._scheduleGameCleanup(room, game);
         return;
       }
+      
+      // === KONDISI PEMENANG ===
       if (entries.length === 1 && eliminated.size === activeIds.length - 1) {
         const winnerId = entries[0][0];
         const winnerName = players.get(winnerId)?.name || winnerId;
@@ -3229,17 +3216,18 @@ export class GameServer extends CPUProtection {
           await this._addLowCardWinner(room, winnerName);
         }
         
-        // === BROADCAST lowCardWinnerUpdate ===
+        // ✅ BROADCAST lowCardWinnerUpdate (data winner)
+        // ✅ BROADCAST gameLowCardWinner (notifikasi)
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
           username: winnerName,
           wins: "1x",
           room: room,
-          totalWinners: 0,
-          winners: {},
           recording: game._startedByRecording,
           updatedAt: new Date().toISOString(),
           type: 'winnerUpdate'
         }]);
+        
+        this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
         game._gameEnded = true;
         game._isActive = false;
@@ -3249,10 +3237,10 @@ export class GameServer extends CPUProtection {
           clearTimeout(game._safetyTimer); 
           game._safetyTimer = null; 
         }
-        this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         this._scheduleGameCleanup(room, game);
         return;
       }
+      
       const values = entries.map(([, n]) => n);
       const allSame = values.every(v => v === values[0]);
       let losers = [];
@@ -3295,17 +3283,18 @@ export class GameServer extends CPUProtection {
           await this._addLowCardWinner(room, winnerName);
         }
         
-        // === BROADCAST lowCardWinnerUpdate ===
+        // ✅ BROADCAST lowCardWinnerUpdate (data winner)
+        // ✅ BROADCAST gameLowCardWinner (notifikasi)
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
           username: winnerName,
           wins: "1x",
           room: room,
-          totalWinners: 0,
-          winners: {},
           recording: game._startedByRecording,
           updatedAt: new Date().toISOString(),
           type: 'winnerUpdate'
         }]);
+        
+        this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
         game._gameEnded = true;
         game._isActive = false;
@@ -3315,7 +3304,6 @@ export class GameServer extends CPUProtection {
           clearTimeout(game._safetyTimer); 
           game._safetyTimer = null; 
         }
-        this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         this._scheduleGameCleanup(room, game);
         return;
       }
