@@ -513,6 +513,8 @@ export class GameServer extends CPUProtection {
       this._startCPUMonitor();
       this._startHealthCheck();
 
+      this._initRecordingStatusFromKV();
+
       setTimeout(async () => {
         try {
           if (!this.closing && !this.isDestroyed) {
@@ -532,6 +534,35 @@ export class GameServer extends CPUProtection {
 
   // ==================== RECORDING WINNERS ====================
 
+  async _initRecordingStatusFromKV() {
+    try {
+      if (!this.env?.QUESTIONS) return;
+      // Initialize on-demand when getRecordingStatus is called
+    } catch(e) {}
+  }
+
+  async _getRecordingStatusFromKV(roomName) {
+    try {
+      if (!roomName) return false;
+      
+      if (this.env?.QUESTIONS) {
+        try {
+          const kvValue = await this.env.QUESTIONS.get(
+            CONSTANTS.LOWCARD_RECORDING_KEY + roomName
+          );
+          const isRecording = kvValue === 'true';
+          this._recordingEnabled.set(roomName, isRecording);
+          return isRecording;
+        } catch(e) {
+          return this._recordingEnabled.get(roomName) || false;
+        }
+      }
+      return this._recordingEnabled.get(roomName) || false;
+    } catch(e) {
+      return false;
+    }
+  }
+
   async _startRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
@@ -546,6 +577,15 @@ export class GameServer extends CPUProtection {
       }
       
       await this._loadRoomWinnersToCache(roomName);
+      
+      // HANYA BROADCAST lowCardWinnersData
+      this._broadcastToRoom(roomName, ["lowCardWinnersData", {
+        room: roomName,
+        winners: {},
+        totalPlayers: 0,
+        recording: true,
+        updatedAt: new Date().toISOString()
+      }]);
       
       return true;
     } catch(e) {
@@ -567,6 +607,7 @@ export class GameServer extends CPUProtection {
       
       this._roomWinnersCache.delete(roomName);
       
+      // HANYA BROADCAST lowCardWinnersData
       this._broadcastToRoom(roomName, ["lowCardWinnersData", {
         room: roomName,
         winners: {},
@@ -607,7 +648,7 @@ export class GameServer extends CPUProtection {
     try {
       if (!room || !username) return false;
       
-      const isRecordingEnabled = this._recordingEnabled.get(room) || false;
+      const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
       if (!isRecordingEnabled) {
         return false;
       }
@@ -686,7 +727,7 @@ export class GameServer extends CPUProtection {
     try {
       if (!room) return;
       
-      const isRecordingEnabled = this._recordingEnabled.get(room) || false;
+      const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
       if (!isRecordingEnabled) {
         this._broadcastToRoom(room, ["lowCardWinnersData", {
           room: room,
@@ -777,7 +818,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== GET RECORDING STATUS ====================
+  // ==================== GET RECORDING STATUS - KIRIM BOOLEAN ====================
 
   async getRecordingStatus(ws, roomName) {
     try {
@@ -785,11 +826,12 @@ export class GameServer extends CPUProtection {
         this._safeSend(ws, ["recordingStatus", false]);
         return;
       }
+
+      const isRecordingEnabled = await this._getRecordingStatusFromKV(roomName);
       
-      const isRecordingEnabled = this._recordingEnabled.get(roomName) || false;
-      
-      // Kirim boolean langsung
+      // Kirim boolean langsung (sesuai client Java)
       this._safeSend(ws, ["recordingStatus", isRecordingEnabled]);
+
     } catch(e) {
       this._safeSend(ws, ["recordingStatus", false]);
     }
@@ -810,7 +852,7 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      const isRecordingEnabled = this._recordingEnabled.get(room) || false;
+      const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
       if (!isRecordingEnabled) {
         this._safeSend(ws, ["gameLowCardError", "Recording must be enabled first! Use startRecordingWinners"]);
         return;
@@ -3371,7 +3413,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      const isRecordingEnabled = this._recordingEnabled.get(room) || false;
+      const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
       if (isRecordingEnabled) {
         this._safeSend(ws, ["gameLowCardError", 
           "Recording is ACTIVE in this room! Users cannot start games."
@@ -3868,7 +3910,7 @@ export class GameServer extends CPUProtection {
           return;
         }
         const winners = await this._getLowCardWinners(room);
-        const isRecordingEnabled = this._recordingEnabled.get(room) || false;
+        const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
         this._safeSend(ws, ["roomWinners", {
           room: room,
           winners: winners,
@@ -3879,8 +3921,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== GET RECORDING STATUS ====================
-      // KIRIM BOOLEAN LANGSUNG
+      // ==================== GET RECORDING STATUS - KIRIM BOOLEAN ====================
       if (evt === "getRecordingStatus") {
         const roomName = data[1];
         await this.getRecordingStatus(ws, roomName);
@@ -3945,7 +3986,7 @@ export class GameServer extends CPUProtection {
         
         await this._sendWinnersToRoom(room);
         
-        const isRecordingEnabled = this._recordingEnabled.get(room) || false;
+        const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
         const winners = await this._getLowCardWinners(room);
         
         this._safeSend(ws, ["lowCardWinnersData", {
@@ -3973,7 +4014,7 @@ export class GameServer extends CPUProtection {
         
         await this._sendWinnersToRoom(room);
         
-        const isRecordingEnabled = this._recordingEnabled.get(room) || false;
+        const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
         const winners = await this._getLowCardWinners(room);
         
         this._safeSend(ws, ["lowCardWinnersData", {
