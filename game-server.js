@@ -621,10 +621,8 @@ export class GameServer extends CPUProtection {
       
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       
-      // AMBIL LANGSUNG DARI KV
       let roomWinners = await this.env.QUESTIONS.get(key, 'json') || {};
       
-      // UPDATE JUMLAH KEMENANGAN
       let currentCount = 0;
       if (roomWinners[username]) {
         const valStr = String(roomWinners[username]);
@@ -632,22 +630,11 @@ export class GameServer extends CPUProtection {
       }
       const newCount = currentCount + 1;
       
-      // SIMPAN KE KV DENGAN FORMAT "X"
       roomWinners[username] = newCount + "x";
       
       await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       
-      // BROADCAST lowCardWinnerUpdate
-      this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-        username: username,
-        wins: newCount + "x",
-        room: room,
-        totalWinners: Object.keys(roomWinners).length,
-        winners: roomWinners,
-        recording: true,
-        updatedAt: new Date().toISOString(),
-        type: 'winnerUpdate'
-      }]);
+      // ❌ TIDAK BROADCAST DI SINI (SUDAH DI _evaluateRound)
       
       return true;
     } catch(e) {
@@ -675,7 +662,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // AMBIL LANGSUNG DARI KV
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       const winners = await this.env.QUESTIONS.get(key, 'json') || {};
       
@@ -2828,7 +2814,7 @@ export class GameServer extends CPUProtection {
     } catch(e) { return false; }
   }
 
-  // ==================== _checkGameCanContinue (HANYA SAVE, TIDAK BROADCAST) ====================
+  // ==================== _checkGameCanContinue (TIDAK BROADCAST lowCardWinnerUpdate) ====================
   async _checkGameCanContinue(room, game) {
     try {
       if (!game?._isActive || game._gameEnded || !game.players || game._isEvaluating || game.evaluationLocked || game.registrationOpen) return;
@@ -2856,18 +2842,15 @@ export class GameServer extends CPUProtection {
         const winner = activePlayers[0]?.name || "Unknown";
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
         
-        // === CEK APAKAH RECORDING ENABLED ===
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winner);
         }
         
-        // ❌ HAPUS BROADCAST lowCardWinnerUpdate DI SINI
+        // ❌ TIDAK BROADCAST lowCardWinnerUpdate DI SINI
         
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
-        
-        // ✅ HANYA gameLowCardWinner
         this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
         this._scheduleGameCleanup(room, game);
       }
@@ -3026,7 +3009,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== _startDrawPhase (HANYA SAVE, TIDAK BROADCAST) ====================
+  // ==================== _startDrawPhase (TIDAK BROADCAST lowCardWinnerUpdate) ====================
   async _startDrawPhase(room, game) {
     try {
       if (!this._isGameActuallyRunning(game)) return;
@@ -3057,18 +3040,15 @@ export class GameServer extends CPUProtection {
             const winner = newActive[0]?.name || "Unknown";
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
             
-            // === CEK APAKAH RECORDING ENABLED ===
             if (game._startedByRecording) {
               await this._addLowCardWinner(room, winner);
             }
             
-            // ❌ HAPUS BROADCAST lowCardWinnerUpdate DI SINI
+            // ❌ TIDAK BROADCAST lowCardWinnerUpdate DI SINI
             
             game._gameEnded = true;
             game._isActive = false;
             game._endTime = Date.now();
-            
-            // ✅ HANYA gameLowCardWinner
             this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
             this._scheduleGameCleanup(room, game);
           } else {
@@ -3158,7 +3138,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== _evaluateRound (BROADCAST lowCardWinnerUpdate + gameLowCardWinner) ====================
+  // ==================== _evaluateRound (HANYA DI SINI BROADCAST lowCardWinnerUpdate 1 KALI) ====================
   async _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
@@ -3205,23 +3185,33 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // === KONDISI PEMENANG ===
+      // === KONDISI PEMENANG (HANYA 1 KALI BROADCAST) ===
       if (entries.length === 1 && eliminated.size === activeIds.length - 1) {
         const winnerId = entries[0][0];
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        // === CEK APAKAH RECORDING ENABLED ===
+        // AMBIL SEMUA WINNER DARI KV
+        const allWinners = await this._getLowCardWinners(room);
+        const winnersWithX = {};
+        for (const [name, count] of Object.entries(allWinners)) {
+          winnersWithX[name] = count + "x";
+        }
+        
+        // SIMPAN KE KV (JIKA RECORDING)
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
         }
         
-        // ✅ BROADCAST lowCardWinnerUpdate (data winner)
-        // ✅ BROADCAST gameLowCardWinner (notifikasi)
+        // ✅ HANYA 1 KALI BROADCAST lowCardWinnerUpdate
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
           username: winnerName,
-          wins: "1x",
+          wins: (game._startedByRecording ? 
+            (allWinners[winnerName] ? allWinners[winnerName] + "x" : "1x") : 
+            "1x"),
           room: room,
+          totalWinners: Object.keys(winnersWithX).length,
+          winners: winnersWithX,
           recording: game._startedByRecording,
           updatedAt: new Date().toISOString(),
           type: 'winnerUpdate'
@@ -3278,17 +3268,27 @@ export class GameServer extends CPUProtection {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        // === CEK APAKAH RECORDING ENABLED ===
+        // AMBIL SEMUA WINNER DARI KV
+        const allWinners = await this._getLowCardWinners(room);
+        const winnersWithX = {};
+        for (const [name, count] of Object.entries(allWinners)) {
+          winnersWithX[name] = count + "x";
+        }
+        
+        // SIMPAN KE KV (JIKA RECORDING)
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
         }
         
-        // ✅ BROADCAST lowCardWinnerUpdate (data winner)
-        // ✅ BROADCAST gameLowCardWinner (notifikasi)
+        // ✅ HANYA 1 KALI BROADCAST lowCardWinnerUpdate
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
           username: winnerName,
-          wins: "1x",
+          wins: (game._startedByRecording ? 
+            (allWinners[winnerName] ? allWinners[winnerName] + "x" : "1x") : 
+            "1x"),
           room: room,
+          totalWinners: Object.keys(winnersWithX).length,
+          winners: winnersWithX,
           recording: game._startedByRecording,
           updatedAt: new Date().toISOString(),
           type: 'winnerUpdate'
