@@ -63,7 +63,7 @@ const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 2 },
     { start: 11, end: 12 },
-    { start: 0, end: 1 }
+    { start: 22, end: 23 }
   ],
   TIMEZONE_OFFSET: 8,
 };
@@ -505,11 +505,11 @@ export class GameServer extends CPUProtection {
 
       this._recordingEnabled = new Map();
 
-      // ⭐ TAMBAHAN: Properti untuk auto reset mingguan
+      // Properti untuk auto reset mingguan
       this._weeklyResetTimer = null;
       this._lastResetWeek = null;
 
-      // ⭐ TAMBAHAN: Untuk menyimpan jawaban saat reading time
+      // Untuk menyimpan jawaban saat reading time
       this._readingAnswers = new Map();
 
       this.countryQuizSystem = new CountryBasedQuizSystem(this);
@@ -617,9 +617,7 @@ export class GameServer extends CPUProtection {
                 await this.env.QUESTIONS.delete(key.name);
               }
             }
-          } catch(e) {
-            // Silent ignore
-          }
+          } catch(e) {}
         }
       }
       
@@ -1239,7 +1237,6 @@ export class GameServer extends CPUProtection {
       this._resetCriticalState();
       this._cleanupResources();
       
-      // ⭐ TAMBAHAN: Restart scheduler reset saat recovery
       this._startWeeklyResetChecker();
       
       if (!this._initialized && !this._initializing) {
@@ -1268,7 +1265,6 @@ export class GameServer extends CPUProtection {
       this._canSubmitAnswer = false;
       this._questionStartTime = null;
       
-      // ⭐ TAMBAHAN: Bersihkan reading answers
       if (this._readingAnswers) {
         this._readingAnswers.clear();
       }
@@ -1403,7 +1399,6 @@ export class GameServer extends CPUProtection {
       await this._initQuiz();
       this._startQuizScheduler();
       
-      // ⭐ TAMBAHAN: Jalankan scheduler reset mingguan
       this._startWeeklyResetChecker();
       
       this._initialized = true;
@@ -1775,10 +1770,9 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ⭐ MODIFIKASI: Tambahkan auto reset di awal _showQuestion()
+  // ==================== _showQuestion ====================
   async _showQuestion() {
     try {
-      // ⭐ TAMBAHAN: CEK DAN RESET MINGGUAN DI AWAL QUIZ
       await this._checkAndResetWeeklyQuiz();
 
       if (this._isShowingQuestion) return;
@@ -1845,7 +1839,6 @@ export class GameServer extends CPUProtection {
         this._winnerProcessed = false;
         this._totalQuestionsAnswered++;
         
-        // ⭐ TAMBAHAN: Bersihkan reading answers untuk pertanyaan baru
         if (this._readingAnswers) {
           this._readingAnswers.clear();
         }
@@ -1862,7 +1855,6 @@ export class GameServer extends CPUProtection {
           
           this._canSubmitAnswer = true;
           
-          // ⭐ TAMBAHAN: Proses semua jawaban yang tertunda saat reading time
           if (this._readingAnswers && this._readingAnswers.size > 0) {
             this._processPendingReadingAnswers();
           }
@@ -1916,7 +1908,6 @@ export class GameServer extends CPUProtection {
             this._isShowingQuestion = false;
             this._canSubmitAnswer = false;
             
-            // ⭐ TAMBAHAN: Bersihkan reading answers
             if (this._readingAnswers) {
               this._readingAnswers.clear();
             }
@@ -1956,14 +1947,13 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ⭐ TAMBAHAN: Proses jawaban yang tertunda saat reading time
+  // ==================== _processPendingReadingAnswers ====================
   _processPendingReadingAnswers() {
     try {
       if (!this._readingAnswers || this._readingAnswers.size === 0) return;
       if (!this.currentQuestion) return;
       
       const correctAnswer = this.currentQuestion.correct;
-      const wsId = this._getWsId(this._readingAnswers.values().next().value?.wsId);
       
       for (const [username, data] of this._readingAnswers) {
         const isCorrect = data.isValid && (data.answer === correctAnswer);
@@ -1982,7 +1972,6 @@ export class GameServer extends CPUProtection {
         
         this.quizAnswered.add(username);
         
-        // Broadcast hasil jawaban yang tertunda
         this._broadcastQuizNotification("quizAnswer", {
           username: username,
           answer: data.answer,
@@ -2001,7 +1990,6 @@ export class GameServer extends CPUProtection {
         });
       }
       
-      // Bersihkan setelah diproses
       this._readingAnswers.clear();
       
     } catch(e) {}
@@ -2032,7 +2020,6 @@ export class GameServer extends CPUProtection {
       this._isShowingQuestion = false;
       this._canSubmitAnswer = false;
       
-      // ⭐ TAMBAHAN: Bersihkan reading answers
       if (this._readingAnswers) {
         this._readingAnswers.clear();
       }
@@ -2054,7 +2041,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ⭐ MODIFIKASI: submitQuizAnswer dengan dukungan reading time
+  // ==================== submitQuizAnswer ====================
   async submitQuizAnswer(ws, username, answer) {
     try {
       if (!ws || !username) {
@@ -2092,7 +2079,6 @@ export class GameServer extends CPUProtection {
         }
       }
       
-      // ⭐ CEK: Apakah dalam reading time
       const isReadingTime = !this._canSubmitAnswer;
       let readingTimeLeft = 0;
       
@@ -2103,7 +2089,6 @@ export class GameServer extends CPUProtection {
       
       const answerRemaining = this._getAnswerRemainingTime();
       
-      // Cek apakah waktu sudah habis
       if (!isReadingTime && answerRemaining <= 0) {
         if (this.quizHasWinner && this.quizWinner) {
           this._safeSend(ws, ["quizError", "Time's up! Winner: " + this.quizWinner]);
@@ -2128,9 +2113,7 @@ export class GameServer extends CPUProtection {
       const wsId = this._getWsId(ws);
       const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
       
-      // ⭐ Jika dalam reading time, tampilkan jawaban tapi belum divalidasi
       if (isReadingTime) {
-        // Broadcast bahwa user mengirim jawaban saat reading time
         this._broadcastQuizNotification("quizAnswerReading", {
           username: username,
           answer: isValidAnswer ? answerKey : "?",
@@ -2141,16 +2124,17 @@ export class GameServer extends CPUProtection {
           countryName: countryInfo.countryName
         });
         
-        // Kirim feedback ke user
         this._safeSend(ws, ["quizAnswerReading", {
           username: username,
           answer: isValidAnswer ? answerKey : "?",
           readingTimeLeft: readingTimeLeft,
           message: `⏳ Jawaban tercatat! Tunggu ${readingTimeLeft}s lagi untuk validasi.`,
           status: "waiting"
-        }));
+        }]);
         
-        // Simpan jawaban untuk divalidasi nanti
+        if (!this._readingAnswers) {
+          this._readingAnswers = new Map();
+        }
         this._readingAnswers.set(username, {
           answer: answerKey,
           isValid: isValidAnswer,
@@ -2161,8 +2145,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // ⭐ Validasi normal (setelah reading time selesai)
-      // Cek apakah ada jawaban dari reading time yang belum divalidasi
       if (this._readingAnswers && this._readingAnswers.has(username)) {
         const pending = this._readingAnswers.get(username);
         if (pending.answer === answerKey) {
@@ -2206,7 +2188,6 @@ export class GameServer extends CPUProtection {
         }
       }
       
-      // Validasi normal
       const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
       const remainingText = `${answerRemaining}s remaining`;
       
@@ -2303,7 +2284,6 @@ export class GameServer extends CPUProtection {
       this._canSubmitAnswer = false;
       this._questionStartTime = null;
       
-      // ⭐ TAMBAHAN: Bersihkan reading answers
       if (this._readingAnswers) {
         this._readingAnswers.clear();
       }
@@ -2442,7 +2422,6 @@ export class GameServer extends CPUProtection {
       this._canSubmitAnswer = false;
       this._questionStartTime = null;
       
-      // ⭐ TAMBAHAN: Bersihkan reading answers
       if (this._readingAnswers) {
         this._readingAnswers.clear();
       }
@@ -3025,7 +3004,6 @@ export class GameServer extends CPUProtection {
     } catch(e) { return false; }
   }
 
-  // ==================== _checkGameCanContinue ====================
   async _checkGameCanContinue(room, game) {
     try {
       if (!game?._isActive || game._gameEnded || !game.players || game._isEvaluating || game.evaluationLocked || game.registrationOpen) return;
@@ -3226,7 +3204,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== _startDrawPhase ====================
   async _startDrawPhase(room, game) {
     try {
       if (!this._isGameActuallyRunning(game)) return;
@@ -3361,7 +3338,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== _evaluateRound ====================
   async _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
@@ -4648,9 +4624,9 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ⭐ ============================================================
-  // ⭐ ==================== QUIZ WEEKLY RESET ====================
-  // ⭐ ============================================================
+  // ============================================================
+  // ==================== QUIZ WEEKLY RESET ====================
+  // ============================================================
 
   async _getLastResetWeek() {
     try {
