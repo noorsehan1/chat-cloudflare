@@ -1973,140 +1973,147 @@ export class GameServer extends CPUProtection {
 
   // ==================== submitQuizAnswer ====================
   // ⭐ PERBAIKAN: Reading Time = jawaban tetap ke quizAnswer dengan flag preview
-  async submitQuizAnswer(ws, username, answer) {
-    try {
-      if (!ws || !username) {
-        this._sendQuizErrorWithTime(ws, "ERROR", "Invalid request");
-        return;
-      }
+// ==================== submitQuizAnswer ====================
+// ⭐ PERBAIKAN: Reading Time = jawaban tetap ditampilkan ke semua user via quizAnswer
+async submitQuizAnswer(ws, username, answer) {
+  try {
+    if (!ws || !username) {
+      return; // SILENT IGNORE
+    }
 
-      const room = this._ensureRoomConsistency(ws);
-      if (room !== QUIZ_ROOM) {
-        this._safeSend(ws, ["quizError", "Quiz only available in Quiz room"]);
-        return;
-      }
+    const room = this._ensureRoomConsistency(ws);
+    if (room !== QUIZ_ROOM) {
+      return; // SILENT IGNORE
+    }
 
-      if (!this._isQuizTime()) {
-        this._sendQuizErrorWithTime(ws, "NOT_QUIZ_TIME");
-        return;
-      }
+    if (!this._isQuizTime()) {
+      return; // SILENT IGNORE
+    }
 
-      if (!this.quizAutoEnabled) {
-        this._sendQuizErrorWithTime(ws, "QUIZ_DISABLED");
-        return;
-      }
+    if (!this.quizAutoEnabled) {
+      return; // SILENT IGNORE
+    }
 
-      const clients = this.wsClients.get(QUIZ_ROOM);
-      if (!clients?.size) {
-        this._sendQuizErrorWithTime(ws, "ERROR", "Quiz is paused");
-        return;
-      }
+    const clients = this.wsClients.get(QUIZ_ROOM);
+    if (!clients?.size) {
+      return; // SILENT IGNORE
+    }
 
+    if (!this.currentQuestion) {
+      this._startQuizIfNeeded();
       if (!this.currentQuestion) {
-        this._startQuizIfNeeded();
-        if (!this.currentQuestion) {
-          this._sendQuizErrorWithTime(ws, "QUIZ_NOT_STARTED");
-          return;
-        }
+        return; // SILENT IGNORE
       }
+    }
 
-      // ⭐ CEK APAKAH MASIH READING TIME
-      const isReadingTime = !this._canSubmitAnswer;
-      
-      const answerKey = answer ? answer.toUpperCase().trim() : '';
-      const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
-      const wsId = this._getWsId(ws);
-      const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
-      
-      // ⭐ Jika masih reading time, TAMPILKAN ke quizAnswer dengan flag preview
-      if (isReadingTime) {
-        // ⭐ KIRIM ke quizAnswer dengan flag isPreview: true dan isReadingTime: true
-        // ⭐ Client akan menampilkan ini sebagai preview (tidak dihitung)
-        this._broadcastQuizResult("quizAnswer", {
-          username: username,
-          answer: isValidAnswer ? answerKey : "?",
-          isPreview: true,        // ⭐ Flag: ini hanya preview
-          isReadingTime: true,    // ⭐ Flag: masih reading time
-          isCorrect: false,       // ⭐ TIDAK dihitung sebagai benar
-          remainingTime: `${Math.round((CONSTANTS.QUIZ_READING_TIME_MS - (Date.now() - this._questionStartTime)) / 1000)}s remaining`,
-          country: countryInfo.countryCode,
-          countryName: countryInfo.countryName,
-          message: "📖 Reading time... Jawaban akan dievaluasi setelah reading selesai"
-        });
-
-        // ⭐ Kirim notifikasi ke user yang menjawab
-        this._safeSend(ws, ["quizNotification", {
-          type: "quizAnswerPreview",
-          timestamp: Date.now(),
-          message: "📖 Jawaban diterima! Akan dievaluasi setelah reading time selesai.",
-          isReadingTime: true,
-          remainingTime: `${Math.round((CONSTANTS.QUIZ_READING_TIME_MS - (Date.now() - this._questionStartTime)) / 1000)}s`
-        }]);
-
-        // ⭐ TIDAK LANJUT ke evaluasi - RETURN
-        return;
-      }
-
-      // ⭐ SETELAH READING TIME SELESAI - NORMAL EVALUASI
-      const answerRemaining = this._getAnswerRemainingTime();
-      if (answerRemaining <= 0) {
-        if (this.quizHasWinner && this.quizWinner) {
-          this._safeSend(ws, ["quizError", "Time's up! Winner: " + this.quizWinner]);
-        } else {
-          this._safeSend(ws, ["quizError", "Time's up!"]);
-        }
-        return;
-      }
-
-      // ⭐ Jika sudah ada pemenang, TETAP TAMPILKAN jawaban user (bukan error)
-      if (this.quizHasWinner) {
-        this._safeSend(ws, ["quizNotification", {
-          type: "quizAlreadyWon",
-          timestamp: Date.now(),
-          winner: this.quizWinner,
-          message: `🎉 ${this.quizWinner} already answered correctly!`
-        }]);
-        // TETAP LANJUT untuk broadcast jawaban user
-      }
-
-      if (this.quizAnswered.has(username)) {
-        this._safeSend(ws, ["quizError", "You already answered!"]);
-        return;
-      }
-
-      const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
-      const remainingText = `${answerRemaining}s remaining`;
-
-      // ⭐ BROADCAST jawaban user ke semua (evaluasi normal)
+    // ⭐ CEK APAKAH MASIH READING TIME
+    const isReadingTime = !this._canSubmitAnswer;
+    
+    const answerKey = answer ? answer.toUpperCase().trim() : '';
+    const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
+    const wsId = this._getWsId(ws);
+    const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
+    
+    // ⭐ Jika masih reading time, TAMPILKAN ke semua user via quizAnswer
+    if (isReadingTime) {
+      // ⭐ BROADCAST ke semua user - TAMPILKAN jawaban user
       this._broadcastQuizResult("quizAnswer", {
-        username,
+        username: username,
         answer: isValidAnswer ? answerKey : "?",
-        isCorrect: isCorrect,
-        isPreview: false,        // ⭐ Bukan preview
-        isReadingTime: false,    // ⭐ Bukan reading time
-        correctAnswer: this.currentQuestion.correct,
-        remainingTime: remainingText,
+        isCorrect: false,        // ⭐ TIDAK dihitung sebagai benar
+        isPreview: true,         // ⭐ Flag: ini hanya preview
+        isReadingTime: true,     // ⭐ Flag: masih reading time
+        remainingTime: `${Math.round((CONSTANTS.QUIZ_READING_TIME_MS - (Date.now() - this._questionStartTime)) / 1000)}s remaining`,
+        country: countryInfo.countryCode,
+        countryName: countryInfo.countryName,
+        message: "📖 Reading time..."
+      });
+
+      // ⭐ TIDAK ADA ERROR - RETURN tanpa mengirim apapun
+      return;
+    }
+
+    // ⭐ SETELAH READING TIME SELESAI - NORMAL EVALUASI
+    const answerRemaining = this._getAnswerRemainingTime();
+    if (answerRemaining <= 0) {
+      // ⭐ Kirim info waktu habis
+      this._broadcastQuizResult("quizAnswer", {
+        username: username,
+        answer: isValidAnswer ? answerKey : "?",
+        isCorrect: false,
+        isPreview: false,
+        isReadingTime: false,
+        remainingTime: "0s remaining",
+        country: countryInfo.countryCode,
+        countryName: countryInfo.countryName,
+        message: "⏰ Time's up!"
+      });
+      return;
+    }
+
+    // ⭐ Jika sudah ada pemenang, TETAP TAMPILKAN jawaban user
+    if (this.quizHasWinner) {
+      this._broadcastQuizResult("quizAnswer", {
+        username: username,
+        answer: isValidAnswer ? answerKey : "?",
+        isCorrect: false,
+        isPreview: false,
+        isReadingTime: false,
+        remainingTime: `${answerRemaining}s remaining`,
+        country: countryInfo.countryCode,
+        countryName: countryInfo.countryName,
+        message: `🎉 ${this.quizWinner} already won!`
+      });
+      return;
+    }
+
+    if (this.quizAnswered.has(username)) {
+      this._broadcastQuizResult("quizAnswer", {
+        username: username,
+        answer: isValidAnswer ? answerKey : "?",
+        isCorrect: false,
+        isPreview: false,
+        isReadingTime: false,
+        remainingTime: `${answerRemaining}s remaining`,
+        country: countryInfo.countryCode,
+        countryName: countryInfo.countryName,
+        message: "⏳ Already answered!"
+      });
+      return;
+    }
+
+    const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
+    const remainingText = `${answerRemaining}s remaining`;
+
+    // ⭐ BROADCAST jawaban user - EVALUASI NORMAL
+    this._broadcastQuizResult("quizAnswer", {
+      username,
+      answer: isValidAnswer ? answerKey : "?",
+      isCorrect: isCorrect,
+      isPreview: false,
+      isReadingTime: false,
+      remainingTime: remainingText,
+      country: countryInfo.countryCode,
+      countryName: countryInfo.countryName
+    });
+
+    this.quizAnswered.add(username);
+
+    // ⭐ Jika jawaban benar dan belum ada pemenang
+    if (isCorrect && !this.quizHasWinner) {
+      this.quizHasWinner = true;
+      this.quizWinner = username;
+      this._broadcastQuizNotification("quizWinnerWithCountry", {
+        username: username,
         country: countryInfo.countryCode,
         countryName: countryInfo.countryName
       });
-
-      this.quizAnswered.add(username);
-
-      // ⭐ Jika jawaban benar dan belum ada pemenang
-      if (isCorrect && !this.quizHasWinner) {
-        this.quizHasWinner = true;
-        this.quizWinner = username;
-        this._broadcastQuizNotification("quizWinnerWithCountry", {
-          username: username,
-          country: countryInfo.countryCode,
-          countryName: countryInfo.countryName
-        });
-      }
-
-    } catch(e) {
-      console.error('submitQuizAnswer error:', e);
     }
+
+  } catch(e) {
+    // ⭐ SILENT IGNORE - TIDAK ADA ERROR YANG DIKIRIM
   }
+}
 
   _startQuizLoop() {
     try {
