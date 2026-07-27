@@ -63,7 +63,7 @@ const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 2 },
     { start: 11, end: 12 },
-    { start: 22, end: 24 }
+    { start: 22, end: 23 }
   ],
   TIMEZONE_OFFSET: 8,
 };
@@ -505,13 +505,9 @@ export class GameServer extends CPUProtection {
 
       this._recordingEnabled = new Map();
 
-      // ⭐ TAMBAHAN: Properti untuk auto reset mingguan
+      // Weekly reset properties
       this._weeklyResetTimer = null;
       this._lastResetWeek = null;
-
-      // ⭐ TAMBAHAN: Properti untuk menyimpan semua jawaban quiz
-      this.quizAllAnswers = [];
-      this.quizAnswerHistory = new Map();
 
       this.countryQuizSystem = new CountryBasedQuizSystem(this);
 
@@ -865,17 +861,7 @@ export class GameServer extends CPUProtection {
 
   async _handleQuizWinner(username, correctAnswer) {
     try {
-      // ⭐ PERUBAHAN: Hapus pengecekan _winnerProcessed agar tidak blokir
-      // if (this._winnerProcessed) return;
-      
-      // ⭐ PERUBAHAN: Cek apakah user sudah pernah dapat poin untuk pertanyaan ini
-      const userHistory = this.quizAnswerHistory.get(username) || [];
-      const alreadyWon = userHistory.some(a => a.isWinner === true);
-      
-      if (alreadyWon) {
-        // User sudah menang, jangan tambah poin lagi
-        return;
-      }
+      if (this._winnerProcessed) return;
       
       this._winnerProcessed = true;
       
@@ -1250,7 +1236,6 @@ export class GameServer extends CPUProtection {
       this._resetCriticalState();
       this._cleanupResources();
       
-      // ⭐ TAMBAHAN: Restart scheduler reset saat recovery
       this._startWeeklyResetChecker();
       
       if (!this._initialized && !this._initializing) {
@@ -1408,7 +1393,6 @@ export class GameServer extends CPUProtection {
       await this._initQuiz();
       this._startQuizScheduler();
       
-      // ⭐ TAMBAHAN: Jalankan scheduler reset mingguan
       this._startWeeklyResetChecker();
       
       this._initialized = true;
@@ -1780,14 +1764,10 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== _showQuestion - MODIFIED ====================
+  // ==================== _showQuestion ====================
   async _showQuestion() {
     try {
-      // ⭐ TAMBAHAN: Reset answer history setiap pertanyaan baru
-      this.quizAllAnswers = [];
-      this.quizAnswerHistory = new Map();
-      
-      // ⭐ TAMBAHAN: CEK DAN RESET MINGGUAN DI AWAL QUIZ
+      // Weekly reset check
       await this._checkAndResetWeeklyQuiz();
 
       if (this._isShowingQuestion) return;
@@ -1847,10 +1827,7 @@ export class GameServer extends CPUProtection {
         this.currentQuestion = { ...q, options: shuffled.options, correct: shuffled.correct };
         this._quizStartTime = Date.now();
         this._questionStartTime = Date.now();
-        
-        // ⭐ PERUBAHAN: Langsung set canSubmit = true (tanpa setTimeout)
-        this._canSubmitAnswer = true;
-        
+        this._canSubmitAnswer = false;
         this.quizAnswered = new Set();
         this.quizHasWinner = false;
         this.quizWinner = null;
@@ -1859,18 +1836,31 @@ export class GameServer extends CPUProtection {
         
         await this._broadcastQuizQuestion(this.currentQuestion.question, this.currentQuestion.options);
         
-        this._broadcastQuizNotification("quizCanAnswer", {
-          answerTime: CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000,
-          remainingTime: `${CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000}s remaining`,
-          message: "You can now answer!"
-        });
+        this._broadcastQuizNotification("quizError", `Read the question... ${CONSTANTS.QUIZ_READING_TIME_MS / 1000}s`);
         
-        this._broadcastToRoom(QUIZ_ROOM, [
-          "quizTimeLeft", 
-          `${CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000}s remaining to answer!`, 
-          false,
-          true
-        ]);
+        // ⭐ READING TIME: Setelah selesai, baru bisa jawab
+        setTimeout(() => {
+          if (this.closing || this.isDestroyed) { 
+            this._isShowingQuestion = false;
+            return; 
+          }
+          
+          this._canSubmitAnswer = true;
+          
+          this._broadcastQuizNotification("quizCanAnswer", {
+            answerTime: CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000,
+            remainingTime: `${CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000}s remaining`,
+            message: "You can now answer!"
+          });
+          
+          this._broadcastToRoom(QUIZ_ROOM, [
+            "quizTimeLeft", 
+            `${CONSTANTS.QUIZ_ANSWER_TIME_MS / 1000}s remaining to answer!`, 
+            false,
+            true
+          ]);
+          
+        }, CONSTANTS.QUIZ_READING_TIME_MS);
         
         if (this._quizTimeout) clearTimeout(this._quizTimeout);
         if (this._quizBreakTimeout) clearTimeout(this._quizBreakTimeout);
@@ -1983,36 +1973,37 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== submitQuizAnswer - MODIFIED ====================
+  // ==================== submitQuizAnswer ====================
+  // ⭐ PERBAIKAN: Reading time = SILENT IGNORE, jawaban tetap di-broadcast meskipun sudah ada pemenang
   async submitQuizAnswer(ws, username, answer) {
     try {
       if (!ws || !username) {
         this._sendQuizErrorWithTime(ws, "ERROR", "Invalid request");
         return;
       }
-      
+
       const room = this._ensureRoomConsistency(ws);
       if (room !== QUIZ_ROOM) {
         this._safeSend(ws, ["quizError", "Quiz only available in Quiz room"]);
         return;
       }
-      
+
       if (!this._isQuizTime()) {
         this._sendQuizErrorWithTime(ws, "NOT_QUIZ_TIME");
         return;
       }
-      
+
       if (!this.quizAutoEnabled) {
         this._sendQuizErrorWithTime(ws, "QUIZ_DISABLED");
         return;
       }
-      
+
       const clients = this.wsClients.get(QUIZ_ROOM);
       if (!clients?.size) {
         this._sendQuizErrorWithTime(ws, "ERROR", "Quiz is paused");
         return;
       }
-      
+
       if (!this.currentQuestion) {
         this._startQuizIfNeeded();
         if (!this.currentQuestion) {
@@ -2020,162 +2011,84 @@ export class GameServer extends CPUProtection {
           return;
         }
       }
-      
-      // ⭐ PERUBAHAN: Hapus pengecekan _canSubmitAnswer
-      // if (!this._canSubmitAnswer) {
-      //   const elapsed = (Date.now() - (this._questionStartTime || 0)) / 1000;
-      //   const remaining = Math.max(0, Math.round((CONSTANTS.QUIZ_READING_TIME_MS / 1000) - elapsed));
-      //   this._safeSend(ws, ["quizError", `Please wait ${remaining}s, reading time!`]);
-      //   return;
-      // }
-      
+
+      // ⭐ PERBAIKAN 1: Jika masih reading time, SILENT IGNORE - tidak kirim apa-apa
+      if (!this._canSubmitAnswer) {
+        // TIDAK ADA BALASAN - SILENT IGNORE
+        return;
+      }
+
       const answerRemaining = this._getAnswerRemainingTime();
       if (answerRemaining <= 0) {
         if (this.quizHasWinner && this.quizWinner) {
-          // Tetap proses jawaban untuk history meskipun waktu habis
+          this._safeSend(ws, ["quizError", "Time's up! Winner: " + this.quizWinner]);
         } else {
           this._safeSend(ws, ["quizError", "Time's up!"]);
-          return;
         }
+        return;
       }
-      
-      // ⭐ HAPUS: Blokir jika sudah ada winner
-      // if (this.quizHasWinner) {
-      //   this._safeSend(ws, ["quizError", "Someone already answered correctly!"]);
-      //   return;
-      // }
-      
+
+      // ⭐ PERBAIKAN 2: Jika sudah ada pemenang, TETAP TAMPILKAN jawaban user (bukan error)
+      if (this.quizHasWinner) {
+        // Kirim notifikasi bahwa sudah ada pemenang (bukan error)
+        this._safeSend(ws, ["quizNotification", {
+          type: "quizAlreadyWon",
+          timestamp: Date.now(),
+          winner: this.quizWinner,
+          message: `🎉 ${this.quizWinner} already answered correctly!`
+        }]);
+        // TETAP LANJUT untuk broadcast jawaban user
+        // JANGAN return
+      }
+
       if (this.quizAnswered.has(username)) {
         this._safeSend(ws, ["quizError", "You already answered!"]);
         return;
       }
-      
+
       const answerKey = answer ? answer.toUpperCase().trim() : '';
       const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
       const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
-      const remainingText = `${Math.max(0, answerRemaining)}s remaining`;
+      const remainingText = `${answerRemaining}s remaining`;
       const wsId = this._getWsId(ws);
       const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
-      
-      // ⭐ TAMBAHAN: Cek apakah ini jawaban benar pertama
-      const isFirstCorrect = isCorrect && !this.quizHasWinner;
-      
-      // ⭐ TAMBAHAN: Simpan jawaban ke history
-      const answerData = {
-        username: username,
-        answer: isValidAnswer ? answerKey : "?",
-        isCorrect: isCorrect,
-        correctAnswer: this.currentQuestion.correct,
-        remainingTime: remainingText,
-        country: countryInfo.countryCode,
-        countryName: countryInfo.countryName,
-        timestamp: Date.now(),
-        isWinner: isFirstCorrect,
-        isFirstCorrect: isFirstCorrect
-      };
-      
-      // ⭐ TAMBAHAN: Simpan ke history per user
-      if (!this.quizAnswerHistory.has(username)) {
-        this.quizAnswerHistory.set(username, []);
-      }
-      this.quizAnswerHistory.get(username).push(answerData);
-      
-      // ⭐ TAMBAHAN: Simpan ke semua jawaban
-      this.quizAllAnswers.push(answerData);
-      
-      // ⭐ BROADCAST SEMUA JAWABAN
-      this._broadcastToRoom(QUIZ_ROOM, ["quizAllAnswers", {
-        answers: this.quizAllAnswers,
-        total: this.quizAllAnswers.length,
-        hasWinner: this.quizHasWinner,
-        winner: this.quizWinner,
-        currentQuestion: {
-          question: this.currentQuestion.question,
-          correct: this.currentQuestion.correct,
-          options: this.currentQuestion.options
-        }
-      }]);
-      
-      // ⭐ BROADCAST setiap jawaban individual
-      this._broadcastQuizResult("quizAnswerResult", {
-        username,
-        answer: isValidAnswer ? answerKey : "?",
-        isCorrect,
-        isFirstCorrect: isFirstCorrect,
-        correctAnswer: this.currentQuestion.correct,
-        remainingTime: remainingText,
-        country: countryInfo.countryCode,
-        countryName: countryInfo.countryName,
-        allAnswersCount: this.quizAllAnswers.length,
-        hasWinner: this.quizHasWinner,
-        winner: this.quizWinner
-      });
-      
-      // ⭐ BROADCAST notifikasi jawaban
+
+      // ⭐ PERBAIKAN 3: TETAP BROADCAST jawaban user ke semua (termasuk jika sudah ada pemenang)
       this._broadcastQuizNotification("quizAnswer", {
         username: username,
         answer: isValidAnswer ? answerKey : "?",
         isCorrect: isCorrect,
-        isFirstCorrect: isFirstCorrect,
         remainingTime: remainingText,
         country: countryInfo.countryCode,
-        countryName: countryInfo.countryName,
-        allAnswersCount: this.quizAllAnswers.length,
-        hasWinner: this.quizHasWinner,
-        winner: this.quizWinner
+        countryName: countryInfo.countryName
       });
-      
-      // Tandai user sudah menjawab
+
+      this._broadcastQuizResult("quizAnswerResult", {
+        username,
+        answer: isValidAnswer ? answerKey : "?",
+        isCorrect,
+        correctAnswer: this.currentQuestion.correct,
+        remainingTime: remainingText,
+        country: countryInfo.countryCode,
+        countryName: countryInfo.countryName
+      });
+
       this.quizAnswered.add(username);
-      
-      // ⭐ Jika jawaban benar dan belum ada winner -> INI PEMENANGNYA
+
+      // ⭐ PERBAIKAN 4: Jika jawaban benar dan belum ada pemenang
       if (isCorrect && !this.quizHasWinner) {
-        // SET WINNER (hanya yang pertama benar)
         this.quizHasWinner = true;
         this.quizWinner = username;
-        
-        // ⭐ UPDATE data winner di semua jawaban
-        const winnerIndex = this.quizAllAnswers.length - 1;
-        if (this.quizAllAnswers[winnerIndex]) {
-          this.quizAllAnswers[winnerIndex].isWinner = true;
-          this.quizAllAnswers[winnerIndex].isFirstCorrect = true;
-        }
-        
-        // ⭐ BROADCAST WINNER
         this._broadcastQuizNotification("quizWinnerWithCountry", {
           username: username,
           country: countryInfo.countryCode,
-          countryName: countryInfo.countryName,
-          allAnswers: this.quizAllAnswers,
-          totalAnswers: this.quizAllAnswers.length
-        });
-        
-        // ⭐ BROADCAST winner dengan semua jawaban
-        this._broadcastToRoom(QUIZ_ROOM, ["quizWinnerWithAllAnswers", {
-          winner: username,
-          allAnswers: this.quizAllAnswers,
-          totalAnswers: this.quizAllAnswers.length,
-          correctAnswer: this.currentQuestion.correct
-        }]);
-        
-        // ⭐ PROSES WINNER (tambah poin)
-        await this._handleQuizWinner(username, this.currentQuestion.correct);
-        
-      } else {
-        // ⭐ Jika bukan winner, tetap broadcast bahwa ini bukan winner
-        this._broadcastQuizNotification("quizAnswerNotWinner", {
-          username: username,
-          answer: isValidAnswer ? answerKey : "?",
-          isCorrect: isCorrect,
-          correctAnswer: this.currentQuestion.correct,
-          message: isCorrect ? "Correct but not first!" : "Wrong answer!",
-          hasWinner: this.quizHasWinner,
-          winner: this.quizWinner
+          countryName: countryInfo.countryName
         });
       }
-      
+
     } catch(e) {
-      this._safeSend(ws, ["quizError", e.message]);
+      // Error internal - silent ignore untuk user
+      console.error('submitQuizAnswer error:', e);
     }
   }
 
@@ -2400,13 +2313,6 @@ export class GameServer extends CPUProtection {
     try {
       const wsIds = this.wsClients.get(QUIZ_ROOM);
       if (!wsIds?.size) return;
-      
-      // ⭐ TAMBAHAN: Jika tipe adalah quizAnswerResult, tambahkan semua jawaban
-      if (type === "quizAnswerResult" && this.quizAllAnswers) {
-        data.allAnswers = this.quizAllAnswers;
-        data.totalAnswers = this.quizAllAnswers.length;
-      }
-      
       const msgStr = JSON.stringify([type, data]);
       const wsIdArray = Array.from(wsIds);
       const batchSize = CONSTANTS.BROADCAST_BATCH_SIZE;
@@ -4195,7 +4101,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ⭐ TAMBAHAN: Event untuk hapus last week winner
       if (evt === "deleteQuizLastWeekWinner") {
         try {
           if (this.env?.QUESTIONS) {
@@ -4279,41 +4184,6 @@ export class GameServer extends CPUProtection {
           totalTimeLeft: Math.max(0, Math.round((CONSTANTS.QUIZ_TOTAL_TIME_MS - (Date.now() - this._questionStartTime)) / 1000))
         };
         this._safeSend(ws, ["quizStatus", status]);
-        return;
-      }
-
-      // ⭐ TAMBAHAN: Event untuk mendapatkan semua jawaban quiz
-      if (evt === "getAllQuizAnswers") {
-        this._safeSend(ws, ["allQuizAnswers", {
-          answers: this.quizAllAnswers || [],
-          total: this.quizAllAnswers?.length || 0,
-          hasWinner: this.quizHasWinner,
-          winner: this.quizWinner,
-          currentQuestion: this.currentQuestion ? {
-            question: this.currentQuestion.question,
-            correct: this.currentQuestion.correct,
-            options: this.currentQuestion.options
-          } : null
-        }]);
-        return;
-      }
-
-      // ⭐ TAMBAHAN: Event untuk mendapatkan history jawaban per user
-      if (evt === "getQuizAnswerHistory") {
-        const username = data[1];
-        if (username && this.quizAnswerHistory.has(username)) {
-          this._safeSend(ws, ["quizAnswerHistory", {
-            username: username,
-            answers: this.quizAnswerHistory.get(username),
-            total: this.quizAnswerHistory.get(username).length
-          }]);
-        } else {
-          this._safeSend(ws, ["quizAnswerHistory", {
-            username: username || 'unknown',
-            answers: [],
-            total: 0
-          }]);
-        }
         return;
       }
 
@@ -4613,13 +4483,8 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ⭐ ============================================================
-  // ⭐ ==================== QUIZ WEEKLY RESET ====================
-  // ⭐ ============================================================
+  // ==================== QUIZ WEEKLY RESET ====================
 
-  /**
-   * Mendapatkan minggu terakhir kali reset dilakukan
-   */
   async _getLastResetWeek() {
     try {
       if (!this.env?.QUESTIONS) return null;
@@ -4629,9 +4494,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Menyimpan minggu terakhir kali reset dilakukan
-   */
   async _setLastResetWeek(week) {
     try {
       if (!this.env?.QUESTIONS) return false;
@@ -4642,28 +4504,18 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Mengecek dan melakukan reset mingguan jika diperlukan
-   * Akan dijalankan otomatis setiap kali quiz dimulai
-   */
   async _checkAndResetWeeklyQuiz() {
     try {
       if (!this.env?.QUESTIONS) return false;
       
-      // 1. Generate minggu saat ini
       const currentWeek = this._generateCurrentWeek();
-      
-      // 2. Ambil minggu terakhir reset
       const lastResetWeek = await this._getLastResetWeek();
       
-      // 3. Jika minggu berbeda, lakukan reset
       if (lastResetWeek !== currentWeek) {
         console.log(`🔄 Weekly Quiz Reset: ${lastResetWeek || 'NEVER'} -> ${currentWeek}`);
         
-        // 4. Ambil points saat ini
         const points = await this._getQuizPoints();
         
-        // 5. Jika ada points, cari pemenang
         if (points && Object.keys(points).length > 0) {
           let winner = null;
           let highestScore = 0;
@@ -4675,7 +4527,6 @@ export class GameServer extends CPUProtection {
             }
           }
           
-          // 6. Simpan pemenang minggu lalu
           if (winner) {
             const winnerData = {
               username: winner,
@@ -4684,7 +4535,6 @@ export class GameServer extends CPUProtection {
             };
             await this._setLastWeekWinner(winnerData);
             
-            // Broadcast pemenang
             this._broadcastToRoom(QUIZ_ROOM, [
               "quizLastWeekWinner", 
               winner, 
@@ -4694,13 +4544,9 @@ export class GameServer extends CPUProtection {
           }
         }
         
-        // 7. RESET POINTS (HAPUS SEMUA)
         await this._setQuizPoints({});
-        
-        // 8. UPDATE last reset week
         await this._setLastResetWeek(currentWeek);
         
-        // 9. Notifikasi ke semua player
         this._broadcastToRoom(QUIZ_ROOM, [
           "systemMessage", 
           `📊 Weekly Quiz Reset! New week: ${currentWeek}`
@@ -4724,17 +4570,12 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  /**
-   * Scheduler untuk auto reset mingguan (cek setiap 1 jam)
-   */
   _startWeeklyResetChecker() {
-    // Hapus timer lama jika ada
     if (this._weeklyResetTimer) {
       clearInterval(this._weeklyResetTimer);
       this._weeklyResetTimer = null;
     }
     
-    // Jalankan timer baru (cek setiap 1 jam)
     this._weeklyResetTimer = setInterval(async () => {
       try {
         if (this.closing || this.isDestroyed) {
@@ -4744,7 +4585,6 @@ export class GameServer extends CPUProtection {
         }
         await this._checkAndResetWeeklyQuiz();
       } catch(e) {}
-    }, 3600000); // 1 jam
+    }, 3600000);
   }
-  // ⭐ AKHIR TAMBAHAN
 }
