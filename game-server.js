@@ -561,30 +561,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  async _startRecordingWinners(roomName) {
-    try {
-      if (!roomName) return false;
-      
-      this._recordingEnabled.set(roomName, true);
-      
-      if (this.env?.QUESTIONS) {
-        await this.env.QUESTIONS.put(
-          CONSTANTS.LOWCARD_RECORDING_KEY + roomName, 
-          'true'
-        );
-      }
-      
-      this._broadcastToRoom(roomName, ["recordingStatus", true]);
-      this._broadcastToRoom(roomName, ["systemMessage", "📢 Recording ENABLED for this room!"]);
-      
-      return true;
-    } catch(e) {
-      return false;
-    }
-  }
-
-  // ==================== STOP RECORDING WINNERS ====================
-=
+// ==================== STOP RECORDING WINNERS ====================
 async _stopRecordingWinners(roomName) {
   try {
     if (!roomName) return false;
