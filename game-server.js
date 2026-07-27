@@ -505,11 +505,10 @@ export class GameServer extends CPUProtection {
 
       this._recordingEnabled = new Map();
 
-      // Properti untuk auto reset mingguan
       this._weeklyResetTimer = null;
       this._lastResetWeek = null;
 
-      // Untuk menyimpan jawaban saat reading time
+      // ⭐ UNTUK MENYIMPAN JAWABAN SAAT READING TIME
       this._readingAnswers = new Map();
 
       this.countryQuizSystem = new CountryBasedQuizSystem(this);
@@ -1770,7 +1769,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== _showQuestion ====================
   async _showQuestion() {
     try {
       await this._checkAndResetWeeklyQuiz();
@@ -1947,7 +1945,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== _processPendingReadingAnswers ====================
+  // ⭐ PROSES JAWABAN YANG TERTUNDA SAAT READING TIME
   _processPendingReadingAnswers() {
     try {
       if (!this._readingAnswers || this._readingAnswers.size === 0) return;
@@ -1974,7 +1972,7 @@ export class GameServer extends CPUProtection {
         
         this._broadcastQuizNotification("quizAnswer", {
           username: username,
-          answer: data.answer,
+          answer: data.display || data.answer,
           isCorrect: isCorrect,
           remainingTime: `${this._getAnswerRemainingTime()}s remaining`,
           fromPending: true
@@ -1982,7 +1980,7 @@ export class GameServer extends CPUProtection {
         
         this._broadcastQuizResult("quizAnswerResult", {
           username,
-          answer: data.answer,
+          answer: data.display || data.answer,
           isCorrect,
           correctAnswer: correctAnswer,
           remainingTime: `${this._getAnswerRemainingTime()}s remaining`,
@@ -2041,7 +2039,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== submitQuizAnswer ====================
+  // ⭐ SUBMIT QUIZ ANSWER - DENGAN TAMPILAN JAWABAN
   async submitQuizAnswer(ws, username, answer) {
     try {
       if (!ws || !username) {
@@ -2112,11 +2110,13 @@ export class GameServer extends CPUProtection {
       const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
       const wsId = this._getWsId(ws);
       const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
+      const answerDisplay = isValidAnswer ? answerKey : "?";
       
+      // ⭐ JIKA DALAM READING TIME - TAMPILKAN JAWABAN
       if (isReadingTime) {
         this._broadcastQuizNotification("quizAnswerReading", {
           username: username,
-          answer: isValidAnswer ? answerKey : "?",
+          answer: answerDisplay,
           isCorrect: false,
           remainingTime: `${readingTimeLeft}s reading time left`,
           status: "reading",
@@ -2126,9 +2126,9 @@ export class GameServer extends CPUProtection {
         
         this._safeSend(ws, ["quizAnswerReading", {
           username: username,
-          answer: isValidAnswer ? answerKey : "?",
+          answer: answerDisplay,
           readingTimeLeft: readingTimeLeft,
-          message: `⏳ Jawaban tercatat! Tunggu ${readingTimeLeft}s lagi untuk validasi.`,
+          message: `⏳ Jawaban "${answerDisplay}" tercatat! Tunggu ${readingTimeLeft}s lagi.`,
           status: "waiting"
         }]);
         
@@ -2139,12 +2139,14 @@ export class GameServer extends CPUProtection {
           answer: answerKey,
           isValid: isValidAnswer,
           timestamp: Date.now(),
-          wsId: wsId
+          wsId: wsId,
+          display: answerDisplay
         });
         
         return;
       }
       
+      // ⭐ VALIDASI NORMAL - TAMPILKAN JAWABAN
       if (this._readingAnswers && this._readingAnswers.has(username)) {
         const pending = this._readingAnswers.get(username);
         if (pending.answer === answerKey) {
@@ -2165,7 +2167,7 @@ export class GameServer extends CPUProtection {
           
           this._broadcastQuizNotification("quizAnswer", {
             username: username,
-            answer: pending.answer,
+            answer: pending.display || pending.answer,
             isCorrect: isCorrect,
             remainingTime: `${answerRemaining}s remaining`,
             country: countryInfo.countryCode,
@@ -2175,7 +2177,7 @@ export class GameServer extends CPUProtection {
           
           this._broadcastQuizResult("quizAnswerResult", {
             username,
-            answer: pending.answer,
+            answer: pending.display || pending.answer,
             isCorrect,
             correctAnswer: this.currentQuestion.correct,
             remainingTime: `${answerRemaining}s remaining`,
@@ -2193,7 +2195,7 @@ export class GameServer extends CPUProtection {
       
       this._broadcastQuizNotification("quizAnswer", {
         username: username,
-        answer: isValidAnswer ? answerKey : "?",
+        answer: answerDisplay,
         isCorrect: isCorrect,
         remainingTime: remainingText,
         country: countryInfo.countryCode,
@@ -2202,7 +2204,7 @@ export class GameServer extends CPUProtection {
       
       this._broadcastQuizResult("quizAnswerResult", {
         username,
-        answer: isValidAnswer ? answerKey : "?",
+        answer: answerDisplay,
         isCorrect,
         correctAnswer: this.currentQuestion.correct,
         remainingTime: remainingText,
