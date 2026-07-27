@@ -647,11 +647,8 @@ export class GameServer extends CPUProtection {
       const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
       if (!isRecordingEnabled) {
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-          username: "",
-          wins: "0x",
-          room: room,
-          totalWinners: 0,
           winners: {},
+          room: room,
           recording: false,
           updatedAt: new Date().toISOString(),
           type: 'sendWinnersToRoom',
@@ -665,11 +662,8 @@ export class GameServer extends CPUProtection {
       
       if (Object.keys(winners).length === 0) {
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-          username: "",
-          wins: "0x",
-          room: room,
-          totalWinners: 0,
           winners: {},
+          room: room,
           recording: true,
           updatedAt: new Date().toISOString(),
           type: 'sendWinnersToRoom',
@@ -679,11 +673,8 @@ export class GameServer extends CPUProtection {
       }
       
       this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-        username: "",
-        wins: "0x",
-        room: room,
-        totalWinners: Object.keys(winners).length,
         winners: winners,
+        room: room,
         recording: true,
         updatedAt: new Date().toISOString(),
         type: 'sendWinnersToRoom'
@@ -2840,12 +2831,16 @@ export class GameServer extends CPUProtection {
         const winner = activePlayers[0]?.name || "Unknown";
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
         
-        // ==================== SAVE WINNER & BROADCAST ====================
+        // SAVE WINNER KE KV JIKA RECORDING ACTIVE
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winner);
+          
+          // ✅ AMBIL SEMUA WINNERS DARI KV
+          const allWinners = await this._getLowCardWinners(room);
+          
+          // ✅ BROADCAST lowCardWinnerUpdate DENGAN FORMAT winners OBJECT
           this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-            username: winner,
-            wins: "1x",
+            winners: allWinners,
             room: room,
             recording: true,
             updatedAt: new Date().toISOString(),
@@ -2853,11 +2848,12 @@ export class GameServer extends CPUProtection {
           }]);
         }
         
-        this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
-        
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
+        
+        // ✅ BROADCAST gameLowCardWinner (notifikasi)
+        this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
         this._scheduleGameCleanup(room, game);
       }
     } catch(e) {}
@@ -3046,11 +3042,16 @@ export class GameServer extends CPUProtection {
             const winner = newActive[0]?.name || "Unknown";
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
             
+            // SAVE WINNER KE KV JIKA RECORDING ACTIVE
             if (game._startedByRecording) {
               await this._addLowCardWinner(room, winner);
+              
+              // ✅ AMBIL SEMUA WINNERS DARI KV
+              const allWinners = await this._getLowCardWinners(room);
+              
+              // ✅ BROADCAST lowCardWinnerUpdate DENGAN FORMAT winners OBJECT
               this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-                username: winner,
-                wins: "1x",
+                winners: allWinners,
                 room: room,
                 recording: true,
                 updatedAt: new Date().toISOString(),
@@ -3058,11 +3059,12 @@ export class GameServer extends CPUProtection {
               }]);
             }
             
-            this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
-            
             game._gameEnded = true;
             game._isActive = false;
             game._endTime = Date.now();
+            
+            // ✅ BROADCAST gameLowCardWinner (notifikasi)
+            this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
             this._scheduleGameCleanup(room, game);
           } else {
             game._gameEnded = true;
@@ -3204,11 +3206,16 @@ export class GameServer extends CPUProtection {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
+        // SAVE WINNER KE KV JIKA RECORDING ACTIVE
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
+          
+          // ✅ AMBIL SEMUA WINNERS DARI KV
+          const allWinners = await this._getLowCardWinners(room);
+          
+          // ✅ BROADCAST lowCardWinnerUpdate DENGAN FORMAT winners OBJECT
           this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-            username: winnerName,
-            wins: "1x",
+            winners: allWinners,
             room: room,
             recording: true,
             updatedAt: new Date().toISOString(),
@@ -3216,6 +3223,7 @@ export class GameServer extends CPUProtection {
           }]);
         }
         
+        // ✅ BROADCAST gameLowCardWinner (notifikasi)
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
         game._gameEnded = true;
@@ -3267,11 +3275,16 @@ export class GameServer extends CPUProtection {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
+        // SAVE WINNER KE KV JIKA RECORDING ACTIVE
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
+          
+          // ✅ AMBIL SEMUA WINNERS DARI KV
+          const allWinners = await this._getLowCardWinners(room);
+          
+          // ✅ BROADCAST lowCardWinnerUpdate DENGAN FORMAT winners OBJECT
           this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-            username: winnerName,
-            wins: "1x",
+            winners: allWinners,
             room: room,
             recording: true,
             updatedAt: new Date().toISOString(),
@@ -3279,6 +3292,7 @@ export class GameServer extends CPUProtection {
           }]);
         }
         
+        // ✅ BROADCAST gameLowCardWinner (notifikasi)
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
         game._gameEnded = true;
@@ -3891,11 +3905,8 @@ export class GameServer extends CPUProtection {
         
         if (Object.keys(winners).length === 0) {
           this._safeSend(ws, ["lowCardWinnerUpdate", {
-            username: "",
-            wins: "0x",
-            room: room,
-            totalWinners: 0,
             winners: {},
+            room: room,
             recording: isRecordingEnabled,
             updatedAt: new Date().toISOString(),
             type: 'getRoomWinners',
@@ -3903,11 +3914,8 @@ export class GameServer extends CPUProtection {
           }]);
         } else {
           this._safeSend(ws, ["lowCardWinnerUpdate", {
-            username: "",
-            wins: "0x",
-            room: room,
-            totalWinners: Object.keys(winners).length,
             winners: winners,
+            room: room,
             recording: isRecordingEnabled,
             updatedAt: new Date().toISOString(),
             type: 'getRoomWinners'
@@ -3969,11 +3977,8 @@ export class GameServer extends CPUProtection {
         
         if (Object.keys(winners).length === 0) {
           this._safeSend(ws, ["lowCardWinnerUpdate", {
-            username: "",
-            wins: "0x",
-            room: room,
-            totalWinners: 0,
             winners: {},
+            room: room,
             recording: isRecordingEnabled,
             updatedAt: new Date().toISOString(),
             type: 'refreshResponse',
@@ -3981,11 +3986,8 @@ export class GameServer extends CPUProtection {
           }]);
         } else {
           this._safeSend(ws, ["lowCardWinnerUpdate", {
-            username: "",
-            wins: "0x",
-            room: room,
-            totalWinners: Object.keys(winners).length,
             winners: winners,
+            room: room,
             recording: isRecordingEnabled,
             updatedAt: new Date().toISOString(),
             type: 'refreshResponse'
