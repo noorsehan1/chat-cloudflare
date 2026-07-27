@@ -579,7 +579,6 @@ async _stopRecordingWinners(roomName) {
     
     // BROADCAST KE ROOM
     this._broadcastToRoom(roomName, ["recordingStatus", false]);
-    this._broadcastToRoom(roomName, ["systemMessage", "📢 Recording DISABLED and winners DELETED for this room!"]);
     
     // KIRIM lowCardWinnerUpdate DENGAN winners KOSONG
     this._broadcastToRoom(roomName, ["lowCardWinnerUpdate", {
