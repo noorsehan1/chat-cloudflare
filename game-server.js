@@ -561,41 +561,73 @@ export class GameServer extends CPUProtection {
     }
   }
 
-// ==================== STOP RECORDING WINNERS ====================
-async _stopRecordingWinners(roomName) {
-  try {
-    if (!roomName) return false;
-    
-    this._recordingEnabled.set(roomName, false);
-    
-    if (this.env?.QUESTIONS) {
-      // HAPUS STATUS RECORDING DARI KV
-      await this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + roomName);
+  // ==================== START RECORDING WINNERS ====================
+  async _startRecordingWinners(roomName) {
+    try {
+      if (!roomName) return false;
       
-      // HAPUS SEMUA DATA WINNERS DARI KV
-      const winnerKey = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
-      await this.env.QUESTIONS.delete(winnerKey);
+      this._recordingEnabled.set(roomName, true);
+      
+      if (this.env?.QUESTIONS) {
+        await this.env.QUESTIONS.put(
+          CONSTANTS.LOWCARD_RECORDING_KEY + roomName, 
+          'true'
+        );
+      }
+      
+      // BROADCAST KE ROOM
+      this._broadcastToRoom(roomName, ["recordingStatus", true]);
+      
+      // KIRIM lowCardWinnerUpdate DENGAN winners DARI KV
+      const winners = await this._getLowCardWinners(roomName);
+      this._broadcastToRoom(roomName, ["lowCardWinnerUpdate", {
+        winners: winners,
+        room: roomName,
+        recording: true,
+        updatedAt: new Date().toISOString(),
+        type: 'startRecording'
+      }]);
+      
+      return true;
+    } catch(e) {
+      return false;
     }
-    
-    // BROADCAST KE ROOM
-    this._broadcastToRoom(roomName, ["recordingStatus", false]);
-    
-    // KIRIM lowCardWinnerUpdate DENGAN winners KOSONG
-    this._broadcastToRoom(roomName, ["lowCardWinnerUpdate", {
-      winners: {},
-      room: roomName,
-      recording: false,
-      updatedAt: new Date().toISOString(),
-      type: 'stopRecording',
-      message: "Recording disabled and winners deleted"
-    }]);
-    
-    return true;
-  } catch(e) {
-    return false;
   }
-}
-  
+
+  // ==================== STOP RECORDING WINNERS ====================
+  async _stopRecordingWinners(roomName) {
+    try {
+      if (!roomName) return false;
+      
+      this._recordingEnabled.set(roomName, false);
+      
+      if (this.env?.QUESTIONS) {
+        // HAPUS STATUS RECORDING DARI KV
+        await this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + roomName);
+        
+        // HAPUS SEMUA DATA WINNERS DARI KV
+        const winnerKey = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
+        await this.env.QUESTIONS.delete(winnerKey);
+      }
+      
+      // BROADCAST KE ROOM
+      this._broadcastToRoom(roomName, ["recordingStatus", false]);
+      
+      // KIRIM lowCardWinnerUpdate DENGAN winners KOSONG
+      this._broadcastToRoom(roomName, ["lowCardWinnerUpdate", {
+        winners: {},
+        room: roomName,
+        recording: false,
+        updatedAt: new Date().toISOString(),
+        type: 'stopRecording',
+        message: "Recording disabled and winners deleted"
+      }]);
+      
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
 
   async _addLowCardWinner(room, username) {
     try {
@@ -803,8 +835,6 @@ async _stopRecordingWinners(roomName) {
           bet: betAmount,
           timestamp: Date.now()
         }]);
-        
-        this._broadcastToRoom(room, ["systemMessage", `🎮 ADMIN started a RECORDING game! Bet: ${betAmount} coins`]);
         
         this._safeSend(ws, ["gameStartWithRecordingSuccess", {
           room: room,
@@ -3840,7 +3870,6 @@ async _stopRecordingWinners(roomName) {
         
         if (success) {
           this._broadcastToRoom(roomName, ["recordingStatus", true]);
-          this._broadcastToRoom(roomName, ["systemMessage", "📢 ADMIN has ENABLED winner recording for this room!"]);
         }
         return;
       }
@@ -3876,7 +3905,6 @@ async _stopRecordingWinners(roomName) {
         
         if (success) {
           this._broadcastToRoom(roomName, ["recordingStatus", false]);
-          this._broadcastToRoom(roomName, ["systemMessage", "📢 ADMIN has DISABLED winner recording for this room!"]);
         }
         return;
       }
