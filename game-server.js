@@ -505,6 +505,10 @@ export class GameServer extends CPUProtection {
 
       this._recordingEnabled = new Map();
 
+      // ⭐ TAMBAHAN: Properti untuk auto reset mingguan
+      this._weeklyResetTimer = null;
+      this._lastResetWeek = null;
+
       this.countryQuizSystem = new CountryBasedQuizSystem(this);
 
       this._loadAllQuestionsToMemory();
@@ -584,46 +588,45 @@ export class GameServer extends CPUProtection {
   }
 
   async _stopRecordingWinners(roomName) {
-  try {
-    if (!roomName) return false;
-    
-    const room = roomName.trim();
-    this._recordingEnabled.set(room, false);
-    
-    if (this.env?.QUESTIONS) {
-      const statusKey = CONSTANTS.LOWCARD_RECORDING_KEY + room;
-      const winnerKey = CONSTANTS.LOWCARD_WINNER_KEY + room;
+    try {
+      if (!roomName) return false;
       
-      await this.env.QUESTIONS.delete(statusKey);
-      await this.env.QUESTIONS.delete(winnerKey);
+      const room = roomName.trim();
+      this._recordingEnabled.set(room, false);
       
-      // Hapus juga semua key dengan prefix yang mengandung nama room
-      const prefixes = [
-        CONSTANTS.LOWCARD_WINNER_KEY,
-        CONSTANTS.LOWCARD_RECORDING_KEY
-      ];
-      
-      for (const prefix of prefixes) {
-        try {
-          const list = await this.env.QUESTIONS.list({ prefix: prefix });
-          for (const key of list.keys) {
-            if (key.name === prefix + room || key.name.includes(room)) {
-              await this.env.QUESTIONS.delete(key.name);
+      if (this.env?.QUESTIONS) {
+        const statusKey = CONSTANTS.LOWCARD_RECORDING_KEY + room;
+        const winnerKey = CONSTANTS.LOWCARD_WINNER_KEY + room;
+        
+        await this.env.QUESTIONS.delete(statusKey);
+        await this.env.QUESTIONS.delete(winnerKey);
+        
+        const prefixes = [
+          CONSTANTS.LOWCARD_WINNER_KEY,
+          CONSTANTS.LOWCARD_RECORDING_KEY
+        ];
+        
+        for (const prefix of prefixes) {
+          try {
+            const list = await this.env.QUESTIONS.list({ prefix: prefix });
+            for (const key of list.keys) {
+              if (key.name === prefix + room || key.name.includes(room)) {
+                await this.env.QUESTIONS.delete(key.name);
+              }
             }
+          } catch(e) {
+            // Silent ignore
           }
-        } catch(e) {
-          // Silent ignore
         }
       }
+      
+      this._broadcastToRoom(room, ["recordingStatus", false]);
+      
+      return true;
+    } catch(e) {
+      return false;
     }
-    
-    this._broadcastToRoom(room, ["recordingStatus", false]);
-    
-    return true;
-  } catch(e) {
-    return false;
   }
-}
 
   async _addLowCardWinner(room, username) {
     try {
@@ -1008,6 +1011,16 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  async _deleteLastWeekWinner() {
+    try {
+      if (!this.env?.QUESTIONS) return false;
+      await this.env.QUESTIONS.delete(CONSTANTS.QUIZ_LAST_WEEK_WINNER);
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
   _generateCurrentWeek() {
     const now = new Date();
     const year = now.getUTCFullYear();
@@ -1222,6 +1235,10 @@ export class GameServer extends CPUProtection {
       if (this._recoveryAttempts >= this._maxRecoveryAttempts) return;
       this._resetCriticalState();
       this._cleanupResources();
+      
+      // ⭐ TAMBAHAN: Restart scheduler reset saat recovery
+      this._startWeeklyResetChecker();
+      
       if (!this._initialized && !this._initializing) {
         this._initAsync();
       }
@@ -1376,6 +1393,10 @@ export class GameServer extends CPUProtection {
       await this.countryQuizSystem.loadAllQuestions();
       await this._initQuiz();
       this._startQuizScheduler();
+      
+      // ⭐ TAMBAHAN: Jalankan scheduler reset mingguan
+      this._startWeeklyResetChecker();
+      
       this._initialized = true;
       this._initializing = false;
       this._errorCount = 0;
@@ -1745,8 +1766,12 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  // ⭐ MODIFIKASI: Tambahkan auto reset di awal _showQuestion()
   async _showQuestion() {
     try {
+      // ⭐ TAMBAHAN: CEK DAN RESET MINGGUAN DI AWAL QUIZ
+      await this._checkAndResetWeeklyQuiz();
+
       if (this._isShowingQuestion) return;
       this._lastActivityTime = Date.now();
       this._isQuizIdle = false;
@@ -2852,14 +2877,9 @@ export class GameServer extends CPUProtection {
         const winner = activePlayers[0]?.name || "Unknown";
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
         
-        // SAVE WINNER KE KV JIKA RECORDING ACTIVE
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winner);
-          
-          // ✅ AMBIL SEMUA WINNERS DARI KV
           const allWinners = await this._getLowCardWinners(room);
-          
-          // ✅ BROADCAST lowCardWinnerUpdate DENGAN FORMAT winners OBJECT
           this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
             winners: allWinners,
             room: room,
@@ -2872,8 +2892,6 @@ export class GameServer extends CPUProtection {
         game._gameEnded = true;
         game._isActive = false;
         game._endTime = Date.now();
-        
-        // ✅ BROADCAST gameLowCardWinner (notifikasi)
         this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
         this._scheduleGameCleanup(room, game);
       }
@@ -3063,14 +3081,9 @@ export class GameServer extends CPUProtection {
             const winner = newActive[0]?.name || "Unknown";
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
             
-            // SAVE WINNER KE KV JIKA RECORDING ACTIVE
             if (game._startedByRecording) {
               await this._addLowCardWinner(room, winner);
-              
-              // ✅ AMBIL SEMUA WINNERS DARI KV
               const allWinners = await this._getLowCardWinners(room);
-              
-              // ✅ BROADCAST lowCardWinnerUpdate DENGAN FORMAT winners OBJECT
               this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
                 winners: allWinners,
                 room: room,
@@ -3083,8 +3096,6 @@ export class GameServer extends CPUProtection {
             game._gameEnded = true;
             game._isActive = false;
             game._endTime = Date.now();
-            
-            // ✅ BROADCAST gameLowCardWinner (notifikasi)
             this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
             this._scheduleGameCleanup(room, game);
           } else {
@@ -3221,20 +3232,14 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // === KONDISI PEMENANG ===
       if (entries.length === 1 && eliminated.size === activeIds.length - 1) {
         const winnerId = entries[0][0];
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        // SAVE WINNER KE KV JIKA RECORDING ACTIVE
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
-          
-          // ✅ AMBIL SEMUA WINNERS DARI KV
           const allWinners = await this._getLowCardWinners(room);
-          
-          // ✅ BROADCAST lowCardWinnerUpdate DENGAN FORMAT winners OBJECT
           this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
             winners: allWinners,
             room: room,
@@ -3244,7 +3249,6 @@ export class GameServer extends CPUProtection {
           }]);
         }
         
-        // ✅ BROADCAST gameLowCardWinner (notifikasi)
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
         game._gameEnded = true;
@@ -3296,14 +3300,9 @@ export class GameServer extends CPUProtection {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        // SAVE WINNER KE KV JIKA RECORDING ACTIVE
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
-          
-          // ✅ AMBIL SEMUA WINNERS DARI KV
           const allWinners = await this._getLowCardWinners(room);
-          
-          // ✅ BROADCAST lowCardWinnerUpdate DENGAN FORMAT winners OBJECT
           this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
             winners: allWinners,
             room: room,
@@ -3313,7 +3312,6 @@ export class GameServer extends CPUProtection {
           }]);
         }
         
-        // ✅ BROADCAST gameLowCardWinner (notifikasi)
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         
         game._gameEnded = true;
@@ -3837,7 +3835,6 @@ export class GameServer extends CPUProtection {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
 
-      // ==================== START RECORDING ====================
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
@@ -3873,7 +3870,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== STOP RECORDING ====================
       if (evt === "stopRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
@@ -3909,7 +3905,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== GET ROOM WINNERS ====================
       if (evt === "getRoomWinners") {
         const room = data[1];
         if (!room) {
@@ -3945,14 +3940,12 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== GET RECORDING STATUS ====================
       if (evt === "getRecordingStatus") {
         const roomName = data[1];
         await this.getRecordingStatus(ws, roomName);
         return;
       }
 
-      // ==================== SEND WINNERS TO ROOM ====================
       if (evt === "sendWinnersToRoom") {
         const room = data[1];
         if (!room) {
@@ -3973,14 +3966,12 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== START GAME WITH RECORDING (ADMIN) ====================
       if (evt === "startGameWithRecording") {
         const [_, room, bet, username] = data;
         await this._startGameWithRecording(ws, room, bet, username);
         return;
       }
 
-      // ==================== LOWCARD WINNER UPDATE ====================
       if (evt === "lowCardWinnerUpdate") {
         const room = data[1] || this._ensureRoomConsistency(ws);
         if (!room) {
@@ -4018,7 +4009,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== USER COUNTRY INFO ====================
       if (evt === "getUserCountryInfo") {
         const wsId = this._getWsId(ws);
         const info = this.countryQuizSystem.getUserCountryInfo(wsId);
@@ -4026,7 +4016,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== COUNTRY QUESTIONS ====================
       if (evt === "getCountryQuestions") {
         const countryCode = data[1] || 'ID';
         const questions = await this.countryQuizSystem.getQuestionsForCountry(countryCode);
@@ -4038,7 +4027,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== COUNTRY QUIZ STATUS ====================
       if (evt === "getCountryQuizStatus") {
         const countryCode = data[1] || 'ID';
         const info = COUNTRY_LANGUAGE_MAP[countryCode];
@@ -4053,28 +4041,24 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== TRANSLATION STATUS ====================
       if (evt === "getTranslationStatus") {
         const status = this.countryQuizSystem.getTranslationStatus();
         this._safeSend(ws, ["translationStatus", status]);
         return;
       }
 
-      // ==================== SWITCH ROOM ====================
       if (evt === "switchRoom") {
         const [_, room, username] = data;
         await this.switchRoom(ws, room, username);
         return;
       }
 
-      // ==================== SUBMIT QUIZ ANSWER ====================
       if (evt === "submitQuizAnswer") {
         const [_, username, answer] = data;
         await this.submitQuizAnswer(ws, username, answer);
         return;
       }
 
-      // ==================== GET QUIZ LAST WEEK WINNER ====================
       if (evt === "getQuizLastWeekWinner") {
         try {
           const winner = await this.env.QUESTIONS.get(CONSTANTS.QUIZ_LAST_WEEK_WINNER, 'json');
@@ -4089,7 +4073,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== GET QUIZ LEADERBOARD ====================
       if (evt === "getQuizLeaderboard") {
         try {
           let limit = data.length > 1 && typeof data[1] === 'number' ? Math.min(data[1], 30) : 10;
@@ -4107,7 +4090,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== DELETE QUIZ LAST WEEK WINNER ====================
+      // ⭐ TAMBAHAN: Event untuk hapus last week winner
       if (evt === "deleteQuizLastWeekWinner") {
         try {
           if (this.env?.QUESTIONS) {
@@ -4116,6 +4099,7 @@ export class GameServer extends CPUProtection {
             const check = await this.env.QUESTIONS.get(CONSTANTS.QUIZ_LAST_WEEK_WINNER, 'json');
             if (!check) {
               this._safeSend(ws, ["quizLastWeekWinnerDeleted", true, "Last week winner deleted successfully"]);
+              this._broadcastToRoom(QUIZ_ROOM, ["systemMessage", "📢 Last week winner data has been deleted"]);
             } else {
               this._safeSend(ws, ["quizLastWeekWinnerDeleted", false, "Failed to delete"]);
             }
@@ -4128,14 +4112,12 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== GET SUPPORTED LANGUAGES ====================
       if (evt === "getSupportedLanguages") {
         const languages = this.countryQuizSystem.getTranslationStatus();
         this._safeSend(ws, ["supportedLanguages", languages]);
         return;
       }
 
-      // ==================== GET USER LANGUAGE ====================
       if (evt === "getUserLanguage") {
         const wsId = this._getWsId(ws);
         const country = this.userCountry.get(wsId) || 'US';
@@ -4149,7 +4131,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== GET QUIZ NOTIFICATION ====================
       if (evt === "getQuizNotification") {
         const remaining = this._getQuestionRemainingTime();
         const remainingText = `${remaining}s remaining`;
@@ -4178,7 +4159,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== GET QUIZ STATUS ====================
       if (evt === "getQuizStatus") {
         const isQuizTime = this._isQuizTime();
         const timeLeft = this._getTimeLeftUntilNextQuiz();
@@ -4197,7 +4177,6 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== GAME EVENTS ====================
       const room = this._ensureRoomConsistency(ws);
       if (!room) { 
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
@@ -4493,4 +4472,139 @@ export class GameServer extends CPUProtection {
       ws.username = null;
     } catch(e) {}
   }
+
+  // ⭐ ============================================================
+  // ⭐ ==================== QUIZ WEEKLY RESET ====================
+  // ⭐ ============================================================
+
+  /**
+   * Mendapatkan minggu terakhir kali reset dilakukan
+   */
+  async _getLastResetWeek() {
+    try {
+      if (!this.env?.QUESTIONS) return null;
+      return await this.env.QUESTIONS.get('quiz_last_reset_week', 'json');
+    } catch(e) { 
+      return null; 
+    }
+  }
+
+  /**
+   * Menyimpan minggu terakhir kali reset dilakukan
+   */
+  async _setLastResetWeek(week) {
+    try {
+      if (!this.env?.QUESTIONS) return false;
+      await this.env.QUESTIONS.put('quiz_last_reset_week', JSON.stringify(week));
+      return true;
+    } catch(e) { 
+      return false; 
+    }
+  }
+
+  /**
+   * Mengecek dan melakukan reset mingguan jika diperlukan
+   * Akan dijalankan otomatis setiap kali quiz dimulai
+   */
+  async _checkAndResetWeeklyQuiz() {
+    try {
+      if (!this.env?.QUESTIONS) return false;
+      
+      // 1. Generate minggu saat ini
+      const currentWeek = this._generateCurrentWeek();
+      
+      // 2. Ambil minggu terakhir reset
+      const lastResetWeek = await this._getLastResetWeek();
+      
+      // 3. Jika minggu berbeda, lakukan reset
+      if (lastResetWeek !== currentWeek) {
+        console.log(`🔄 Weekly Quiz Reset: ${lastResetWeek || 'NEVER'} -> ${currentWeek}`);
+        
+        // 4. Ambil points saat ini
+        const points = await this._getQuizPoints();
+        
+        // 5. Jika ada points, cari pemenang
+        if (points && Object.keys(points).length > 0) {
+          let winner = null;
+          let highestScore = 0;
+          
+          for (const [username, score] of Object.entries(points)) {
+            if (score > highestScore) {
+              highestScore = score;
+              winner = username;
+            }
+          }
+          
+          // 6. Simpan pemenang minggu lalu
+          if (winner) {
+            const winnerData = {
+              username: winner,
+              score: highestScore,
+              week: lastResetWeek || currentWeek
+            };
+            await this._setLastWeekWinner(winnerData);
+            
+            // Broadcast pemenang
+            this._broadcastToRoom(QUIZ_ROOM, [
+              "quizLastWeekWinner", 
+              winner, 
+              highestScore, 
+              lastResetWeek || currentWeek
+            ]);
+          }
+        }
+        
+        // 7. RESET POINTS (HAPUS SEMUA)
+        await this._setQuizPoints({});
+        
+        // 8. UPDATE last reset week
+        await this._setLastResetWeek(currentWeek);
+        
+        // 9. Notifikasi ke semua player
+        this._broadcastToRoom(QUIZ_ROOM, [
+          "systemMessage", 
+          `📊 Weekly Quiz Reset! New week: ${currentWeek}`
+        ]);
+        
+        this._broadcastToRoom(QUIZ_ROOM, [
+          "quizReset", 
+          {
+            week: currentWeek,
+            message: "Points reset for new week! Good luck!"
+          }
+        ]);
+        
+        return true;
+      }
+      
+      return false;
+    } catch(e) {
+      console.error('Weekly reset error:', e);
+      return false;
+    }
+  }
+
+  /**
+   * Scheduler untuk auto reset mingguan (cek setiap 1 jam)
+   */
+  _startWeeklyResetChecker() {
+    // Hapus timer lama jika ada
+    if (this._weeklyResetTimer) {
+      clearInterval(this._weeklyResetTimer);
+      this._weeklyResetTimer = null;
+    }
+    
+    // Jalankan timer baru (cek setiap 1 jam)
+    this._weeklyResetTimer = setInterval(async () => {
+      try {
+        if (this.closing || this.isDestroyed) {
+          clearInterval(this._weeklyResetTimer);
+          this._weeklyResetTimer = null;
+          return;
+        }
+        await this._checkAndResetWeeklyQuiz();
+      } catch(e) {}
+    }, 3600000); // 1 jam
+  }
+  // ⭐ AKHIR TAMBAHAN
 }
