@@ -20,9 +20,9 @@ const CONSTANTS = {
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
   QUIZ_INTERVAL_MS: 30000,
-  QUIZ_READING_TIME_MS: 5000,
+  QUIZ_READING_TIME_MS: 10000,
   QUIZ_ANSWER_TIME_MS: 10000,
-  QUIZ_TOTAL_TIME_MS: 15000,
+  QUIZ_TOTAL_TIME_MS: 20000,
   QUIZ_BREAK_MS: 2000,
   QUIZ_START_DELAY_MS: 5000,
   MAX_RETRY_INIT_QUIZ: 2,
@@ -1973,8 +1973,9 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== submitQuizAnswer ====================
-  // ⭐ PERBAIKAN: Reading time = SILENT IGNORE, jawaban tetap di-broadcast meskipun sudah ada pemenang
+  // ==================== submitQuizAnswer (FULL PERBAIKAN) ====================
+  // ⭐ PERBAIKAN: Reading time = TAMPILKAN jawaban tapi TIDAK dihitung
+  // ⭐ Jika sudah ada pemenang = TETAP TAMPILKAN jawaban user
   async submitQuizAnswer(ws, username, answer) {
     try {
       if (!ws || !username) {
@@ -2012,9 +2013,36 @@ export class GameServer extends CPUProtection {
         }
       }
 
-      // ⭐ PERBAIKAN 1: Jika masih reading time, SILENT IGNORE - tidak kirim apa-apa
+      const wsId = this._getWsId(ws);
+      const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
+      const answerKey = answer ? answer.toUpperCase().trim() : '';
+      const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
+
+      // ⭐ PERBAIKAN 1: Jika masih reading time, TAMPILKAN jawaban tapi TIDAK dihitung
       if (!this._canSubmitAnswer) {
-        // TIDAK ADA BALASAN - SILENT IGNORE
+        // Broadcast jawaban dengan status "reading" - tidak dihitung
+        this._broadcastQuizNotification("quizReadingAnswer", {
+          username: username,
+          answer: isValidAnswer ? answerKey : "?",
+          isReading: true,
+          message: "📝 " + username + " answered during reading time (not counted)",
+          country: countryInfo.countryCode,
+          countryName: countryInfo.countryName,
+          timestamp: Date.now()
+        });
+
+        this._broadcastQuizResult("quizReadingAnswerResult", {
+          username,
+          answer: isValidAnswer ? answerKey : "?",
+          isReading: true,
+          message: "Reading time answer - not counted",
+          country: countryInfo.countryCode,
+          countryName: countryInfo.countryName,
+          timestamp: Date.now()
+        });
+
+        // TIDAK ADA evaluasi, TIDAK ditambahkan ke quizAnswered
+        // TIDAK ada error, hanya tampilkan jawaban
         return;
       }
 
@@ -2028,9 +2056,9 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ⭐ PERBAIKAN 2: Jika sudah ada pemenang, TETAP TAMPILKAN jawaban user (bukan error)
+      // ⭐ PERBAIKAN 2: Jika sudah ada pemenang, TETAP TAMPILKAN jawaban user
       if (this.quizHasWinner) {
-        // Kirim notifikasi bahwa sudah ada pemenang (bukan error)
+        // Kirim notifikasi bahwa sudah ada pemenang
         this._safeSend(ws, ["quizNotification", {
           type: "quizAlreadyWon",
           timestamp: Date.now(),
@@ -2046,12 +2074,8 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      const answerKey = answer ? answer.toUpperCase().trim() : '';
-      const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
       const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
       const remainingText = `${answerRemaining}s remaining`;
-      const wsId = this._getWsId(ws);
-      const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
 
       // ⭐ PERBAIKAN 3: TETAP BROADCAST jawaban user ke semua (termasuk jika sudah ada pemenang)
       this._broadcastQuizNotification("quizAnswer", {
@@ -2087,7 +2111,6 @@ export class GameServer extends CPUProtection {
       }
 
     } catch(e) {
-      // Error internal - silent ignore untuk user
       console.error('submitQuizAnswer error:', e);
     }
   }
