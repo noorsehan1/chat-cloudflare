@@ -505,7 +505,6 @@ export class GameServer extends CPUProtection {
 
       this._recordingEnabled = new Map();
 
-      // Weekly reset properties
       this._weeklyResetTimer = null;
       this._lastResetWeek = null;
 
@@ -1767,7 +1766,6 @@ export class GameServer extends CPUProtection {
   // ==================== _showQuestion ====================
   async _showQuestion() {
     try {
-      // Weekly reset check
       await this._checkAndResetWeeklyQuiz();
 
       if (this._isShowingQuestion) return;
@@ -1973,9 +1971,8 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== submitQuizAnswer (FULL PERBAIKAN) ====================
-  // ⭐ PERBAIKAN: Reading time = TAMPILKAN jawaban tapi TIDAK dihitung
-  // ⭐ Jika sudah ada pemenang = TETAP TAMPILKAN jawaban user
+  // ==================== submitQuizAnswer ====================
+  // ⭐ PERBAIKAN: Reading Time = jawaban tetap ke quizAnswer dengan flag preview
   async submitQuizAnswer(ws, username, answer) {
     try {
       if (!ws || !username) {
@@ -2013,39 +2010,44 @@ export class GameServer extends CPUProtection {
         }
       }
 
-      const wsId = this._getWsId(ws);
-      const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
+      // ⭐ CEK APAKAH MASIH READING TIME
+      const isReadingTime = !this._canSubmitAnswer;
+      
       const answerKey = answer ? answer.toUpperCase().trim() : '';
       const isValidAnswer = ['A', 'B', 'C', 'D'].includes(answerKey);
-
-      // ⭐ PERBAIKAN 1: Jika masih reading time, TAMPILKAN jawaban tapi TIDAK dihitung
-      if (!this._canSubmitAnswer) {
-        // Broadcast jawaban dengan status "reading" - tidak dihitung
-        this._broadcastQuizNotification("quizReadingAnswer", {
+      const wsId = this._getWsId(ws);
+      const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
+      
+      // ⭐ Jika masih reading time, TAMPILKAN ke quizAnswer dengan flag preview
+      if (isReadingTime) {
+        // ⭐ KIRIM ke quizAnswer dengan flag isPreview: true dan isReadingTime: true
+        // ⭐ Client akan menampilkan ini sebagai preview (tidak dihitung)
+        this._broadcastQuizResult("quizAnswer", {
           username: username,
           answer: isValidAnswer ? answerKey : "?",
-          isReading: true,
-          message: "📝 " + username + " answered during reading time (not counted)",
+          isPreview: true,        // ⭐ Flag: ini hanya preview
+          isReadingTime: true,    // ⭐ Flag: masih reading time
+          isCorrect: false,       // ⭐ TIDAK dihitung sebagai benar
+          remainingTime: `${Math.round((CONSTANTS.QUIZ_READING_TIME_MS - (Date.now() - this._questionStartTime)) / 1000)}s remaining`,
           country: countryInfo.countryCode,
           countryName: countryInfo.countryName,
-          timestamp: Date.now()
+          message: "📖 Reading time... Jawaban akan dievaluasi setelah reading selesai"
         });
 
-        this._broadcastQuizResult("quizReadingAnswerResult", {
-          username,
-          answer: isValidAnswer ? answerKey : "?",
-          isReading: true,
-          message: "Reading time answer - not counted",
-          country: countryInfo.countryCode,
-          countryName: countryInfo.countryName,
-          timestamp: Date.now()
-        });
+        // ⭐ Kirim notifikasi ke user yang menjawab
+        this._safeSend(ws, ["quizNotification", {
+          type: "quizAnswerPreview",
+          timestamp: Date.now(),
+          message: "📖 Jawaban diterima! Akan dievaluasi setelah reading time selesai.",
+          isReadingTime: true,
+          remainingTime: `${Math.round((CONSTANTS.QUIZ_READING_TIME_MS - (Date.now() - this._questionStartTime)) / 1000)}s`
+        }]);
 
-        // TIDAK ADA evaluasi, TIDAK ditambahkan ke quizAnswered
-        // TIDAK ada error, hanya tampilkan jawaban
+        // ⭐ TIDAK LANJUT ke evaluasi - RETURN
         return;
       }
 
+      // ⭐ SETELAH READING TIME SELESAI - NORMAL EVALUASI
       const answerRemaining = this._getAnswerRemainingTime();
       if (answerRemaining <= 0) {
         if (this.quizHasWinner && this.quizWinner) {
@@ -2056,9 +2058,8 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ⭐ PERBAIKAN 2: Jika sudah ada pemenang, TETAP TAMPILKAN jawaban user
+      // ⭐ Jika sudah ada pemenang, TETAP TAMPILKAN jawaban user (bukan error)
       if (this.quizHasWinner) {
-        // Kirim notifikasi bahwa sudah ada pemenang
         this._safeSend(ws, ["quizNotification", {
           type: "quizAlreadyWon",
           timestamp: Date.now(),
@@ -2066,7 +2067,6 @@ export class GameServer extends CPUProtection {
           message: `🎉 ${this.quizWinner} already answered correctly!`
         }]);
         // TETAP LANJUT untuk broadcast jawaban user
-        // JANGAN return
       }
 
       if (this.quizAnswered.has(username)) {
@@ -2077,20 +2077,13 @@ export class GameServer extends CPUProtection {
       const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
       const remainingText = `${answerRemaining}s remaining`;
 
-      // ⭐ PERBAIKAN 3: TETAP BROADCAST jawaban user ke semua (termasuk jika sudah ada pemenang)
-      this._broadcastQuizNotification("quizAnswer", {
-        username: username,
-        answer: isValidAnswer ? answerKey : "?",
-        isCorrect: isCorrect,
-        remainingTime: remainingText,
-        country: countryInfo.countryCode,
-        countryName: countryInfo.countryName
-      });
-
-      this._broadcastQuizResult("quizAnswerResult", {
+      // ⭐ BROADCAST jawaban user ke semua (evaluasi normal)
+      this._broadcastQuizResult("quizAnswer", {
         username,
         answer: isValidAnswer ? answerKey : "?",
-        isCorrect,
+        isCorrect: isCorrect,
+        isPreview: false,        // ⭐ Bukan preview
+        isReadingTime: false,    // ⭐ Bukan reading time
         correctAnswer: this.currentQuestion.correct,
         remainingTime: remainingText,
         country: countryInfo.countryCode,
@@ -2099,7 +2092,7 @@ export class GameServer extends CPUProtection {
 
       this.quizAnswered.add(username);
 
-      // ⭐ PERBAIKAN 4: Jika jawaban benar dan belum ada pemenang
+      // ⭐ Jika jawaban benar dan belum ada pemenang
       if (isCorrect && !this.quizHasWinner) {
         this.quizHasWinner = true;
         this.quizWinner = username;
