@@ -63,7 +63,7 @@ const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 2 },
     { start: 11, end: 12 },
-    { start: 21, end: 22 }
+    { start: 22, end: 23 }
   ],
   TIMEZONE_OFFSET: 8,
 };
