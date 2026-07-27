@@ -583,26 +583,43 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  async _stopRecordingWinners(roomName) {
-    try {
-      if (!roomName) return false;
+  // ==================== STOP RECORDING WINNERS ====================
+=
+async _stopRecordingWinners(roomName) {
+  try {
+    if (!roomName) return false;
+    
+    this._recordingEnabled.set(roomName, false);
+    
+    if (this.env?.QUESTIONS) {
+      // HAPUS STATUS RECORDING DARI KV
+      await this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + roomName);
       
-      this._recordingEnabled.set(roomName, false);
-      
-      if (this.env?.QUESTIONS) {
-        await this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + roomName);
-        const winnerKey = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
-        await this.env.QUESTIONS.delete(winnerKey);
-      }
-      
-      this._broadcastToRoom(roomName, ["recordingStatus", false]);
-      this._broadcastToRoom(roomName, ["systemMessage", "📢 Recording DISABLED and winners DELETED for this room!"]);
-      
-      return true;
-    } catch(e) {
-      return false;
+      // HAPUS SEMUA DATA WINNERS DARI KV
+      const winnerKey = CONSTANTS.LOWCARD_WINNER_KEY + roomName;
+      await this.env.QUESTIONS.delete(winnerKey);
     }
+    
+    // BROADCAST KE ROOM
+    this._broadcastToRoom(roomName, ["recordingStatus", false]);
+    this._broadcastToRoom(roomName, ["systemMessage", "📢 Recording DISABLED and winners DELETED for this room!"]);
+    
+    // KIRIM lowCardWinnerUpdate DENGAN winners KOSONG
+    this._broadcastToRoom(roomName, ["lowCardWinnerUpdate", {
+      winners: {},
+      room: roomName,
+      recording: false,
+      updatedAt: new Date().toISOString(),
+      type: 'stopRecording',
+      message: "Recording disabled and winners deleted"
+    }]);
+    
+    return true;
+  } catch(e) {
+    return false;
   }
+}
+  
 
   async _addLowCardWinner(room, username) {
     try {
