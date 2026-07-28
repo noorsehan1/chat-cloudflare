@@ -1727,15 +1727,10 @@ export class GameServer extends CPUProtection {
           message: `⚠️ Guess seen, but already have winner: ${this.diceWinner}`
         });
         
-        this._broadcastDiceResult("diceAnswerResult", {
-          username,
-          guess: guessValue || "?",
-          isCorrect,
-          diceValue: diceValue,
-          remainingTime: remainingText,
-          gotPoint: false,
-          hasWinner: true,
-          winner: this.diceWinner
+        // ✅ HANYA KIRIM username DAN guess KE CLIENT
+        this._broadcastDiceResult("diceAnswer", {
+          username: username,
+          guess: guessValue || "?"
         });
         
         this.diceAnswered.add(username);
@@ -1768,13 +1763,10 @@ export class GameServer extends CPUProtection {
         diceValue: diceValue
       });
       
-      this._broadcastDiceResult("diceAnswerResult", {
-        username,
-        guess: guessValue || "?",
-        isCorrect,
-        diceValue: diceValue,
-        remainingTime: remainingText,
-        gotPoint: isCorrect
+      // ✅ HANYA KIRIM username DAN guess KE CLIENT
+      this._broadcastDiceResult("diceAnswer", {
+        username: username,
+        guess: guessValue || "?"
       });
       
     } catch(e) {
