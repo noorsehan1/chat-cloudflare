@@ -1683,7 +1683,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== submitDiceAnswer - FIXED ====================
+  // ==================== submitDiceAnswer - FIXED (HAPUS diceAnswerResult) ====================
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) {
@@ -1713,7 +1713,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // Cek apakah masih dalam masa jawab
       if (this._isShowingDice || this.isDiceWaiting || this._diceTimeout) {
         if (this._diceQuestionStartTime) {
           const elapsed = (Date.now() - this._diceQuestionStartTime) / 1000;
@@ -1736,7 +1735,6 @@ export class GameServer extends CPUProtection {
       const guessValue = parseInt(guess, 10);
       const isValidGuess = !isNaN(guessValue) && guessValue >= 1 && guessValue <= 6;
       
-      // Cek apakah user sudah submit sebelumnya
       if (this.diceAnswered.has(username)) {
         this._safeSend(ws, ["diceError", "⚠️ You have already submitted your guess!"]);
         return;
@@ -1746,36 +1744,19 @@ export class GameServer extends CPUProtection {
       const diceValue = this.currentDiceRoll?.value;
       const answerRemaining = this._getDiceAnswerRemainingTime();
       
-      // Sudah ada pemenang
       if (hasWinner) {
         this.diceAnswered.add(username);
-        this._safeSend(ws, ["diceAnswerResult", {
-          success: false,
-          username: username,
-          guess: guessValue || "?",
-          isCorrect: false,
-          hasWinner: true,
-          winner: this.diceWinner,
-          message: `⚠️ ${this.diceWinner} already won!`
-        }]);
+        // ===== HAPUS diceAnswerResult, pakai diceError =====
+        this._safeSend(ws, ["diceError", `⚠️ ${this.diceWinner} already won!`]);
         return;
       }
       
-      // Waktu habis
       if (answerRemaining <= 0) {
         this.diceAnswered.add(username);
-        this._safeSend(ws, ["diceAnswerResult", {
-          success: false,
-          username: username,
-          guess: guessValue || "?",
-          isCorrect: false,
-          status: "timeout",
-          message: "⏰ Time's up! Guess not counted."
-        }]);
+        this._safeSend(ws, ["diceError", "⏰ Time's up! Guess not counted."]);
         return;
       }
       
-      // Jawaban benar
       const isCorrect = isValidGuess && guessValue === diceValue;
       
       if (isCorrect) {
@@ -1788,7 +1769,6 @@ export class GameServer extends CPUProtection {
         
         this.diceAnswered.add(username);
         
-        // Kirim jawaban ke room
         this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
           username: username,
           guess: guessValue
@@ -1800,19 +1780,9 @@ export class GameServer extends CPUProtection {
           diceValue: diceValue
         }]);
         
-        this._safeSend(ws, ["diceAnswerResult", {
-          success: true,
-          username: username,
-          guess: guessValue,
-          isCorrect: true,
-          gotPoint: true,
-          totalPoints: points[username] || 0,
-          diceValue: diceValue,
-          message: `🎉 YOU WON! +1 point!`
-        }]);
+        // ===== HAPUS diceAnswerResult =====
         
       } else {
-        // Jawaban salah
         this.diceAnswered.add(username);
         
         this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
@@ -1820,14 +1790,8 @@ export class GameServer extends CPUProtection {
           guess: guessValue || "?"
         }]);
         
-        this._safeSend(ws, ["diceAnswerResult", {
-          success: false,
-          username: username,
-          guess: guessValue || "?",
-          isCorrect: false,
-          gotPoint: false,
-          message: `❌ Wrong! Try again!`
-        }]);
+        // ===== HAPUS diceAnswerResult, pakai diceError =====
+        this._safeSend(ws, ["diceError", `❌ Wrong guess! The correct value was: ${diceValue}`]);
       }
       
     } catch(e) {
@@ -2096,15 +2060,6 @@ export class GameServer extends CPUProtection {
             isActive: false
           });
           this._diceJoinedNotified.set(wsId, true);
-          
-          setTimeout(() => {
-            if (!this.closing && !this.isDestroyed) {
-              this._sendDiceNotification(ws, "diceTimeClear", {
-                clear: true,
-                message: ""
-              });
-            }
-          }, 5000);
         } else {
           return false;
         }
@@ -2311,7 +2266,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== switchRoom ====================
+  // ==================== switchRoom - FIXED ====================
   async switchRoom(ws, room, username = null) {
     try {
       if (this.isDestroyed) { 
@@ -2344,6 +2299,12 @@ export class GameServer extends CPUProtection {
             this._nextDiceNotified.delete(wsId);
             this._diceJoinedNotified.delete(wsId);
             
+            // ===== FIX: Kirim clear terlebih dahulu =====
+            this._sendDiceNotification(ws, "diceTimeClear", {
+              clear: true,
+              message: ""
+            });
+            
             const timeLeft = this._getTimeLeftUntilNextDice();
             
             this._sendDiceNotification(ws, "diceTimeInfo", {
@@ -2356,15 +2317,6 @@ export class GameServer extends CPUProtection {
             });
             
             this._diceJoinedNotified.set(wsId, true);
-            
-            setTimeout(() => {
-              if (!this.closing && !this.isDestroyed) {
-                this._sendDiceNotification(ws, "diceTimeClear", {
-                  clear: true,
-                  message: ""
-                });
-              }
-            }, 5000);
             
             if (this._isDiceTime()) {
               if (!this.diceAutoEnabled) this.diceAutoEnabled = true;
@@ -2458,6 +2410,12 @@ export class GameServer extends CPUProtection {
           this._nextDiceNotified.delete(wsId);
           this._diceJoinedNotified.delete(wsId);
           
+          // ===== FIX: Kirim clear terlebih dahulu =====
+          this._sendDiceNotification(ws, "diceTimeClear", {
+            clear: true,
+            message: ""
+          });
+          
           const timeLeft = this._getTimeLeftUntilNextDice();
           
           this._sendDiceNotification(ws, "diceTimeInfo", {
@@ -2470,15 +2428,6 @@ export class GameServer extends CPUProtection {
           });
           
           this._diceJoinedNotified.set(wsId, true);
-          
-          setTimeout(() => {
-            if (!this.closing && !this.isDestroyed) {
-              this._sendDiceNotification(ws, "diceTimeClear", {
-                clear: true,
-                message: ""
-              });
-            }
-          }, 5000);
           
           if (this._isDiceTime()) {
             if (!this.diceAutoEnabled) this.diceAutoEnabled = true;
@@ -3993,7 +3942,6 @@ export class GameServer extends CPUProtection {
       }
 
       if (evt === "getDiceStatus") {
-        // ===== PERBAIKAN: Kirim boolean langsung =====
         const isActive = !!this.currentDiceRoll && this._canSubmitDiceAnswer;
         this._safeSend(ws, ["diceStatus", isActive]);
         return;
