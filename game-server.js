@@ -69,7 +69,7 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 4},
+    { start: 1, end: 4 },
     { start: 11, end: 12 },
     { start: 23, end: 24 }
   ],
@@ -1113,21 +1113,25 @@ export class GameServer extends CPUProtection {
       points[username] = (points[username] || 0) + 1;
       await this.diceGameSystem.setPoints(points);
       
+      // BROADCAST TO ROOM - Everyone sees winner
+      this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
+        username: username,
+        totalPoints: points[username] || 0,
+        diceValue: diceValue,
+        message: `🎉 ${username} WINS! 🎉`,
+        timestamp: Date.now()
+      }]);
+      
       this._broadcastDiceNotification("diceWinner", {
         username: username,
         totalPoints: points[username] || 0,
         diceValue: diceValue
       });
       
-      this._broadcastDiceResult("diceWinner", {
-        username: username,
-        totalPoints: points[username] || 0,
-        diceValue: diceValue
-      });
-      
+      // Lock only for 1 second
       setTimeout(() => {
         this._winnerProcessed = false;
-      }, 5000);
+      }, 1000);
       
     } catch(e) {
       this._winnerProcessed = false;
@@ -1598,11 +1602,11 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== submitDiceAnswer ====================
+  // ==================== submitDiceAnswer - FIXED ====================
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) {
-        this._sendDiceErrorWithTime(ws, "ERROR", "Invalid request");
+        this._safeSend(ws, ["diceError", "Invalid request"]);
         return;
       }
       
@@ -1637,6 +1641,16 @@ export class GameServer extends CPUProtection {
       }
       
       if (this.diceAnswered.has(username)) {
+        // BROADCAST TO ROOM - User tried to answer again
+        this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
+          username: username,
+          guess: guess || "?",
+          isCorrect: false,
+          status: "already_answered",
+          message: `⚠️ ${username} already guessed!`,
+          timestamp: Date.now()
+        }]);
+        
         this._safeSend(ws, ["diceError", "You already guessed!"]);
         return;
       }
@@ -1656,79 +1670,102 @@ export class GameServer extends CPUProtection {
       const hasWinner = this.diceHasWinner && this.diceWinner;
       const diceValue = this.currentDiceRoll?.value;
       
-      if (!isReadingTime && this._getDiceAnswerRemainingTime() <= 0) {
-        this._broadcastDiceNotification("diceAnswerLate", {
+      // ==================== CASE 1: ALREADY HAS WINNER ====================
+      if (hasWinner) {
+        this.diceAnswered.add(username);
+        
+        // BROADCAST TO ROOM - Everyone sees this
+        this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
           username: username,
           guess: guessValue || "?",
           isCorrect: false,
-          remainingTime: "0s (Time's up!)",
-          message: "⏰ Time's up! Guess seen but not counted.",
-          hasWinner: hasWinner,
-          winner: hasWinner ? this.diceWinner : null
-        });
-        
-        this.diceAnswered.add(username);
-        
-        if (hasWinner) {
-          this._safeSend(ws, ["diceError", `Time's up! Winner: ${this.diceWinner}`]);
-        } else {
-          this._safeSend(ws, ["diceError", "Time's up!"]);
-        }
-        return;
-      }
-      
-      if (isReadingTime) {
-        this._broadcastDiceNotification("diceAnswerReading", {
-          username: username,
-          guess: guessValue || "?",
-          remainingTime: `${readingTimeLeft}s reading time left`,
-          status: "reading",
-          message: hasWinner ? `⏳ Guess seen, but already have winner: ${this.diceWinner}` : "⏳ Guess during reading NOT counted. Resubmit during answer time!",
-          hasWinner: hasWinner,
-          winner: hasWinner ? this.diceWinner : null
-        });
-        
-        this._safeSend(ws, ["diceAnswerReading", {
-          username: username,
-          guess: guessValue || "?",
-          readingTimeLeft: readingTimeLeft,
-          message: hasWinner ? 
-            `⏳ "${guessValue}" seen! But already have winner: ${this.diceWinner}` :
-            `⏳ "${guessValue}" NOT counted! Resubmit during answer time (${CONSTANTS.DICE_ANSWER_TIME_MS / 1000}s).`,
-          status: "waiting",
-          notCounted: true
+          status: "has_winner",
+          winner: this.diceWinner,
+          message: `⚠️ ${username} guessed ${guessValue || "?"}, but ${this.diceWinner} already won!`,
+          timestamp: Date.now()
         }]);
         
-        this.diceAnswered.add(username);
-        return;
-      }
-      
-      const isCorrect = isValidGuess && guessValue === diceValue;
-      const answerRemaining = this._getDiceAnswerRemainingTime();
-      const remainingText = `${answerRemaining}s remaining`;
-      
-      if (hasWinner) {
-        this._broadcastDiceNotification("diceAnswer", {
+        // Send direct response to user
+        this._safeSend(ws, ["diceAnswerResult", {
+          success: false,
           username: username,
           guess: guessValue || "?",
-          isCorrect: isCorrect,
-          remainingTime: remainingText,
-          gotPoint: false,
+          isCorrect: false,
           hasWinner: true,
           winner: this.diceWinner,
-          message: `⚠️ Guess seen, but already have winner: ${this.diceWinner}`
-        });
+          message: `⚠️ ${this.diceWinner} already won!`,
+          timestamp: Date.now()
+        }]);
         
-        this._broadcastDiceResult("diceAnswer", {
-          username: username,
-          guess: guessValue || "?"
-        });
-        
-        this.diceAnswered.add(username);
         return;
       }
       
-      if (isCorrect && !this.diceHasWinner) {
+      // ==================== CASE 2: READING TIME ====================
+      if (isReadingTime) {
+        this.diceAnswered.add(username);
+        
+        // BROADCAST TO ROOM - Everyone sees this
+        this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
+          username: username,
+          guess: guessValue || "?",
+          isCorrect: false,
+          status: "reading_time",
+          readingTimeLeft: readingTimeLeft,
+          message: `⏳ ${username} tried ${guessValue || "?"} during reading time (${readingTimeLeft}s left)`,
+          timestamp: Date.now()
+        }]);
+        
+        // Send direct response to user
+        this._safeSend(ws, ["diceAnswerResult", {
+          success: false,
+          username: username,
+          guess: guessValue || "?",
+          isCorrect: false,
+          status: "reading",
+          readingTimeLeft: readingTimeLeft,
+          message: `⏳ "${guessValue}" NOT counted! Resubmit in ${CONSTANTS.DICE_ANSWER_TIME_MS / 1000}s`,
+          notCounted: true,
+          timestamp: Date.now()
+        }]);
+        
+        return;
+      }
+      
+      // ==================== CASE 3: TIME'S UP ====================
+      const answerRemaining = this._getDiceAnswerRemainingTime();
+      if (answerRemaining <= 0) {
+        this.diceAnswered.add(username);
+        
+        // BROADCAST TO ROOM - Everyone sees this
+        this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
+          username: username,
+          guess: guessValue || "?",
+          isCorrect: false,
+          status: "timeout",
+          message: `⏰ ${username} guessed ${guessValue || "?"} after time expired!`,
+          timestamp: Date.now()
+        }]);
+        
+        // Send direct response to user
+        this._safeSend(ws, ["diceAnswerResult", {
+          success: false,
+          username: username,
+          guess: guessValue || "?",
+          isCorrect: false,
+          status: "timeout",
+          message: "⏰ Time's up! Guess not counted.",
+          timestamp: Date.now()
+        }]);
+        
+        return;
+      }
+      
+      // ==================== CASE 4: CORRECT ANSWER ====================
+      const isCorrect = isValidGuess && guessValue === diceValue;
+      const remainingText = `${answerRemaining}s remaining`;
+      
+      if (isCorrect) {
+        // Set winner immediately
         this.diceHasWinner = true;
         this.diceWinner = username;
         
@@ -1736,31 +1773,94 @@ export class GameServer extends CPUProtection {
         points[username] = (points[username] || 0) + 1;
         await this.diceGameSystem.setPoints(points);
         
-        this._broadcastDiceNotification("diceWinner", {
+        // ===== BROADCAST TO ROOM - WINNER =====
+        this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
           username: username,
           totalPoints: points[username] || 0,
-          diceValue: diceValue
-        });
+          diceValue: diceValue,
+          guess: guessValue,
+          message: `🎉 ${username} WINS with ${guessValue}! 🎉`,
+          timestamp: Date.now()
+        }]);
+        
+        // ===== BROADCAST TO ROOM - Answer confirmation =====
+        this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
+          username: username,
+          guess: guessValue,
+          isCorrect: true,
+          status: "winner",
+          gotPoint: true,
+          totalPoints: points[username] || 0,
+          diceValue: diceValue,
+          message: `🎉 ${username} guessed ${guessValue} correctly! WINNER!`,
+          timestamp: Date.now()
+        }]);
+        
+        // Send direct response to user
+        this._safeSend(ws, ["diceAnswerResult", {
+          success: true,
+          username: username,
+          guess: guessValue,
+          isCorrect: true,
+          gotPoint: true,
+          totalPoints: points[username] || 0,
+          diceValue: diceValue,
+          message: `🎉 YOU WON! +1 point!`,
+          timestamp: Date.now()
+        }]);
+        
+      } else {
+        // ===== CASE 5: WRONG ANSWER =====
+        
+        // BROADCAST TO ROOM - Everyone sees wrong answer
+        this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
+          username: username,
+          guess: guessValue || "?",
+          isCorrect: false,
+          status: "wrong",
+          remainingTime: remainingText,
+          message: `❌ ${username} guessed ${guessValue || "?"} - Wrong!`,
+          timestamp: Date.now()
+        }]);
+        
+        // Send direct response to user
+        this._safeSend(ws, ["diceAnswerResult", {
+          success: false,
+          username: username,
+          guess: guessValue || "?",
+          isCorrect: false,
+          gotPoint: false,
+          remainingTime: remainingText,
+          message: `❌ Wrong! Try again!`,
+          timestamp: Date.now()
+        }]);
       }
       
+      // Mark user as answered
       this.diceAnswered.add(username);
       
+      // ===== BONUS: Also broadcast via notification =====
       this._broadcastDiceNotification("diceAnswer", {
         username: username,
         guess: guessValue || "?",
         isCorrect: isCorrect,
         remainingTime: remainingText,
         gotPoint: isCorrect,
-        diceValue: diceValue
-      });
-      
-      this._broadcastDiceResult("diceAnswer", {
-        username: username,
-        guess: guessValue || "?"
+        diceValue: isCorrect ? diceValue : null,
+        hasWinner: this.diceHasWinner,
+        winner: this.diceHasWinner ? this.diceWinner : null
       });
       
     } catch(e) {
-      this._safeSend(ws, ["diceError", e.message]);
+      // Error - also broadcast to room
+      this._broadcastToRoom(DICE_ROOM, ["diceError", {
+        username: username,
+        error: e.message,
+        message: `⚠️ Error processing ${username}'s answer`,
+        timestamp: Date.now()
+      }]);
+      
+      this._safeSend(ws, ["diceError", e.message || "Error submitting answer"]);
     }
   }
 
