@@ -53,10 +53,10 @@ const CONSTANTS = {
   
   // ==================== DICE GAME CONSTANTS ====================
   MAX_DICE_GAMES: 10,
-  DICE_ROLL_TIME_MS: 3000,
-  DICE_READING_TIME_MS: 2000,
+  DICE_ROLL_TIME_MS: 0,
+  DICE_READING_TIME_MS: 0,
   DICE_ANSWER_TIME_MS: 20000,
-  DICE_TOTAL_TIME_MS: 22000,
+  DICE_TOTAL_TIME_MS: 20000,
   DICE_BREAK_MS: 2000,
   MAX_DICE_VALUE: 6,
   DICE_ROOM: "Quiz",
@@ -69,7 +69,7 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 4 },
+    { start: 1, end: 2 },
     { start: 11, end: 12 },
     { start: 23, end: 24 }
   ],
@@ -474,6 +474,13 @@ export class GameServer extends CPUProtection {
       this._weeklyResetTimer = null;
       this._lastResetWeek = null;
 
+      // ==================== DICE TIMER NOTIFICATION FLAGS ====================
+      this._diceTimerInterval = null;
+      this._diceNotified20 = false;
+      this._diceNotified10 = false;
+      this._diceNotified5 = false;
+      this._diceNotified3 = false;
+
       // ==================== FLAGS ====================
       this._diceOutOfTimeShown = false;
       this._diceRemainingShown = false;
@@ -583,44 +590,11 @@ export class GameServer extends CPUProtection {
         this._diceTimeUpShown = false;
       }
       
+      // Safety cleanup if something goes wrong
       if (this.currentDiceRoll && this._diceStartTime) {
         const now = Date.now();
         const elapsed = (now - this._diceStartTime) / 1000;
         const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
-        const remaining = Math.max(0, totalTime - elapsed);
-        const remainingInt = Math.floor(remaining);
-        const minutes = Math.floor(remainingInt / 60);
-        const seconds = remainingInt % 60;
-        const timeText = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
-        
-        if (this._canSubmitDiceAnswer && remaining > 0) {
-          const isTargetTime = (remainingInt === 20 || remainingInt === 10 || remainingInt === 5);
-          
-          if (isTargetTime && !this._diceTimeUpShown) {
-            this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", 
-              `${timeText} remaining`, 
-              false, 
-              true
-            ]);
-          }
-        }
-        
-        if (remaining <= 0 && !this._diceTimeUpShown) {
-          this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", 
-            "TIME UP!", 
-            false, 
-            true
-          ]);
-          this._diceTimeUpShown = true;
-          
-          if (!this._diceTimeout) {
-            this._forceEvaluateDice();
-          }
-        }
-        
-        if (remaining <= 2 && !this._diceTimeout && !this.diceHasWinner) {
-          this._forceEvaluateDice();
-        }
         
         if (elapsed > totalTime + 10) {
           this.currentDiceRoll = null;
@@ -629,6 +603,7 @@ export class GameServer extends CPUProtection {
           this._canSubmitDiceAnswer = false;
           this._diceRemainingShown = false;
           this._diceTimeUpShown = false;
+          this._stopDiceTimerNotifications();
         }
       }
     } catch(e) {}
@@ -1407,6 +1382,99 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== DICE TIMER NOTIFICATIONS ====================
+
+  _startDiceTimerNotifications() {
+    try {
+      if (this._diceTimerInterval) {
+        clearInterval(this._diceTimerInterval);
+      }
+      
+      // Reset notification flags
+      this._diceNotified20 = false;
+      this._diceNotified10 = false;
+      this._diceNotified5 = false;
+      this._diceNotified3 = false;
+      
+      // Check every second
+      this._diceTimerInterval = setInterval(() => {
+        try {
+          if (!this.currentDiceRoll || !this._diceQuestionStartTime) {
+            this._stopDiceTimerNotifications();
+            return;
+          }
+          
+          const elapsed = (Date.now() - this._diceQuestionStartTime) / 1000;
+          const remaining = Math.max(0, CONSTANTS.DICE_ANSWER_TIME_MS / 1000 - elapsed);
+          const remainingInt = Math.floor(remaining);
+          
+          // ===== NOTIFY AT 20s, 10s, 5s, 3s =====
+          if (remainingInt <= 20 && remainingInt > 19 && !this._diceNotified20) {
+            this._diceNotified20 = true;
+            this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", "20s remaining", false, true]);
+            this._broadcastDiceNotification("diceTimer", {
+              remaining: 20,
+              message: "⏱️ 20 seconds remaining!"
+            });
+          }
+          
+          if (remainingInt <= 10 && remainingInt > 9 && !this._diceNotified10) {
+            this._diceNotified10 = true;
+            this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", "10s remaining", false, true]);
+            this._broadcastDiceNotification("diceTimer", {
+              remaining: 10,
+              message: "⏱️ 10 seconds remaining!"
+            });
+          }
+          
+          if (remainingInt <= 5 && remainingInt > 4 && !this._diceNotified5) {
+            this._diceNotified5 = true;
+            this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", "5s remaining", false, true]);
+            this._broadcastDiceNotification("diceTimer", {
+              remaining: 5,
+              message: "⏱️ 5 seconds remaining!"
+            });
+          }
+          
+          if (remainingInt <= 3 && remainingInt > 2 && !this._diceNotified3) {
+            this._diceNotified3 = true;
+            this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", "3s remaining", false, true]);
+            this._broadcastDiceNotification("diceTimer", {
+              remaining: 3,
+              message: "⏱️ 3 seconds remaining!"
+            });
+          }
+          
+          // Time up notification
+          if (remainingInt <= 0 && !this._diceTimeUpShown) {
+            this._diceTimeUpShown = true;
+            this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", "TIME UP!", false, true]);
+            this._broadcastDiceNotification("diceTimer", {
+              remaining: 0,
+              message: "⏰ TIME UP!"
+            });
+            this._stopDiceTimerNotifications();
+          }
+          
+        } catch(e) {}
+      }, 1000);
+      
+    } catch(e) {}
+  }
+
+  _stopDiceTimerNotifications() {
+    try {
+      if (this._diceTimerInterval) {
+        clearInterval(this._diceTimerInterval);
+        this._diceTimerInterval = null;
+      }
+      this._diceNotified20 = false;
+      this._diceNotified10 = false;
+      this._diceNotified5 = false;
+      this._diceNotified3 = false;
+    } catch(e) {}
+  }
+
   // ==================== _showDiceQuestion ====================
   async _showDiceQuestion() {
     try {
@@ -1452,7 +1520,10 @@ export class GameServer extends CPUProtection {
         };
         this._diceStartTime = Date.now();
         this._diceQuestionStartTime = Date.now();
-        this._canSubmitDiceAnswer = false;
+        
+        // Answer immediately - NO READING TIME
+        this._canSubmitDiceAnswer = true;
+        
         this.diceAnswered = new Set();
         this.diceHasWinner = false;
         this.diceWinner = null;
@@ -1460,36 +1531,25 @@ export class GameServer extends CPUProtection {
         this._diceRemainingShown = false;
         this._diceTimeUpShown = false;
         
+        // Broadcast dice roll with immediate answer capability
         await this._broadcastDiceRoll(diceValue, diceEmoji);
         
-        this._broadcastDiceNotification("diceRolled", {
-          value: diceValue,
-          emoji: diceEmoji,
-          readingTime: CONSTANTS.DICE_READING_TIME_MS / 1000
+        // Notify that users can answer NOW
+        this._broadcastDiceNotification("diceCanAnswer", {
+          answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
+          remainingTime: `${CONSTANTS.DICE_ANSWER_TIME_MS / 1000}s remaining`,
+          message: "🎲 Guess the dice value NOW!"
         });
         
-        setTimeout(() => {
-          if (this.closing || this.isDestroyed) { 
-            this._isShowingDice = false;
-            return; 
-          }
-          
-          this._canSubmitDiceAnswer = true;
-          
-          this._broadcastDiceNotification("diceCanAnswer", {
-            answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
-            remainingTime: `${CONSTANTS.DICE_ANSWER_TIME_MS / 1000}s remaining`,
-            message: "You can now guess the dice value!"
-          });
-          
-          this._broadcastToRoom(DICE_ROOM, [
-            "diceTimeLeft", 
-            "20s remaining", 
-            false,
-            true
-          ]);
-          
-        }, CONSTANTS.DICE_READING_TIME_MS);
+        this._broadcastToRoom(DICE_ROOM, [
+          "diceTimeLeft", 
+          "20s remaining", 
+          false,
+          true
+        ]);
+        
+        // ===== START TIMER NOTIFICATIONS =====
+        this._startDiceTimerNotifications();
         
         if (this._diceTimeout) clearTimeout(this._diceTimeout);
         if (this._diceBreakTimeout) clearTimeout(this._diceBreakTimeout);
@@ -1500,6 +1560,7 @@ export class GameServer extends CPUProtection {
               this._diceTimeout = null; 
               this._isShowingDice = false;
               this._canSubmitDiceAnswer = false;
+              this._stopDiceTimerNotifications();
               return; 
             }
             
@@ -1509,6 +1570,7 @@ export class GameServer extends CPUProtection {
               this.currentDiceRoll = null;
               this._isShowingDice = false;
               this._canSubmitDiceAnswer = false;
+              this._stopDiceTimerNotifications();
               return; 
             }
             
@@ -1517,13 +1579,22 @@ export class GameServer extends CPUProtection {
             if (this.diceHasWinner && this.diceWinner) {
               await this._handleDiceWinner(this.diceWinner, diceValue);
             } else {
-              this._broadcastDiceNotification("diceNoWinner", `No winner this round! The value was: ${diceValue} ${this.diceGameSystem.getDiceEmoji(diceValue)}`);
+              this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
+                message: `No winner this round! The value was: ${diceValue} ${this.diceGameSystem.getDiceEmoji(diceValue)}`,
+                value: diceValue,
+                emoji: this.diceGameSystem.getDiceEmoji(diceValue)
+              }]);
+              
+              this._broadcastDiceNotification("diceNoWinner", 
+                `No winner this round! The value was: ${diceValue} ${this.diceGameSystem.getDiceEmoji(diceValue)}`
+              );
             }
             
             this._diceTimeout = null;
             this.isDiceWaiting = true;
             this._isShowingDice = false;
             this._canSubmitDiceAnswer = false;
+            this._stopDiceTimerNotifications();
             
             this._diceBreakTimeout = setTimeout(() => {
               if (this.closing || this.isDestroyed) { 
@@ -1541,6 +1612,7 @@ export class GameServer extends CPUProtection {
             this.isDiceWaiting = false;
             this._isShowingDice = false;
             this._canSubmitDiceAnswer = false;
+            this._stopDiceTimerNotifications();
           }
         }, CONSTANTS.DICE_TOTAL_TIME_MS);
         
@@ -1550,6 +1622,7 @@ export class GameServer extends CPUProtection {
         this.isDiceWaiting = false;
         this._diceTimeout = null;
         this._canSubmitDiceAnswer = false;
+        this._stopDiceTimerNotifications();
       }
     } catch(e) {
       this._isShowingDice = false;
@@ -1557,6 +1630,7 @@ export class GameServer extends CPUProtection {
       this.isDiceWaiting = false;
       this._diceTimeout = null;
       this._canSubmitDiceAnswer = false;
+      this._stopDiceTimerNotifications();
     }
   }
 
@@ -1569,6 +1643,7 @@ export class GameServer extends CPUProtection {
         this.currentDiceRoll = null;
         this._isShowingDice = false;
         this._canSubmitDiceAnswer = false;
+        this._stopDiceTimerNotifications();
         return; 
       }
       
@@ -1577,13 +1652,22 @@ export class GameServer extends CPUProtection {
       if (this.diceHasWinner && this.diceWinner) {
         await this._handleDiceWinner(this.diceWinner, diceValue);
       } else {
-        this._broadcastDiceNotification("diceNoWinner", `No winner this round! The value was: ${diceValue} ${this.diceGameSystem.getDiceEmoji(diceValue)}`);
+        this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
+          message: `No winner this round! The value was: ${diceValue} ${this.diceGameSystem.getDiceEmoji(diceValue)}`,
+          value: diceValue,
+          emoji: this.diceGameSystem.getDiceEmoji(diceValue)
+        }]);
+        
+        this._broadcastDiceNotification("diceNoWinner", 
+          `No winner this round! The value was: ${diceValue} ${this.diceGameSystem.getDiceEmoji(diceValue)}`
+        );
       }
       
       this.currentDiceRoll = null;
       this.isDiceWaiting = true;
       this._isShowingDice = false;
       this._canSubmitDiceAnswer = false;
+      this._stopDiceTimerNotifications();
       
       this._diceBreakTimeout = setTimeout(() => {
         if (this.closing || this.isDestroyed) { 
@@ -1599,10 +1683,11 @@ export class GameServer extends CPUProtection {
       this.isDiceWaiting = false;
       this._isShowingDice = false;
       this._canSubmitDiceAnswer = false;
+      this._stopDiceTimerNotifications();
     }
   }
 
-  // ==================== submitDiceAnswer - FIXED ====================
+  // ==================== submitDiceAnswer ====================
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) {
@@ -1655,14 +1740,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      const isReadingTime = !this._canSubmitDiceAnswer;
-      let readingTimeLeft = 0;
-      
-      if (isReadingTime) {
-        const elapsed = (Date.now() - (this._diceQuestionStartTime || 0)) / 1000;
-        readingTimeLeft = Math.max(0, Math.round((CONSTANTS.DICE_READING_TIME_MS / 1000) - elapsed));
-      }
-      
       const guessValue = parseInt(guess, 10);
       const isValidGuess = !isNaN(guessValue) && guessValue >= 1 && guessValue <= 6;
       const wsId = this._getWsId(ws);
@@ -1700,38 +1777,7 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // ==================== CASE 2: READING TIME ====================
-      if (isReadingTime) {
-        this.diceAnswered.add(username);
-        
-        // BROADCAST TO ROOM - Everyone sees this
-        this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
-          username: username,
-          guess: guessValue || "?",
-          isCorrect: false,
-          status: "reading_time",
-          readingTimeLeft: readingTimeLeft,
-          message: `⏳ ${username} tried ${guessValue || "?"} during reading time (${readingTimeLeft}s left)`,
-          timestamp: Date.now()
-        }]);
-        
-        // Send direct response to user
-        this._safeSend(ws, ["diceAnswerResult", {
-          success: false,
-          username: username,
-          guess: guessValue || "?",
-          isCorrect: false,
-          status: "reading",
-          readingTimeLeft: readingTimeLeft,
-          message: `⏳ "${guessValue}" NOT counted! Resubmit in ${CONSTANTS.DICE_ANSWER_TIME_MS / 1000}s`,
-          notCounted: true,
-          timestamp: Date.now()
-        }]);
-        
-        return;
-      }
-      
-      // ==================== CASE 3: TIME'S UP ====================
+      // ==================== CASE 2: TIME'S UP ====================
       const answerRemaining = this._getDiceAnswerRemainingTime();
       if (answerRemaining <= 0) {
         this.diceAnswered.add(username);
@@ -1760,7 +1806,7 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // ==================== CASE 4: CORRECT ANSWER ====================
+      // ==================== CASE 3: CORRECT ANSWER ====================
       const isCorrect = isValidGuess && guessValue === diceValue;
       const remainingText = `${answerRemaining}s remaining`;
       
@@ -1810,7 +1856,7 @@ export class GameServer extends CPUProtection {
         }]);
         
       } else {
-        // ===== CASE 5: WRONG ANSWER =====
+        // ===== CASE 4: WRONG ANSWER =====
         
         // BROADCAST TO ROOM - Everyone sees wrong answer
         this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
@@ -1874,6 +1920,10 @@ export class GameServer extends CPUProtection {
       if (this._diceBreakTimeout) clearTimeout(this._diceBreakTimeout);
       if (this._diceStartTimeout) clearTimeout(this._diceStartTimeout);
       if (this._diceKeepAliveInterval) clearInterval(this._diceKeepAliveInterval);
+      
+      // Stop timer notifications
+      this._stopDiceTimerNotifications();
+      
       this.currentDiceRoll = null;
       this.isDiceWaiting = false;
       this.diceHasWinner = false;
@@ -1954,6 +2004,9 @@ export class GameServer extends CPUProtection {
       this._diceOutOfTimeShown = false;
       this._diceRemainingShown = false;
       this._diceTimeUpShown = false;
+      
+      // Stop timer notifications
+      this._stopDiceTimerNotifications();
       
       if (this._diceTimeout) {
         clearTimeout(this._diceTimeout);
@@ -2076,6 +2129,8 @@ export class GameServer extends CPUProtection {
             displayTime = "10s remaining";
           } else if (remainingInt >= 5) {
             displayTime = "5s remaining";
+          } else if (remainingInt >= 3) {
+            displayTime = "3s remaining";
           } else if (remainingInt > 0) {
             displayTime = `${timeText} remaining`;
           } else {
@@ -2141,10 +2196,7 @@ export class GameServer extends CPUProtection {
   _getDiceAnswerRemainingTime() {
     try {
       if (!this.currentDiceRoll || !this._diceQuestionStartTime) return 0;
-      const readingEnd = this._diceQuestionStartTime + CONSTANTS.DICE_READING_TIME_MS;
-      const now = Date.now();
-      if (now < readingEnd) return 0;
-      const elapsed = (now - readingEnd) / 1000;
+      const elapsed = (Date.now() - this._diceQuestionStartTime) / 1000;
       return Math.max(0, Math.round((CONSTANTS.DICE_ANSWER_TIME_MS / 1000) - elapsed));
     } catch(e) { return 0; }
   }
@@ -2159,8 +2211,9 @@ export class GameServer extends CPUProtection {
         value: diceValue,
         emoji: diceEmoji,
         timestamp: Date.now(),
-        readingTime: CONSTANTS.DICE_READING_TIME_MS / 1000,
-        answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000
+        answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
+        canAnswerNow: true,
+        message: "🎲 Guess the number NOW!"
       };
       
       const msgStr = JSON.stringify(["diceRoll", msgData]);
@@ -2331,6 +2384,8 @@ export class GameServer extends CPUProtection {
                   displayTime = "10s remaining";
                 } else if (remainingInt >= 5) {
                   displayTime = "5s remaining";
+                } else if (remainingInt >= 3) {
+                  displayTime = "3s remaining";
                 } else if (remainingInt > 0) {
                   const minutes = Math.floor(remainingInt / 60);
                   const seconds = remainingInt % 60;
@@ -2349,8 +2404,8 @@ export class GameServer extends CPUProtection {
                   value: this.currentDiceRoll.value,
                   emoji: this.currentDiceRoll.emoji,
                   timestamp: this.currentDiceRoll.timestamp,
-                  readingTime: CONSTANTS.DICE_READING_TIME_MS / 1000,
-                  answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000
+                  answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
+                  canAnswerNow: true
                 }]);
                 
                 if (this._canSubmitDiceAnswer) {
@@ -2428,6 +2483,8 @@ export class GameServer extends CPUProtection {
                 displayTime = "10s remaining";
               } else if (remainingInt >= 5) {
                 displayTime = "5s remaining";
+              } else if (remainingInt >= 3) {
+                displayTime = "3s remaining";
               } else if (remainingInt > 0) {
                 const minutes = Math.floor(remainingInt / 60);
                 const seconds = remainingInt % 60;
@@ -2446,8 +2503,8 @@ export class GameServer extends CPUProtection {
                 value: this.currentDiceRoll.value,
                 emoji: this.currentDiceRoll.emoji,
                 timestamp: this.currentDiceRoll.timestamp,
-                readingTime: CONSTANTS.DICE_READING_TIME_MS / 1000,
-                answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000
+                answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
+                canAnswerNow: true
               }]);
               
               if (this._canSubmitDiceAnswer) {
@@ -3925,7 +3982,7 @@ export class GameServer extends CPUProtection {
             winner: this.diceWinner,
             timeLeft: timeLeft.text,
             canSubmit: this._canSubmitDiceAnswer,
-            readingTimeLeft: this._canSubmitDiceAnswer ? 0 : Math.max(0, Math.round((CONSTANTS.DICE_READING_TIME_MS - (Date.now() - this._diceQuestionStartTime)) / 1000)),
+            readingTimeLeft: 0,
             answerTimeLeft: this._canSubmitDiceAnswer ? answerRemaining : 0,
             totalTimeLeft: Math.max(0, Math.round((CONSTANTS.DICE_TOTAL_TIME_MS - (Date.now() - this._diceStartTime)) / 1000))
           }
@@ -4132,6 +4189,7 @@ export class GameServer extends CPUProtection {
           this._canSubmitDiceAnswer = false;
           this._diceRemainingShown = false;
           this._diceTimeUpShown = false;
+          this._stopDiceTimerNotifications();
         }
       }
       const deadConnections = [];
@@ -4191,6 +4249,7 @@ export class GameServer extends CPUProtection {
       this._diceOutOfTimeShown = false;
       this._diceRemainingShown = false;
       this._diceTimeUpShown = false;
+      this._stopDiceTimerNotifications();
       
       if (this._eventQueue) {
         this._eventQueue = [];
@@ -4227,6 +4286,7 @@ export class GameServer extends CPUProtection {
         clearInterval(this._diceKeepAliveInterval);
         this._diceKeepAliveInterval = null;
       }
+      this._stopDiceTimerNotifications();
     } catch(e) {}
   }
 
