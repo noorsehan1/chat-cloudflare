@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS - FULL CLASS ====================
+// ==================== GAME-SERVER.JS - FULL CLASS DENGAN PERBAIKAN ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -56,7 +56,8 @@ const CONSTANTS = {
   MAX_UNHANDLED_ERRORS: 5,
   ERROR_RESET_INTERVAL_MS: 60000,
   LOWCARD_WINNER_KEY: 'lowcard_winner_',
-  LOWCARD_RECORDING_KEY: 'lowcard_recording_status_'
+  LOWCARD_RECORDING_KEY: 'lowcard_recording_status_',
+  SCHEDULER_LOOP_INTERVAL_MS: 50 // Scheduler loop interval
 };
 
 const QUIZ_SCHEDULE = {
@@ -77,6 +78,7 @@ const COUNTRY_LANGUAGE_MAP = {
 
 const SUPPORTED_LANGUAGES = ['en', 'id'];
 
+// ==================== CPU PROTECTION CLASS ====================
 class CPUProtection {
   constructor() {
     this._cpuStartTime = 0;
@@ -166,26 +168,24 @@ class CPUProtection {
     } catch(e) { return false; }
   }
 
-  _startCPUMonitor() {
-    if (this._cpuMonitorInterval) clearInterval(this._cpuMonitorInterval);
-    this._cpuMonitorInterval = setInterval(() => {
-      try {
-        const now = Date.now();
-        for (const [key, data] of this._rateLimitMap) {
-          if (now - data.resetTime > 1000) this._rateLimitMap.delete(key);
+  _cpuMonitorTask() {
+    try {
+      const now = Date.now();
+      for (const [key, data] of this._rateLimitMap) {
+        if (now - data.resetTime > 1000) this._rateLimitMap.delete(key);
+      }
+      if (this._cpuHistory.length > 0) {
+        const avg = this._cpuHistory.reduce((a, b) => a + b, 0) / this._cpuHistory.length;
+        if (avg > CONSTANTS.CPU_TIME_LIMIT_MS * 0.9) {
+          this._isThrottled = true;
+          setTimeout(() => { this._isThrottled = false; }, 500);
         }
-        if (this._cpuHistory.length > 0) {
-          const avg = this._cpuHistory.reduce((a, b) => a + b, 0) / this._cpuHistory.length;
-          if (avg > CONSTANTS.CPU_TIME_LIMIT_MS * 0.9) {
-            this._isThrottled = true;
-            setTimeout(() => { this._isThrottled = false; }, 500);
-          }
-        }
-      } catch(e) {}
-    }, CONSTANTS.CPU_CHECK_INTERVAL_MS);
+      }
+    } catch(e) {}
   }
 }
 
+// ==================== COUNTRY BASED QUIZ SYSTEM ====================
 class CountryBasedQuizSystem {
   constructor(gameServer) {
     this.gameServer = gameServer;
@@ -326,10 +326,12 @@ class CountryBasedQuizSystem {
 
   getQuestionByIndex(langCode, index) {
     try {
-      const questions = this.getQuestionsByLanguage(langCode);
-      if (!questions || questions.length === 0) return null;
-      const safeIndex = index % questions.length;
-      return questions[safeIndex] || null;
+      const data = this.questionsByLanguage.get(langCode);
+      if (!data || !data.questions || data.questions.length === 0) {
+        return null;
+      }
+      const safeIndex = index % data.questions.length;
+      return data.questions[safeIndex] || null;
     } catch(e) {
       return null;
     }
@@ -401,6 +403,99 @@ class CountryBasedQuizSystem {
   }
 }
 
+// ==================== CENTRALIZED SCHEDULER ====================
+class CentralizedScheduler {
+  constructor() {
+    this.tasks = [];
+    this.isRunning = false;
+    this._lastRun = Date.now();
+    this._taskQueue = [];
+    this._loopInterval = null;
+  }
+
+  registerTask(name, interval, fn, options = {}) {
+    this.tasks.push({
+      name,
+      interval,
+      fn,
+      lastRun: 0,
+      options,
+      isRunning: false,
+      errorCount: 0
+    });
+  }
+
+  async run() {
+    if (this.isRunning) return;
+    this.isRunning = true;
+
+    try {
+      const now = Date.now();
+      
+      const dueTasks = this.tasks.filter(task => {
+        if (task.isRunning) return false;
+        const elapsed = now - task.lastRun;
+        return elapsed >= task.interval;
+      });
+
+      for (const task of dueTasks) {
+        task.isRunning = true;
+        task.lastRun = now;
+        
+        try {
+          if (this._shouldYieldCPU()) {
+            await this._yield();
+          }
+          
+          await task.fn();
+          task.errorCount = 0;
+          
+        } catch(e) {
+          task.errorCount++;
+          if (task.errorCount > 5) {
+            // Disable task if too many errors
+            task.interval = task.interval * 2;
+            task.errorCount = 0;
+          }
+        } finally {
+          task.isRunning = false;
+        }
+        
+        await this._yield();
+      }
+
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
+  _shouldYieldCPU() {
+    const elapsed = Date.now() - this._lastRun;
+    return elapsed > 8;
+  }
+
+  async _yield() {
+    return new Promise(resolve => setTimeout(resolve, 1));
+  }
+
+  start(intervalMs = 50) {
+    if (this._loopInterval) {
+      clearInterval(this._loopInterval);
+    }
+    this._loopInterval = setInterval(() => {
+      this.run();
+    }, intervalMs);
+  }
+
+  stop() {
+    if (this._loopInterval) {
+      clearInterval(this._loopInterval);
+      this._loopInterval = null;
+    }
+  }
+}
+
+// ==================== GAME SERVER CLASS ====================
 export class GameServer extends CPUProtection {
   constructor(state, env) {
     try {
@@ -510,9 +605,12 @@ export class GameServer extends CPUProtection {
 
       this.countryQuizSystem = new CountryBasedQuizSystem(this);
 
+      // ==================== CENTRALIZED SCHEDULER ====================
+      this._scheduler = new CentralizedScheduler();
+      this._setupScheduler();
+
       this._loadAllQuestionsToMemory();
       this._initAsync();
-      this._startCPUMonitor();
       this._startHealthCheck();
 
       this._initRecordingStatusFromKV();
@@ -531,6 +629,103 @@ export class GameServer extends CPUProtection {
         }
       }, 8000);
 
+    } catch(e) {}
+  }
+
+  // ==================== SETUP SCHEDULER ====================
+  _setupScheduler() {
+    // Register semua task dengan interval yang tepat
+    this._scheduler.registerTask('cpuMonitor', 100, () => {
+      this._cpuMonitorTask();
+    });
+
+    this._scheduler.registerTask('healthCheck', 10000, () => {
+      this._healthCheckTask();
+    });
+
+    this._scheduler.registerTask('weeklyReset', 3600000, async () => {
+      await this._weeklyResetTask();
+    });
+
+    this._scheduler.registerTask('quizKeepAlive', 5000, () => {
+      this._quizKeepAliveTask();
+    });
+
+    this._scheduler.registerTask('quizAuto', 60000, async () => {
+      await this._quizAutoTask();
+    });
+
+    this._scheduler.registerTask('quizTimer', 30000, () => {
+      this._quizTimerTask();
+    });
+
+    this._scheduler.registerTask('stuckGamesCheck', 15000, () => {
+      this._checkStuckGames();
+    });
+
+    this._scheduler.registerTask('staleGamesCleanup', 60000, () => {
+      this._cleanupStaleGames();
+    });
+
+    this._scheduler.registerTask('deadConnectionsCleanup', 30000, () => {
+      this._cleanupDeadConnections();
+    });
+
+    // Start scheduler loop
+    this._scheduler.start(CONSTANTS.SCHEDULER_LOOP_INTERVAL_MS || 50);
+  }
+
+  // ==================== SCHEDULER TASKS ====================
+  _healthCheckTask() {
+    try {
+      this._performHealthCheck();
+    } catch(e) {}
+  }
+
+  async _weeklyResetTask() {
+    await this._checkAndResetWeeklyQuiz();
+  }
+
+  _quizKeepAliveTask() {
+    try {
+      this._lastHeartbeat = Date.now();
+      if (this._isQuizTime() && this.currentQuestion) {
+        const now = Date.now();
+        const elapsed = (now - this._quizStartTime) / 1000;
+        if (elapsed > (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) - 2 && !this._quizTimeout) {
+          this._forceEvaluateQuiz();
+        }
+        if (elapsed > (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) + 10) {
+          this.currentQuestion = null;
+          this._quizTimeout = null;
+          this._isShowingQuestion = false;
+          this._canSubmitAnswer = false;
+        }
+      }
+    } catch(e) {}
+  }
+
+  async _quizAutoTask() {
+    try {
+      await this._checkQuizAutoStatus();
+      await this._checkAndRestartQuiz();
+      
+      const timeInfo = this._getTimeLeftUntilNextEvent();
+      if (!timeInfo.isRunning && !this.quizEndNotified) {
+        this._sendQuizEndNotificationOnce();
+        this._broadcastQuizTimeLeft();
+      }
+    } catch(e) {}
+  }
+
+  _quizTimerTask() {
+    try {
+      if (this._isQuizTime()) {
+        if (!this.currentQuestion && !this._quizTimeout && 
+            !this.isQuizWaiting && !this._isShowingQuestion) {
+          this._showQuestion();
+        }
+      }
     } catch(e) {}
   }
 
@@ -1173,17 +1368,8 @@ export class GameServer extends CPUProtection {
   }
 
   _startHealthCheck() {
-    if (this._healthCheckInterval) clearInterval(this._healthCheckInterval);
-    this._healthCheckInterval = setInterval(() => {
-      try {
-        if (this.closing || this.isDestroyed) {
-          clearInterval(this._healthCheckInterval);
-          this._healthCheckInterval = null;
-          return;
-        }
-        this._performHealthCheck();
-      } catch(e) {}
-    }, CONSTANTS.HEALTH_CHECK_INTERVAL_MS);
+    // Health check sudah dihandle oleh scheduler
+    // Tidak perlu interval terpisah
   }
 
   _performHealthCheck() {
@@ -1365,19 +1551,7 @@ export class GameServer extends CPUProtection {
         data: data || {}
       };
       const msgStr = JSON.stringify(["quizNotification", notification]);
-      const wsIdArray = Array.from(wsIds);
-      const batchSize = CONSTANTS.BROADCAST_BATCH_SIZE;
-      for (let i = 0; i < wsIdArray.length; i += batchSize) {
-        const batch = wsIdArray.slice(i, i + batchSize);
-        for (const wsId of batch) {
-          try {
-            const ws = this.wsMap.get(wsId);
-            if (ws && ws.readyState === 1) {
-              ws.send(msgStr);
-            }
-          } catch(e) {}
-        }
-      }
+      this._broadcastToRoom(QUIZ_ROOM, ["quizNotification", notification]);
     } catch(e) {}
   }
 
@@ -1389,7 +1563,6 @@ export class GameServer extends CPUProtection {
       
       await this.countryQuizSystem.loadAllQuestions();
       await this._initQuiz();
-      this._startQuizScheduler();
       
       this._startWeeklyResetChecker();
       
@@ -1448,30 +1621,6 @@ export class GameServer extends CPUProtection {
     } catch(e) { 
       return false; 
     }
-  }
-
-  _startQuizScheduler() {
-    try {
-      if (this.quizAutoTimer) clearInterval(this.quizAutoTimer);
-      this.quizAutoTimer = setInterval(() => {
-        try {
-          if (this.closing || this.isDestroyed) {
-            clearInterval(this.quizAutoTimer);
-            this.quizAutoTimer = null;
-            return;
-          }
-          this._checkQuizAutoStatus();
-          this._checkAndRestartQuiz();
-          const timeInfo = this._getTimeLeftUntilNextEvent();
-          if (!timeInfo.isRunning) {
-            if (!this.quizEndNotified) {
-              this._sendQuizEndNotificationOnce();
-            }
-            this._broadcastQuizTimeLeft();
-          }
-        } catch(e) {}
-      }, CONSTANTS.SCHEDULER_INTERVAL_MS);
-    } catch(e) {}
   }
 
   async _checkQuizAutoStatus() {
@@ -1671,95 +1820,124 @@ export class GameServer extends CPUProtection {
     } catch(e) { return false; }
   }
 
+  // ==================== OPTIMIZED BROADCAST QUIZ QUESTION ====================
   async _broadcastQuizQuestion(question, options) {
     try {
       const wsIds = this.wsClients.get(QUIZ_ROOM);
       if (!wsIds?.size) return;
+
       const userWsIds = Array.from(wsIds);
-      const globalIndex = this._globalQuestionIndex;
-      const results = new Map();
+      const questionId = this._globalQuestionIndex;
+      const startTime = Date.now();
       
+      // Group by country
+      const countryGroups = new Map();
       for (const wsId of userWsIds) {
         const country = this.userCountry.get(wsId) || 'US';
+        if (!countryGroups.has(country)) {
+          countryGroups.set(country, []);
+        }
+        countryGroups.get(country).push(wsId);
+      }
+
+      // Process per country
+      for (const [country, wsIdGroup] of countryGroups) {
+        // CPU check
+        if (Date.now() - startTime > 8) {
+          await this._cpuYield();
+        }
+
         const info = COUNTRY_LANGUAGE_MAP[country];
         const lang = info?.lang || 'en';
+        
         let translatedQuestion = question;
         let translatedOptions = options;
-        let isTranslated = false;
         
+        // LANGSUNG AMBIL DARI MAP (BUKAN KV)
         if (lang === 'id') {
-          const translatedQ = this.countryQuizSystem.getQuestionByIndex('id', globalIndex);
+          const translatedQ = this.countryQuizSystem.getQuestionByIndex('id', questionId);
           if (translatedQ) {
             translatedQuestion = translatedQ.question || translatedQ.text || question;
-            const foundOptions = translatedQ.options || translatedQ.choices || { A: '', B: '', C: '', D: '' };
-            translatedOptions = {};
-            const optionKeys = ['A', 'B', 'C', 'D'];
-            if (Array.isArray(foundOptions)) {
-              optionKeys.forEach((key, index) => {
-                translatedOptions[key] = foundOptions[index] || '';
-              });
-            } else {
-              optionKeys.forEach((key) => {
-                translatedOptions[key] = foundOptions[key] || '';
-              });
-            }
-            isTranslated = true;
+            translatedOptions = this._convertOptions(translatedQ.options || translatedQ.choices);
           }
         }
-        
-        results.set(wsId, {
+
+        // Siapkan message
+        const msgData = {
           question: translatedQuestion,
           options: translatedOptions,
           language: lang,
           country: country,
           countryName: info?.name || 'Unknown',
-          isTranslated: isTranslated,
-          questionId: globalIndex + 1,
-          questionNumber: globalIndex + 1
-        });
-      }
-      
-      const batchSize = CONSTANTS.BROADCAST_BATCH_SIZE;
-      this._startCPUTimer();
-      for (let i = 0; i < userWsIds.length; i += batchSize) {
-        const batch = userWsIds.slice(i, i + batchSize);
-        for (const wsId of batch) {
-          try {
+          isTranslated: lang === 'id',
+          questionId: questionId + 1,
+          questionNumber: questionId + 1
+        };
+        
+        const msgStr = JSON.stringify(["quizQuestion", msgData]);
+        
+        // Broadcast dengan batching dan CPU yield
+        const BATCH_SIZE = CONSTANTS.BROADCAST_BATCH_SIZE || 5;
+        let batchStartTime = Date.now();
+        
+        for (let i = 0; i < wsIdGroup.length; i += BATCH_SIZE) {
+          const batch = wsIdGroup.slice(i, i + BATCH_SIZE);
+          
+          for (const wsId of batch) {
             const ws = this.wsMap.get(wsId);
-            if (!ws || ws.readyState !== 1) continue;
-            const userQuestion = results.get(wsId);
-            if (userQuestion) {
-              const message = ["quizQuestion", {
-                question: userQuestion.question,
-                options: userQuestion.options,
-                language: userQuestion.language,
-                country: userQuestion.country,
-                countryName: userQuestion.countryName,
-                isTranslated: userQuestion.isTranslated,
-                questionId: userQuestion.questionId,
-                questionNumber: userQuestion.questionNumber
-              }];
-              this._safeSend(ws, message);
+            if (ws && ws.readyState === 1) {
+              try { ws.send(msgStr); } catch(e) {}
             }
-          } catch(e) {}
+          }
+          
+          // CPU yield setiap batch
+          if (Date.now() - batchStartTime > 8) {
+            await this._cpuYield();
+            batchStartTime = Date.now();
+          }
         }
-        if (this._checkCPULimit()) {
-          await this._cpuYield();
-          this._startCPUTimer();
-        }
+        
+        // Yield antar country group
+        await this._cpuYield();
       }
+
     } catch(e) {
-      const msgStr = JSON.stringify(["quizQuestion", { question, options }]);
+      // Fallback: broadcast tanpa translation
+      const msgStr = JSON.stringify(["quizQuestion", { 
+        question, 
+        options, 
+        isTranslated: false,
+        questionId: this._globalQuestionIndex + 1,
+        questionNumber: this._globalQuestionIndex + 1
+      }]);
+      
       const wsIdArray = Array.from(this.wsClients.get(QUIZ_ROOM) || []);
       for (const wsId of wsIdArray) {
-        try {
-          const ws = this.wsMap.get(wsId);
-          if (ws && ws.readyState === 1) {
-            ws.send(msgStr);
-          }
-        } catch(e) {}
+        const ws = this.wsMap.get(wsId);
+        if (ws && ws.readyState === 1) {
+          try { ws.send(msgStr); } catch(e) {}
+        }
       }
     }
+  }
+
+  _convertOptions(options) {
+    const result = { A: '', B: '', C: '', D: '' };
+    if (!options) return result;
+    
+    if (Array.isArray(options)) {
+      const keys = ['A', 'B', 'C', 'D'];
+      for (let i = 0; i < Math.min(options.length, 4); i++) {
+        result[keys[i]] = options[i] || '';
+      }
+      return result;
+    }
+    
+    const keys = ['A', 'B', 'C', 'D'];
+    for (const key of keys) {
+      result[key] = options[key] || '';
+    }
+    return result;
   }
 
   // ==================== _showQuestion ====================
@@ -1969,7 +2147,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== submitQuizAnswer - JAWABAN TETAP TERLIHAT ====================
+  // ==================== submitQuizAnswer ====================
   async submitQuizAnswer(ws, username, answer) {
     try {
       if (!ws || !username) {
@@ -2007,7 +2185,6 @@ export class GameServer extends CPUProtection {
         }
       }
       
-      // ⭐ CEK APAKAH USER SUDAH PERNAH SUBMIT (SATU KALI SAJA)
       if (this.quizAnswered.has(username)) {
         this._safeSend(ws, ["quizError", "You already answered!"]);
         return;
@@ -2029,12 +2206,9 @@ export class GameServer extends CPUProtection {
       const countryInfo = this.countryQuizSystem.getUserCountryInfo(wsId);
       const answerDisplay = isValidAnswer ? answerKey : "?";
       
-      // ⭐ CEK JIKA SUDAH ADA WINNER
       const hasWinner = this.quizHasWinner && this.quizWinner;
       
-      // ⭐ CEK APAKAH WAKTU ANSWER SUDAH HABIS
       if (!isReadingTime && answerRemaining <= 0) {
-        // ⭐ TETAP TAMPILKAN JAWABAN WALAUPUN TIME UP
         this._broadcastQuizNotification("quizAnswerLate", {
           username: username,
           answer: answerDisplay,
@@ -2047,7 +2221,6 @@ export class GameServer extends CPUProtection {
           winner: hasWinner ? this.quizWinner : null
         });
         
-        // ⭐ TAMBAHKAN KE quizAnswered AGAR TIDAK BISA SUBMIT LAGI
         this.quizAnswered.add(username);
         
         if (hasWinner) {
@@ -2058,11 +2231,7 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // ⭐ ============================================================
-      // ⭐ JIKA READING TIME - TAMPILKAN TAPI TIDAK DIVALIDASI
-      // ⭐ ============================================================
       if (isReadingTime) {
-        // Tampilkan jawaban user, TANPA status benar/salah
         this._broadcastQuizNotification("quizAnswerReading", {
           username: username,
           answer: answerDisplay,
@@ -2086,23 +2255,14 @@ export class GameServer extends CPUProtection {
           notCounted: true
         }]);
         
-        // ⭐ TAMBAHKAN KE quizAnswered (TIDAK BISA SUBMIT LAGI DI READING TIME)
         this.quizAnswered.add(username);
-        
         return;
       }
       
-      // ⭐ ============================================================
-      // ⭐ ANSWER TIME - VALIDASI DAN DIBERI POIN
-      // ⭐ ============================================================
-      
-      // ⭐ VALIDASI NORMAL (ANSWER TIME)
       const isCorrect = isValidAnswer && (answerKey === this.currentQuestion.correct);
       const remainingText = `${answerRemaining}s remaining`;
       
-      // ⭐ JIKA SUDAH ADA WINNER, JAWABAN TETAP DITAMPILKAN TAPI TIDAK DAPAT POIN
       if (hasWinner) {
-        // Tampilkan jawaban user tapi tidak dapat poin
         this._broadcastQuizNotification("quizAnswer", {
           username: username,
           answer: answerDisplay,
@@ -2129,13 +2289,10 @@ export class GameServer extends CPUProtection {
           winner: this.quizWinner
         });
         
-        // ⭐ TAMBAHKAN KE quizAnswered (TIDAK BISA SUBMIT LAGI)
         this.quizAnswered.add(username);
-        
         return;
       }
       
-      // ⭐ JIKA JAWABAN BENAR, BERI POIN
       if (isCorrect && !this.quizHasWinner) {
         this.quizHasWinner = true;
         this.quizWinner = username;
@@ -2156,7 +2313,6 @@ export class GameServer extends CPUProtection {
         });
       }
       
-      // ⭐ TAMBAHKAN KE quizAnswered (TIDAK BISA SUBMIT LAGI)
       this.quizAnswered.add(username);
       
       this._broadcastQuizNotification("quizAnswer", {
@@ -2186,42 +2342,7 @@ export class GameServer extends CPUProtection {
   }
 
   _startQuizLoop() {
-    try {
-      if (this.quizTimer) clearInterval(this.quizTimer);
-      this.quizTimer = setInterval(() => {
-        try {
-          if (this.closing || this.isDestroyed) { 
-            clearInterval(this.quizTimer); 
-            this.quizTimer = null; 
-            return; 
-          }
-          if (this._isRecovering) return;
-          if (this._isQuizTime()) {
-            this.quizEndedToday = false;
-            this.quizEndMessageShown = false;
-            this.quizEndNotified = false;
-            if (!this.quizAutoEnabled) {
-              this.quizAutoEnabled = true;
-              this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", "Quiz is starting soon!", true, true]);
-            }
-            if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout && !this._isShowingQuestion) {
-              this._showQuestion();
-            }
-          } else {
-            if (this.quizAutoEnabled && !this.quizEndNotified) {
-              this.quizAutoEnabled = false;
-              this.quizEndedToday = true;
-              this.quizEndMessageShown = false;
-              this.resetQuiz();
-              this._clearQuizData();
-              this._quizTimeLeftNotified.clear();
-              this._nextQuizNotified.clear();
-              this._sendQuizEndNotificationOnce();
-            }
-          }
-        } catch(e) {}
-      }, CONSTANTS.QUIZ_INTERVAL_MS);
-    } catch(e) {}
+    // Quiz loop sudah dihandle oleh scheduler
   }
 
   async resetQuiz() {
@@ -2244,7 +2365,6 @@ export class GameServer extends CPUProtection {
       
       this._quizTimeLeftNotified.clear();
       this._nextQuizNotified.clear();
-      this._startQuizKeepAlive();
     } catch(e) {}
   }
 
@@ -2298,14 +2418,10 @@ export class GameServer extends CPUProtection {
           difficulty: q.difficulty || 'medium'
         }));
         this._isAllQuestionsLoaded = true;
-        this._startQuizLoop();
-        this._startQuizKeepAlive();
         return true;
       }
       const loaded = await this._loadAllQuestionsFromKV();
       if (loaded) {
-        this._startQuizLoop();
-        this._startQuizKeepAlive();
         return true;
       }
       if (retryCount < CONSTANTS.MAX_RETRY_INIT_QUIZ && !this.closing && !this.isDestroyed) {
@@ -2321,46 +2437,7 @@ export class GameServer extends CPUProtection {
   }
 
   _startQuizKeepAlive() {
-    try {
-      if (this._quizKeepAliveInterval) clearInterval(this._quizKeepAliveInterval);
-      this._quizKeepAliveInterval = setInterval(() => {
-        try {
-          if (this.closing || this.isDestroyed) { 
-            clearInterval(this._quizKeepAliveInterval); 
-            this._quizKeepAliveInterval = null; 
-            return; 
-          }
-          this._lastHeartbeat = Date.now();
-          if (this._isQuizTime()) {
-            const now = Date.now();
-            if (!this.currentQuestion && !this._quizTimeout && !this.isQuizWaiting && !this._quizStartTimeout && !this._isShowingQuestion) {
-              if (this.quizAutoEnabled) {
-                this._showQuestion();
-              } else { 
-                this.quizAutoEnabled = true; 
-                this._showQuestion(); 
-              }
-            }
-            if (this.currentQuestion && this._quizStartTime) {
-              const elapsed = (now - this._quizStartTime) / 1000;
-              if (elapsed > (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) - 2 && !this._quizTimeout) {
-                this._forceEvaluateQuiz();
-              }
-              if (elapsed > (CONSTANTS.QUIZ_TOTAL_TIME_MS / 1000) + 10) {
-                this.currentQuestion = null;
-                this._quizTimeout = null;
-                this._isShowingQuestion = false;
-                this._canSubmitAnswer = false;
-              }
-            }
-          } else {
-            if (!this.quizEndNotified && this.quizAutoEnabled) {
-              this._sendQuizEndNotificationOnce();
-            }
-          }
-        } catch(e) {}
-      }, CONSTANTS.QUIZ_KEEP_ALIVE_INTERVAL_MS);
-    } catch(e) {}
+    // Keep alive sudah dihandle oleh scheduler
   }
 
   _clearQuizData() {
@@ -2408,19 +2485,7 @@ export class GameServer extends CPUProtection {
       const wsIds = this.wsClients.get(QUIZ_ROOM);
       if (!wsIds?.size) return;
       const msgStr = JSON.stringify([type, data]);
-      const wsIdArray = Array.from(wsIds);
-      const batchSize = CONSTANTS.BROADCAST_BATCH_SIZE;
-      this._startCPUTimer();
-      for (let i = 0; i < wsIdArray.length; i += batchSize) {
-        const batch = wsIdArray.slice(i, i + batchSize);
-        for (const wsId of batch) {
-          try {
-            const ws = this.wsMap.get(wsId);
-            if (ws && ws.readyState === 1) ws.send(msgStr);
-          } catch(e) {}
-        }
-        if (this._checkCPULimit()) { await this._cpuYield(); this._startCPUTimer(); }
-      }
+      this._broadcastToRoom(QUIZ_ROOM, [type, data]);
     } catch(e) {}
   }
 
@@ -2450,30 +2515,8 @@ export class GameServer extends CPUProtection {
         message = `${timeLeft.text}`;
         canType = true;
       }
-      const wsIdArray = Array.from(wsIds);
-      let hasUnnotified = false;
-      for (const wsId of wsIdArray) {
-        if (!this._quizTimeLeftNotified.has(wsId) && !this._nextQuizNotified.has(wsId)) {
-          hasUnnotified = true;
-          break;
-        }
-      }
-      if (!hasUnnotified) return;
-      const msgStr = JSON.stringify(["quizTimeLeft", message, canType, isQuizTime]);
-      for (const wsId of wsIdArray) {
-        if (!this._quizTimeLeftNotified.has(wsId) && !this._nextQuizNotified.has(wsId)) {
-          try {
-            const ws = this.wsMap.get(wsId);
-            if (ws && ws.readyState === 1) {
-              ws.send(msgStr);
-              this._quizTimeLeftNotified.set(wsId, now);
-              if (!isQuizTime) {
-                this._nextQuizNotified.set(wsId, now);
-              }
-            }
-          } catch(e) {}
-        }
-      }
+      
+      this._broadcastToRoom(QUIZ_ROOM, ["quizTimeLeft", message, canType, isQuizTime]);
       this._lastQuizTimeLeftBroadcast = now;
     } catch(e) {}
   }
@@ -2762,25 +2805,35 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  // ==================== OPTIMIZED BROADCAST TO ROOM ====================
   async _broadcastToRoom(room, message) {
     try {
       if (this.closing || this.isDestroyed || !room || !message) return;
       const wsIds = this.wsClients.get(room);
       if (!wsIds?.size) return;
+      
       const msgStr = JSON.stringify(message);
       const wsIdArray = Array.from(wsIds);
-      const batchSize = CONSTANTS.BROADCAST_BATCH_SIZE;
-      this._startCPUTimer();
-      for (let i = 0; i < wsIdArray.length; i += batchSize) {
-        const batch = wsIdArray.slice(i, i + batchSize);
+      const BATCH_SIZE = CONSTANTS.BROADCAST_BATCH_SIZE || 5;
+      let startTime = Date.now();
+      
+      for (let i = 0; i < wsIdArray.length; i += BATCH_SIZE) {
+        const batch = wsIdArray.slice(i, i + BATCH_SIZE);
+        
         for (const wsId of batch) {
           const ws = this.wsMap.get(wsId);
           if (ws && ws.readyState === 1) {
             try { ws.send(msgStr); } catch(e) {}
           }
         }
-        if (this._checkCPULimit()) { await this._cpuYield(); this._startCPUTimer(); }
+        
+        // CPU yield setiap batch
+        if (Date.now() - startTime > 8) {
+          await this._cpuYield();
+          startTime = Date.now();
+        }
       }
+      
     } catch(e) {}
   }
 
@@ -4315,18 +4368,22 @@ export class GameServer extends CPUProtection {
   _checkStuckGames() {
     try {
       const now = Date.now();
+      const toEvaluate = [];
+      const toClose = [];
+      
       for (const [room, game] of this.activeGames) {
         if (!game?._isActive || game._gameEnded) continue;
+        
         if (game._phase === 'draw' && game._drawPhaseStart &&
             (now - game._drawPhaseStart) > CONSTANTS.STUCK_DRAW_TIMEOUT_MS) {
-          this._broadcastToRoom(room, ["gameLowCardError", "Game stuck, forcing evaluation..."]);
-          this._closeDrawPhase(room, game);
+          toEvaluate.push({ room, game });
         }
+        
         if (game._phase === 'registration' && game.registrationOpen &&
             game._createdAt && (now - game._createdAt) > CONSTANTS.STUCK_REGISTRATION_TIMEOUT_MS) {
-          this._broadcastToRoom(room, ["gameLowCardError", "Registration timeout"]);
-          this._closeRegistration(room, game);
+          toClose.push({ room, game });
         }
+        
         if (game._phase !== 'registration' && !game.registrationOpen) {
           const activePlayers = this._getActivePlayers(game);
           if (activePlayers.length === 0 && !game._gameEnded) {
@@ -4338,6 +4395,16 @@ export class GameServer extends CPUProtection {
           }
         }
       }
+      
+      // Process results with CPU yield
+      for (const item of toEvaluate) {
+        this._closeDrawPhase(item.room, item.game);
+      }
+      
+      for (const item of toClose) {
+        this._closeRegistration(item.room, item.game);
+      }
+      
     } catch(e) {}
   }
 
@@ -4574,9 +4641,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ============================================================
   // ==================== QUIZ WEEKLY RESET ====================
-  // ============================================================
 
   async _getLastResetWeek() {
     try {
@@ -4605,8 +4670,6 @@ export class GameServer extends CPUProtection {
       const lastResetWeek = await this._getLastResetWeek();
       
       if (lastResetWeek !== currentWeek) {
-        console.log(`🔄 Weekly Quiz Reset: ${lastResetWeek || 'NEVER'} -> ${currentWeek}`);
-        
         const points = await this._getQuizPoints();
         
         if (points && Object.keys(points).length > 0) {
@@ -4658,26 +4721,11 @@ export class GameServer extends CPUProtection {
       
       return false;
     } catch(e) {
-      console.error('Weekly reset error:', e);
       return false;
     }
   }
 
   _startWeeklyResetChecker() {
-    if (this._weeklyResetTimer) {
-      clearInterval(this._weeklyResetTimer);
-      this._weeklyResetTimer = null;
-    }
-    
-    this._weeklyResetTimer = setInterval(async () => {
-      try {
-        if (this.closing || this.isDestroyed) {
-          clearInterval(this._weeklyResetTimer);
-          this._weeklyResetTimer = null;
-          return;
-        }
-        await this._checkAndResetWeeklyQuiz();
-      } catch(e) {}
-    }, 3600000);
+    // Weekly reset sudah dihandle oleh scheduler
   }
 }
