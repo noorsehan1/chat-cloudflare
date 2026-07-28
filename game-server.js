@@ -78,7 +78,7 @@ const QUIZ_SCHEDULE = {
 
 // ==================== ROOM CONSTANTS ====================
 const QUIZ_ROOM = "Quiz";
-const DICE_ROOM = "Dice";
+const DICE_ROOM = "Quiz";
 
 // ==================== CPU PROTECTION CLASS ====================
 class CPUProtection {
