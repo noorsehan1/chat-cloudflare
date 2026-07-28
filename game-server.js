@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS - FULL CLASS DENGAN PERBAIKAN ====================
+// ==================== GAME-SERVER.JS - FULL CLASS ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -71,7 +71,7 @@ const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 2 },
     { start: 11, end: 12 },
-    { start: 2, end: 3 }
+    { start: 23, end: 24 }
   ],
   TIMEZONE_OFFSET: 8,
 };
@@ -474,7 +474,7 @@ export class GameServer extends CPUProtection {
       this._weeklyResetTimer = null;
       this._lastResetWeek = null;
 
-      // ==================== FLAGS UNTUK REMAINING & TIME UP ====================
+      // ==================== FLAGS ====================
       this._diceOutOfTimeShown = false;
       this._diceRemainingShown = false;
       this._diceTimeUpShown = false;
@@ -564,7 +564,6 @@ export class GameServer extends CPUProtection {
     try {
       this._lastHeartbeat = Date.now();
       
-      // ==================== CEK APAKAH DI LUAR JAM DICE ====================
       if (!this._isDiceTime()) {
         if (!this._diceOutOfTimeShown) {
           const timeLeft = this._getTimeLeftUntilNextDice();
@@ -578,14 +577,12 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // ==================== RESET FLAG SAAT JAM DICE DIMULAI ====================
       if (this._diceOutOfTimeShown) {
         this._diceOutOfTimeShown = false;
         this._diceRemainingShown = false;
         this._diceTimeUpShown = false;
       }
       
-      // ==================== JIKA ADA DICE BERJALAN ====================
       if (this.currentDiceRoll && this._diceStartTime) {
         const now = Date.now();
         const elapsed = (now - this._diceStartTime) / 1000;
@@ -596,7 +593,6 @@ export class GameServer extends CPUProtection {
         const seconds = remainingInt % 60;
         const timeText = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
         
-        // ==================== HANYA 20, 10, 5 DETIK ====================
         if (this._canSubmitDiceAnswer && remaining > 0) {
           const isTargetTime = (remainingInt === 20 || remainingInt === 10 || remainingInt === 5);
           
@@ -609,7 +605,6 @@ export class GameServer extends CPUProtection {
           }
         }
         
-        // ==================== TIME UP! ====================
         if (remaining <= 0 && !this._diceTimeUpShown) {
           this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", 
             "TIME UP!", 
@@ -623,12 +618,10 @@ export class GameServer extends CPUProtection {
           }
         }
         
-        // ==================== FORCE EVALUATE ====================
         if (remaining <= 2 && !this._diceTimeout && !this.diceHasWinner) {
           this._forceEvaluateDice();
         }
         
-        // ==================== RESET ====================
         if (elapsed > totalTime + 10) {
           this.currentDiceRoll = null;
           this._diceTimeout = null;
@@ -1485,7 +1478,6 @@ export class GameServer extends CPUProtection {
             message: "You can now guess the dice value!"
           });
           
-          // ==================== TAMPILKAN 20s REMAINING SAAT MULAI ====================
           this._broadcastToRoom(DICE_ROOM, [
             "diceTimeLeft", 
             "20s remaining", 
@@ -1727,7 +1719,6 @@ export class GameServer extends CPUProtection {
           message: `⚠️ Guess seen, but already have winner: ${this.diceWinner}`
         });
         
-        // ✅ HANYA KIRIM username DAN guess KE CLIENT
         this._broadcastDiceResult("diceAnswer", {
           username: username,
           guess: guessValue || "?"
@@ -1763,7 +1754,6 @@ export class GameServer extends CPUProtection {
         diceValue: diceValue
       });
       
-      // ✅ HANYA KIRIM username DAN guess KE CLIENT
       this._broadcastDiceResult("diceAnswer", {
         username: username,
         guess: guessValue || "?"
