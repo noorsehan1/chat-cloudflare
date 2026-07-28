@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS - FULL CLASS DENGAN LOWCARD TETAP ====================
+// ==================== GAME-SERVER.JS - FULL CLASS DENGAN PERBAIKAN ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -55,11 +55,11 @@ const CONSTANTS = {
   MAX_DICE_GAMES: 10,
   DICE_ROLL_TIME_MS: 3000,
   DICE_READING_TIME_MS: 2000,
-  DICE_ANSWER_TIME_MS: 5000,
-  DICE_TOTAL_TIME_MS: 7000,
+  DICE_ANSWER_TIME_MS: 20000,     // 20 DETIK JAWAB
+  DICE_TOTAL_TIME_MS: 22000,      // 2s BACA + 20s JAWAB
   DICE_BREAK_MS: 2000,
   MAX_DICE_VALUE: 6,
-  DICE_ROOM: "Dice",
+  DICE_ROOM: "Quiz",
   DICE_POINT_KEY: 'dice_points',
   DICE_LAST_WEEK_WINNER: 'dice_last_week_winner',
   DICE_WINNER_KEY: 'dice_winner_',
@@ -76,7 +76,6 @@ const QUIZ_SCHEDULE = {
   TIMEZONE_OFFSET: 8,
 };
 
-// ==================== ROOM CONSTANTS ====================
 const QUIZ_ROOM = "Quiz";
 const DICE_ROOM = "Quiz";
 
@@ -474,6 +473,11 @@ export class GameServer extends CPUProtection {
       this._weeklyResetTimer = null;
       this._lastResetWeek = null;
 
+      // ==================== FLAGS UNTUK REMAINING & TIME UP ====================
+      this._diceOutOfTimeShown = false;
+      this._diceRemainingShown = false;
+      this._diceTimeUpShown = false;
+
       // DICE SYSTEM
       this.diceGameSystem = new DiceGameSystem(this);
 
@@ -558,17 +562,78 @@ export class GameServer extends CPUProtection {
   _diceKeepAliveTask() {
     try {
       this._lastHeartbeat = Date.now();
-      if (this._isDiceTime() && this.currentDiceRoll) {
+      
+      // ==================== CEK APAKAH DI LUAR JAM DICE ====================
+      if (!this._isDiceTime()) {
+        // Hanya tampilkan remaining SEKALI
+        if (!this._diceOutOfTimeShown) {
+          const timeLeft = this._getTimeLeftUntilNextDice();
+          this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", 
+            `Next dice game in: ${timeLeft.text}`, 
+            true, 
+            false
+          ]);
+          this._diceOutOfTimeShown = true;
+        }
+        return;
+      }
+      
+      // ==================== RESET FLAG SAAT JAM DICE DIMULAI ====================
+      if (this._diceOutOfTimeShown) {
+        this._diceOutOfTimeShown = false;
+        this._diceRemainingShown = false;
+        this._diceTimeUpShown = false;
+      }
+      
+      // ==================== JIKA ADA DICE BERJALAN ====================
+      if (this.currentDiceRoll && this._diceStartTime) {
         const now = Date.now();
         const elapsed = (now - this._diceStartTime) / 1000;
-        if (elapsed > (CONSTANTS.DICE_TOTAL_TIME_MS / 1000) - 2 && !this._diceTimeout) {
+        const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
+        const remaining = Math.max(0, totalTime - elapsed);
+        
+        // ==================== TAMPILKAN REMAINING SEKALI (saat sisa 10 detik) ====================
+        if (remaining <= 10 && remaining > 9 && !this._diceRemainingShown && this._canSubmitDiceAnswer) {
+          const minutes = Math.floor(remaining / 60);
+          const seconds = Math.floor(remaining % 60);
+          const timeText = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+          
+          this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", 
+            `${timeText} remaining`, 
+            true, 
+            true
+          ]);
+          this._diceRemainingShown = true;
+        }
+        
+        // ==================== TIME UP! ====================
+        if (remaining <= 0 && !this._diceTimeUpShown) {
+          this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", 
+            "⏰ TIME UP!", 
+            false, 
+            true
+          ]);
+          this._diceTimeUpShown = true;
+          
+          // Force evaluate jika belum selesai
+          if (!this._diceTimeout) {
+            this._forceEvaluateDice();
+          }
+        }
+        
+        // ==================== FORCE EVALUATE (2 detik sebelum habis) ====================
+        if (remaining <= 2 && !this._diceTimeout && !this.diceHasWinner) {
           this._forceEvaluateDice();
         }
-        if (elapsed > (CONSTANTS.DICE_TOTAL_TIME_MS / 1000) + 10) {
+        
+        // ==================== RESET JIKA LEWAT BATAS ====================
+        if (elapsed > totalTime + 10) {
           this.currentDiceRoll = null;
           this._diceTimeout = null;
           this._isShowingDice = false;
           this._canSubmitDiceAnswer = false;
+          this._diceRemainingShown = false;
+          this._diceTimeUpShown = false;
         }
       }
     } catch(e) {}
@@ -580,9 +645,23 @@ export class GameServer extends CPUProtection {
       await this._checkAndRestartDice();
       
       const timeInfo = this._getTimeLeftUntilNextDiceEvent();
+      
+      // ==================== JIKA DI LUAR JAM, TAMPILKAN REMAINING SEKALI ====================
       if (!timeInfo.isRunning && !this.diceEndNotified) {
+        if (!this._diceOutOfTimeShown) {
+          const timeLeft = this._getTimeLeftUntilNextDice();
+          this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", 
+            `Next dice game in: ${timeLeft.text}`, 
+            true, 
+            false
+          ]);
+          this._diceOutOfTimeShown = true;
+        }
         this._sendDiceEndNotificationOnce();
         this._broadcastDiceTimeLeft();
+      } else if (timeInfo.isRunning) {
+        // RESET FLAG SAAT JAM DICE DIMULAI
+        this._diceOutOfTimeShown = false;
       }
     } catch(e) {}
   }
@@ -1235,10 +1314,16 @@ export class GameServer extends CPUProtection {
     try {
       const isDiceTime = this._isDiceTime();
       if (isDiceTime) {
+        // RESET FLAG SAAT JAM DICE DIMULAI
+        this._diceOutOfTimeShown = false;
+        this._diceRemainingShown = false;
+        this._diceTimeUpShown = false;
+        
         this.diceEndedToday = false;
         this.diceEndMessageShown = false;
         this.diceEndNotified = false;
         this._nextDiceNotified.clear();
+        
         if (!this.diceAutoEnabled) {
           this.diceAutoEnabled = true;
           const wsIds = this.wsClients.get(DICE_ROOM);
@@ -1263,6 +1348,7 @@ export class GameServer extends CPUProtection {
         }
         return false;
       } else {
+        // DI LUAR JAM DICE
         if (this.diceAutoEnabled && !this.diceEndNotified) {
           this.diceAutoEnabled = false;
           this.diceEndedToday = true;
@@ -1333,6 +1419,11 @@ export class GameServer extends CPUProtection {
       this._lastActivityTime = Date.now();
       this._isDiceIdle = false;
       
+      // RESET FLAG
+      this._diceRemainingShown = false;
+      this._diceTimeUpShown = false;
+      this._diceOutOfTimeShown = false;
+      
       if (!this._isDiceTime()) {
         const clients = this.wsClients.get(DICE_ROOM);
         if (clients?.size > 0) {
@@ -1371,6 +1462,8 @@ export class GameServer extends CPUProtection {
         this.diceHasWinner = false;
         this.diceWinner = null;
         this._winnerProcessed = false;
+        this._diceRemainingShown = false;
+        this._diceTimeUpShown = false;
         
         // Broadcast the dice roll
         await this._broadcastDiceRoll(diceValue, diceEmoji);
@@ -1396,6 +1489,7 @@ export class GameServer extends CPUProtection {
             message: "You can now guess the dice value!"
           });
           
+          // TAMPILKAN TIME LEFT SAAT JAWAB MULAI
           this._broadcastToRoom(DICE_ROOM, [
             "diceTimeLeft", 
             `${CONSTANTS.DICE_ANSWER_TIME_MS / 1000}s remaining to guess!`, 
@@ -1713,6 +1807,9 @@ export class GameServer extends CPUProtection {
       this._winnerProcessed = false;
       this._canSubmitDiceAnswer = false;
       this._diceQuestionStartTime = null;
+      this._diceOutOfTimeShown = false;
+      this._diceRemainingShown = false;
+      this._diceTimeUpShown = false;
       
       this._diceTimeLeftNotified.clear();
       this._nextDiceNotified.clear();
@@ -1775,6 +1872,9 @@ export class GameServer extends CPUProtection {
       this._winnerProcessed = false;
       this._canSubmitDiceAnswer = false;
       this._diceQuestionStartTime = null;
+      this._diceOutOfTimeShown = false;
+      this._diceRemainingShown = false;
+      this._diceTimeUpShown = false;
       
       if (this._diceTimeout) {
         clearTimeout(this._diceTimeout);
@@ -1824,7 +1924,7 @@ export class GameServer extends CPUProtection {
           const elapsed = (Date.now() - this._diceStartTime) / 1000;
           const left = Math.max(0, (CONSTANTS.DICE_TOTAL_TIME_MS / 1000) - elapsed);
           const minutes = Math.floor(left / 60), seconds = Math.floor(left % 60);
-          message = `${minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`} remaining`;
+          message = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
           canType = false;
         } else {
           message = `Dice game is starting soon!`;
@@ -3789,6 +3889,8 @@ export class GameServer extends CPUProtection {
           this._diceTimeout = null;
           this._isShowingDice = false;
           this._canSubmitDiceAnswer = false;
+          this._diceRemainingShown = false;
+          this._diceTimeUpShown = false;
         }
       }
       const deadConnections = [];
@@ -3845,6 +3947,9 @@ export class GameServer extends CPUProtection {
       this._winnerProcessed = false;
       this._canSubmitDiceAnswer = false;
       this._diceQuestionStartTime = null;
+      this._diceOutOfTimeShown = false;
+      this._diceRemainingShown = false;
+      this._diceTimeUpShown = false;
       
       if (this._eventQueue) {
         this._eventQueue = [];
