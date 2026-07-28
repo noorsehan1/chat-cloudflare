@@ -566,7 +566,6 @@ export class GameServer extends CPUProtection {
       
       // ==================== CEK APAKAH DI LUAR JAM DICE ====================
       if (!this._isDiceTime()) {
-        // Hanya tampilkan remaining SEKALI (global)
         if (!this._diceOutOfTimeShown) {
           const timeLeft = this._getTimeLeftUntilNextDice();
           this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", 
@@ -592,20 +591,22 @@ export class GameServer extends CPUProtection {
         const elapsed = (now - this._diceStartTime) / 1000;
         const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
         const remaining = Math.max(0, totalTime - elapsed);
-        
-        // ==================== HITUNG SISA WAKTU ====================
-        const minutes = Math.floor(remaining / 60);
-        const seconds = Math.floor(remaining % 60);
+        const remainingInt = Math.floor(remaining);
+        const minutes = Math.floor(remainingInt / 60);
+        const seconds = remainingInt % 60;
         const timeText = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
         
-        // ==================== TAMPILKAN TIME LEFT SETIAP DETIK ====================
+        // ==================== HANYA 20, 10, 5 DETIK ====================
         if (this._canSubmitDiceAnswer && remaining > 0) {
-          // Kirim sisa waktu setiap detik dengan format yang sama
-          this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", 
-            `${timeText} remaining`, 
-            false, 
-            true
-          ]);
+          const isTargetTime = (remainingInt === 20 || remainingInt === 10 || remainingInt === 5);
+          
+          if (isTargetTime && !this._diceTimeUpShown) {
+            this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", 
+              `${timeText} remaining`, 
+              false, 
+              true
+            ]);
+          }
         }
         
         // ==================== TIME UP! ====================
@@ -647,7 +648,6 @@ export class GameServer extends CPUProtection {
       
       const timeInfo = this._getTimeLeftUntilNextDiceEvent();
       
-      // ==================== JIKA DI LUAR JAM, TAMPILKAN REMAINING SEKALI ====================
       if (!timeInfo.isRunning && !this.diceEndNotified) {
         if (!this._diceOutOfTimeShown) {
           const timeLeft = this._getTimeLeftUntilNextDice();
@@ -661,7 +661,6 @@ export class GameServer extends CPUProtection {
         this._sendDiceEndNotificationOnce();
         this._broadcastDiceTimeLeft();
       } else if (timeInfo.isRunning) {
-        // RESET FLAG SAAT JAM DICE DIMULAI
         this._diceOutOfTimeShown = false;
       }
     } catch(e) {}
@@ -1315,7 +1314,6 @@ export class GameServer extends CPUProtection {
     try {
       const isDiceTime = this._isDiceTime();
       if (isDiceTime) {
-        // RESET FLAG SAAT JAM DICE DIMULAI
         this._diceOutOfTimeShown = false;
         this._diceRemainingShown = false;
         this._diceTimeUpShown = false;
@@ -1350,7 +1348,6 @@ export class GameServer extends CPUProtection {
         }
         return false;
       } else {
-        // DI LUAR JAM DICE
         if (this.diceAutoEnabled && !this.diceEndNotified) {
           this.diceAutoEnabled = false;
           this.diceEndedToday = true;
@@ -1422,7 +1419,6 @@ export class GameServer extends CPUProtection {
       this._lastActivityTime = Date.now();
       this._isDiceIdle = false;
       
-      // RESET FLAG
       this._diceRemainingShown = false;
       this._diceTimeUpShown = false;
       this._diceOutOfTimeShown = false;
@@ -1449,7 +1445,6 @@ export class GameServer extends CPUProtection {
       this._isShowingDice = true;
       
       try {
-        // Roll the dice
         const diceValue = this.diceGameSystem.rollDice();
         const diceEmoji = this.diceGameSystem.getDiceEmoji(diceValue);
         
@@ -1468,7 +1463,6 @@ export class GameServer extends CPUProtection {
         this._diceRemainingShown = false;
         this._diceTimeUpShown = false;
         
-        // Broadcast the dice roll
         await this._broadcastDiceRoll(diceValue, diceEmoji);
         
         this._broadcastDiceNotification("diceRolled", {
@@ -1477,7 +1471,6 @@ export class GameServer extends CPUProtection {
           readingTime: CONSTANTS.DICE_READING_TIME_MS / 1000
         });
         
-        // After reading time, allow answers
         setTimeout(() => {
           if (this.closing || this.isDestroyed) { 
             this._isShowingDice = false;
@@ -1492,17 +1485,10 @@ export class GameServer extends CPUProtection {
             message: "You can now guess the dice value!"
           });
           
-          // ==================== TAMPILKAN SISA WAKTU AWAL ====================
-          const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
-          const elapsed = (Date.now() - this._diceStartTime) / 1000;
-          const remaining = Math.max(0, totalTime - elapsed);
-          const minutes = Math.floor(remaining / 60);
-          const seconds = Math.floor(remaining % 60);
-          const timeText = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
-          
+          // ==================== TAMPILKAN 20s REMAINING SAAT MULAI ====================
           this._broadcastToRoom(DICE_ROOM, [
             "diceTimeLeft", 
-            `${timeText} remaining`, 
+            "20s remaining", 
             false,
             true
           ]);
@@ -1973,10 +1959,25 @@ export class GameServer extends CPUProtection {
           const elapsed = (Date.now() - this._diceStartTime) / 1000;
           const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
           const remaining = Math.max(0, totalTime - elapsed);
-          const minutes = Math.floor(remaining / 60);
-          const seconds = Math.floor(remaining % 60);
+          const remainingInt = Math.floor(remaining);
+          const minutes = Math.floor(remainingInt / 60);
+          const seconds = remainingInt % 60;
           const timeText = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
-          message = `${timeText} remaining`;
+          
+          let displayTime = "";
+          if (remainingInt >= 20) {
+            displayTime = "20s remaining";
+          } else if (remainingInt >= 10) {
+            displayTime = "10s remaining";
+          } else if (remainingInt >= 5) {
+            displayTime = "5s remaining";
+          } else if (remainingInt > 0) {
+            displayTime = `${timeText} remaining`;
+          } else {
+            displayTime = "TIME UP!";
+          }
+          
+          message = displayTime;
           canType = false;
         } else {
           message = `Dice game is starting soon!`;
@@ -2216,12 +2217,25 @@ export class GameServer extends CPUProtection {
                 const elapsed = (Date.now() - this._diceStartTime) / 1000;
                 const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
                 const remaining = Math.max(0, totalTime - elapsed);
-                const minutes = Math.floor(remaining / 60);
-                const seconds = Math.floor(remaining % 60);
-                const timeText = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+                const remainingInt = Math.floor(remaining);
+                
+                let displayTime = "";
+                if (remainingInt >= 20) {
+                  displayTime = "20s remaining";
+                } else if (remainingInt >= 10) {
+                  displayTime = "10s remaining";
+                } else if (remainingInt >= 5) {
+                  displayTime = "5s remaining";
+                } else if (remainingInt > 0) {
+                  const minutes = Math.floor(remainingInt / 60);
+                  const seconds = remainingInt % 60;
+                  displayTime = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s remaining`;
+                } else {
+                  displayTime = "TIME UP!";
+                }
                 
                 this._safeSend(ws, ["diceTimeLeft", 
-                  `${timeText} remaining`, 
+                  displayTime, 
                   false, 
                   true
                 ]);
@@ -2300,12 +2314,25 @@ export class GameServer extends CPUProtection {
               const elapsed = (Date.now() - this._diceStartTime) / 1000;
               const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
               const remaining = Math.max(0, totalTime - elapsed);
-              const minutes = Math.floor(remaining / 60);
-              const seconds = Math.floor(remaining % 60);
-              const timeText = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+              const remainingInt = Math.floor(remaining);
+              
+              let displayTime = "";
+              if (remainingInt >= 20) {
+                displayTime = "20s remaining";
+              } else if (remainingInt >= 10) {
+                displayTime = "10s remaining";
+              } else if (remainingInt >= 5) {
+                displayTime = "5s remaining";
+              } else if (remainingInt > 0) {
+                const minutes = Math.floor(remainingInt / 60);
+                const seconds = remainingInt % 60;
+                displayTime = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s remaining`;
+              } else {
+                displayTime = "TIME UP!";
+              }
               
               this._safeSend(ws, ["diceTimeLeft", 
-                `${timeText} remaining`, 
+                displayTime, 
                 false, 
                 true
               ]);
@@ -3803,7 +3830,6 @@ export class GameServer extends CPUProtection {
       }
 
       if (evt === "getDiceStatus") {
-        // ✅ SEDERHANA: HANYA TRUE/FALSE
         const isActive = !!this.currentDiceRoll && this._canSubmitDiceAnswer;
         this._safeSend(ws, ["diceStatus", isActive]);
         return;
