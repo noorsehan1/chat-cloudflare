@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS - FULL CLASS ====================
+// ==================== GAME-SERVER.JS - FULL CLASS (DISESUAIKAN DENGAN CLIENT JAVA) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -1114,6 +1114,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  // ==================== _checkAndResetWeeklyDice - HAPUS diceReset ====================
   async _checkAndResetWeeklyDice() {
     try {
       if (!this.env?.QUESTIONS) return false;
@@ -1160,13 +1161,11 @@ export class GameServer extends CPUProtection {
           `📊 Weekly Dice Reset! New week: ${currentWeek}`
         ]);
         
-        this._broadcastToRoom(DICE_ROOM, [
-          "diceReset", 
-          {
-            week: currentWeek,
-            message: "Points reset for new week! Good luck!"
-          }
-        ]);
+        // ===== HAPUS diceReset, pakai diceNotification =====
+        this._broadcastDiceNotification("diceResetNotification", {
+          week: currentWeek,
+          message: "Points reset for new week! Good luck!"
+        });
         
         return true;
       }
@@ -1683,7 +1682,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== submitDiceAnswer - FIXED (HAPUS diceAnswerResult) ====================
+  // ==================== submitDiceAnswer - HAPUS diceAnswerResult ====================
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) {
@@ -1746,7 +1745,6 @@ export class GameServer extends CPUProtection {
       
       if (hasWinner) {
         this.diceAnswered.add(username);
-        // ===== HAPUS diceAnswerResult, pakai diceError =====
         this._safeSend(ws, ["diceError", `⚠️ ${this.diceWinner} already won!`]);
         return;
       }
@@ -1790,7 +1788,6 @@ export class GameServer extends CPUProtection {
           guess: guessValue || "?"
         }]);
         
-        // ===== HAPUS diceAnswerResult, pakai diceError =====
         this._safeSend(ws, ["diceError", `❌ Wrong guess! The correct value was: ${diceValue}`]);
       }
       
@@ -1877,6 +1874,7 @@ export class GameServer extends CPUProtection {
     // Keep alive already handled by scheduler
   }
 
+  // ==================== _clearDiceData - HAPUS diceClear ====================
   _clearDiceData() {
     try {
       this.currentDiceRoll = null;
@@ -1908,10 +1906,7 @@ export class GameServer extends CPUProtection {
         this._diceStartTimeout = null;
       }
       
-      this._broadcastToRoom(DICE_ROOM, ["diceClear", {
-        message: "Dice game has ended. Come back tomorrow!",
-        timestamp: Date.now()
-      }]);
+      // ===== HAPUS diceClear, pakai diceNotification =====
       this._broadcastDiceNotification("diceCleared", {
         message: "Dice game has ended. Come back tomorrow!",
         clearUI: true
@@ -2266,7 +2261,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== switchRoom - FIXED ====================
+  // ==================== switchRoom - HAPUS diceTimeLeft ====================
   async switchRoom(ws, room, username = null) {
     try {
       if (this.isDestroyed) { 
@@ -2299,24 +2294,37 @@ export class GameServer extends CPUProtection {
             this._nextDiceNotified.delete(wsId);
             this._diceJoinedNotified.delete(wsId);
             
-            // ===== FIX: Kirim clear terlebih dahulu =====
-            this._sendDiceNotification(ws, "diceTimeClear", {
-              clear: true,
-              message: ""
-            });
-            
-            const timeLeft = this._getTimeLeftUntilNextDice();
-            
-            this._sendDiceNotification(ws, "diceTimeInfo", {
-              message: `Next dice game in: ${timeLeft.text}`,
-              timeLeft: timeLeft.text,
-              hours: timeLeft.hours,
-              minutes: timeLeft.minutes,
-              isDiceTime: this._isDiceTime(),
-              isActive: !!this.currentDiceRoll
-            });
-            
-            this._diceJoinedNotified.set(wsId, true);
+            // ===== HAPUS diceTimeLeft, pakai diceNotification =====
+            if (!this._diceJoinedNotified.has(wsId)) {
+              // Kirim clear terlebih dahulu
+              this._sendDiceNotification(ws, "diceTimeClear", {
+                clear: true,
+                message: ""
+              });
+              
+              const timeLeft = this._getTimeLeftUntilNextDice();
+              
+              this._sendDiceNotification(ws, "diceTimeInfo", {
+                message: `Next dice game in: ${timeLeft.text}`,
+                timeLeft: timeLeft.text,
+                hours: timeLeft.hours,
+                minutes: timeLeft.minutes,
+                isDiceTime: this._isDiceTime(),
+                isActive: !!this.currentDiceRoll
+              });
+              
+              this._diceJoinedNotified.set(wsId, true);
+              
+              setTimeout(() => {
+                if (!this.closing && !this.isDestroyed) {
+                  this._sendDiceNotification(ws, "diceTimeClear", {
+                    clear: true,
+                    message: ""
+                  });
+                  this._diceJoinedNotified.delete(wsId);
+                }
+              }, 5000);
+            }
             
             if (this._isDiceTime()) {
               if (!this.diceAutoEnabled) this.diceAutoEnabled = true;
@@ -2410,24 +2418,37 @@ export class GameServer extends CPUProtection {
           this._nextDiceNotified.delete(wsId);
           this._diceJoinedNotified.delete(wsId);
           
-          // ===== FIX: Kirim clear terlebih dahulu =====
-          this._sendDiceNotification(ws, "diceTimeClear", {
-            clear: true,
-            message: ""
-          });
-          
-          const timeLeft = this._getTimeLeftUntilNextDice();
-          
-          this._sendDiceNotification(ws, "diceTimeInfo", {
-            message: `Next dice game in: ${timeLeft.text}`,
-            timeLeft: timeLeft.text,
-            hours: timeLeft.hours,
-            minutes: timeLeft.minutes,
-            isDiceTime: this._isDiceTime(),
-            isActive: !!this.currentDiceRoll
-          });
-          
-          this._diceJoinedNotified.set(wsId, true);
+          // ===== HAPUS diceTimeLeft, pakai diceNotification =====
+          if (!this._diceJoinedNotified.has(wsId)) {
+            // Kirim clear terlebih dahulu
+            this._sendDiceNotification(ws, "diceTimeClear", {
+              clear: true,
+              message: ""
+            });
+            
+            const timeLeft = this._getTimeLeftUntilNextDice();
+            
+            this._sendDiceNotification(ws, "diceTimeInfo", {
+              message: `Next dice game in: ${timeLeft.text}`,
+              timeLeft: timeLeft.text,
+              hours: timeLeft.hours,
+              minutes: timeLeft.minutes,
+              isDiceTime: this._isDiceTime(),
+              isActive: !!this.currentDiceRoll
+            });
+            
+            this._diceJoinedNotified.set(wsId, true);
+            
+            setTimeout(() => {
+              if (!this.closing && !this.isDestroyed) {
+                this._sendDiceNotification(ws, "diceTimeClear", {
+                  clear: true,
+                  message: ""
+                });
+                this._diceJoinedNotified.delete(wsId);
+              }
+            }, 5000);
+          }
           
           if (this._isDiceTime()) {
             if (!this.diceAutoEnabled) this.diceAutoEnabled = true;
@@ -3941,6 +3962,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ===== getDiceStatus - KIRIM BOOLEAN LANGSUNG =====
       if (evt === "getDiceStatus") {
         const isActive = !!this.currentDiceRoll && this._canSubmitDiceAnswer;
         this._safeSend(ws, ["diceStatus", isActive]);
