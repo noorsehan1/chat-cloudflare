@@ -76,8 +76,8 @@ const QUIZ_SCHEDULE = {
   TIMEZONE_OFFSET: 8,
 };
 
-const QUIZ_ROOM = "Dice";
-const DICE_ROOM = "Dice";
+
+const DICE_ROOM = "Quiz";
 
 // ==================== CPU PROTECTION CLASS ====================
 class CPUProtection {
