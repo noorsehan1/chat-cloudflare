@@ -69,7 +69,7 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 4 },
+    { start: 1, end: 2 },
     { start: 11, end: 12 },
     { start: 23, end: 24 }
   ],
@@ -590,7 +590,6 @@ export class GameServer extends CPUProtection {
         this._diceTimeUpShown = false;
       }
       
-      // Safety cleanup if something goes wrong
       if (this.currentDiceRoll && this._diceStartTime) {
         const now = Date.now();
         const elapsed = (now - this._diceStartTime) / 1000;
@@ -1092,9 +1091,7 @@ export class GameServer extends CPUProtection {
       this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
         username: username,
         totalPoints: points[username] || 0,
-        diceValue: diceValue,
-        message: `🎉 ${username} WINS! 🎉`,
-        timestamp: Date.now()
+        diceValue: diceValue
       }]);
       
       this._broadcastDiceNotification("diceWinner", {
@@ -1103,7 +1100,6 @@ export class GameServer extends CPUProtection {
         diceValue: diceValue
       });
       
-      // Lock only for 1 second
       setTimeout(() => {
         this._winnerProcessed = false;
       }, 1000);
@@ -1390,13 +1386,11 @@ export class GameServer extends CPUProtection {
         clearInterval(this._diceTimerInterval);
       }
       
-      // Reset notification flags
       this._diceNotified20 = false;
       this._diceNotified10 = false;
       this._diceNotified5 = false;
       this._diceNotified3 = false;
       
-      // Check every second
       this._diceTimerInterval = setInterval(() => {
         try {
           if (!this.currentDiceRoll || !this._diceQuestionStartTime) {
@@ -1408,7 +1402,6 @@ export class GameServer extends CPUProtection {
           const remaining = Math.max(0, CONSTANTS.DICE_ANSWER_TIME_MS / 1000 - elapsed);
           const remainingInt = Math.floor(remaining);
           
-          // ===== NOTIFY AT 20s, 10s, 5s, 3s =====
           if (remainingInt <= 20 && remainingInt > 19 && !this._diceNotified20) {
             this._diceNotified20 = true;
             this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", "20s remaining", false, true]);
@@ -1445,7 +1438,6 @@ export class GameServer extends CPUProtection {
             });
           }
           
-          // Time up notification
           if (remainingInt <= 0 && !this._diceTimeUpShown) {
             this._diceTimeUpShown = true;
             this._broadcastToRoom(DICE_ROOM, ["diceTimeLeft", "TIME UP!", false, true]);
@@ -1521,7 +1513,6 @@ export class GameServer extends CPUProtection {
         this._diceStartTime = Date.now();
         this._diceQuestionStartTime = Date.now();
         
-        // Answer immediately - NO READING TIME
         this._canSubmitDiceAnswer = true;
         
         this.diceAnswered = new Set();
@@ -1531,10 +1522,8 @@ export class GameServer extends CPUProtection {
         this._diceRemainingShown = false;
         this._diceTimeUpShown = false;
         
-        // Broadcast dice roll with immediate answer capability
         await this._broadcastDiceRoll(diceValue, diceEmoji);
         
-        // Notify that users can answer NOW
         this._broadcastDiceNotification("diceCanAnswer", {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remainingTime: `${CONSTANTS.DICE_ANSWER_TIME_MS / 1000}s remaining`,
@@ -1548,7 +1537,6 @@ export class GameServer extends CPUProtection {
           true
         ]);
         
-        // ===== START TIMER NOTIFICATIONS =====
         this._startDiceTimerNotifications();
         
         if (this._diceTimeout) clearTimeout(this._diceTimeout);
@@ -1687,7 +1675,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== submitDiceAnswer ====================
+  // ==================== submitDiceAnswer - FIXED ====================
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) {
@@ -1726,14 +1714,10 @@ export class GameServer extends CPUProtection {
       }
       
       if (this.diceAnswered.has(username)) {
-        // BROADCAST TO ROOM - User tried to answer again
+        // ONLY send username and guess
         this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
           username: username,
-          guess: guess || "?",
-          isCorrect: false,
-          status: "already_answered",
-          message: `⚠️ ${username} already guessed!`,
-          timestamp: Date.now()
+          guess: guess || "?"
         }]);
         
         this._safeSend(ws, ["diceError", "You already guessed!"]);
@@ -1742,7 +1726,6 @@ export class GameServer extends CPUProtection {
       
       const guessValue = parseInt(guess, 10);
       const isValidGuess = !isNaN(guessValue) && guessValue >= 1 && guessValue <= 6;
-      const wsId = this._getWsId(ws);
       
       const hasWinner = this.diceHasWinner && this.diceWinner;
       const diceValue = this.currentDiceRoll?.value;
@@ -1751,18 +1734,12 @@ export class GameServer extends CPUProtection {
       if (hasWinner) {
         this.diceAnswered.add(username);
         
-        // BROADCAST TO ROOM - Everyone sees this
+        // ONLY send username and guess
         this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
           username: username,
-          guess: guessValue || "?",
-          isCorrect: false,
-          status: "has_winner",
-          winner: this.diceWinner,
-          message: `⚠️ ${username} guessed ${guessValue || "?"}, but ${this.diceWinner} already won!`,
-          timestamp: Date.now()
+          guess: guessValue || "?"
         }]);
         
-        // Send direct response to user
         this._safeSend(ws, ["diceAnswerResult", {
           success: false,
           username: username,
@@ -1770,8 +1747,7 @@ export class GameServer extends CPUProtection {
           isCorrect: false,
           hasWinner: true,
           winner: this.diceWinner,
-          message: `⚠️ ${this.diceWinner} already won!`,
-          timestamp: Date.now()
+          message: `⚠️ ${this.diceWinner} already won!`
         }]);
         
         return;
@@ -1782,25 +1758,19 @@ export class GameServer extends CPUProtection {
       if (answerRemaining <= 0) {
         this.diceAnswered.add(username);
         
-        // BROADCAST TO ROOM - Everyone sees this
+        // ONLY send username and guess
         this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
           username: username,
-          guess: guessValue || "?",
-          isCorrect: false,
-          status: "timeout",
-          message: `⏰ ${username} guessed ${guessValue || "?"} after time expired!`,
-          timestamp: Date.now()
+          guess: guessValue || "?"
         }]);
         
-        // Send direct response to user
         this._safeSend(ws, ["diceAnswerResult", {
           success: false,
           username: username,
           guess: guessValue || "?",
           isCorrect: false,
           status: "timeout",
-          message: "⏰ Time's up! Guess not counted.",
-          timestamp: Date.now()
+          message: "⏰ Time's up! Guess not counted."
         }]);
         
         return;
@@ -1808,10 +1778,8 @@ export class GameServer extends CPUProtection {
       
       // ==================== CASE 3: CORRECT ANSWER ====================
       const isCorrect = isValidGuess && guessValue === diceValue;
-      const remainingText = `${answerRemaining}s remaining`;
       
       if (isCorrect) {
-        // Set winner immediately
         this.diceHasWinner = true;
         this.diceWinner = username;
         
@@ -1819,30 +1787,19 @@ export class GameServer extends CPUProtection {
         points[username] = (points[username] || 0) + 1;
         await this.diceGameSystem.setPoints(points);
         
-        // ===== BROADCAST TO ROOM - WINNER =====
+        // ONLY send username and guess
+        this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
+          username: username,
+          guess: guessValue
+        }]);
+        
+        // Send winner notification
         this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
           username: username,
           totalPoints: points[username] || 0,
-          diceValue: diceValue,
-          guess: guessValue,
-          message: `🎉 ${username} WINS with ${guessValue}! 🎉`,
-          timestamp: Date.now()
+          diceValue: diceValue
         }]);
         
-        // ===== BROADCAST TO ROOM - Answer confirmation =====
-        this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
-          username: username,
-          guess: guessValue,
-          isCorrect: true,
-          status: "winner",
-          gotPoint: true,
-          totalPoints: points[username] || 0,
-          diceValue: diceValue,
-          message: `🎉 ${username} guessed ${guessValue} correctly! WINNER!`,
-          timestamp: Date.now()
-        }]);
-        
-        // Send direct response to user
         this._safeSend(ws, ["diceAnswerResult", {
           success: true,
           username: username,
@@ -1851,59 +1808,34 @@ export class GameServer extends CPUProtection {
           gotPoint: true,
           totalPoints: points[username] || 0,
           diceValue: diceValue,
-          message: `🎉 YOU WON! +1 point!`,
-          timestamp: Date.now()
+          message: `🎉 YOU WON! +1 point!`
         }]);
         
       } else {
         // ===== CASE 4: WRONG ANSWER =====
         
-        // BROADCAST TO ROOM - Everyone sees wrong answer
+        // ONLY send username and guess
         this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
           username: username,
-          guess: guessValue || "?",
-          isCorrect: false,
-          status: "wrong",
-          remainingTime: remainingText,
-          message: `❌ ${username} guessed ${guessValue || "?"} - Wrong!`,
-          timestamp: Date.now()
+          guess: guessValue || "?"
         }]);
         
-        // Send direct response to user
         this._safeSend(ws, ["diceAnswerResult", {
           success: false,
           username: username,
           guess: guessValue || "?",
           isCorrect: false,
           gotPoint: false,
-          remainingTime: remainingText,
-          message: `❌ Wrong! Try again!`,
-          timestamp: Date.now()
+          message: `❌ Wrong! Try again!`
         }]);
       }
       
-      // Mark user as answered
       this.diceAnswered.add(username);
       
-      // ===== BONUS: Also broadcast via notification =====
-      this._broadcastDiceNotification("diceAnswer", {
-        username: username,
-        guess: guessValue || "?",
-        isCorrect: isCorrect,
-        remainingTime: remainingText,
-        gotPoint: isCorrect,
-        diceValue: isCorrect ? diceValue : null,
-        hasWinner: this.diceHasWinner,
-        winner: this.diceHasWinner ? this.diceWinner : null
-      });
-      
     } catch(e) {
-      // Error - also broadcast to room
       this._broadcastToRoom(DICE_ROOM, ["diceError", {
         username: username,
-        error: e.message,
-        message: `⚠️ Error processing ${username}'s answer`,
-        timestamp: Date.now()
+        error: e.message
       }]);
       
       this._safeSend(ws, ["diceError", e.message || "Error submitting answer"]);
@@ -1921,7 +1853,6 @@ export class GameServer extends CPUProtection {
       if (this._diceStartTimeout) clearTimeout(this._diceStartTimeout);
       if (this._diceKeepAliveInterval) clearInterval(this._diceKeepAliveInterval);
       
-      // Stop timer notifications
       this._stopDiceTimerNotifications();
       
       this.currentDiceRoll = null;
@@ -2005,7 +1936,6 @@ export class GameServer extends CPUProtection {
       this._diceRemainingShown = false;
       this._diceTimeUpShown = false;
       
-      // Stop timer notifications
       this._stopDiceTimerNotifications();
       
       if (this._diceTimeout) {
