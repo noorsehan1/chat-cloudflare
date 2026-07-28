@@ -24,8 +24,6 @@ const CONSTANTS = {
   MAX_WS_CLIENTS: 50,
   MAX_ARRAY_SIZE: 50,
   QUIZ_SWITCH_DELAY_MS: 5000,
-  QUIZ_POINT_KEY: 'dice_points',
-  QUIZ_LAST_WEEK_WINNER: 'dice_last_week_winner',
   SCHEDULER_INTERVAL_MS: 60000,
   QUIZ_BATCH_SIZE: 100,
   MAX_QUESTIONS: 10000,
@@ -52,7 +50,8 @@ const CONSTANTS = {
   LOWCARD_WINNER_KEY: 'dice_winner_',
   LOWCARD_RECORDING_KEY: 'dice_recording_status_',
   SCHEDULER_LOOP_INTERVAL_MS: 50,
-  // DICE GAME CONSTANTS
+  
+  // ==================== DICE GAME CONSTANTS ====================
   MAX_DICE_GAMES: 10,
   DICE_ROLL_TIME_MS: 3000,
   DICE_READING_TIME_MS: 2000,
@@ -60,24 +59,25 @@ const CONSTANTS = {
   DICE_TOTAL_TIME_MS: 7000,
   DICE_BREAK_MS: 2000,
   MAX_DICE_VALUE: 6,
-  DICE_ROOM: "Dice",
+  DICE_ROOM: "Quiz",
   DICE_POINT_KEY: 'dice_points',
   DICE_LAST_WEEK_WINNER: 'dice_last_week_winner',
   DICE_WINNER_KEY: 'dice_winner_',
   DICE_RECORDING_KEY: 'dice_recording_status_',
+  QUIZ_START_DELAY_MS: 5000,  // ← TAMBAHKAN INI!
 };
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 2 },
-    { start: 11, end: 12 },
-    { start: 23, end: 24 }
+    { start: 1, end: 2 },    // 01:00 - 02:00 WITA
+    { start: 11, end: 12 },  // 11:00 - 12:00 WITA
+    { start: 23, end: 24 }   // 23:00 - 00:00 WITA
   ],
   TIMEZONE_OFFSET: 8,
 };
 
-
 const DICE_ROOM = "Quiz";
+const QUIZ_ROOM = "Quiz";
 
 // ==================== CPU PROTECTION CLASS ====================
 class CPUProtection {
@@ -443,6 +443,7 @@ export class GameServer extends CPUProtection {
       this.currentDiceRoll = null;
       this.isDiceWaiting = false;
       this._diceStartTime = null;
+      this._diceTimeout = null;
       this._diceBreakTimeout = null;
       this._diceStartTimeout = null;
       this.diceAutoEnabled = false;
@@ -497,7 +498,9 @@ export class GameServer extends CPUProtection {
         }
       }, 8000);
 
-    } catch(e) {}
+    } catch(e) {
+      console.error("Constructor error:", e);
+    }
   }
 
   // ==================== SETUP SCHEDULER ====================
@@ -2076,7 +2079,7 @@ export class GameServer extends CPUProtection {
         if (oldRoom === roomName) {
           ws.room = roomName;
           ws.roomname = roomName;
-          if (roomName === DICE_ROOM) {
+          if (roomName === DICE_ROOM || roomName === "Quiz") {
             this._diceTimeLeftNotified.delete(wsId);
             this._nextDiceNotified.delete(wsId);
             if (this._isDiceTime() && !this.diceAutoEnabled) { 
@@ -2111,7 +2114,7 @@ export class GameServer extends CPUProtection {
           else { this.userConnections.set(username, { wsId, ws, room: roomName, timestamp: Date.now() }); }
         }
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
-        if (roomName === DICE_ROOM) {
+        if (roomName === DICE_ROOM || roomName === "Quiz") {
           this._diceTimeLeftNotified.delete(wsId);
           this._nextDiceNotified.delete(wsId);
           if (this._isDiceTime()) { 
@@ -2876,7 +2879,7 @@ export class GameServer extends CPUProtection {
         this._safeSend(ws, ["gameDiceError", "Please switch to a room first!"]);
         return;
       }
-      if (room === DICE_ROOM) {
+      if (room === DICE_ROOM || room === "Quiz") {
         this._safeSend(ws, ["gameDiceError", "Cannot start game in Dice room"]);
         return;
       }
@@ -3598,7 +3601,7 @@ export class GameServer extends CPUProtection {
         this._safeSend(ws, ["gameDiceError", "Please switch to a room first!"]); 
         return; 
       }
-      if (room === DICE_ROOM) { 
+      if (room === DICE_ROOM || room === "Quiz") { 
         this._safeSend(ws, ["gameDiceError", "Cannot start game in Dice room"]); 
         return; 
       }
