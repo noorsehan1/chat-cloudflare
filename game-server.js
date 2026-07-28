@@ -69,7 +69,7 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 3 },
+    { start: 1, end: 2 },
     { start: 11, end: 12 },
     { start: 23, end: 24 }
   ],
@@ -1882,8 +1882,31 @@ export class GameServer extends CPUProtection {
   async _broadcastDiceResult(type, data) {
     try {
       const wsIds = this.wsClients.get(DICE_ROOM);
-      if (!wsIds?.size) return;
-      this._broadcastToRoom(DICE_ROOM, [type, data]);
+      if (!wsIds || wsIds.size === 0) return;
+      
+      const msgStr = JSON.stringify([type, data]);
+      const wsIdArray = Array.from(wsIds);
+      const BATCH_SIZE = CONSTANTS.BROADCAST_BATCH_SIZE || 5;
+      let startTime = Date.now();
+      
+      for (let i = 0; i < wsIdArray.length; i += BATCH_SIZE) {
+        const batch = wsIdArray.slice(i, i + BATCH_SIZE);
+        
+        for (const wsId of batch) {
+          const ws = this.wsMap.get(wsId);
+          if (ws && ws.readyState === 1) {
+            try { 
+              ws.send(msgStr); 
+            } catch(e) {}
+          }
+        }
+        
+        if (Date.now() - startTime > 8) {
+          await this._cpuYield();
+          startTime = Date.now();
+        }
+      }
+      
     } catch(e) {}
   }
 
