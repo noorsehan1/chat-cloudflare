@@ -74,8 +74,8 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 6 },
-    { start: 11, end: 12 },
+    { start: 1, end: 2 },
+    { start: 15, end: 16 },
     { start: 23, end: 24 }
   ],
   TIMEZONE_OFFSET: 8,
@@ -444,9 +444,7 @@ export class GameServer extends CPUProtection {
       this.diceHasWinner = false;
       this.diceWinner = null;
       this.diceTimer = null;
-      this.isDiceRunning = false;
       this.currentDiceRoll = null;
-      this.isDiceWaiting = false;
       this._diceStartTime = null;
       this._diceTimeout = null;
       this._diceBreakTimeout = null;
@@ -492,6 +490,9 @@ export class GameServer extends CPUProtection {
       this._diceOutOfTimeShown = false;
       this._diceRemainingShown = false;
       this._diceTimeUpShown = false;
+
+      // ==================== DICE ROUND COUNTER ====================
+      this._diceRound = 0;
 
       // DICE SYSTEM
       this.diceGameSystem = new DiceGameSystem(this);
@@ -639,7 +640,7 @@ export class GameServer extends CPUProtection {
         this._nextDiceNotified.clear();
         
         if (hasPlayers && !this.currentDiceRoll && !this._diceTimeout && 
-            !this.isDiceWaiting && !this._diceStartTimeout && !this._isShowingDice) {
+            !this._diceStartTimeout && !this._isShowingDice) {
           
           this._broadcastDiceNotification("diceAutoStart", {
             message: "🎲 Dice game is starting now!",
@@ -656,7 +657,7 @@ export class GameServer extends CPUProtection {
           setTimeout(() => {
             if (!this.closing && !this.isDestroyed && 
                 !this.currentDiceRoll && !this._diceTimeout && 
-                !this.isDiceWaiting && !this._isShowingDice) {
+                !this._isShowingDice) {
               this.forceStartDice();
             }
           }, CONSTANTS.DICE_AUTO_START_DELAY_MS || 3000);
@@ -677,7 +678,8 @@ export class GameServer extends CPUProtection {
               message: `🎲 Running... ${timeText} remaining`,
               remaining: remainingInt,
               isDiceTime: true,
-              isActive: true
+              isActive: true,
+              round: this._diceRound || 1
             });
           }
         }
@@ -688,6 +690,15 @@ export class GameServer extends CPUProtection {
             isDiceTime: true,
             isActive: false
           });
+          
+          if (hasPlayers) {
+            setTimeout(() => {
+              if (!this.closing && !this.isDestroyed && 
+                  !this.currentDiceRoll && !this._diceTimeout && !this._isShowingDice) {
+                this.forceStartDice();
+              }
+            }, CONSTANTS.DICE_AUTO_START_DELAY_MS || 3000);
+          }
         }
         
         const timeInfo = this._getTimeLeftUntilNextDiceEvent();
@@ -756,8 +767,11 @@ export class GameServer extends CPUProtection {
     try {
       if (this._isDiceTime()) {
         if (!this.currentDiceRoll && !this._diceTimeout && 
-            !this.isDiceWaiting && !this._isShowingDice) {
-          this._showDiceQuestion();
+            !this._isShowingDice) {
+          const clients = this.wsClients.get(DICE_ROOM);
+          if (clients?.size > 0) {
+            this._showDiceQuestion();
+          }
         }
       }
     } catch(e) {}
@@ -783,7 +797,7 @@ export class GameServer extends CPUProtection {
             const hasPlayers = clients && clients.size > 0;
             
             if (hasPlayers && !this.currentDiceRoll && !this._diceTimeout && 
-                !this.isDiceWaiting && !this._diceStartTimeout && !this._isShowingDice) {
+                !this._diceStartTimeout && !this._isShowingDice) {
               
               this._broadcastDiceNotification("diceAutoStart", {
                 message: "🎲 Dice game is starting now!",
@@ -798,7 +812,7 @@ export class GameServer extends CPUProtection {
               setTimeout(() => {
                 if (!this.closing && !this.isDestroyed && 
                     !this.currentDiceRoll && !this._diceTimeout && 
-                    !this.isDiceWaiting && !this._isShowingDice) {
+                    !this._isShowingDice) {
                   this.forceStartDice();
                 }
               }, CONSTANTS.DICE_AUTO_START_DELAY_MS || 3000);
@@ -1256,13 +1270,15 @@ export class GameServer extends CPUProtection {
       this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
         username: username,
         totalPoints: points[username] || 0,
-        diceValue: diceValue
+        diceValue: diceValue,
+        round: this._diceRound || 1
       }]);
       
       this._broadcastDiceNotification("diceWinner", {
         username: username,
         totalPoints: points[username] || 0,
-        diceValue: diceValue
+        diceValue: diceValue,
+        round: this._diceRound || 1
       });
       
       setTimeout(() => {
@@ -1494,8 +1510,11 @@ export class GameServer extends CPUProtection {
           if (!this._diceStartTimeout && !this._isShowingDice) {
             this.forceStartDice();
           }
-        } else if (!this.currentDiceRoll && !this._diceTimeout && !this.isDiceWaiting && !this._diceStartTimeout && !this._isShowingDice) {
-          await this._showDiceQuestion();
+        } else if (!this.currentDiceRoll && !this._diceTimeout && !this._diceStartTimeout && !this._isShowingDice) {
+          const clients = this.wsClients.get(DICE_ROOM);
+          if (clients?.size > 0) {
+            await this._showDiceQuestion();
+          }
         }
         return false;
       } else {
@@ -1518,7 +1537,7 @@ export class GameServer extends CPUProtection {
   forceStartDice() {
     try {
       if (this._isShowingDice) return false;
-      if (!this._isDiceTime() || this.currentDiceRoll || this._diceTimeout || this.isDiceWaiting || this._diceStartTimeout) {
+      if (!this._isDiceTime() || this.currentDiceRoll || this._diceTimeout || this._diceStartTimeout) {
         return false;
       }
       this.diceAutoEnabled = true;
@@ -1530,9 +1549,12 @@ export class GameServer extends CPUProtection {
   _checkAndRestartDice() {
     try {
       if (!this._isDiceTime()) return;
-      if (!this.currentDiceRoll && !this.isDiceWaiting && !this._diceTimeout && !this._diceBreakTimeout && !this._isShowingDice) {
-        this.diceAutoEnabled = true;
-        this._showDiceQuestion();
+      if (!this.currentDiceRoll && !this._diceTimeout && !this._diceBreakTimeout && !this._isShowingDice) {
+        const clients = this.wsClients.get(DICE_ROOM);
+        if (clients?.size > 0) {
+          this.diceAutoEnabled = true;
+          this._showDiceQuestion();
+        }
       }
     } catch(e) {}
   }
@@ -1541,7 +1563,7 @@ export class GameServer extends CPUProtection {
     try {
       if (this._isShowingDice) return;
       this._forceStartDiceIfTime();
-      if (!this.currentDiceRoll && !this._diceTimeout && !this.isDiceWaiting && !this._diceStartTimeout && !this._isShowingDice) {
+      if (!this.currentDiceRoll && !this._diceTimeout && !this._diceStartTimeout && !this._isShowingDice) {
         this.forceStartDice();
       }
       if (!this._diceKeepAliveInterval) {
@@ -1553,7 +1575,7 @@ export class GameServer extends CPUProtection {
   _forceStartDiceIfTime() {
     try {
       if (this._isShowingDice) return;
-      if (!this._isDiceTime() || this.currentDiceRoll || this._diceTimeout || this.isDiceWaiting || this._diceStartTimeout) {
+      if (!this._isDiceTime() || this.currentDiceRoll || this._diceTimeout || this._diceStartTimeout) {
         return;
       }
       this.diceAutoEnabled = true;
@@ -1653,7 +1675,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== _showDiceQuestion ====================
+  // ==================== _showDiceQuestion - CONTINUOUS LOOP ====================
   async _showDiceQuestion() {
     try {
       await this._checkAndResetWeeklyDice();
@@ -1689,18 +1711,22 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      if (this.isDestroyed || this.isDiceWaiting || this._diceStartTimeout || this.currentDiceRoll) return;
+      if (this.isDestroyed || this._diceStartTimeout || this.currentDiceRoll) return;
       
       this._isShowingDice = true;
       
       try {
+        // Increment round counter
+        this._diceRound = (this._diceRound || 0) + 1;
+        
         const diceValue = this.diceGameSystem.rollDice();
         const diceEmoji = this.diceGameSystem.getDiceEmoji(diceValue);
         
         this.currentDiceRoll = {
           value: diceValue,
           emoji: diceEmoji,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          round: this._diceRound
         };
         this._diceStartTime = Date.now();
         this._diceQuestionStartTime = Date.now();
@@ -1719,13 +1745,15 @@ export class GameServer extends CPUProtection {
         this._broadcastDiceNotification("diceCanAnswer", {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remainingTime: `${CONSTANTS.DICE_ANSWER_TIME_MS / 1000}s remaining`,
-          message: "🎲 Guess the dice value NOW!"
+          message: "🎲 Guess the dice value NOW!",
+          round: this._diceRound
         });
         
         this._broadcastDiceNotification("diceTimer", {
           remaining: 20,
           message: "20s remaining",
-          timeLeft: "20s"
+          timeLeft: "20s",
+          round: this._diceRound
         });
         
         this._startDiceTimerNotifications();
@@ -1733,6 +1761,7 @@ export class GameServer extends CPUProtection {
         if (this._diceTimeout) clearTimeout(this._diceTimeout);
         if (this._diceBreakTimeout) clearTimeout(this._diceBreakTimeout);
         
+        // MODIFIED: Timeout handler - always continue to next round
         this._diceTimeout = setTimeout(async () => {
           try {
             if (this.closing || this.isDestroyed) { 
@@ -1754,14 +1783,24 @@ export class GameServer extends CPUProtection {
             }
             
             const diceValue = this.currentDiceRoll?.value;
+            const roundNumber = this._diceRound || 1;
             
+            // Handle winner or no winner
             if (this.diceHasWinner && this.diceWinner) {
               await this._handleDiceWinner(this.diceWinner, diceValue);
+              this._broadcastToRoom(DICE_ROOM, ["diceRoundComplete", {
+                winner: this.diceWinner,
+                value: diceValue,
+                emoji: this.diceGameSystem.getDiceEmoji(diceValue),
+                round: roundNumber,
+                message: `🎉 ${this.diceWinner} won round ${roundNumber}!`
+              }]);
             } else {
               this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
                 message: `No winner this round! The value was: ${diceValue} ${this.diceGameSystem.getDiceEmoji(diceValue)}`,
                 value: diceValue,
-                emoji: this.diceGameSystem.getDiceEmoji(diceValue)
+                emoji: this.diceGameSystem.getDiceEmoji(diceValue),
+                round: roundNumber
               }]);
               
               this._broadcastDiceNotification("diceNoWinner", 
@@ -1769,26 +1808,34 @@ export class GameServer extends CPUProtection {
               );
             }
             
+            // Clear current state
             this._diceTimeout = null;
-            this.isDiceWaiting = true;
+            this.currentDiceRoll = null;
             this._isShowingDice = false;
             this._canSubmitDiceAnswer = false;
             this._stopDiceTimerNotifications();
             
-            this._diceBreakTimeout = setTimeout(() => {
-              if (this.closing || this.isDestroyed) { 
-                this._diceBreakTimeout = null; 
-                return; 
-              }
-              this.isDiceWaiting = false;
-              this._diceBreakTimeout = null;
-              this.currentDiceRoll = null;
-            }, CONSTANTS.DICE_BREAK_MS);
+            // MODIFIED: Always continue to next round
+            if (this._isDiceTime() && currentClients?.size > 0) {
+              // Broadcast next round starting
+              this._broadcastDiceNotification("diceNextRound", {
+                message: `🎲 Round ${this._diceRound + 1} starting...`,
+                round: this._diceRound + 1,
+                timestamp: Date.now()
+              });
+              
+              // Small delay before next round (like lowcard)
+              setTimeout(() => {
+                if (this.closing || this.isDestroyed) return;
+                if (this._isDiceTime()) {
+                  this._showDiceQuestion();
+                }
+              }, CONSTANTS.DICE_BREAK_MS || 2000);
+            }
             
           } catch(e) {
             this._diceTimeout = null;
             this.currentDiceRoll = null;
-            this.isDiceWaiting = false;
             this._isShowingDice = false;
             this._canSubmitDiceAnswer = false;
             this._stopDiceTimerNotifications();
@@ -1798,69 +1845,12 @@ export class GameServer extends CPUProtection {
       } catch(e) {
         this._isShowingDice = false;
         this.currentDiceRoll = null;
-        this.isDiceWaiting = false;
-        this._diceTimeout = null;
         this._canSubmitDiceAnswer = false;
         this._stopDiceTimerNotifications();
       }
     } catch(e) {
       this._isShowingDice = false;
       this.currentDiceRoll = null;
-      this.isDiceWaiting = false;
-      this._diceTimeout = null;
-      this._canSubmitDiceAnswer = false;
-      this._stopDiceTimerNotifications();
-    }
-  }
-
-  async _forceEvaluateDice() {
-    try {
-      if (!this.currentDiceRoll || this._diceTimeout) return;
-      
-      const currentClients = this.wsClients.get(DICE_ROOM);
-      if (!currentClients?.size) { 
-        this.currentDiceRoll = null;
-        this._isShowingDice = false;
-        this._canSubmitDiceAnswer = false;
-        this._stopDiceTimerNotifications();
-        return; 
-      }
-      
-      const diceValue = this.currentDiceRoll?.value;
-      
-      if (this.diceHasWinner && this.diceWinner) {
-        await this._handleDiceWinner(this.diceWinner, diceValue);
-      } else {
-        this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-          message: `No winner this round! The value was: ${diceValue} ${this.diceGameSystem.getDiceEmoji(diceValue)}`,
-          value: diceValue,
-          emoji: this.diceGameSystem.getDiceEmoji(diceValue)
-        }]);
-        
-        this._broadcastDiceNotification("diceNoWinner", 
-          `No winner this round! The value was: ${diceValue} ${this.diceGameSystem.getDiceEmoji(diceValue)}`
-        );
-      }
-      
-      this.currentDiceRoll = null;
-      this.isDiceWaiting = true;
-      this._isShowingDice = false;
-      this._canSubmitDiceAnswer = false;
-      this._stopDiceTimerNotifications();
-      
-      this._diceBreakTimeout = setTimeout(() => {
-        if (this.closing || this.isDestroyed) { 
-          this._diceBreakTimeout = null; 
-          return; 
-        }
-        this.isDiceWaiting = false;
-        this._diceBreakTimeout = null;
-      }, CONSTANTS.DICE_BREAK_MS);
-      
-    } catch(e) {
-      this.currentDiceRoll = null;
-      this.isDiceWaiting = false;
-      this._isShowingDice = false;
       this._canSubmitDiceAnswer = false;
       this._stopDiceTimerNotifications();
     }
@@ -1896,7 +1886,7 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      if (this._isShowingDice || this.isDiceWaiting || this._diceTimeout) {
+      if (this._isShowingDice || this._diceTimeout) {
         if (this._diceQuestionStartTime) {
           const elapsed = (Date.now() - this._diceQuestionStartTime) / 1000;
           const answerTime = CONSTANTS.DICE_ANSWER_TIME_MS / 1000;
@@ -1953,13 +1943,15 @@ export class GameServer extends CPUProtection {
         
         this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
           username: username,
-          guess: guessValue
+          guess: guessValue,
+          round: this._diceRound || 1
         }]);
         
         this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
           username: username,
           totalPoints: points[username] || 0,
-          diceValue: diceValue
+          diceValue: diceValue,
+          round: this._diceRound || 1
         }]);
         
       } else {
@@ -1967,7 +1959,8 @@ export class GameServer extends CPUProtection {
         
         this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
           username: username,
-          guess: guessValue || "?"
+          guess: guessValue || "?",
+          round: this._diceRound || 1
         }]);
         
         this._safeSend(ws, ["diceError", `❌ Wrong guess! The correct value was: ${diceValue}`]);
@@ -1996,7 +1989,6 @@ export class GameServer extends CPUProtection {
       this._stopDiceTimerNotifications();
       
       this.currentDiceRoll = null;
-      this.isDiceWaiting = false;
       this.diceHasWinner = false;
       this.diceWinner = null;
       this.diceAnswered = new Set();
@@ -2013,6 +2005,9 @@ export class GameServer extends CPUProtection {
       this._diceTimeLeftNotified.clear();
       this._nextDiceNotified.clear();
       this._diceJoinedNotified.clear();
+      
+      // Keep round counter for continuous tracking
+      // this._diceRound = 0;
     } catch(e) {}
   }
 
@@ -2038,7 +2033,7 @@ export class GameServer extends CPUProtection {
     try {
       const clients = this.wsClients.get(DICE_ROOM);
       if (!clients?.size) return;
-      if (!this.currentDiceRoll && !this._diceTimeout && !this.isDiceWaiting && !this._diceStartTimeout && !this._isShowingDice) {
+      if (!this.currentDiceRoll && !this._diceTimeout && !this._diceStartTimeout && !this._isShowingDice) {
         this._showDiceQuestion();
       }
     } catch(e) {}
@@ -2068,7 +2063,6 @@ export class GameServer extends CPUProtection {
       this.diceAnswered = new Set();
       this.diceHasWinner = false;
       this.diceWinner = null;
-      this.isDiceWaiting = false;
       this._isShowingDice = false;
       this._winnerProcessed = false;
       this._canSubmitDiceAnswer = false;
@@ -2093,7 +2087,7 @@ export class GameServer extends CPUProtection {
       }
       
       this._broadcastDiceNotification("diceCleared", {
-        message: "Dice game has ended. Come back tomorrow!",
+        message: "Dice game has ended.",
         clearUI: true
       });
     } catch(e) {}
@@ -2154,7 +2148,8 @@ export class GameServer extends CPUProtection {
             message: message,
             remaining: remainingInt,
             isDiceTime: true,
-            isActive: true
+            isActive: true,
+            round: this._diceRound || 1
           });
           this._lastDiceTimeLeftBroadcast = now;
           return;
@@ -2214,7 +2209,8 @@ export class GameServer extends CPUProtection {
               message: displayTime,
               remaining: remainingInt,
               isDiceTime: true,
-              isActive: true
+              isActive: true,
+              round: this._diceRound || 1
             });
             this._diceTimeLeftNotified.set(wsId, Date.now());
             return true;
@@ -2299,7 +2295,8 @@ export class GameServer extends CPUProtection {
         timestamp: Date.now(),
         answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
         canAnswerNow: true,
-        message: "🎲 Guess the number NOW!"
+        message: "🎲 Guess the number NOW!",
+        round: this._diceRound || 1
       };
       
       const msgStr = JSON.stringify(["diceRoll", msgData]);
@@ -2492,7 +2489,8 @@ export class GameServer extends CPUProtection {
                   message: displayTime,
                   remaining: remainingInt,
                   isDiceTime: true,
-                  isActive: true
+                  isActive: true,
+                  round: this._diceRound || 1
                 });
               }
             } else {
@@ -2559,7 +2557,8 @@ export class GameServer extends CPUProtection {
                 message: displayTime,
                 remaining: remainingInt,
                 isDiceTime: true,
-                isActive: true
+                isActive: true,
+                round: this._diceRound || 1
               });
             }
           } else {
@@ -2581,12 +2580,14 @@ export class GameServer extends CPUProtection {
               emoji: this.currentDiceRoll.emoji,
               timestamp: this.currentDiceRoll.timestamp,
               answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
-              canAnswerNow: true
+              canAnswerNow: true,
+              round: this._diceRound || 1
             }]);
             this._safeSend(ws, ["diceCanAnswer", {
               answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
               remainingTime: `${this._getDiceAnswerRemainingTime()}s remaining`,
-              message: "You can now guess the dice value!"
+              message: "You can now guess the dice value!",
+              round: this._diceRound || 1
             }]);
           }
         }
@@ -4028,7 +4029,8 @@ export class GameServer extends CPUProtection {
             canSubmit: this._canSubmitDiceAnswer,
             readingTimeLeft: 0,
             answerTimeLeft: this._canSubmitDiceAnswer ? answerRemaining : 0,
-            totalTimeLeft: Math.max(0, Math.round((CONSTANTS.DICE_TOTAL_TIME_MS - (Date.now() - this._diceStartTime)) / 1000))
+            totalTimeLeft: Math.max(0, Math.round((CONSTANTS.DICE_TOTAL_TIME_MS - (Date.now() - this._diceStartTime)) / 1000)),
+            round: this._diceRound || 1
           }
         };
         this._safeSend(ws, ["diceNotification", notification]);
@@ -4037,7 +4039,7 @@ export class GameServer extends CPUProtection {
 
       if (evt === "getDiceStatus") {
         const isActive = !!this.currentDiceRoll && this._canSubmitDiceAnswer;
-        this._safeSend(ws, ["diceStatus", isActive]);
+        this._safeSend(ws, ["diceStatus", isActive, this._diceRound || 1]);
         return;
       }
 
@@ -4281,7 +4283,6 @@ export class GameServer extends CPUProtection {
   _resetCriticalState() {
     try {
       this.currentDiceRoll = null;
-      this.isDiceWaiting = false;
       this.diceHasWinner = false;
       this.diceWinner = null;
       this.diceAnswered = new Set();
@@ -4402,6 +4403,7 @@ export class GameServer extends CPUProtection {
             isRestarting: this._isRestarting,
             isRecovering: this._isRecovering,
             diceActive: !!this.currentDiceRoll,
+            diceRound: this._diceRound || 0,
             gamesRunning: this.activeGames.size,
             wsConnections: this.wsMap.size,
             eventQueueSize: this._eventQueue?.length || 0,
