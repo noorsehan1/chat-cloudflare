@@ -1760,107 +1760,94 @@ export class GameServer extends CPUProtection {
         if (this._diceTimeout) clearTimeout(this._diceTimeout);
         if (this._diceBreakTimeout) clearTimeout(this._diceBreakTimeout);
         
-        this._diceTimeout = setTimeout(async () => {
-          try {
-            if (this.closing || this.isDestroyed) { 
-              this._diceTimeout = null; 
-              this._isShowingDice = false;
-              this._canSubmitDiceAnswer = false;
-              this._stopDiceTimerNotifications();
-              return; 
-            }
-            
-            const currentClients = this.wsClients.get(DICE_ROOM);
-            if (!currentClients?.size) { 
-              this._diceTimeout = null; 
-              this.currentDiceRoll = null;
-              this._isShowingDice = false;
-              this._canSubmitDiceAnswer = false;
-              this._stopDiceTimerNotifications();
-              return; 
-            }
-            
-            const diceValue = this.currentDiceRoll?.value;
-            const roundNumber = this._diceRound || 1;
-            
-            this._stopDiceTimerNotifications();
-            
-            // UMUMKAN PEMENANG DI AKHIR
-            if (this.diceHasWinner && this.diceWinner) {
-              const points = await this.diceGameSystem.getPoints();
-              this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
-                username: this.diceWinner,
-                totalPoints: points[this.diceWinner] || 0,
-                diceValue: diceValue,
-                round: roundNumber
-              }]);
-              
-              this._broadcastDiceNotification("diceError", {
-                username: this.diceWinner,
-                totalPoints: points[this.diceWinner] || 0,
-                diceValue: diceValue,
-                round: roundNumber,
-                remaining: -1,
-                message: `${this.diceWinner} won with value ${diceValue}!`
-              });
-            } else {
-              this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-                message: `No winner this round! The value was: ${diceValue}`,
-                value: diceValue,
-                round: roundNumber
-              }]);
-              
-              this._broadcastDiceNotification("diceError", {
-                message: `No winner this round! The value was: ${diceValue}`,
-                value: diceValue,
-                remaining: -1,
-                round: roundNumber
-              });
-            }
-            
-            this._diceTimeout = null;
-            this.currentDiceRoll = null;
-            this._isShowingDice = false;
-            this._canSubmitDiceAnswer = false;
-            
-            if (this._isDiceTime() && currentClients?.size > 0 && !this._diceTimeUpCooldown) {
-              this._broadcastDiceNotification("diceError", {
-                message: `Round ${this._diceRound + 1} starting...`,
-                round: this._diceRound + 1,
-                remaining: -1,
-                timestamp: Date.now()
-              });
-              
-              setTimeout(() => {
-                if (this.closing || this.isDestroyed) return;
-                if (this._isDiceTime() && !this._diceTimeUpCooldown) {
-                  this._showDiceQuestion();
-                }
-              }, CONSTANTS.DICE_BREAK_MS || 2000);
-            }
-            
-          } catch(e) {
-            this._diceTimeout = null;
-            this.currentDiceRoll = null;
-            this._isShowingDice = false;
-            this._canSubmitDiceAnswer = false;
-            this._stopDiceTimerNotifications();
-          }
-        }, CONSTANTS.DICE_TOTAL_TIME_MS);
-        
-      } catch(e) {
-        this._isShowingDice = false;
-        this.currentDiceRoll = null;
-        this._canSubmitDiceAnswer = false;
-        this._stopDiceTimerNotifications();
-      }
-    } catch(e) {
+       // Di dalam _showDiceQuestion - setTimeout diceTimeout
+
+this._diceTimeout = setTimeout(async () => {
+  try {
+    if (this.closing || this.isDestroyed) { 
+      this._diceTimeout = null; 
       this._isShowingDice = false;
-      this.currentDiceRoll = null;
       this._canSubmitDiceAnswer = false;
       this._stopDiceTimerNotifications();
+      return; 
     }
+    
+    const currentClients = this.wsClients.get(DICE_ROOM);
+    if (!currentClients?.size) { 
+      this._diceTimeout = null; 
+      this.currentDiceRoll = null;
+      this._isShowingDice = false;
+      this._canSubmitDiceAnswer = false;
+      this._stopDiceTimerNotifications();
+      return; 
+    }
+    
+    const diceValue = this.currentDiceRoll?.value;
+    const roundNumber = this._diceRound || 1;
+    
+    this._stopDiceTimerNotifications();
+    
+    // UMUMKAN PEMENANG DI AKHIR
+    if (this.diceHasWinner && this.diceWinner) {
+      const points = await this.diceGameSystem.getPoints();
+      this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
+        username: this.diceWinner,
+        totalPoints: points[this.diceWinner] || 0,
+        diceValue: diceValue,
+        round: roundNumber
+      }]);
+      
+      this._broadcastDiceNotification("diceError", {
+        username: this.diceWinner,
+        totalPoints: points[this.diceWinner] || 0,
+        diceValue: diceValue,
+        round: roundNumber,
+        remaining: -1,
+        message: `${this.diceWinner} won with value ${diceValue}!`
+      });
+      
+    } else {
+      // 🔥 TIDAK ADA PEMENANG - KIRIM HANYA 1 KALI
+      // HANYA diceNoWinner, TIDAK ADA diceNotification tambahan
+      this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
+        message: `No winner this round! The value was: ${diceValue}`,
+        value: diceValue,
+        round: roundNumber
+      }]);
+      
+      // 🔥 HAPUS BROADCAST DICE NOTIFICATION - SUDAH ADA diceNoWinner
+      // TIDAK PERLU KIRIM 2 KALI
+    }
+    
+    this._diceTimeout = null;
+    this.currentDiceRoll = null;
+    this._isShowingDice = false;
+    this._canSubmitDiceAnswer = false;
+    
+    if (this._isDiceTime() && currentClients?.size > 0 && !this._diceTimeUpCooldown) {
+      this._broadcastDiceNotification("diceError", {
+        message: `Round ${this._diceRound + 1} starting...`,
+        round: this._diceRound + 1,
+        remaining: -1,
+        timestamp: Date.now()
+      });
+      
+      setTimeout(() => {
+        if (this.closing || this.isDestroyed) return;
+        if (this._isDiceTime() && !this._diceTimeUpCooldown) {
+          this._showDiceQuestion();
+        }
+      }, CONSTANTS.DICE_BREAK_MS || 2000);
+    }
+    
+  } catch(e) {
+    this._diceTimeout = null;
+    this.currentDiceRoll = null;
+    this._isShowingDice = false;
+    this._canSubmitDiceAnswer = false;
+    this._stopDiceTimerNotifications();
   }
+}, CONSTANTS.DICE_TOTAL_TIME_MS);
 
   // ==================== submitDiceAnswer ====================
   async submitDiceAnswer(ws, username, guess) {
