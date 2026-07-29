@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS - FULL CLASS (LENGKAP) ====================
+// ==================== GAME-SERVER.JS - DENGAN REMAINING TIME ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -73,7 +73,7 @@ const CONSTANTS = {
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 6 },
-    { start: 11, end: 18 },
+    { start: 11, end: 12 },
     { start: 23, end: 24 }
   ],
   TIMEZONE_OFFSET: 8,
@@ -572,6 +572,7 @@ export class GameServer extends CPUProtection {
             timeLeft: timeLeft.text,
             hours: timeLeft.hours,
             minutes: timeLeft.minutes,
+            remaining: -1,
             isDiceTime: false,
             isActive: false
           });
@@ -631,6 +632,7 @@ export class GameServer extends CPUProtection {
             message: "Dice game is starting now!",
             isDiceTime: true,
             isActive: false,
+            remaining: -1,
             timestamp: Date.now()
           });
           
@@ -676,7 +678,8 @@ export class GameServer extends CPUProtection {
           this._broadcastDiceNotification("diceError", {
             message: "Dice game is available!",
             isDiceTime: true,
-            isActive: false
+            isActive: false,
+            remaining: -1
           });
           
           if (hasPlayers) {
@@ -697,6 +700,7 @@ export class GameServer extends CPUProtection {
               this._broadcastDiceNotification("diceError", {
                 message: `${Math.ceil(remainingMinutes)} minutes remaining in this session!`,
                 remainingMinutes: Math.ceil(remainingMinutes),
+                remaining: -1,
                 isDiceTime: true
               });
               this._diceRemainingShown = true;
@@ -707,6 +711,7 @@ export class GameServer extends CPUProtection {
               this._broadcastDiceNotification("diceError", {
                 message: "Last minute! Game will end soon!",
                 remainingMinutes: 1,
+                remaining: -1,
                 isDiceTime: true
               });
               this._diceTimeUpShown = true;
@@ -738,6 +743,7 @@ export class GameServer extends CPUProtection {
             timeLeft: timeLeft.text,
             hours: timeLeft.hours,
             minutes: timeLeft.minutes,
+            remaining: -1,
             isDiceTime: false,
             isActive: false
           });
@@ -790,6 +796,7 @@ export class GameServer extends CPUProtection {
               this._broadcastDiceNotification("diceError", {
                 message: "Dice game is starting now!",
                 isDiceTime: true,
+                remaining: -1,
                 timestamp: Date.now()
               });
               
@@ -1267,6 +1274,7 @@ export class GameServer extends CPUProtection {
         totalPoints: points[username] || 0,
         diceValue: diceValue,
         round: this._diceRound || 1,
+        remaining: -1,
         message: `${username} won with value ${diceValue}!`
       });
       
@@ -1327,6 +1335,7 @@ export class GameServer extends CPUProtection {
         
         this._broadcastDiceNotification("diceError", {
           week: currentWeek,
+          remaining: -1,
           message: "Points reset for new week! Good luck!"
         });
         
@@ -1368,6 +1377,7 @@ export class GameServer extends CPUProtection {
       }]);
       this._broadcastDiceNotification("diceError", { 
         timeLeft: timeLeft.text,
+        remaining: -1,
         message: `Dice game ended. Next session in: ${timeLeft.text}`
       });
       this.diceEndNotified = true;
@@ -1381,6 +1391,7 @@ export class GameServer extends CPUProtection {
         type: "diceError",
         timestamp: Date.now(),
         diceValue: this.currentDiceRoll?.value || null,
+        remaining: data.remaining !== undefined ? data.remaining : -1,
         data: data || {}
       };
       this._safeSend(ws, ["diceNotification", notification]);
@@ -1396,6 +1407,7 @@ export class GameServer extends CPUProtection {
         type: "diceError",
         timestamp: Date.now(),
         diceValue: this.currentDiceRoll?.value || null,
+        remaining: data.remaining !== undefined ? data.remaining : -1,
         data: data || {}
       };
       
@@ -1424,6 +1436,7 @@ export class GameServer extends CPUProtection {
               this._broadcastDiceNotification("diceError", {
                 message: "Dice game is starting now!",
                 isDiceTime: true,
+                remaining: -1,
                 timestamp: Date.now()
               });
               
@@ -1687,7 +1700,8 @@ export class GameServer extends CPUProtection {
           this._broadcastDiceNotification("diceError", {
             message: "Dice game is starting soon!",
             isDiceTime: true,
-            isActive: false
+            isActive: false,
+            remaining: -1
           });
         }
         return;
@@ -1726,9 +1740,11 @@ export class GameServer extends CPUProtection {
         
         await this._broadcastDiceRoll(diceValue);
         
+        // ✅ TAMBAHKAN remaining DI SINI
         this._broadcastDiceNotification("diceError", {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remainingTime: `${CONSTANTS.DICE_ANSWER_TIME_MS / 1000}s remaining`,
+          remaining: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           message: "Guess the dice value NOW!",
           round: this._diceRound
         });
@@ -1781,6 +1797,7 @@ export class GameServer extends CPUProtection {
               this._broadcastDiceNotification("diceError", {
                 message: `No winner this round! The value was: ${diceValue}`,
                 value: diceValue,
+                remaining: -1,
                 round: roundNumber
               });
             }
@@ -1794,6 +1811,7 @@ export class GameServer extends CPUProtection {
               this._broadcastDiceNotification("diceError", {
                 message: `Round ${this._diceRound + 1} starting...`,
                 round: this._diceRound + 1,
+                remaining: -1,
                 timestamp: Date.now()
               });
               
@@ -2057,6 +2075,7 @@ export class GameServer extends CPUProtection {
       
       this._broadcastDiceNotification("diceError", {
         message: "Dice game has ended.",
+        remaining: -1,
         clearUI: true
       });
     } catch(e) {}
@@ -2131,6 +2150,7 @@ export class GameServer extends CPUProtection {
         timeLeft: timeLeft.text,
         hours: timeLeft.hours,
         minutes: timeLeft.minutes,
+        remaining: -1,
         isDiceTime: this._isDiceTime(),
         isActive: false
       });
@@ -2193,6 +2213,7 @@ export class GameServer extends CPUProtection {
         timeLeft: timeLeft.text,
         hours: timeLeft.hours,
         minutes: timeLeft.minutes,
+        remaining: -1,
         isDiceTime: this._isDiceTime(),
         isActive: false
       });
@@ -2228,6 +2249,7 @@ export class GameServer extends CPUProtection {
       this._sendDiceNotification(ws, "diceError", {
         message: message,
         timeLeft: timeLeft.text,
+        remaining: -1,
         errorType: errorType,
         isDiceTime: this._isDiceTime()
       });
@@ -2469,6 +2491,7 @@ export class GameServer extends CPUProtection {
                 timeLeft: timeLeft.text,
                 hours: timeLeft.hours,
                 minutes: timeLeft.minutes,
+                remaining: -1,
                 isDiceTime: this._isDiceTime(),
                 isActive: false
               });
@@ -2537,6 +2560,7 @@ export class GameServer extends CPUProtection {
               timeLeft: timeLeft.text,
               hours: timeLeft.hours,
               minutes: timeLeft.minutes,
+              remaining: -1,
               isDiceTime: this._isDiceTime(),
               isActive: false
             });
@@ -3985,6 +4009,7 @@ export class GameServer extends CPUProtection {
           type: "diceError",
           timestamp: Date.now(),
           diceValue: this.currentDiceRoll?.value || null,
+          remaining: remaining,
           data: {
             isDiceTime: this._isDiceTime(),
             isActive: !!this.currentDiceRoll,
