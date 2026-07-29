@@ -57,8 +57,7 @@ const CONSTANTS = {
   DICE_ANSWER_TIME_MS: 20000,
   DICE_TOTAL_TIME_MS: 20000,
   DICE_BREAK_MS: 2000,
-  DICE_AFTER_TIMEOUT_BREAK_MS: 60000,
-  DICE_TIMEUP_COOLDOWN_MS: 60000,
+  DICE_AFTER_TIMEOUT_BREAK_MS: 60000, // 🔥 1 MENIT COOLDOWN
   MAX_DICE_VALUE: 6,
   DICE_ROOM: "Quiz",
   DICE_POINT_KEY: 'dice_points',
@@ -1597,7 +1596,7 @@ export class GameServer extends CPUProtection {
         cooldown: true
       });
       
-      let timeLeft = 60;
+      let timeLeft = CONSTANTS.DICE_AFTER_TIMEOUT_BREAK_MS / 1000; // 60 detik
       this._diceTimeUpCooldownTimer = setInterval(() => {
         try {
           timeLeft--;
@@ -1626,7 +1625,7 @@ export class GameServer extends CPUProtection {
               isActive: false,
               cooldown: true
             });
-          } else if (timeLeft === 0) {
+          } else if (timeLeft <= 0) {
             clearInterval(this._diceTimeUpCooldownTimer);
             this._diceTimeUpCooldownTimer = null;
             this._diceTimeUpCooldown = false;
@@ -1639,6 +1638,7 @@ export class GameServer extends CPUProtection {
               cooldown: false
             });
             
+            // 🔥 LANJUT KE ROUND BERIKUTNYA
             this._showDiceQuestion();
           }
         } catch(e) {}
@@ -1806,7 +1806,7 @@ export class GameServer extends CPUProtection {
             } else {
               // NO WINNER - HANYA KIRIM 1 KALI
               this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-                message: `No winner this round!}`,
+                message: `No winner this round! The value was: ${diceValue}`,
                 value: diceValue,
                 round: roundNumber
               }]);
@@ -1818,21 +1818,8 @@ export class GameServer extends CPUProtection {
             this._isShowingDice = false;
             this._canSubmitDiceAnswer = false;
             
-            if (this._isDiceTime() && currentClients?.size > 0 && !this._diceTimeUpCooldown) {
-              this._broadcastDiceNotification("diceError", {
-                message: `Round ${this._diceRound + 1} starting...`,
-                round: this._diceRound + 1,
-                remaining: -1,
-                timestamp: Date.now()
-              });
-              
-              setTimeout(() => {
-                if (this.closing || this.isDestroyed) return;
-                if (this._isDiceTime() && !this._diceTimeUpCooldown) {
-                  this._showDiceQuestion();
-                }
-              }, CONSTANTS.DICE_BREAK_MS || 2000);
-            }
+            // 🔥 MULAI COOLDOWN 1 MENIT
+            this._startTimeUpCooldown();
             
           } catch(e) {
             this._diceTimeout = null;
