@@ -74,9 +74,9 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 2 },    // Jam 01:00 - 02:00 WITA
-    { start: 11, end: 19 },  // Jam 11:00 - 19:00 WITA
-    { start: 21, end: 22 }   // Jam 21:00 - 22:00 WITA
+    { start: 1, end: 6 },
+    { start: 11, end: 19 },
+    { start: 23, end: 24 }
   ],
   TIMEZONE_OFFSET: 8,
 };
@@ -1304,6 +1304,7 @@ export class GameServer extends CPUProtection {
         key = `dice_msg_${message.substring(0, 30)}`;
       }
       
+      // TIME UP - PAKAI KEY KHUSUS
       if (message === "TIME UP!") {
         key = "dice_timeup";
       }
@@ -1312,7 +1313,7 @@ export class GameServer extends CPUProtection {
         key = `cooldown_${remaining}`;
       }
       
-      // ANTI SPAM - TAPI TIME UP TETAP DIKIRIM
+      // ANTI SPAM - TIME UP TETAP DIKIRIM
       if (message !== "TIME UP!") {
         if (this._lastNotificationKey === key && (now - this._lastNotificationTime) < 3000) {
           return;
@@ -1544,7 +1545,6 @@ export class GameServer extends CPUProtection {
           let shouldSend = false;
           let message = "";
           
-          // CEK 20, 10, 5
           if (remainingInt === 20 && !this._diceNotifiedFlags[20]) {
             this._diceNotifiedFlags[20] = true;
             shouldSend = true;
@@ -1557,10 +1557,7 @@ export class GameServer extends CPUProtection {
             this._diceNotifiedFlags[5] = true;
             shouldSend = true;
             message = "5 seconds remaining!";
-          }
-          
-          // CEK TIME UP - PAKAI remainingInt <= 0
-          if (remainingInt <= 0 && !this._diceNotifiedFlags.timeup) {
+          } else if (remainingInt <= 0 && !this._diceNotifiedFlags.timeup) {
             this._diceNotifiedFlags.timeup = true;
             shouldSend = true;
             message = "TIME UP!";
@@ -1568,7 +1565,6 @@ export class GameServer extends CPUProtection {
             this._startTimeUpCooldown();
           }
           
-          // KIRIM NOTIFIKASI
           if (shouldSend) {
             this._broadcastDiceNotification("diceError", {
               remaining: remainingInt,
@@ -1789,14 +1785,24 @@ export class GameServer extends CPUProtection {
             
             this._stopDiceTimerNotifications();
             
+            // UMUMKAN PEMENANG DI AKHIR
             if (this.diceHasWinner && this.diceWinner) {
-              await this._handleDiceWinner(this.diceWinner, diceValue);
-              this._broadcastToRoom(DICE_ROOM, ["diceRoundComplete", {
-                winner: this.diceWinner,
-                value: diceValue,
-                round: roundNumber,
-                message: `${this.diceWinner} won round ${roundNumber}!`
+              const points = await this.diceGameSystem.getPoints();
+              this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
+                username: this.diceWinner,
+                totalPoints: points[this.diceWinner] || 0,
+                diceValue: diceValue,
+                round: roundNumber
               }]);
+              
+              this._broadcastDiceNotification("diceError", {
+                username: this.diceWinner,
+                totalPoints: points[this.diceWinner] || 0,
+                diceValue: diceValue,
+                round: roundNumber,
+                remaining: -1,
+                message: `${this.diceWinner} won with value ${diceValue}!`
+              });
             } else {
               this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
                 message: `No winner this round! The value was: ${diceValue}`,
@@ -1860,39 +1866,34 @@ export class GameServer extends CPUProtection {
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) {
-        this._safeSend(ws, ["diceError", "Invalid request"]);
-        return;
+        return; // DIAM
       }
       
       const room = this._ensureRoomConsistency(ws);
       if (room !== DICE_ROOM) {
-        this._safeSend(ws, ["diceError", "Dice game only available in Dice room"]);
-        return;
+        return; // DIAM
       }
       
       if (!this._isDiceTime()) {
-        this._sendDiceErrorWithTime(ws, "NOT_DICE_TIME");
-        return;
+        return; // DIAM
       }
       
       if (!this.diceAutoEnabled) {
-        this._sendDiceErrorWithTime(ws, "DICE_DISABLED");
-        return;
+        return; // DIAM
       }
       
       const clients = this.wsClients.get(DICE_ROOM);
       if (!clients?.size) {
-        this._sendDiceErrorWithTime(ws, "ERROR", "Dice game is paused");
-        return;
+        return; // DIAM
       }
       
+      // CEK APAKAH MASIH BISA MENJAWAB
       if (this._isShowingDice || this._diceTimeout) {
         if (this._diceQuestionStartTime) {
           const elapsed = (Date.now() - this._diceQuestionStartTime) / 1000;
           const answerTime = CONSTANTS.DICE_ANSWER_TIME_MS / 1000;
           if (elapsed >= answerTime) {
-            this._safeSend(ws, ["diceError", "Answer time has expired!"]);
-            return;
+            return; // DIAM - TIME UP
           }
         }
       }
@@ -1900,62 +1901,65 @@ export class GameServer extends CPUProtection {
       if (!this.currentDiceRoll) {
         this._startDiceIfNeeded();
         if (!this.currentDiceRoll) {
-          this._sendDiceErrorWithTime(ws, "DICE_NOT_STARTED");
-          return;
+          return; // DIAM
         }
       }
       
       const guessValue = parseInt(guess, 10);
       const isValidGuess = !isNaN(guessValue) && guessValue >= 1 && guessValue <= 6;
       
+      // CEK SUDAH MENJAWAB
       if (this.diceAnswered.has(username)) {
-        this._safeSend(ws, ["diceError", "You have already submitted your guess!"]);
-        return;
+        return; // DIAM
       }
       
+      // CEK SUDAH ADA WINNER
       const hasWinner = this.diceHasWinner && this.diceWinner;
+      if (hasWinner) {
+        this.diceAnswered.add(username);
+        return; // DIAM
+      }
+      
       const diceValue = this.currentDiceRoll?.value;
       const answerRemaining = this._getDiceAnswerRemainingTime();
       
-      if (hasWinner) {
-        this.diceAnswered.add(username);
-        this._safeSend(ws, ["diceError", `${this.diceWinner} already won!`]);
-        return;
-      }
-      
       if (answerRemaining <= 0) {
         this.diceAnswered.add(username);
-        this._safeSend(ws, ["diceError", "Time's up! Guess not counted."]);
-        return;
+        return; // DIAM
       }
       
       const isCorrect = isValidGuess && guessValue === diceValue;
       
+      // KIRIM NOTIFIKASI KE ROOM BAHWA USER TELAH SUBMIT ANGKA
+      // TANPA MEMBERITAHU BENAR/SALAH
+      this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
+        username: username,
+        guess: guessValue,
+        round: this._diceRound || 1
+      }]);
+      
       if (isCorrect) {
+        // SET WINNER
         this.diceHasWinner = true;
         this.diceWinner = username;
         
+        // TAMBAHKAN POIN
         const points = await this.diceGameSystem.getPoints();
         points[username] = (points[username] || 0) + 1;
         await this.diceGameSystem.setPoints(points);
         
         this.diceAnswered.add(username);
         
-        // 🔥 HANYA KIRIM KE USER YANG MENANG (PRIVATE) - TIDAK BROADCAST
-        this._safeSend(ws, ["diceCorrect", {
-          message: "Your answer is correct! Waiting for round to end...",
-          diceValue: diceValue,
-          round: this._diceRound || 1
-        }]);
+        // TIDAK ADA NOTIFIKASI APAPUN KE USER
+        // USER TIDAK TAHU JAWABANNYA BENAR
         
       } else {
-        // 🔥 JAWABAN SALAH - TIDAK KIRIM APA PUN
+        // JAWABAN SALAH - DIAM
         this.diceAnswered.add(username);
-        // TIDAK ADA NOTIFIKASI
       }
       
     } catch(e) {
-      this._safeSend(ws, ["diceError", e.message || "Error submitting answer"]);
+      // DIAM - TIDAK KIRIM ERROR
     }
   }
 
