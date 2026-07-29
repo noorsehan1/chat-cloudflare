@@ -57,7 +57,7 @@ const CONSTANTS = {
   DICE_ANSWER_TIME_MS: 20000,
   DICE_TOTAL_TIME_MS: 20000,
   DICE_BREAK_MS: 2000,
-  DICE_AFTER_TIMEOUT_BREAK_MS: 60000, // 🔥 1 MENIT COOLDOWN
+  DICE_AFTER_TIMEOUT_BREAK_MS: 60000,
   MAX_DICE_VALUE: 6,
   DICE_ROOM: "Quiz",
   DICE_POINT_KEY: 'dice_points',
@@ -1596,7 +1596,7 @@ export class GameServer extends CPUProtection {
         cooldown: true
       });
       
-      let timeLeft = CONSTANTS.DICE_AFTER_TIMEOUT_BREAK_MS / 1000; // 60 detik
+      let timeLeft = CONSTANTS.DICE_AFTER_TIMEOUT_BREAK_MS / 1000;
       this._diceTimeUpCooldownTimer = setInterval(() => {
         try {
           timeLeft--;
@@ -1638,7 +1638,6 @@ export class GameServer extends CPUProtection {
               cooldown: false
             });
             
-            // 🔥 LANJUT KE ROUND BERIKUTNYA
             this._showDiceQuestion();
           }
         } catch(e) {}
@@ -1810,7 +1809,6 @@ export class GameServer extends CPUProtection {
                 value: diceValue,
                 round: roundNumber
               }]);
-              // TIDAK ADA diceNotification TAMBAHAN
             }
             
             this._diceTimeout = null;
@@ -1818,7 +1816,7 @@ export class GameServer extends CPUProtection {
             this._isShowingDice = false;
             this._canSubmitDiceAnswer = false;
             
-            // 🔥 MULAI COOLDOWN 1 MENIT
+            // MULAI COOLDOWN 1 MENIT
             this._startTimeUpCooldown();
             
           } catch(e) {
@@ -1848,34 +1846,33 @@ export class GameServer extends CPUProtection {
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) {
-        return; // DIAM
+        return;
       }
       
       const room = this._ensureRoomConsistency(ws);
       if (room !== DICE_ROOM) {
-        return; // DIAM
+        return;
       }
       
       if (!this._isDiceTime()) {
-        return; // DIAM
+        return;
       }
       
       if (!this.diceAutoEnabled) {
-        return; // DIAM
+        return;
       }
       
       const clients = this.wsClients.get(DICE_ROOM);
       if (!clients?.size) {
-        return; // DIAM
+        return;
       }
       
-      // CEK APAKAH MASIH BISA MENJAWAB
       if (this._isShowingDice || this._diceTimeout) {
         if (this._diceQuestionStartTime) {
           const elapsed = (Date.now() - this._diceQuestionStartTime) / 1000;
           const answerTime = CONSTANTS.DICE_ANSWER_TIME_MS / 1000;
           if (elapsed >= answerTime) {
-            return; // DIAM - TIME UP
+            return;
           }
         }
       }
@@ -1883,23 +1880,21 @@ export class GameServer extends CPUProtection {
       if (!this.currentDiceRoll) {
         this._startDiceIfNeeded();
         if (!this.currentDiceRoll) {
-          return; // DIAM
+          return;
         }
       }
       
       const guessValue = parseInt(guess, 10);
       const isValidGuess = !isNaN(guessValue) && guessValue >= 1 && guessValue <= 6;
       
-      // CEK SUDAH MENJAWAB
       if (this.diceAnswered.has(username)) {
-        return; // DIAM
+        return;
       }
       
-      // CEK SUDAH ADA WINNER
       const hasWinner = this.diceHasWinner && this.diceWinner;
       if (hasWinner) {
         this.diceAnswered.add(username);
-        return; // DIAM
+        return;
       }
       
       const diceValue = this.currentDiceRoll?.value;
@@ -1907,13 +1902,11 @@ export class GameServer extends CPUProtection {
       
       if (answerRemaining <= 0) {
         this.diceAnswered.add(username);
-        return; // DIAM
+        return;
       }
       
       const isCorrect = isValidGuess && guessValue === diceValue;
       
-      // KIRIM NOTIFIKASI KE ROOM BAHWA USER TELAH SUBMIT ANGKA
-      // TANPA MEMBERITAHU BENAR/SALAH
       this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
         username: username,
         guess: guessValue,
@@ -1921,27 +1914,20 @@ export class GameServer extends CPUProtection {
       }]);
       
       if (isCorrect) {
-        // SET WINNER
         this.diceHasWinner = true;
         this.diceWinner = username;
         
-        // TAMBAHKAN POIN
         const points = await this.diceGameSystem.getPoints();
         points[username] = (points[username] || 0) + 1;
         await this.diceGameSystem.setPoints(points);
         
         this.diceAnswered.add(username);
-        
-        // TIDAK ADA NOTIFIKASI APAPUN KE USER
-        // USER TIDAK TAHU JAWABANNYA BENAR
-        
       } else {
-        // JAWABAN SALAH - DIAM
         this.diceAnswered.add(username);
       }
       
     } catch(e) {
-      // DIAM - TIDAK KIRIM ERROR
+      // DIAM
     }
   }
 
@@ -2339,6 +2325,7 @@ export class GameServer extends CPUProtection {
       if (!ws) return null;
       const wsId = this._getWsId(ws);
       if (!wsId) return null;
+      
       let room = this.clientRooms.get(wsId);
       if (!room) room = ws.room || ws.roomname || null;
       if (!room) {
@@ -2347,16 +2334,20 @@ export class GameServer extends CPUProtection {
           if (conn) room = conn.room;
         }
       }
-      if (!room) return null;
-      ws.room = room;
-      ws.roomname = room;
-      if (!this.wsClients.has(room)) this.wsClients.set(room, new Set());
-      if (!this.wsClients.get(room).has(wsId)) {
-        this.wsClients.get(room).add(wsId);
-        this.clientRooms.set(wsId, room);
-        this.wsMap.set(wsId, ws);
+      
+      if (room) {
+        ws.room = room;
+        ws.roomname = room;
+        if (!this.wsClients.has(room)) this.wsClients.set(room, new Set());
+        if (!this.wsClients.get(room).has(wsId)) {
+          this.wsClients.get(room).add(wsId);
+          this.clientRooms.set(wsId, room);
+          this.wsMap.set(wsId, ws);
+        }
+        return room;
       }
-      return room;
+      
+      return null;
     } catch(e) { return null; }
   }
 
@@ -2449,75 +2440,26 @@ export class GameServer extends CPUProtection {
         this._safeSend(ws, ["gameLowCardError", "Connection error"]); 
         return; 
       }
+      
       const lockKey = `switch_${wsId}`;
       if (this._switchLocks.has(lockKey)) { 
-        this._safeSend(ws, ["gameLowCardError", "Switch in progress"]); 
+        this._safeSend(ws, ["switchRoomSuccess", roomName]);
         return; 
       }
       this._switchLocks.set(lockKey, Date.now());
+      
       try {
         const oldRoom = this.clientRooms.get(wsId);
+        
         if (oldRoom === roomName) {
           ws.room = roomName;
           ws.roomname = roomName;
+          this._safeSend(ws, ["switchRoomSuccess", roomName]);
           
           if (roomName === DICE_ROOM) {
-            this._diceTimeLeftNotified.delete(wsId);
-            this._nextDiceNotified.delete(wsId);
-            this._diceJoinedNotified.delete(wsId);
-            
-            // 🔥 CEK APAKAH GAME AKTIF
-            const isGameActive = this.currentDiceRoll && this._canSubmitDiceAnswer;
-            
-            if (isGameActive) {
-              // 🔥 GAME AKTIF - TAMPILKAN SISA WAKTU
-              const elapsed = (Date.now() - this._diceStartTime) / 1000;
-              const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
-              const remaining = Math.max(0, totalTime - elapsed);
-              const remainingInt = Math.floor(remaining);
-              
-              if (remainingInt > 0) {
-                let displayTime = "";
-                if (remainingInt >= 20) {
-                  displayTime = "20 seconds remaining!";
-                } else if (remainingInt >= 10) {
-                  displayTime = "10 seconds remaining!";
-                } else if (remainingInt >= 5) {
-                  displayTime = "5 seconds remaining!";
-                } else {
-                  displayTime = `${remainingInt}s remaining`;
-                }
-                
-                this._sendDiceNotification(ws, "diceError", {
-                  message: displayTime,
-                  remaining: remainingInt,
-                  isDiceTime: true,
-                  isActive: true
-                });
-              }
-            } else {
-              // 🔥 GAME TIDAK AKTIF - DELAY 5 DETIK
-              const timeLeft = this._getTimeLeftUntilNextDice();
-              
-              setTimeout(() => {
-                if (!this.closing && !this.isDestroyed && ws && ws.readyState === 1) {
-                  this._sendDiceNotification(ws, "diceError", {
-                    message: `Dice game ended. Next session in: ${timeLeft.text}`,
-                    timeLeft: timeLeft.text,
-                    hours: timeLeft.hours,
-                    minutes: timeLeft.minutes,
-                    remaining: -1,
-                    isDiceTime: this._isDiceTime(),
-                    isActive: false
-                  });
-                }
-              }, 5000);
-              
-              this._diceJoinedNotified.set(wsId, true);
-            }
+            this._sendDiceNotificationOnSwitch(ws, wsId);
           }
           
-          this._safeSend(ws, ["switchRoomSuccess", roomName]);
           return;
         }
         
@@ -2542,81 +2484,86 @@ export class GameServer extends CPUProtection {
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
         
         if (roomName === DICE_ROOM) {
-          this._diceTimeLeftNotified.delete(wsId);
-          this._nextDiceNotified.delete(wsId);
-          this._diceJoinedNotified.delete(wsId);
-          
-          // 🔥 CEK APAKAH GAME AKTIF
-          const isGameActive = this.currentDiceRoll && this._canSubmitDiceAnswer;
-          
-          if (isGameActive) {
-            // 🔥 GAME AKTIF - TAMPILKAN SISA WAKTU
-            // JANGAN TAMPILKAN "Dice game ended. Next session in: Xh Ym"
-            const elapsed = (Date.now() - this._diceStartTime) / 1000;
-            const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
-            const remaining = Math.max(0, totalTime - elapsed);
-            const remainingInt = Math.floor(remaining);
-            
-            if (remainingInt > 0) {
-              let displayTime = "";
-              if (remainingInt >= 20) {
-                displayTime = "20 seconds remaining!";
-              } else if (remainingInt >= 10) {
-                displayTime = "10 seconds remaining!";
-              } else if (remainingInt >= 5) {
-                displayTime = "5 seconds remaining!";
-              } else {
-                displayTime = `${remainingInt}s remaining`;
-              }
-              
-              this._sendDiceNotification(ws, "diceError", {
-                message: displayTime,
-                remaining: remainingInt,
-                isDiceTime: true,
-                isActive: true
-              });
-            }
-          } else {
-            // 🔥 GAME TIDAK AKTIF - DELAY 5 DETIK
-            const timeLeft = this._getTimeLeftUntilNextDice();
-            
-            setTimeout(() => {
-              if (!this.closing && !this.isDestroyed && ws && ws.readyState === 1) {
-                this._sendDiceNotification(ws, "diceError", {
-                  message: `Dice game ended. Next session in: ${timeLeft.text}`,
-                  timeLeft: timeLeft.text,
-                  hours: timeLeft.hours,
-                  minutes: timeLeft.minutes,
-                  remaining: -1,
-                  isDiceTime: this._isDiceTime(),
-                  isActive: false
-                });
-              }
-            }, 5000);
-            
-            this._diceJoinedNotified.set(wsId, true);
-          }
-          
-          if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
-            this._safeSend(ws, ["diceRoll", {
-              value: this.currentDiceRoll.value,
-              timestamp: this.currentDiceRoll.timestamp,
-              answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
-              canAnswerNow: true,
-              round: this._diceRound || 1
-            }]);
-          }
+          this._sendDiceNotificationOnSwitch(ws, wsId);
         }
         
         this._broadcastToRoom(roomName, ["userJoinedRoom", username, roomName]);
         if (oldRoom) this._broadcastToRoom(oldRoom, ["userLeftRoom", username, oldRoom]);
         
       } finally {
-        this._switchLocks.delete(lockKey);
+        setTimeout(() => {
+          this._switchLocks.delete(lockKey);
+        }, 3000);
       }
     } catch(e) {
       this._safeSend(ws, ["gameLowCardError", "Switch failed"]);
+      this._switchLocks.delete(lockKey);
     }
+  }
+
+  _sendDiceNotificationOnSwitch(ws, wsId) {
+    try {
+      this._diceTimeLeftNotified.delete(wsId);
+      this._nextDiceNotified.delete(wsId);
+      this._diceJoinedNotified.delete(wsId);
+      
+      const isGameActive = this.currentDiceRoll && this._canSubmitDiceAnswer;
+      
+      if (isGameActive) {
+        const elapsed = (Date.now() - this._diceStartTime) / 1000;
+        const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
+        const remaining = Math.max(0, totalTime - elapsed);
+        const remainingInt = Math.floor(remaining);
+        
+        if (remainingInt > 0) {
+          let displayTime = "";
+          if (remainingInt >= 20) {
+            displayTime = "20 seconds remaining!";
+          } else if (remainingInt >= 10) {
+            displayTime = "10 seconds remaining!";
+          } else if (remainingInt >= 5) {
+            displayTime = "5 seconds remaining!";
+          } else {
+            displayTime = `${remainingInt}s remaining`;
+          }
+          
+          this._sendDiceNotification(ws, "diceError", {
+            message: displayTime,
+            remaining: remainingInt,
+            isDiceTime: true,
+            isActive: true
+          });
+        }
+      } else {
+        const timeLeft = this._getTimeLeftUntilNextDice();
+        
+        setTimeout(() => {
+          if (!this.closing && !this.isDestroyed && ws && ws.readyState === 1) {
+            this._sendDiceNotification(ws, "diceError", {
+              message: `Dice game ended. Next session in: ${timeLeft.text}`,
+              timeLeft: timeLeft.text,
+              hours: timeLeft.hours,
+              minutes: timeLeft.minutes,
+              remaining: -1,
+              isDiceTime: this._isDiceTime(),
+              isActive: false
+            });
+          }
+        }, 5000);
+        
+        this._diceJoinedNotified.set(wsId, true);
+      }
+      
+      if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
+        this._safeSend(ws, ["diceRoll", {
+          value: this.currentDiceRoll.value,
+          timestamp: this.currentDiceRoll.timestamp,
+          answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
+          canAnswerNow: true,
+          round: this._diceRound || 1
+        }]);
+      }
+    } catch(e) {}
   }
 
   // ==================== OPTIMIZED BROADCAST TO ROOM ====================
