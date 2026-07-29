@@ -74,9 +74,9 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 2 },
-    { start: 11, end: 19 },
-    { start: 21, end: 22 }
+    { start: 1, end: 2 },    // Jam 01:00 - 02:00 WITA
+    { start: 11, end: 19 },  // Jam 11:00 - 19:00 WITA
+    { start: 21, end: 22 }   // Jam 21:00 - 22:00 WITA
   ],
   TIMEZONE_OFFSET: 8,
 };
