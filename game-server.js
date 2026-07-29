@@ -1806,7 +1806,7 @@ export class GameServer extends CPUProtection {
             } else {
               // NO WINNER - HANYA KIRIM 1 KALI
               this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-                message: `No winner this round! The value was: ${diceValue}`,
+                message: `No winner this round!}`,
                 value: diceValue,
                 round: roundNumber
               }]);
