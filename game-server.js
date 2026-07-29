@@ -2208,13 +2208,13 @@ export class GameServer extends CPUProtection {
           
           let displayTime = "";
           if (remainingInt >= 20) {
-            displayTime = "20s remaining";
+            displayTime = "20 seconds remaining!";
           } else if (remainingInt >= 10) {
-            displayTime = "10s remaining";
+            displayTime = "10 seconds remaining!";
           } else if (remainingInt >= 5) {
-            displayTime = "5s remaining";
+            displayTime = "5 seconds remaining!";
           } else if (remainingInt >= 3) {
-            displayTime = "3s remaining";
+            displayTime = "3 seconds remaining!";
           } else if (remainingInt > 0) {
             displayTime = `${timeText} remaining`;
           }
@@ -2475,12 +2475,15 @@ export class GameServer extends CPUProtection {
         if (oldRoom === roomName) {
           ws.room = roomName;
           ws.roomname = roomName;
+          
           if (roomName === DICE_ROOM) {
             this._diceTimeLeftNotified.delete(wsId);
             this._nextDiceNotified.delete(wsId);
             this._diceJoinedNotified.delete(wsId);
             
-            if (this._isDiceTime() && this.currentDiceRoll && this._diceStartTime) {
+            const isGameActive = this.currentDiceRoll && this._canSubmitDiceAnswer;
+            
+            if (isGameActive) {
               const elapsed = (Date.now() - this._diceStartTime) / 1000;
               const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
               const remaining = Math.max(0, totalTime - elapsed);
@@ -2489,49 +2492,53 @@ export class GameServer extends CPUProtection {
               if (remainingInt > 0) {
                 let displayTime = "";
                 if (remainingInt >= 20) {
-                  displayTime = "20s remaining";
+                  displayTime = "20 seconds remaining!";
                 } else if (remainingInt >= 10) {
-                  displayTime = "10s remaining";
+                  displayTime = "10 seconds remaining!";
                 } else if (remainingInt >= 5) {
-                  displayTime = "5s remaining";
-                } else if (remainingInt >= 3) {
-                  displayTime = "3s remaining";
+                  displayTime = "5 seconds remaining!";
                 } else {
-                  const minutes = Math.floor(remainingInt / 60);
-                  const seconds = remainingInt % 60;
-                  displayTime = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s remaining`;
+                  displayTime = `${remainingInt}s remaining`;
                 }
                 
                 this._sendDiceNotification(ws, "diceError", {
                   message: displayTime,
                   remaining: remainingInt,
                   isDiceTime: true,
-                  isActive: true,
-                  round: this._diceRound || 1
+                  isActive: true
                 });
               }
             } else {
               const timeLeft = this._getTimeLeftUntilNextDice();
-              this._sendDiceNotification(ws, "diceError", {
-                message: `Next dice game in: ${timeLeft.text}`,
-                timeLeft: timeLeft.text,
-                hours: timeLeft.hours,
-                minutes: timeLeft.minutes,
-                remaining: -1,
-                isDiceTime: this._isDiceTime(),
-                isActive: false
-              });
+              
+              setTimeout(() => {
+                if (!this.closing && !this.isDestroyed && ws && ws.readyState === 1) {
+                  this._sendDiceNotification(ws, "diceError", {
+                    message: `Dice game ended. Next session in: ${timeLeft.text}`,
+                    timeLeft: timeLeft.text,
+                    hours: timeLeft.hours,
+                    minutes: timeLeft.minutes,
+                    remaining: -1,
+                    isDiceTime: this._isDiceTime(),
+                    isActive: false
+                  });
+                }
+              }, 5000);
+              
               this._diceJoinedNotified.set(wsId, true);
             }
           }
+          
           this._safeSend(ws, ["switchRoomSuccess", roomName]);
           return;
         }
+        
         if (oldRoom) this._removeClientFromRoom(oldRoom, wsId);
         this._addClient(roomName, ws, username, false);
         ws.room = roomName;
         ws.roomname = roomName;
         ws.username = username;
+        
         if (username) {
           let conn = this.userConnections.get(username);
           if (conn) { 
@@ -2543,13 +2550,17 @@ export class GameServer extends CPUProtection {
             this.userConnections.set(username, { wsId, ws, room: roomName, timestamp: Date.now() }); 
           }
         }
+        
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
+        
         if (roomName === DICE_ROOM) {
           this._diceTimeLeftNotified.delete(wsId);
           this._nextDiceNotified.delete(wsId);
           this._diceJoinedNotified.delete(wsId);
           
-          if (this._isDiceTime() && this.currentDiceRoll && this._diceStartTime) {
+          const isGameActive = this.currentDiceRoll && this._canSubmitDiceAnswer;
+          
+          if (isGameActive) {
             const elapsed = (Date.now() - this._diceStartTime) / 1000;
             const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
             const remaining = Math.max(0, totalTime - elapsed);
@@ -2558,38 +2569,39 @@ export class GameServer extends CPUProtection {
             if (remainingInt > 0) {
               let displayTime = "";
               if (remainingInt >= 20) {
-                displayTime = "20s remaining";
+                displayTime = "20 seconds remaining!";
               } else if (remainingInt >= 10) {
-                displayTime = "10s remaining";
+                displayTime = "10 seconds remaining!";
               } else if (remainingInt >= 5) {
-                displayTime = "5s remaining";
-              } else if (remainingInt >= 3) {
-                displayTime = "3s remaining";
+                displayTime = "5 seconds remaining!";
               } else {
-                const minutes = Math.floor(remainingInt / 60);
-                const seconds = remainingInt % 60;
-                displayTime = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s remaining`;
+                displayTime = `${remainingInt}s remaining`;
               }
               
               this._sendDiceNotification(ws, "diceError", {
                 message: displayTime,
                 remaining: remainingInt,
                 isDiceTime: true,
-                isActive: true,
-                round: this._diceRound || 1
+                isActive: true
               });
             }
           } else {
             const timeLeft = this._getTimeLeftUntilNextDice();
-            this._sendDiceNotification(ws, "diceError", {
-              message: `Next dice game in: ${timeLeft.text}`,
-              timeLeft: timeLeft.text,
-              hours: timeLeft.hours,
-              minutes: timeLeft.minutes,
-              remaining: -1,
-              isDiceTime: this._isDiceTime(),
-              isActive: false
-            });
+            
+            setTimeout(() => {
+              if (!this.closing && !this.isDestroyed && ws && ws.readyState === 1) {
+                this._sendDiceNotification(ws, "diceError", {
+                  message: `Dice game ended. Next session in: ${timeLeft.text}`,
+                  timeLeft: timeLeft.text,
+                  hours: timeLeft.hours,
+                  minutes: timeLeft.minutes,
+                  remaining: -1,
+                  isDiceTime: this._isDiceTime(),
+                  isActive: false
+                });
+              }
+            }, 5000);
+            
             this._diceJoinedNotified.set(wsId, true);
           }
           
@@ -2601,16 +2613,12 @@ export class GameServer extends CPUProtection {
               canAnswerNow: true,
               round: this._diceRound || 1
             }]);
-            this._safeSend(ws, ["diceError", {
-              answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
-              remainingTime: `${this._getDiceAnswerRemainingTime()}s remaining`,
-              message: "You can now guess the dice value!",
-              round: this._diceRound || 1
-            }]);
           }
         }
+        
         this._broadcastToRoom(roomName, ["userJoinedRoom", username, roomName]);
         if (oldRoom) this._broadcastToRoom(oldRoom, ["userLeftRoom", username, oldRoom]);
+        
       } finally {
         this._switchLocks.delete(lockKey);
       }
