@@ -3614,20 +3614,20 @@ export class GameServer extends CPUProtection {
   async checkGameRunning(ws, roomname) {
     try {
       if (this.isDestroyed) { 
-        this._safeSend(ws, ["gameStatus", { running: "false" }]); 
+        this._safeSend(ws, ["gameStatus", "false"]);
         return; 
       }
       let room = roomname;
       if (!room) room = this._ensureRoomConsistency(ws);
       if (!room) { 
-        this._safeSend(ws, ["gameStatus", { running: "false" }]); 
+        this._safeSend(ws, ["gameStatus", "false"]);
         return; 
       }
       const game = this.activeGames.get(room);
       const isRunning = game?._isActive && !game._gameEnded && game.players?.size > 0;
-      this._safeSend(ws, ["gameStatus", { running: isRunning ? "true" : "false" }]);
+      this._safeSend(ws, ["gameStatus", isRunning ? "true" : "false"]);
     } catch(e) {
-      this._safeSend(ws, ["gameStatus", { running: "false" }]);
+      this._safeSend(ws, ["gameStatus", "false"]);
     }
   }
 
