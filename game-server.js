@@ -82,6 +82,61 @@ const QUIZ_SCHEDULE = {
 
 const DICE_ROOM = "Quiz";
 
+// ==================== KV CACHE CLASS ====================
+class KVCache {
+  constructor() {
+    this.cache = new Map();
+    this.ttl = 30000; // 30 detik default
+    this._cleanupInterval = null;
+  }
+
+  get(key) {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.timestamp > this.ttl) {
+      this.cache.delete(key);
+      return null;
+    }
+    return entry.value;
+  }
+
+  set(key, value, customTtl = null) {
+    const ttl = customTtl || this.ttl;
+    this.cache.set(key, {
+      value: value,
+      timestamp: Date.now(),
+      ttl: ttl
+    });
+  }
+
+  delete(key) {
+    this.cache.delete(key);
+  }
+
+  clear() {
+    this.cache.clear();
+  }
+
+  startCleanup() {
+    if (this._cleanupInterval) return;
+    this._cleanupInterval = setInterval(() => {
+      const now = Date.now();
+      for (const [key, entry] of this.cache) {
+        if (now - entry.timestamp > entry.ttl) {
+          this.cache.delete(key);
+        }
+      }
+    }, 60000);
+  }
+
+  stopCleanup() {
+    if (this._cleanupInterval) {
+      clearInterval(this._cleanupInterval);
+      this._cleanupInterval = null;
+    }
+  }
+}
+
 // ==================== CPU PROTECTION CLASS ====================
 class CPUProtection {
   constructor() {
@@ -467,6 +522,7 @@ export class GameServer extends CPUProtection {
 
       this._weeklyResetTimer = null;
       this._lastResetWeek = null;
+      this._lastResetCheck = null;
 
       this._diceTimerInterval = null;
       this._diceNotified20 = false;
@@ -497,6 +553,10 @@ export class GameServer extends CPUProtection {
         5: false,
         timeup: false
       };
+
+      // KV CACHE
+      this._kvCache = new KVCache();
+      this._kvCache.startCleanup();
 
       this.diceGameSystem = new DiceGameSystem(this);
 
@@ -839,6 +899,10 @@ export class GameServer extends CPUProtection {
     try {
       if (!roomName) return false;
       
+      const cacheKey = `recording_${roomName}`;
+      const cached = this._kvCache.get(cacheKey);
+      if (cached !== null) return cached;
+      
       if (this.env?.QUESTIONS) {
         try {
           const kvValue = await this.env.QUESTIONS.get(
@@ -846,9 +910,12 @@ export class GameServer extends CPUProtection {
           );
           const isRecording = kvValue === 'true';
           this._recordingEnabled.set(roomName, isRecording);
+          this._kvCache.set(cacheKey, isRecording, 300000); // 5 menit
           return isRecording;
         } catch(e) {
-          return this._recordingEnabled.get(roomName) || false;
+          const isRecording = this._recordingEnabled.get(roomName) || false;
+          this._kvCache.set(cacheKey, isRecording, 300000);
+          return isRecording;
         }
       }
       return this._recordingEnabled.get(roomName) || false;
@@ -862,6 +929,7 @@ export class GameServer extends CPUProtection {
       if (!roomName) return false;
       
       this._recordingEnabled.set(roomName, true);
+      this._kvCache.delete(`recording_${roomName}`);
       
       if (this.env?.QUESTIONS) {
         await this.env.QUESTIONS.put(
@@ -885,6 +953,8 @@ export class GameServer extends CPUProtection {
       
       const room = roomName.trim();
       this._recordingEnabled.set(room, false);
+      this._kvCache.delete(`recording_${room}`);
+      this._kvCache.delete(`winners_${room}`);
       
       if (this.env?.QUESTIONS) {
         const statusKey = CONSTANTS.LOWCARD_RECORDING_KEY + room;
@@ -948,6 +1018,9 @@ export class GameServer extends CPUProtection {
       
       await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       
+      // INVALIDATE CACHE
+      this._kvCache.delete(`winners_${room}`);
+      
       return true;
     } catch(e) {
       return false;
@@ -1002,14 +1075,26 @@ export class GameServer extends CPUProtection {
       if (!room) return {};
       if (!this.env?.QUESTIONS) return {};
       
+      const isRecording = await this._getRecordingStatusFromKV(room);
+      if (!isRecording) {
+        return {};
+      }
+      
+      const cacheKey = `winners_${room}`;
+      const cached = this._kvCache.get(cacheKey);
+      if (cached !== null) return cached;
+      
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       const winners = await this.env.QUESTIONS.get(key, 'json');
       
       if (winners && typeof winners === 'object') {
+        this._kvCache.set(cacheKey, winners, 60000); // 1 menit
         return winners;
       }
       
-      return {};
+      const empty = {};
+      this._kvCache.set(cacheKey, empty, 60000);
+      return empty;
     } catch(e) {
       return {};
     }
@@ -1153,11 +1238,19 @@ export class GameServer extends CPUProtection {
     try {
       if (this._winnerProcessed) return;
       
+      // CEK APAKAH GAME ACTIVE
+      if (!this.currentDiceRoll || !this._canSubmitDiceAnswer) {
+        return;
+      }
+      
       this._winnerProcessed = true;
       
       const points = await this.diceGameSystem.getPoints();
       points[username] = (points[username] || 0) + 1;
       await this.diceGameSystem.setPoints(points);
+      
+      // INVALIDATE CACHE
+      this._kvCache.delete('dice_points');
       
       this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
         username: username,
@@ -1188,11 +1281,18 @@ export class GameServer extends CPUProtection {
     try {
       if (!this.env?.QUESTIONS) return false;
       
+      // CEK 1X PER JAM
+      const now = Date.now();
+      if (this._lastResetCheck && (now - this._lastResetCheck) < 3600000) {
+        return false;
+      }
+      this._lastResetCheck = now;
+      
       const currentWeek = this.diceGameSystem.generateCurrentWeek();
       const lastResetWeek = await this._getLastResetWeek();
       
       if (lastResetWeek !== currentWeek) {
-        const points = await this.diceGameSystem.getPoints();
+        const points = await this._getDicePoints();
         
         if (points && Object.keys(points).length > 0) {
           let winner = null;
@@ -1212,6 +1312,7 @@ export class GameServer extends CPUProtection {
               week: lastResetWeek || currentWeek
             };
             await this.diceGameSystem.setLastWeekWinner(winnerData);
+            this._kvCache.delete('dice_last_week_winner');
             
             this._broadcastToRoom(DICE_ROOM, [
               "diceLastWeekWinner", 
@@ -1224,6 +1325,7 @@ export class GameServer extends CPUProtection {
         
         await this.diceGameSystem.setPoints({});
         await this._setLastResetWeek(currentWeek);
+        this._kvCache.delete('dice_points');
         
         this._broadcastToRoom(DICE_ROOM, [
           "systemMessage", 
@@ -1261,6 +1363,22 @@ export class GameServer extends CPUProtection {
       return true;
     } catch(e) { 
       return false; 
+    }
+  }
+
+  async _getDicePoints() {
+    try {
+      if (!this.env?.QUESTIONS) return {};
+      
+      const cacheKey = 'dice_points';
+      const cached = this._kvCache.get(cacheKey);
+      if (cached !== null) return cached;
+      
+      const points = await this.diceGameSystem.getPoints();
+      this._kvCache.set(cacheKey, points, 5000); // 5 detik
+      return points;
+    } catch(e) {
+      return {};
     }
   }
 
@@ -1786,7 +1904,7 @@ export class GameServer extends CPUProtection {
             
             // UMUMKAN PEMENANG DI AKHIR
             if (this.diceHasWinner && this.diceWinner) {
-              const points = await this.diceGameSystem.getPoints();
+              const points = await this._getDicePoints();
               this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
                 username: this.diceWinner,
                 totalPoints: points[this.diceWinner] || 0,
@@ -1907,6 +2025,7 @@ export class GameServer extends CPUProtection {
       
       const isCorrect = isValidGuess && guessValue === diceValue;
       
+      // KIRIM NOTIFIKASI KE ROOM BAHWA USER TELAH SUBMIT ANGKA
       this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
         username: username,
         guess: guessValue,
@@ -1917,9 +2036,10 @@ export class GameServer extends CPUProtection {
         this.diceHasWinner = true;
         this.diceWinner = username;
         
-        const points = await this.diceGameSystem.getPoints();
+        const points = await this._getDicePoints();
         points[username] = (points[username] || 0) + 1;
         await this.diceGameSystem.setPoints(points);
+        this._kvCache.delete('dice_points');
         
         this.diceAnswered.add(username);
       } else {
@@ -4333,6 +4453,11 @@ export class GameServer extends CPUProtection {
       if (this._diceTimeUpCooldownTimer) {
         clearInterval(this._diceTimeUpCooldownTimer);
         this._diceTimeUpCooldownTimer = null;
+      }
+      
+      if (this._kvCache) {
+        this._kvCache.stopCleanup();
+        this._kvCache.clear();
       }
       
       if (this._scheduler) {
