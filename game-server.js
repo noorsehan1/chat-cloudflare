@@ -74,7 +74,7 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 0, end: 1 },
+    { start: 1, end: 3 },
     { start: 11, end: 12 },
     { start: 22, end: 23 }
   ],
