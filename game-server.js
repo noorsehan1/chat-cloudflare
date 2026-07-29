@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS - DENGAN REMAINING TIME ====================
+// ==================== GAME-SERVER.JS - FULL CLASS (LENGKAP) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -72,8 +72,8 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 2 },
-    { start: 11, end: 18 },
+    { start: 1, end: 6 },
+    { start: 11, end: 12 },
     { start: 23, end: 24 }
   ],
   TIMEZONE_OFFSET: 8,
@@ -481,6 +481,11 @@ export class GameServer extends CPUProtection {
 
       this._diceRound = 0;
 
+      // ✅ ANTI-SPAM VARIABLES
+      this._lastSentRemaining = -1;
+      this._lastNotificationKey = "";
+      this._lastNotificationTime = 0;
+
       this.diceGameSystem = new DiceGameSystem(this);
 
       this._scheduler = new CentralizedScheduler();
@@ -587,21 +592,8 @@ export class GameServer extends CPUProtection {
         this._diceTimeUpShown = false;
       }
       
-      if (this.currentDiceRoll && this._diceStartTime) {
-        const now = Date.now();
-        const elapsed = (now - this._diceStartTime) / 1000;
-        const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
-        
-        if (elapsed > totalTime + 10) {
-          this.currentDiceRoll = null;
-          this._diceTimeout = null;
-          this._isShowingDice = false;
-          this._canSubmitDiceAnswer = false;
-          this._diceRemainingShown = false;
-          this._diceTimeUpShown = false;
-          this._stopDiceTimerNotifications();
-        }
-      }
+      // ✅ HAPUS BROADCAST REMAINING DISINI - SUDAH ADA DI TIMER
+      
     } catch(e) {}
   }
 
@@ -628,13 +620,7 @@ export class GameServer extends CPUProtection {
         if (hasPlayers && !this.currentDiceRoll && !this._diceTimeout && 
             !this._diceStartTimeout && !this._isShowingDice) {
           
-          this._broadcastDiceNotification("diceError", {
-            message: "Dice game is starting now!",
-            isDiceTime: true,
-            isActive: false,
-            remaining: -1,
-            timestamp: Date.now()
-          });
+          // ✅ HAPUS BROADCAST DISINI - TIDAK PERLU
           
           if (!this.diceAutoEnabled) {
             this.diceAutoEnabled = true;
@@ -650,47 +636,7 @@ export class GameServer extends CPUProtection {
           }, CONSTANTS.DICE_AUTO_START_DELAY_MS || 3000);
         }
         
-        if (this.currentDiceRoll && this._diceStartTime) {
-          const elapsed = (Date.now() - this._diceStartTime) / 1000;
-          const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
-          const remaining = Math.max(0, totalTime - elapsed);
-          const remainingInt = Math.floor(remaining);
-          
-          if (remainingInt > 0) {
-            const minutes = Math.floor(remainingInt / 60);
-            const seconds = remainingInt % 60;
-            const timeText = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
-            
-            if (remainingInt !== 20 && remainingInt !== 10 && 
-                remainingInt !== 5 && remainingInt > 3) {
-              this._broadcastDiceNotification("diceError", {
-                message: `Running... ${timeText} remaining`,
-                remaining: remainingInt,
-                isDiceTime: true,
-                isActive: true,
-                round: this._diceRound || 1
-              });
-            }
-          }
-        }
-        
-        if (!this.currentDiceRoll && !this._isShowingDice) {
-          this._broadcastDiceNotification("diceError", {
-            message: "Dice game is available!",
-            isDiceTime: true,
-            isActive: false,
-            remaining: -1
-          });
-          
-          if (hasPlayers) {
-            setTimeout(() => {
-              if (!this.closing && !this.isDestroyed && 
-                  !this.currentDiceRoll && !this._diceTimeout && !this._isShowingDice) {
-                this.forceStartDice();
-              }
-            }, CONSTANTS.DICE_AUTO_START_DELAY_MS || 3000);
-          }
-        }
+        // ✅ HAPUS BROADCAST REMAINING DISINI - SUDAH ADA DI TIMER
         
         const timeInfo = this._getTimeLeftUntilNextDiceEvent();
         if (timeInfo.isRunning) {
@@ -733,27 +679,8 @@ export class GameServer extends CPUProtection {
         }
       }
       
-      const timeInfo = this._getTimeLeftUntilNextDiceEvent();
+      // ✅ HAPUS BROADCAST TIMELEFT DISINI
       
-      if (!timeInfo.isRunning && !this.diceEndNotified) {
-        if (!this._diceOutOfTimeShown) {
-          const timeLeft = this._getTimeLeftUntilNextDice();
-          this._broadcastDiceNotification("diceError", {
-            message: `Next dice game in: ${timeLeft.text}`,
-            timeLeft: timeLeft.text,
-            hours: timeLeft.hours,
-            minutes: timeLeft.minutes,
-            remaining: -1,
-            isDiceTime: false,
-            isActive: false
-          });
-          this._diceOutOfTimeShown = true;
-        }
-        this._sendDiceEndNotificationOnce();
-        this._broadcastDiceTimeLeft();
-      } else if (timeInfo.isRunning) {
-        this._diceOutOfTimeShown = false;
-      }
     } catch(e) {}
   }
 
@@ -793,12 +720,7 @@ export class GameServer extends CPUProtection {
             if (hasPlayers && !this.currentDiceRoll && !this._diceTimeout && 
                 !this._diceStartTimeout && !this._isShowingDice) {
               
-              this._broadcastDiceNotification("diceError", {
-                message: "Dice game is starting now!",
-                isDiceTime: true,
-                remaining: -1,
-                timestamp: Date.now()
-              });
+              // ✅ HAPUS BROADCAST DISINI
               
               if (!this.diceAutoEnabled) {
                 this.diceAutoEnabled = true;
@@ -1403,15 +1325,29 @@ export class GameServer extends CPUProtection {
       const wsIds = this.wsClients.get(DICE_ROOM);
       if (!wsIds?.size) return;
       
+      const now = Date.now();
+      const message = data.message || "";
+      const remaining = data.remaining !== undefined ? data.remaining : -1;
+      const key = `dice_${remaining}_${message.substring(0, 20)}`;
+      
+      // ✅ CEK DUPLIKAT - ANTI SPAM
+      if (this._lastNotificationKey === key && (now - this._lastNotificationTime) < 1000) {
+        return;
+      }
+      
+      this._lastNotificationKey = key;
+      this._lastNotificationTime = now;
+      
       const notification = {
         type: "diceError",
-        timestamp: Date.now(),
+        timestamp: now,
         diceValue: this.currentDiceRoll?.value || null,
-        remaining: data.remaining !== undefined ? data.remaining : -1,
+        remaining: remaining,
         data: data || {}
       };
       
       this._broadcastToRoom(DICE_ROOM, ["diceNotification", notification]);
+      
     } catch(e) {}
   }
 
@@ -1596,6 +1532,7 @@ export class GameServer extends CPUProtection {
       this._diceNotified3 = false;
       this._diceTimeUpShown = false;
       this._diceRemainingShown = false;
+      this._lastSentRemaining = -1; // ✅ RESET ANTI SPAM
       
       this._diceTimerInterval = setInterval(() => {
         try {
@@ -1608,46 +1545,46 @@ export class GameServer extends CPUProtection {
           const remaining = Math.max(0, CONSTANTS.DICE_ANSWER_TIME_MS / 1000 - elapsed);
           const remainingInt = Math.floor(remaining);
           
-          if (remainingInt === 20 && !this._diceNotified20) {
-            this._diceNotified20 = true;
-            this._broadcastDiceNotification("diceError", {
-              remaining: 20,
-              message: "20 seconds remaining!",
-              timeLeft: "20s",
-              round: this._diceRound || 1
-            });
+          // ✅ CEK PERUBAHAN - ANTI SPAM
+          if (remainingInt === this._lastSentRemaining) {
+            return;
           }
+          this._lastSentRemaining = remainingInt;
           
-          if (remainingInt === 10 && !this._diceNotified10) {
-            this._diceNotified10 = true;
-            this._broadcastDiceNotification("diceError", {
-              remaining: 10,
-              message: "10 seconds remaining!",
-              timeLeft: "10s",
-              round: this._diceRound || 1
-            });
-          }
+          let message = "";
+          let timeLeft = "";
           
-          if (remainingInt === 5 && !this._diceNotified5) {
-            this._diceNotified5 = true;
-            this._broadcastDiceNotification("diceError", {
-              remaining: 5,
-              message: "5 seconds remaining!",
-              timeLeft: "5s",
-              round: this._diceRound || 1
-            });
-          }
-          
-          if (remainingInt <= 0 && !this._diceTimeUpShown) {
+          if (remainingInt > 0) {
+            const minutes = Math.floor(remainingInt / 60);
+            const seconds = remainingInt % 60;
+            timeLeft = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+            message = timeLeft + " remaining";
+            
+            if (remainingInt === 20 && !this._diceNotified20) {
+              this._diceNotified20 = true;
+              message = "20 seconds remaining!";
+            } else if (remainingInt === 10 && !this._diceNotified10) {
+              this._diceNotified10 = true;
+              message = "10 seconds remaining!";
+            } else if (remainingInt === 5 && !this._diceNotified5) {
+              this._diceNotified5 = true;
+              message = "5 seconds remaining!";
+            }
+          } else {
+            message = "TIME UP!";
             this._diceTimeUpShown = true;
-            this._broadcastDiceNotification("diceError", {
-              remaining: 0,
-              message: "TIME UP!",
-              timeLeft: "0s",
-              round: this._diceRound || 1
-            });
             this._stopDiceTimerNotifications();
           }
+          
+          // ✅ KIRIM SEKALI
+          this._broadcastDiceNotification("diceError", {
+            remaining: remainingInt,
+            message: message,
+            timeLeft: timeLeft,
+            round: this._diceRound || 1,
+            isDiceTime: true,
+            isActive: true
+          });
           
         } catch(e) {}
       }, 1000);
@@ -1667,6 +1604,7 @@ export class GameServer extends CPUProtection {
       this._diceNotified3 = false;
       this._diceTimeUpShown = false;
       this._diceRemainingShown = false;
+      this._lastSentRemaining = -1;
     } catch(e) {}
   }
 
@@ -1737,10 +1675,10 @@ export class GameServer extends CPUProtection {
         this._diceNotified10 = false;
         this._diceNotified5 = false;
         this._diceNotified3 = false;
+        this._lastSentRemaining = -1;
         
         await this._broadcastDiceRoll(diceValue);
         
-        // ✅ TAMBAHKAN remaining DI SINI
         this._broadcastDiceNotification("diceError", {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remainingTime: `${CONSTANTS.DICE_ANSWER_TIME_MS / 1000}s remaining`,
@@ -1991,6 +1929,7 @@ export class GameServer extends CPUProtection {
       this._diceOutOfTimeShown = false;
       this._diceRemainingShown = false;
       this._diceTimeUpShown = false;
+      this._lastSentRemaining = -1;
       
       this._diceTimeLeftNotified.clear();
       this._nextDiceNotified.clear();
@@ -2057,6 +1996,7 @@ export class GameServer extends CPUProtection {
       this._diceOutOfTimeShown = false;
       this._diceRemainingShown = false;
       this._diceTimeUpShown = false;
+      this._lastSentRemaining = -1;
       
       this._stopDiceTimerNotifications();
       
@@ -4278,6 +4218,7 @@ export class GameServer extends CPUProtection {
       this._diceOutOfTimeShown = false;
       this._diceRemainingShown = false;
       this._diceTimeUpShown = false;
+      this._lastSentRemaining = -1;
       this._stopDiceTimerNotifications();
       
       if (this._eventQueue) {
