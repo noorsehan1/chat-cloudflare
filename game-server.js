@@ -1285,14 +1285,8 @@ export class GameServer extends CPUProtection {
   _sendDiceNotification(ws, type, data) {
     try {
       if (!ws || ws.readyState !== 1) return;
-      const notification = {
-        type: "diceError",
-        timestamp: Date.now(),
-        diceValue: this.currentDiceRoll?.value || null,
-        remaining: data.remaining !== undefined ? data.remaining : -1,
-        data: data || {}
-      };
-      this._safeSend(ws, ["diceNotification", notification]);
+      const message = data.message || "";
+      this._safeSend(ws, ["diceNotification", message]);
     } catch(e) {}
   }
 
@@ -1314,6 +1308,7 @@ export class GameServer extends CPUProtection {
         key = `cooldown_${remaining}`;
       }
       
+      // ANTI SPAM
       if (this._lastNotificationKey === key && (now - this._lastNotificationTime) < 3000) {
         return;
       }
@@ -1328,15 +1323,8 @@ export class GameServer extends CPUProtection {
         this._lastSentRemaining = remaining;
       }
       
-      const notification = {
-        type: "diceError",
-        timestamp: now,
-        diceValue: this.currentDiceRoll?.value || null,
-        remaining: remaining,
-        data: data || {}
-      };
-      
-      this._broadcastToRoom(DICE_ROOM, ["diceNotification", notification]);
+      // KIRIM HANYA MESSAGE
+      this._broadcastToRoom(DICE_ROOM, ["diceNotification", message]);
       
     } catch(e) {}
   }
@@ -1553,19 +1541,19 @@ export class GameServer extends CPUProtection {
           if (remainingInt === 20 && !this._diceNotifiedFlags[20]) {
             this._diceNotifiedFlags[20] = true;
             shouldSend = true;
-            message = "⏰ 20 seconds remaining!";
+            message = "20 seconds remaining!";
           } else if (remainingInt === 10 && !this._diceNotifiedFlags[10]) {
             this._diceNotifiedFlags[10] = true;
             shouldSend = true;
-            message = "⏰ 10 seconds remaining!";
+            message = "10 seconds remaining!";
           } else if (remainingInt === 5 && !this._diceNotifiedFlags[5]) {
             this._diceNotifiedFlags[5] = true;
             shouldSend = true;
-            message = "⏰ 5 seconds remaining!";
+            message = "5 seconds remaining!";
           } else if (remainingInt <= 0 && !this._diceNotifiedFlags.timeup) {
             this._diceNotifiedFlags.timeup = true;
             shouldSend = true;
-            message = "⏰ TIME UP!";
+            message = "TIME UP!";
             this._stopDiceTimerNotifications();
             this._startTimeUpCooldown();
           }
@@ -1595,7 +1583,7 @@ export class GameServer extends CPUProtection {
       this._diceTimeUpCooldown = true;
       
       this._broadcastDiceNotification("diceError", {
-        message: "⏳ Game akan dimulai kembali dalam 1 menit...",
+        message: "Next game starts in 1 minute...",
         remaining: 60,
         isDiceTime: true,
         isActive: false,
@@ -1609,7 +1597,7 @@ export class GameServer extends CPUProtection {
           
           if (timeLeft === 30) {
             this._broadcastDiceNotification("diceError", {
-              message: "⏳ 30 seconds remaining until next game",
+              message: "30 seconds remaining until next game",
               remaining: 30,
               isDiceTime: true,
               isActive: false,
@@ -1617,7 +1605,7 @@ export class GameServer extends CPUProtection {
             });
           } else if (timeLeft === 10) {
             this._broadcastDiceNotification("diceError", {
-              message: "⏳ 10 seconds remaining!",
+              message: "10 seconds remaining!",
               remaining: 10,
               isDiceTime: true,
               isActive: false,
@@ -1625,7 +1613,7 @@ export class GameServer extends CPUProtection {
             });
           } else if (timeLeft === 5) {
             this._broadcastDiceNotification("diceError", {
-              message: "⏳ 5 seconds!",
+              message: "5 seconds!",
               remaining: 5,
               isDiceTime: true,
               isActive: false,
@@ -1637,7 +1625,7 @@ export class GameServer extends CPUProtection {
             this._diceTimeUpCooldown = false;
             
             this._broadcastDiceNotification("diceError", {
-              message: "🎲 Game dimulai!",
+              message: "Game starting now!",
               remaining: -1,
               isDiceTime: true,
               isActive: true,
