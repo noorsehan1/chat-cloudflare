@@ -75,8 +75,8 @@ const CONSTANTS = {
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 6 },
-    { start: 11, end: 12 },
-    { start: 21, end: 22 }
+    { start: 11, end: 19 },
+    { start: 23, end: 24 }
   ],
   TIMEZONE_OFFSET: 8,
 };
@@ -1304,17 +1304,23 @@ export class GameServer extends CPUProtection {
         key = `dice_msg_${message.substring(0, 30)}`;
       }
       
+      if (message === "TIME UP!") {
+        key = "dice_timeup";
+      }
+      
       if (data.cooldown) {
         key = `cooldown_${remaining}`;
       }
       
-      // ANTI SPAM
-      if (this._lastNotificationKey === key && (now - this._lastNotificationTime) < 3000) {
-        return;
-      }
-      
-      if (remaining > 0 && this._lastSentRemaining === remaining && !data.cooldown) {
-        return;
+      // ANTI SPAM - TAPI TIME UP TETAP DIKIRIM
+      if (message !== "TIME UP!") {
+        if (this._lastNotificationKey === key && (now - this._lastNotificationTime) < 3000) {
+          return;
+        }
+        
+        if (remaining > 0 && this._lastSentRemaining === remaining && !data.cooldown) {
+          return;
+        }
       }
       
       this._lastNotificationKey = key;
@@ -1538,6 +1544,7 @@ export class GameServer extends CPUProtection {
           let shouldSend = false;
           let message = "";
           
+          // CEK 20, 10, 5
           if (remainingInt === 20 && !this._diceNotifiedFlags[20]) {
             this._diceNotifiedFlags[20] = true;
             shouldSend = true;
@@ -1550,7 +1557,10 @@ export class GameServer extends CPUProtection {
             this._diceNotifiedFlags[5] = true;
             shouldSend = true;
             message = "5 seconds remaining!";
-          } else if (remainingInt <= 0 && !this._diceNotifiedFlags.timeup) {
+          }
+          
+          // CEK TIME UP - PAKAI remainingInt <= 0
+          if (remainingInt <= 0 && !this._diceNotifiedFlags.timeup) {
             this._diceNotifiedFlags.timeup = true;
             shouldSend = true;
             message = "TIME UP!";
@@ -1558,6 +1568,7 @@ export class GameServer extends CPUProtection {
             this._startTimeUpCooldown();
           }
           
+          // KIRIM NOTIFIKASI
           if (shouldSend) {
             this._broadcastDiceNotification("diceError", {
               remaining: remainingInt,
@@ -1930,29 +1941,17 @@ export class GameServer extends CPUProtection {
         
         this.diceAnswered.add(username);
         
-        this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
-          username: username,
-          guess: guessValue,
-          round: this._diceRound || 1
-        }]);
-        
-        this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
-          username: username,
-          totalPoints: points[username] || 0,
+        // 🔥 HANYA KIRIM KE USER YANG MENANG (PRIVATE) - TIDAK BROADCAST
+        this._safeSend(ws, ["diceCorrect", {
+          message: "Your answer is correct! Waiting for round to end...",
           diceValue: diceValue,
           round: this._diceRound || 1
         }]);
         
       } else {
+        // 🔥 JAWABAN SALAH - TIDAK KIRIM APA PUN
         this.diceAnswered.add(username);
-        
-        this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
-          username: username,
-          guess: guessValue || "?",
-          round: this._diceRound || 1
-        }]);
-        
-        this._safeSend(ws, ["diceError", `Wrong guess! The correct value was: ${diceValue}`]);
+        // TIDAK ADA NOTIFIKASI
       }
       
     } catch(e) {
