@@ -933,6 +933,7 @@ export class GameServer extends CPUProtection {
       const currentStatus = await this._getRecordingStatusFromKV(roomName);
       if (currentStatus) {
         this._broadcastToRoom(roomName, ["recordingStatus", true]);
+        await this._broadcastLowCardWinners(roomName);
         return true;
       }
       
@@ -997,8 +998,8 @@ export class GameServer extends CPUProtection {
         }
       }
       
+      // ✅ HANYA KIRIM recordingStatus - TIDAK KIRIM lowCardWinnerUpdate
       this._broadcastToRoom(room, ["recordingStatus", false]);
-      await this._broadcastLowCardWinners(room);
       
       return true;
     } catch(e) {
@@ -1070,11 +1071,6 @@ export class GameServer extends CPUProtection {
       
       const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
       if (!isRecordingEnabled) {
-        this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-          recording: false,
-          message: "Recording is disabled",
-          room: room
-        }]);
         return;
       }
       
@@ -1096,12 +1092,7 @@ export class GameServer extends CPUProtection {
       }
       
     } catch(e) {
-      this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-        winners: {},
-        room: room,
-        recording: false,
-        error: e.message
-      }]);
+      // Silent fail - jangan kirim error
     }
   }
 
@@ -1261,8 +1252,6 @@ export class GameServer extends CPUProtection {
       await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       
       this._kvCache.delete(`winners_${room}`);
-      
-      await this._broadcastLowCardWinners(room);
       
       return true;
     } catch(e) {
@@ -2938,6 +2927,7 @@ export class GameServer extends CPUProtection {
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winner);
           const allWinners = await this._getLowCardWinners(room);
+          // ✅ KIRIM 1 KALI
           this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
             winners: allWinners,
             room: room,
@@ -3139,6 +3129,7 @@ export class GameServer extends CPUProtection {
             if (game._startedByRecording) {
               await this._addLowCardWinner(room, winner);
               const allWinners = await this._getLowCardWinners(room);
+              // ✅ KIRIM 1 KALI
               this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
                 winners: allWinners,
                 room: room,
@@ -3238,6 +3229,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== _evaluateRound ====================
   async _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
@@ -3289,6 +3281,7 @@ export class GameServer extends CPUProtection {
         return;
       }
       
+      // ✅ WINNER - HANYA 1 KALI BROADCAST
       if (entries.length === 1 && eliminated.size >= activeIds.length - 1) {
         const winnerId = entries[0][0];
         const winnerName = players.get(winnerId)?.name || winnerId;
@@ -3297,6 +3290,7 @@ export class GameServer extends CPUProtection {
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
           const allWinners = await this._getLowCardWinners(room);
+          // ✅ HANYA 1 KALI
           this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
             winners: allWinners,
             room: room,
@@ -3368,6 +3362,7 @@ export class GameServer extends CPUProtection {
         return;
       }
       
+      // ✅ WINNER - HANYA 1 KALI BROADCAST
       if (remaining.length === 1 && !game._gameEnded) {
         const winnerId = remaining[0];
         const winnerName = players.get(winnerId)?.name || winnerId;
@@ -3376,6 +3371,7 @@ export class GameServer extends CPUProtection {
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
           const allWinners = await this._getLowCardWinners(room);
+          // ✅ HANYA 1 KALI
           this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
             winners: allWinners,
             room: room,
