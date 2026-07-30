@@ -73,7 +73,7 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 4 },
+    { start: 1, end: 3 },
     { start: 11, end: 12 },
     { start: 22, end: 23 }
   ],
@@ -892,18 +892,16 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== PERBAIKAN 1: _getRecordingStatusFromKV ====================
+  // ==================== _getRecordingStatusFromKV ====================
   async _getRecordingStatusFromKV(roomName) {
     try {
       if (!roomName) return false;
       
-      // CEK MEMORY CACHE DULU
       const memCached = this._recordingEnabled.get(roomName);
       if (memCached !== undefined) {
         return memCached;
       }
       
-      // CEK KV CACHE
       const cacheKey = `recording_${roomName}`;
       const cached = this._kvCache.get(cacheKey);
       if (cached !== null) {
@@ -911,7 +909,6 @@ export class GameServer extends CPUProtection {
         return cached;
       }
       
-      // CEK KV STORE
       if (this.env?.QUESTIONS) {
         const kvValue = await this.env.QUESTIONS.get(
           CONSTANTS.LOWCARD_RECORDING_KEY + roomName
@@ -928,7 +925,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== PERBAIKAN 2: _startRecordingWinners ====================
+  // ==================== _startRecordingWinners - BROADCAST KE SEMUA ====================
   async _startRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
@@ -974,7 +971,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== PERBAIKAN 3: _stopRecordingWinners ====================
+  // ==================== _stopRecordingWinners - BROADCAST KE SEMUA ====================
   async _stopRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
@@ -1039,7 +1036,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== PERBAIKAN 4: _sendWinnersToRoom ====================
+  // ==================== _sendWinnersToRoom ====================
   async _sendWinnersToRoom(room) {
     try {
       if (!room) return;
@@ -1047,7 +1044,6 @@ export class GameServer extends CPUProtection {
       const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
       const winners = await this._getLowCardWinners(room);
       
-      // ✅ BROADCAST KE SEMUA USER DI ROOM
       this._broadcastToRoom(room, ["roomWinners", {
         winners: winners,
         room: room,
@@ -1066,7 +1062,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== PERBAIKAN 5: _getLowCardWinners ====================
+  // ==================== _getLowCardWinners ====================
   async _getLowCardWinners(room) {
     try {
       if (!room) return {};
@@ -1097,8 +1093,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== GET RECORDING STATUS ====================
-
+  // ==================== GET RECORDING STATUS - HANYA PENGIRIM ====================
   async getRecordingStatus(ws, roomName) {
     try {
       if (!roomName || roomName.trim() === "") {
@@ -3853,7 +3848,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== PERBAIKAN 6-10: HANDLER EVENT ====================
+  // ==================== HANDLER EVENT INTERNAL ====================
   async _handleEventInternal(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
@@ -3861,7 +3856,7 @@ export class GameServer extends CPUProtection {
 
       // ==================== RECORDING EVENTS ====================
       
-      // PERBAIKAN 7: startRecordingWinners
+      // startRecordingWinners - BROADCAST KE SEMUA
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
@@ -3877,19 +3872,17 @@ export class GameServer extends CPUProtection {
         const success = await this._startRecordingWinners(roomName);
         
         // HANYA RESPONSE UNTUK PENGIRIM
-        this._safeSend(ws, ["recordingStatus", {
+        this._safeSend(ws, ["startRecordingResult", {
           success: success,
-          enabled: success,
-          room: roomName,
-          action: 'started',
-          message: success ? "Recording enabled" : "Failed to enable recording"
+          message: success ? "Recording enabled" : "Failed to enable recording",
+          room: roomName
         }]);
         
         // BROADCAST SUDAH DILAKUKAN DI _startRecordingWinners
         return;
       }
 
-      // PERBAIKAN 8: stopRecordingWinners
+      // stopRecordingWinners - BROADCAST KE SEMUA
       if (evt === "stopRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
@@ -3905,19 +3898,17 @@ export class GameServer extends CPUProtection {
         const success = await this._stopRecordingWinners(roomName);
         
         // HANYA RESPONSE UNTUK PENGIRIM
-        this._safeSend(ws, ["recordingStatus", {
+        this._safeSend(ws, ["stopRecordingResult", {
           success: success,
-          enabled: false,
-          room: roomName,
-          action: 'stopped',
-          message: success ? "Recording stopped" : "Failed to stop recording"
+          message: success ? "Recording stopped" : "Failed to stop recording",
+          room: roomName
         }]);
         
         // BROADCAST SUDAH DILAKUKAN DI _stopRecordingWinners
         return;
       }
 
-      // PERBAIKAN 10: getRecordingStatus
+      // getRecordingStatus - HANYA PENGIRIM
       if (evt === "getRecordingStatus") {
         const roomName = data[1];
         if (!roomName) {
@@ -3932,7 +3923,6 @@ export class GameServer extends CPUProtection {
         
         const isRecordingEnabled = await this._getRecordingStatusFromKV(roomName);
         
-        // ✅ HANYA UNTUK PENGIRIM (QUERY)
         this._safeSend(ws, ["recordingStatus", {
           enabled: isRecordingEnabled,
           room: roomName,
@@ -3942,32 +3932,29 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // PERBAIKAN 9: sendWinnersToRoom
+      // sendWinnersToRoom - BROADCAST KE SEMUA
       if (evt === "sendWinnersToRoom") {
         const room = data[1];
         if (!room) {
-          this._safeSend(ws, ["roomWinners", {
+          this._safeSend(ws, ["sendWinnersResult", {
             success: false,
-            message: "Room name required",
-            winners: {},
-            recording: false
+            message: "Room name required"
           }]);
           return;
         }
         
         await this._sendWinnersToRoom(room);
         
-        // RESPONSE UNTUK PENGIRIM
-        this._safeSend(ws, ["roomWinners", {
+        this._safeSend(ws, ["sendWinnersResult", {
           success: true,
-          room: room,
-          message: "Winners data sent to room"
+          message: "Winners data sent to room",
+          room: room
         }]);
         return;
       }
 
-      // PERBAIKAN 6: getRoomWinners (GABUNGKAN dengan lowCardWinnerUpdate)
-      if (evt === "getRoomWinners" || evt === "lowCardWinnerUpdate") {
+      // getRoomWinners - BROADCAST KE SEMUA
+      if (evt === "getRoomWinners") {
         const room = data[1] || this._ensureRoomConsistency(ws);
         if (!room) {
           this._safeSend(ws, ["roomWinners", {
@@ -3999,6 +3986,13 @@ export class GameServer extends CPUProtection {
           updatedAt: new Date().toISOString(),
           message: "Winners data updated"
         }]);
+        return;
+      }
+
+      // startGameWithRecording
+      if (evt === "startGameWithRecording") {
+        const [_, room, bet, username] = data;
+        await this._startGameWithRecording(ws, room, bet, username);
         return;
       }
 
@@ -4064,7 +4058,6 @@ export class GameServer extends CPUProtection {
 
       if (evt === "getDiceNotification") {
         const remaining = this._getDiceQuestionRemainingTime();
-        const remainingText = `${remaining}s remaining`;
         const timeLeft = this._getTimeLeftUntilNextDice();
         const answerRemaining = this._getDiceAnswerRemainingTime();
         const notification = {
@@ -4079,7 +4072,6 @@ export class GameServer extends CPUProtection {
             winner: this.diceWinner,
             timeLeft: timeLeft.text,
             canSubmit: this._canSubmitDiceAnswer,
-            readingTimeLeft: 0,
             answerTimeLeft: this._canSubmitDiceAnswer ? answerRemaining : 0,
             totalTimeLeft: Math.max(0, Math.round((CONSTANTS.DICE_TOTAL_TIME_MS - (Date.now() - this._diceStartTime)) / 1000)),
             round: this._diceRound || 1
