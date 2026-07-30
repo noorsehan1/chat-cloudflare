@@ -86,7 +86,7 @@ const DICE_ROOM = "Quiz";
 class KVCache {
   constructor() {
     this.cache = new Map();
-    this.ttl = 30000; // 30 detik default
+    this.ttl = 30000;
     this._cleanupInterval = null;
   }
 
@@ -538,12 +538,10 @@ export class GameServer extends CPUProtection {
 
       this._diceRound = 0;
 
-      // ANTI-SPAM VARIABLES
       this._lastSentRemaining = -1;
       this._lastNotificationKey = "";
       this._lastNotificationTime = 0;
       
-      // COOLDOWN AFTER TIMEUP
       this._diceTimeUpCooldown = false;
       this._diceTimeUpCooldownTimer = null;
       
@@ -554,7 +552,6 @@ export class GameServer extends CPUProtection {
         timeup: false
       };
 
-      // KV CACHE
       this._kvCache = new KVCache();
       this._kvCache.startCleanup();
 
@@ -895,41 +892,58 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== PERBAIKAN 1: _getRecordingStatusFromKV ====================
   async _getRecordingStatusFromKV(roomName) {
     try {
       if (!roomName) return false;
       
+      // CEK MEMORY CACHE DULU
+      const memCached = this._recordingEnabled.get(roomName);
+      if (memCached !== undefined) {
+        return memCached;
+      }
+      
+      // CEK KV CACHE
       const cacheKey = `recording_${roomName}`;
       const cached = this._kvCache.get(cacheKey);
-      if (cached !== null) return cached;
-      
-      if (this.env?.QUESTIONS) {
-        try {
-          const kvValue = await this.env.QUESTIONS.get(
-            CONSTANTS.LOWCARD_RECORDING_KEY + roomName
-          );
-          const isRecording = kvValue === 'true';
-          this._recordingEnabled.set(roomName, isRecording);
-          this._kvCache.set(cacheKey, isRecording, 300000); // 5 menit
-          return isRecording;
-        } catch(e) {
-          const isRecording = this._recordingEnabled.get(roomName) || false;
-          this._kvCache.set(cacheKey, isRecording, 300000);
-          return isRecording;
-        }
+      if (cached !== null) {
+        // SYNC KE MEMORY CACHE
+        this._recordingEnabled.set(roomName, cached);
+        return cached;
       }
-      return this._recordingEnabled.get(roomName) || false;
+      
+      // CEK KV STORE
+      if (this.env?.QUESTIONS) {
+        const kvValue = await this.env.QUESTIONS.get(
+          CONSTANTS.LOWCARD_RECORDING_KEY + roomName
+        );
+        const isRecording = kvValue === 'true';
+        this._recordingEnabled.set(roomName, isRecording);
+        this._kvCache.set(cacheKey, isRecording, 300000);
+        return isRecording;
+      }
+      
+      return false;
     } catch(e) {
       return false;
     }
   }
 
+  // ==================== PERBAIKAN 2: _startRecordingWinners ====================
   async _startRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
       
+      // CEK APAKAH SUDAH ENABLED
+      const currentStatus = await this._getRecordingStatusFromKV(roomName);
+      if (currentStatus) {
+        this._broadcastToRoom(roomName, ["recordingStatus", true]);
+        return true;
+      }
+      
       this._recordingEnabled.set(roomName, true);
       this._kvCache.delete(`recording_${roomName}`);
+      this._kvCache.delete(`winners_${roomName}`);
       
       if (this.env?.QUESTIONS) {
         await this.env.QUESTIONS.put(
@@ -938,6 +952,11 @@ export class GameServer extends CPUProtection {
         );
       }
       
+      this._broadcastToRoom(roomName, ["recordingStarted", {
+        room: roomName,
+        success: true,
+        timestamp: Date.now()
+      }]);
       this._broadcastToRoom(roomName, ["recordingStatus", true]);
       this._broadcastToRoom(roomName, ["systemMessage", "Recording ENABLED for this room!"]);
       
@@ -947,11 +966,20 @@ export class GameServer extends CPUProtection {
     }
   }
 
+  // ==================== PERBAIKAN 3: _stopRecordingWinners ====================
   async _stopRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
       
       const room = roomName.trim();
+      
+      // CEK APAKAH SUDAH DISABLED
+      const currentStatus = await this._getRecordingStatusFromKV(room);
+      if (!currentStatus) {
+        this._broadcastToRoom(room, ["recordingStatus", false]);
+        return true;
+      }
+      
       this._recordingEnabled.set(room, false);
       this._kvCache.delete(`recording_${room}`);
       this._kvCache.delete(`winners_${room}`);
@@ -980,7 +1008,13 @@ export class GameServer extends CPUProtection {
         }
       }
       
+      this._broadcastToRoom(room, ["recordingStopped", {
+        room: room,
+        success: true,
+        timestamp: Date.now()
+      }]);
       this._broadcastToRoom(room, ["recordingStatus", false]);
+      this._broadcastToRoom(room, ["systemMessage", "Recording STOPPED and winners DELETED!"]);
       
       return true;
     } catch(e) {
@@ -988,88 +1022,33 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  async _addLowCardWinner(room, username) {
-    try {
-      if (!room || !username) return false;
-      
-      const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
-      if (!isRecordingEnabled) {
-        return false;
-      }
-      
-      if (room === DICE_ROOM) {
-        return false;
-      }
-      
-      if (!this.env?.QUESTIONS) return false;
-      
-      const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
-      
-      let roomWinners = await this.env.QUESTIONS.get(key, 'json') || {};
-      
-      let currentCount = 0;
-      if (roomWinners[username]) {
-        const valStr = String(roomWinners[username]);
-        currentCount = parseInt(valStr.replace("x", "").replace("X", "")) || 0;
-      }
-      const newCount = currentCount + 1;
-      
-      roomWinners[username] = newCount + "x";
-      
-      await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
-      
-      // INVALIDATE CACHE
-      this._kvCache.delete(`winners_${room}`);
-      
-      return true;
-    } catch(e) {
-      return false;
-    }
-  }
-
+  // ==================== PERBAIKAN 4: _sendWinnersToRoom ====================
   async _sendWinnersToRoom(room) {
     try {
       if (!room) return;
       
       const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
-      if (!isRecordingEnabled) {
-        this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-          winners: {},
-          room: room,
-          recording: false,
-          updatedAt: new Date().toISOString(),
-          type: 'sendWinnersToRoom',
-          message: "Recording disabled for this room"
-        }]);
-        return;
-      }
+      const winners = await this._getLowCardWinners(room);
       
-      const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
-      const winners = await this.env.QUESTIONS.get(key, 'json') || {};
-      
-      if (Object.keys(winners).length === 0) {
-        this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
-          winners: {},
-          room: room,
-          recording: true,
-          updatedAt: new Date().toISOString(),
-          type: 'sendWinnersToRoom',
-          message: "No winners yet"
-        }]);
-        return;
-      }
-      
-      this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
+      this._broadcastToRoom(room, ["roomWinners", {
         winners: winners,
         room: room,
-        recording: true,
-        updatedAt: new Date().toISOString(),
-        type: 'sendWinnersToRoom'
+        recording: isRecordingEnabled,
+        updatedAt: new Date().toISOString()
       }]);
       
-    } catch(e) {}
+    } catch(e) {
+      this._broadcastToRoom(room, ["roomWinners", {
+        winners: {},
+        room: room,
+        recording: false,
+        updatedAt: new Date().toISOString(),
+        error: e.message
+      }]);
+    }
   }
 
+  // ==================== PERBAIKAN 5: _getLowCardWinners ====================
   async _getLowCardWinners(room) {
     try {
       if (!room) return {};
@@ -1087,13 +1066,13 @@ export class GameServer extends CPUProtection {
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       const winners = await this.env.QUESTIONS.get(key, 'json');
       
-      if (winners && typeof winners === 'object') {
-        this._kvCache.set(cacheKey, winners, 60000); // 1 menit
+      if (winners && typeof winners === 'object' && Object.keys(winners).length > 0) {
+        this._kvCache.set(cacheKey, winners, 60000);
         return winners;
       }
       
       const empty = {};
-      this._kvCache.set(cacheKey, empty, 60000);
+      this._kvCache.set(cacheKey, empty, 30000);
       return empty;
     } catch(e) {
       return {};
@@ -1105,16 +1084,28 @@ export class GameServer extends CPUProtection {
   async getRecordingStatus(ws, roomName) {
     try {
       if (!roomName || roomName.trim() === "") {
-        this._safeSend(ws, ["recordingStatus", false]);
+        this._safeSend(ws, ["recordingStatus", {
+          enabled: false,
+          room: null,
+          message: "Room name required"
+        }]);
         return;
       }
 
       const isRecordingEnabled = await this._getRecordingStatusFromKV(roomName);
       
-      this._safeSend(ws, ["recordingStatus", isRecordingEnabled]);
+      this._safeSend(ws, ["recordingStatus", {
+        enabled: isRecordingEnabled,
+        room: roomName,
+        timestamp: Date.now()
+      }]);
 
     } catch(e) {
-      this._safeSend(ws, ["recordingStatus", false]);
+      this._safeSend(ws, ["recordingStatus", {
+        enabled: false,
+        room: roomName,
+        error: e.message
+      }]);
     }
   }
 
@@ -1238,7 +1229,6 @@ export class GameServer extends CPUProtection {
     try {
       if (this._winnerProcessed) return;
       
-      // CEK APAKAH GAME ACTIVE
       if (!this.currentDiceRoll || !this._canSubmitDiceAnswer) {
         return;
       }
@@ -1249,7 +1239,6 @@ export class GameServer extends CPUProtection {
       points[username] = (points[username] || 0) + 1;
       await this.diceGameSystem.setPoints(points);
       
-      // INVALIDATE CACHE
       this._kvCache.delete('dice_points');
       
       this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
@@ -1281,7 +1270,6 @@ export class GameServer extends CPUProtection {
     try {
       if (!this.env?.QUESTIONS) return false;
       
-      // CEK 1X PER JAM
       const now = Date.now();
       if (this._lastResetCheck && (now - this._lastResetCheck) < 3600000) {
         return false;
@@ -1375,7 +1363,7 @@ export class GameServer extends CPUProtection {
       if (cached !== null) return cached;
       
       const points = await this.diceGameSystem.getPoints();
-      this._kvCache.set(cacheKey, points, 5000); // 5 detik
+      this._kvCache.set(cacheKey, points, 5000);
       return points;
     } catch(e) {
       return {};
@@ -1421,7 +1409,6 @@ export class GameServer extends CPUProtection {
         key = `dice_msg_${message.substring(0, 30)}`;
       }
       
-      // TIME UP - PAKAI KEY KHUSUS
       if (message === "TIME UP!") {
         key = "dice_timeup";
       }
@@ -1430,7 +1417,6 @@ export class GameServer extends CPUProtection {
         key = `cooldown_${remaining}`;
       }
       
-      // ANTI SPAM - TIME UP TETAP DIKIRIM
       if (message !== "TIME UP!") {
         if (this._lastNotificationKey === key && (now - this._lastNotificationTime) < 3000) {
           return;
@@ -1447,7 +1433,6 @@ export class GameServer extends CPUProtection {
         this._lastSentRemaining = remaining;
       }
       
-      // KIRIM HANYA MESSAGE
       this._broadcastToRoom(DICE_ROOM, ["diceNotification", message]);
       
     } catch(e) {}
@@ -1902,7 +1887,6 @@ export class GameServer extends CPUProtection {
             
             this._stopDiceTimerNotifications();
             
-            // UMUMKAN PEMENANG DI AKHIR
             if (this.diceHasWinner && this.diceWinner) {
               const points = await this._getDicePoints();
               this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
@@ -1921,7 +1905,6 @@ export class GameServer extends CPUProtection {
                 message: `${this.diceWinner} won with value ${diceValue}!`
               });
             } else {
-              // NO WINNER - HANYA KIRIM 1 KALI
               this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
                 message: `No winner this round! The value was: ${diceValue}`,
                 value: diceValue,
@@ -1934,7 +1917,6 @@ export class GameServer extends CPUProtection {
             this._isShowingDice = false;
             this._canSubmitDiceAnswer = false;
             
-            // MULAI COOLDOWN 1 MENIT
             this._startTimeUpCooldown();
             
           } catch(e) {
@@ -2025,7 +2007,6 @@ export class GameServer extends CPUProtection {
       
       const isCorrect = isValidGuess && guessValue === diceValue;
       
-      // KIRIM NOTIFIKASI KE ROOM BAHWA USER TELAH SUBMIT ANGKA
       this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
         username: username,
         guess: guessValue,
@@ -2046,9 +2027,7 @@ export class GameServer extends CPUProtection {
         this.diceAnswered.add(username);
       }
       
-    } catch(e) {
-      // DIAM
-    }
+    } catch(e) {}
   }
 
   _startDiceLoop() {
@@ -2917,12 +2896,11 @@ export class GameServer extends CPUProtection {
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winner);
           const allWinners = await this._getLowCardWinners(room);
-          this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
+          this._broadcastToRoom(room, ["roomWinners", {
             winners: allWinners,
             room: room,
             recording: true,
-            updatedAt: new Date().toISOString(),
-            type: 'winnerUpdate'
+            updatedAt: new Date().toISOString()
           }]);
         }
         
@@ -3120,12 +3098,11 @@ export class GameServer extends CPUProtection {
             if (game._startedByRecording) {
               await this._addLowCardWinner(room, winner);
               const allWinners = await this._getLowCardWinners(room);
-              this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
+              this._broadcastToRoom(room, ["roomWinners", {
                 winners: allWinners,
                 room: room,
                 recording: true,
-                updatedAt: new Date().toISOString(),
-                type: 'winnerUpdate'
+                updatedAt: new Date().toISOString()
               }]);
             }
             
@@ -3275,12 +3252,11 @@ export class GameServer extends CPUProtection {
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
           const allWinners = await this._getLowCardWinners(room);
-          this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
+          this._broadcastToRoom(room, ["roomWinners", {
             winners: allWinners,
             room: room,
             recording: true,
-            updatedAt: new Date().toISOString(),
-            type: 'winnerUpdate'
+            updatedAt: new Date().toISOString()
           }]);
         }
         
@@ -3338,12 +3314,11 @@ export class GameServer extends CPUProtection {
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
           const allWinners = await this._getLowCardWinners(room);
-          this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
+          this._broadcastToRoom(room, ["roomWinners", {
             winners: allWinners,
             room: room,
             recording: true,
-            updatedAt: new Date().toISOString(),
-            type: 'winnerUpdate'
+            updatedAt: new Date().toISOString()
           }]);
         }
         
@@ -3856,50 +3831,53 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== PERBAIKAN 6-10: HANDLER EVENT ====================
   async _handleEventInternal(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
 
+      // ==================== RECORDING EVENTS ====================
+      
+      // PERBAIKAN 7: startRecordingWinners
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
-          this._safeSend(ws, ["startRecordingResult", {
+          this._safeSend(ws, ["recordingStarted", {
             success: false,
             enabled: false,
             message: "Room name required"
+          }]);
+          return;
+        }
+        
+        const currentStatus = await this._getRecordingStatusFromKV(roomName);
+        if (currentStatus) {
+          this._safeSend(ws, ["recordingStarted", {
+            success: true,
+            enabled: true,
+            room: roomName,
+            message: "Recording already enabled for " + roomName
           }]);
           return;
         }
         
         const success = await this._startRecordingWinners(roomName);
         
-        this._broadcastToRoom(roomName, ["startRecordingResult", {
+        this._safeSend(ws, ["recordingStarted", {
           success: success,
-          enabled: true,
-          room: roomName,
-          message: success ? "Recording ENABLED for " + roomName : "Failed to enable recording",
-          timestamp: Date.now()
-        }]);
-        
-        this._safeSend(ws, ["startRecordingResult", {
-          success: success,
-          enabled: true,
+          enabled: success,
           room: roomName,
           message: success ? "Recording enabled for " + roomName : "Failed to enable recording"
         }]);
-        
-        if (success) {
-          this._broadcastToRoom(roomName, ["recordingStatus", true]);
-          this._broadcastToRoom(roomName, ["systemMessage", "ADMIN has ENABLED winner recording for this room!"]);
-        }
         return;
       }
 
+      // PERBAIKAN 8: stopRecordingWinners
       if (evt === "stopRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
-          this._safeSend(ws, ["stopRecordingResult", {
+          this._safeSend(ws, ["recordingStopped", {
             success: false,
             enabled: false,
             message: "Room name required"
@@ -3907,84 +3885,65 @@ export class GameServer extends CPUProtection {
           return;
         }
         
+        const currentStatus = await this._getRecordingStatusFromKV(roomName);
+        if (!currentStatus) {
+          this._safeSend(ws, ["recordingStopped", {
+            success: true,
+            enabled: false,
+            room: roomName,
+            message: "Recording already disabled for " + roomName
+          }]);
+          return;
+        }
+        
         const success = await this._stopRecordingWinners(roomName);
         
-        this._broadcastToRoom(roomName, ["stopRecordingResult", {
+        this._safeSend(ws, ["recordingStopped", {
           success: success,
           enabled: false,
           room: roomName,
-          message: success ? "Recording STOPPED and winners DELETED for " + roomName : "Failed to stop recording",
-          timestamp: Date.now()
+          message: success ? "Recording stopped for " + roomName : "Failed to stop recording"
         }]);
-        
-        this._safeSend(ws, ["stopRecordingResult", {
-          success: success,
-          enabled: false,
-          room: roomName,
-          message: success ? "Recording stopped and winners deleted for " + roomName : "Failed to stop recording"
-        }]);
-        
-        if (success) {
-          this._broadcastToRoom(roomName, ["recordingStatus", false]);
-          this._broadcastToRoom(roomName, ["systemMessage", "ADMIN has DISABLED winner recording for this room!"]);
-        }
         return;
       }
 
-      if (evt === "getRoomWinners") {
-        const room = data[1];
-        if (!room) {
-          this._safeSend(ws, ["lowCardWinnerUpdate", {
-            error: "Room name required",
-            success: false,
+      // PERBAIKAN 10: getRecordingStatus
+      if (evt === "getRecordingStatus") {
+        const roomName = data[1];
+        if (!roomName) {
+          this._safeSend(ws, ["recordingStatus", {
+            enabled: false,
+            room: null,
             message: "Room name required"
           }]);
           return;
         }
         
-        const winners = await this._getLowCardWinners(room);
-        const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
-        
-        if (Object.keys(winners).length === 0) {
-          this._safeSend(ws, ["lowCardWinnerUpdate", {
-            winners: {},
-            room: room,
-            recording: isRecordingEnabled,
-            updatedAt: new Date().toISOString(),
-            type: 'getRoomWinners',
-            message: "No winners yet"
-          }]);
-        } else {
-          this._safeSend(ws, ["lowCardWinnerUpdate", {
-            winners: winners,
-            room: room,
-            recording: isRecordingEnabled,
-            updatedAt: new Date().toISOString(),
-            type: 'getRoomWinners'
-          }]);
-        }
+        const isRecordingEnabled = await this._getRecordingStatusFromKV(roomName);
+        this._safeSend(ws, ["recordingStatus", {
+          enabled: isRecordingEnabled,
+          room: roomName,
+          timestamp: Date.now()
+        }]);
         return;
       }
 
-      if (evt === "getRecordingStatus") {
-        const roomName = data[1];
-        await this.getRecordingStatus(ws, roomName);
-        return;
-      }
-
+      // PERBAIKAN 9: sendWinnersToRoom
       if (evt === "sendWinnersToRoom") {
         const room = data[1];
         if (!room) {
-          this._safeSend(ws, ["sendWinnersResult", {
+          this._safeSend(ws, ["roomWinners", {
             success: false,
-            message: "Room name required"
+            message: "Room name required",
+            winners: {},
+            recording: false
           }]);
           return;
         }
         
         await this._sendWinnersToRoom(room);
         
-        this._safeSend(ws, ["sendWinnersResult", {
+        this._safeSend(ws, ["roomWinners", {
           success: true,
           room: room,
           message: "Winners data sent to room"
@@ -3992,48 +3951,32 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      if (evt === "startGameWithRecording") {
-        const [_, room, bet, username] = data;
-        await this._startGameWithRecording(ws, room, bet, username);
-        return;
-      }
-
-      if (evt === "lowCardWinnerUpdate") {
+      // PERBAIKAN 6: getRoomWinners (GABUNGKAN dengan lowCardWinnerUpdate)
+      if (evt === "getRoomWinners" || evt === "lowCardWinnerUpdate") {
         const room = data[1] || this._ensureRoomConsistency(ws);
         if (!room) {
-          this._safeSend(ws, ["lowCardWinnerUpdate", {
+          this._safeSend(ws, ["roomWinners", {
             error: "Room name required",
-            success: false
+            success: false,
+            winners: {},
+            recording: false
           }]);
           return;
         }
         
-        await this._sendWinnersToRoom(room);
-        
         const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
         const winners = await this._getLowCardWinners(room);
         
-        if (Object.keys(winners).length === 0) {
-          this._safeSend(ws, ["lowCardWinnerUpdate", {
-            winners: {},
-            room: room,
-            recording: isRecordingEnabled,
-            updatedAt: new Date().toISOString(),
-            type: 'refreshResponse',
-            message: "No winners yet"
-          }]);
-        } else {
-          this._safeSend(ws, ["lowCardWinnerUpdate", {
-            winners: winners,
-            room: room,
-            recording: isRecordingEnabled,
-            updatedAt: new Date().toISOString(),
-            type: 'refreshResponse'
-          }]);
-        }
-        
+        this._safeSend(ws, ["roomWinners", {
+          winners: winners,
+          room: room,
+          recording: isRecordingEnabled,
+          updatedAt: new Date().toISOString()
+        }]);
         return;
       }
+
+      // ==================== DICE EVENTS ====================
 
       if (evt === "submitDiceAnswer") {
         const [_, username, guess] = data;
@@ -4126,11 +4069,15 @@ export class GameServer extends CPUProtection {
         return;
       }
 
+      // ==================== SWITCH ROOM ====================
+
       if (evt === "switchRoom") {
         const [_, room, username] = data;
         await this.switchRoom(ws, room, username);
         return;
       }
+
+      // ==================== LOWCARD GAME EVENTS ====================
 
       const room = this._ensureRoomConsistency(ws);
       if (!room) { 
