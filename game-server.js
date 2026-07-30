@@ -73,7 +73,7 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 3 },
+    { start: 1, end: 4 },
     { start: 11, end: 12 },
     { start: 22, end: 23 }
   ],
@@ -907,7 +907,6 @@ export class GameServer extends CPUProtection {
       const cacheKey = `recording_${roomName}`;
       const cached = this._kvCache.get(cacheKey);
       if (cached !== null) {
-        // SYNC KE MEMORY CACHE
         this._recordingEnabled.set(roomName, cached);
         return cached;
       }
@@ -934,10 +933,16 @@ export class GameServer extends CPUProtection {
     try {
       if (!roomName) return false;
       
-      // CEK APAKAH SUDAH ENABLED
       const currentStatus = await this._getRecordingStatusFromKV(roomName);
       if (currentStatus) {
-        this._broadcastToRoom(roomName, ["recordingStatus", true]);
+        // SUDAH ENABLED - BROADCAST KE SEMUA USER
+        this._broadcastToRoom(roomName, ["recordingStatus", {
+          enabled: true,
+          room: roomName,
+          action: 'started',
+          timestamp: Date.now(),
+          message: "Recording is already ENABLED"
+        }]);
         return true;
       }
       
@@ -952,13 +957,16 @@ export class GameServer extends CPUProtection {
         );
       }
       
-      this._broadcastToRoom(roomName, ["recordingStarted", {
+      // ✅ BROADCAST KE SEMUA USER DI ROOM
+      this._broadcastToRoom(roomName, ["recordingStatus", {
+        enabled: true,
         room: roomName,
-        success: true,
-        timestamp: Date.now()
+        action: 'started',
+        timestamp: Date.now(),
+        message: "Recording ENABLED for this room!"
       }]);
-      this._broadcastToRoom(roomName, ["recordingStatus", true]);
-      this._broadcastToRoom(roomName, ["systemMessage", "Recording ENABLED for this room!"]);
+      
+      this._broadcastToRoom(roomName, ["systemMessage", "🔴 RECORDING ENABLED - All winners will be saved!"]);
       
       return true;
     } catch(e) {
@@ -973,10 +981,16 @@ export class GameServer extends CPUProtection {
       
       const room = roomName.trim();
       
-      // CEK APAKAH SUDAH DISABLED
       const currentStatus = await this._getRecordingStatusFromKV(room);
       if (!currentStatus) {
-        this._broadcastToRoom(room, ["recordingStatus", false]);
+        // SUDAH DISABLED - BROADCAST KE SEMUA USER
+        this._broadcastToRoom(room, ["recordingStatus", {
+          enabled: false,
+          room: room,
+          action: 'stopped',
+          timestamp: Date.now(),
+          message: "Recording is already DISABLED"
+        }]);
         return true;
       }
       
@@ -1008,13 +1022,16 @@ export class GameServer extends CPUProtection {
         }
       }
       
-      this._broadcastToRoom(room, ["recordingStopped", {
+      // ✅ BROADCAST KE SEMUA USER DI ROOM
+      this._broadcastToRoom(room, ["recordingStatus", {
+        enabled: false,
         room: room,
-        success: true,
-        timestamp: Date.now()
+        action: 'stopped',
+        timestamp: Date.now(),
+        message: "Recording STOPPED and winners DELETED!"
       }]);
-      this._broadcastToRoom(room, ["recordingStatus", false]);
-      this._broadcastToRoom(room, ["systemMessage", "Recording STOPPED and winners DELETED!"]);
+      
+      this._broadcastToRoom(room, ["systemMessage", "⏹️ RECORDING STOPPED - All winners data DELETED!"]);
       
       return true;
     } catch(e) {
@@ -1030,6 +1047,7 @@ export class GameServer extends CPUProtection {
       const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
       const winners = await this._getLowCardWinners(room);
       
+      // ✅ BROADCAST KE SEMUA USER DI ROOM
       this._broadcastToRoom(room, ["roomWinners", {
         winners: winners,
         room: room,
@@ -1087,6 +1105,7 @@ export class GameServer extends CPUProtection {
         this._safeSend(ws, ["recordingStatus", {
           enabled: false,
           room: null,
+          action: 'status',
           message: "Room name required"
         }]);
         return;
@@ -1094,9 +1113,11 @@ export class GameServer extends CPUProtection {
 
       const isRecordingEnabled = await this._getRecordingStatusFromKV(roomName);
       
+      // ✅ HANYA UNTUK PENGIRIM (QUERY)
       this._safeSend(ws, ["recordingStatus", {
         enabled: isRecordingEnabled,
         room: roomName,
+        action: 'status',
         timestamp: Date.now()
       }]);
 
@@ -1104,6 +1125,7 @@ export class GameServer extends CPUProtection {
       this._safeSend(ws, ["recordingStatus", {
         enabled: false,
         room: roomName,
+        action: 'status',
         error: e.message
       }]);
     }
@@ -3843,33 +3865,27 @@ export class GameServer extends CPUProtection {
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
-          this._safeSend(ws, ["recordingStarted", {
+          this._safeSend(ws, ["recordingStatus", {
             success: false,
             enabled: false,
+            action: 'started',
             message: "Room name required"
-          }]);
-          return;
-        }
-        
-        const currentStatus = await this._getRecordingStatusFromKV(roomName);
-        if (currentStatus) {
-          this._safeSend(ws, ["recordingStarted", {
-            success: true,
-            enabled: true,
-            room: roomName,
-            message: "Recording already enabled for " + roomName
           }]);
           return;
         }
         
         const success = await this._startRecordingWinners(roomName);
         
-        this._safeSend(ws, ["recordingStarted", {
+        // HANYA RESPONSE UNTUK PENGIRIM
+        this._safeSend(ws, ["recordingStatus", {
           success: success,
           enabled: success,
           room: roomName,
-          message: success ? "Recording enabled for " + roomName : "Failed to enable recording"
+          action: 'started',
+          message: success ? "Recording enabled" : "Failed to enable recording"
         }]);
+        
+        // BROADCAST SUDAH DILAKUKAN DI _startRecordingWinners
         return;
       }
 
@@ -3877,33 +3893,27 @@ export class GameServer extends CPUProtection {
       if (evt === "stopRecordingWinners") {
         const roomName = data[1];
         if (!roomName) {
-          this._safeSend(ws, ["recordingStopped", {
+          this._safeSend(ws, ["recordingStatus", {
             success: false,
             enabled: false,
+            action: 'stopped',
             message: "Room name required"
-          }]);
-          return;
-        }
-        
-        const currentStatus = await this._getRecordingStatusFromKV(roomName);
-        if (!currentStatus) {
-          this._safeSend(ws, ["recordingStopped", {
-            success: true,
-            enabled: false,
-            room: roomName,
-            message: "Recording already disabled for " + roomName
           }]);
           return;
         }
         
         const success = await this._stopRecordingWinners(roomName);
         
-        this._safeSend(ws, ["recordingStopped", {
+        // HANYA RESPONSE UNTUK PENGIRIM
+        this._safeSend(ws, ["recordingStatus", {
           success: success,
           enabled: false,
           room: roomName,
-          message: success ? "Recording stopped for " + roomName : "Failed to stop recording"
+          action: 'stopped',
+          message: success ? "Recording stopped" : "Failed to stop recording"
         }]);
+        
+        // BROADCAST SUDAH DILAKUKAN DI _stopRecordingWinners
         return;
       }
 
@@ -3914,15 +3924,19 @@ export class GameServer extends CPUProtection {
           this._safeSend(ws, ["recordingStatus", {
             enabled: false,
             room: null,
+            action: 'status',
             message: "Room name required"
           }]);
           return;
         }
         
         const isRecordingEnabled = await this._getRecordingStatusFromKV(roomName);
+        
+        // ✅ HANYA UNTUK PENGIRIM (QUERY)
         this._safeSend(ws, ["recordingStatus", {
           enabled: isRecordingEnabled,
           room: roomName,
+          action: 'status',
           timestamp: Date.now()
         }]);
         return;
@@ -3943,6 +3957,7 @@ export class GameServer extends CPUProtection {
         
         await this._sendWinnersToRoom(room);
         
+        // RESPONSE UNTUK PENGIRIM
         this._safeSend(ws, ["roomWinners", {
           success: true,
           room: room,
@@ -3967,11 +3982,22 @@ export class GameServer extends CPUProtection {
         const isRecordingEnabled = await this._getRecordingStatusFromKV(room);
         const winners = await this._getLowCardWinners(room);
         
+        // BROADCAST KE SEMUA USER DI ROOM
+        this._broadcastToRoom(room, ["roomWinners", {
+          winners: winners,
+          room: room,
+          recording: isRecordingEnabled,
+          updatedAt: new Date().toISOString(),
+          requestedBy: ws.username || 'anonymous'
+        }]);
+        
+        // RESPONSE KE PENGIRIM
         this._safeSend(ws, ["roomWinners", {
           winners: winners,
           room: room,
           recording: isRecordingEnabled,
-          updatedAt: new Date().toISOString()
+          updatedAt: new Date().toISOString(),
+          message: "Winners data updated"
         }]);
         return;
       }
