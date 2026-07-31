@@ -54,10 +54,10 @@ const CONSTANTS = {
   MAX_DICE_GAMES: 10,
   DICE_ROLL_TIME_MS: 0,
   DICE_READING_TIME_MS: 0,
-  DICE_ANSWER_TIME_MS: 20000,
-  DICE_TOTAL_TIME_MS: 20000,
-  DICE_BREAK_MS: 2000,
-  DICE_AFTER_TIMEOUT_BREAK_MS: 60000,
+  DICE_ANSWER_TIME_MS: 30000, // 30 detik untuk menjawab
+  DICE_TOTAL_TIME_MS: 30000, // Total waktu draw 30 detik
+  DICE_BREAK_MS: 15000, // 15 detik waktu tunggu
+  DICE_AFTER_TIMEOUT_BREAK_MS: 15000, // 15 detik cooldown
   MAX_DICE_VALUE: 6,
   DICE_ROOM: "Quiz",
   DICE_POINT_KEY: 'dice_points',
@@ -547,6 +547,7 @@ export class GameServer extends CPUProtection {
       
       this._diceNotifiedFlags = {
         20: false,
+        15: false,
         10: false,
         5: false,
         timeup: false
@@ -892,7 +893,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== _getRecordingStatusFromKV ====================
   async _getRecordingStatusFromKV(roomName) {
     try {
       if (!roomName) return false;
@@ -925,7 +925,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== _startRecordingWinners ====================
   async _startRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
@@ -955,7 +954,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== _stopRecordingWinners ====================
   async _stopRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
@@ -1004,7 +1002,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== _sendWinnersToRoom ====================
   async _sendWinnersToRoom(room) {
     try {
       if (!room) return;
@@ -1028,7 +1025,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== _getLowCardWinners ====================
   async _getLowCardWinners(room) {
     try {
       if (!room) return {};
@@ -1059,7 +1055,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== _broadcastLowCardWinners ====================
   async _broadcastLowCardWinners(room) {
     try {
       if (!room) return;
@@ -1089,7 +1084,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== GET RECORDING STATUS ====================
   async getRecordingStatus(ws, roomName) {
     try {
       if (!roomName || roomName.trim() === "") {
@@ -1104,8 +1098,6 @@ export class GameServer extends CPUProtection {
       this._safeSend(ws, ["recordingError", e.message]);
     }
   }
-
-  // ==================== START GAME WITH RECORDING (ADMIN) ====================
 
   async _startGameWithRecording(ws, room, bet, username) {
     try {
@@ -1213,7 +1205,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== _addLowCardWinner ====================
   async _addLowCardWinner(room, username) {
     try {
       if (!room || !username) return false;
@@ -1652,6 +1643,7 @@ export class GameServer extends CPUProtection {
       this._lastNotificationTime = 0;
       this._diceNotifiedFlags = {
         20: false,
+        15: false,
         10: false,
         5: false,
         timeup: false
@@ -1675,6 +1667,10 @@ export class GameServer extends CPUProtection {
             this._diceNotifiedFlags[20] = true;
             shouldSend = true;
             message = "20 seconds remaining!";
+          } else if (remainingInt === 15 && !this._diceNotifiedFlags[15]) {
+            this._diceNotifiedFlags[15] = true;
+            shouldSend = true;
+            message = "15 seconds remaining!";
           } else if (remainingInt === 10 && !this._diceNotifiedFlags[10]) {
             this._diceNotifiedFlags[10] = true;
             shouldSend = true;
@@ -1707,7 +1703,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== TIME UP COOLDOWN 1 MENIT ====================
+  // ==================== TIME UP COOLDOWN 15 DETIK ====================
   
   _startTimeUpCooldown() {
     try {
@@ -1715,44 +1711,22 @@ export class GameServer extends CPUProtection {
       
       this._diceTimeUpCooldown = true;
       
+      // HANYA 1 BROADCAST "Wait 15 seconds"
       this._broadcastDiceNotification("diceError", {
-        message: "Next game starts in 1 minute...",
-        remaining: 60,
+        message: "Wait 15 seconds",
+        remaining: 15,
         isDiceTime: true,
         isActive: false,
         cooldown: true
       });
       
-      let timeLeft = CONSTANTS.DICE_AFTER_TIMEOUT_BREAK_MS / 1000;
+      let timeLeft = CONSTANTS.DICE_AFTER_TIMEOUT_BREAK_MS / 1000; // 15 detik
+      
       this._diceTimeUpCooldownTimer = setInterval(() => {
         try {
           timeLeft--;
           
-          if (timeLeft === 30) {
-            this._broadcastDiceNotification("diceError", {
-              message: "30 seconds remaining until next game",
-              remaining: 30,
-              isDiceTime: true,
-              isActive: false,
-              cooldown: true
-            });
-          } else if (timeLeft === 10) {
-            this._broadcastDiceNotification("diceError", {
-              message: "10 seconds remaining!",
-              remaining: 10,
-              isDiceTime: true,
-              isActive: false,
-              cooldown: true
-            });
-          } else if (timeLeft === 5) {
-            this._broadcastDiceNotification("diceError", {
-              message: "5 seconds!",
-              remaining: 5,
-              isDiceTime: true,
-              isActive: false,
-              cooldown: true
-            });
-          } else if (timeLeft <= 0) {
+          if (timeLeft <= 0) {
             clearInterval(this._diceTimeUpCooldownTimer);
             this._diceTimeUpCooldownTimer = null;
             this._diceTimeUpCooldown = false;
@@ -1788,6 +1762,7 @@ export class GameServer extends CPUProtection {
       this._lastSentRemaining = -1;
       this._diceNotifiedFlags = {
         20: false,
+        15: false,
         10: false,
         5: false,
         timeup: false
@@ -1824,7 +1799,7 @@ export class GameServer extends CPUProtection {
         const clients = this.wsClients.get(DICE_ROOM);
         if (clients?.size > 0) {
           this._broadcastDiceNotification("diceError", {
-            message: "Dice game is starting soon!",
+            message: "Dice game is starting soon! (30 seconds)",
             isDiceTime: true,
             isActive: false,
             remaining: -1
@@ -1866,6 +1841,7 @@ export class GameServer extends CPUProtection {
         this._lastSentRemaining = -1;
         this._diceNotifiedFlags = {
           20: false,
+          15: false,
           10: false,
           5: false,
           timeup: false
@@ -1875,9 +1851,9 @@ export class GameServer extends CPUProtection {
         
         this._broadcastDiceNotification("diceError", {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
-          remainingTime: `${CONSTANTS.DICE_ANSWER_TIME_MS / 1000}s remaining`,
-          remaining: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
-          message: "Guess the dice value NOW!",
+          remainingTime: `30 seconds remaining`,
+          remaining: 30,
+          message: "Guess the dice value NOW! (30 seconds)",
           round: this._diceRound
         });
         
@@ -2093,6 +2069,7 @@ export class GameServer extends CPUProtection {
       this._diceTimeUpCooldown = false;
       this._diceNotifiedFlags = {
         20: false,
+        15: false,
         10: false,
         5: false,
         timeup: false
@@ -2149,7 +2126,6 @@ export class GameServer extends CPUProtection {
     // Keep alive already handled by scheduler
   }
 
-  // ==================== _clearDiceData ====================
   _clearDiceData() {
     try {
       if (this._diceTimeUpCooldownTimer) {
@@ -2173,6 +2149,7 @@ export class GameServer extends CPUProtection {
       this._diceTimeUpCooldown = false;
       this._diceNotifiedFlags = {
         20: false,
+        15: false,
         10: false,
         5: false,
         timeup: false
@@ -2303,12 +2280,12 @@ export class GameServer extends CPUProtection {
           let displayTime = "";
           if (remainingInt >= 20) {
             displayTime = "20 seconds remaining!";
+          } else if (remainingInt >= 15) {
+            displayTime = "15 seconds remaining!";
           } else if (remainingInt >= 10) {
             displayTime = "10 seconds remaining!";
           } else if (remainingInt >= 5) {
             displayTime = "5 seconds remaining!";
-          } else if (remainingInt >= 3) {
-            displayTime = "3 seconds remaining!";
           } else if (remainingInt > 0) {
             displayTime = `${timeText} remaining`;
           }
@@ -2405,9 +2382,9 @@ export class GameServer extends CPUProtection {
         timestamp: Date.now(),
         answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
         canAnswerNow: true,
-        message: "Guess the number NOW!",
+        message: "Guess the number NOW! (30 seconds)",
         round: this._diceRound || 1,
-        timerNotifications: [20, 10, 5]
+        timerNotifications: [20, 15, 10, 5]
       };
       
       const msgStr = JSON.stringify(["diceRoll", msgData]);
@@ -2642,6 +2619,8 @@ export class GameServer extends CPUProtection {
           let displayTime = "";
           if (remainingInt >= 20) {
             displayTime = "20 seconds remaining!";
+          } else if (remainingInt >= 15) {
+            displayTime = "15 seconds remaining!";
           } else if (remainingInt >= 10) {
             displayTime = "10 seconds remaining!";
           } else if (remainingInt >= 5) {
@@ -4338,6 +4317,7 @@ export class GameServer extends CPUProtection {
       this._diceTimeUpCooldown = false;
       this._diceNotifiedFlags = {
         20: false,
+        15: false,
         10: false,
         5: false,
         timeup: false
