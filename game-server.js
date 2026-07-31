@@ -1836,7 +1836,7 @@ export class GameServer extends CPUProtection {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remainingTime: `30 seconds remaining`,
           remaining: 30,
-          message: "Guess the dice value NOW! (30 seconds)",
+          message: "Guess the dice value NOW!",
           round: this._diceRound
         });
         
