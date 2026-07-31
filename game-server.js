@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS - FULL CLASS (LENGKAP) ====================
+ // ==================== GAME-SERVER.JS - FULL CLASS (LENGKAP) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -73,8 +73,8 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 3 },
-    { start: 11, end: 16 },
+    { start: 1, end: 2 },
+    { start: 11, end: 12 },
     { start: 21, end: 22 }
   ],
   TIMEZONE_OFFSET: 8,
@@ -1870,6 +1870,7 @@ export class GameServer extends CPUProtection {
             
             this._stopDiceTimerNotifications();
             
+            // BROADCAST PEMENANG HANYA DI SINI (SATU KALI DI AKHIR GAME)
             if (this.diceHasWinner && this.diceWinner) {
               const points = await this._getDicePoints();
               this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
@@ -1975,13 +1976,6 @@ export class GameServer extends CPUProtection {
             return;
         }
         
-        // HAPUS BLOK INI - jangan cek pemenang untuk blokir jawaban
-        // const hasWinner = this.diceHasWinner && this.diceWinner;
-        // if (hasWinner) {
-        //     this.diceAnswered.add(username);
-        //     return;
-        // }
-        
         const diceValue = this.currentDiceRoll?.value;
         const answerRemaining = this._getDiceAnswerRemainingTime();
         
@@ -1992,14 +1986,14 @@ export class GameServer extends CPUProtection {
         
         const isCorrect = isValidGuess && guessValue === diceValue;
         
-        // Broadcast jawaban (tetap pakai yang sudah ada)
+        // Broadcast jawaban
         this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
             username: username,
             guess: guessValue,
             round: this._diceRound || 1
         }]);
         
-        // Jika benar, catat pemenang (tanpa blokir yang lain)
+        // Jika benar, catat pemenang TAPI JANGAN BROADCAST DI SINI
         if (isCorrect) {
             // Catat pemenang pertama saja
             if (!this.diceHasWinner) {
@@ -2011,11 +2005,9 @@ export class GameServer extends CPUProtection {
                 await this.diceGameSystem.setPoints(points);
                 this._kvCache.delete('dice_points');
                 
-                
+                // Tandai user sudah menjawab
+                this.diceAnswered.add(username);
             }
-            
-            // Tandai user sudah menjawab
-            this.diceAnswered.add(username);
         } else {
             // Jawaban salah - tetap tandai sudah menjawab
             this.diceAnswered.add(username);
@@ -2024,7 +2016,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {
         // Error handling
     }
-}
+  }
 
   _startDiceLoop() {
     // Dice loop already handled by scheduler
