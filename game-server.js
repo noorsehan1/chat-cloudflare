@@ -1928,90 +1928,109 @@ export class GameServer extends CPUProtection {
   // ==================== submitDiceAnswer ====================
   async submitDiceAnswer(ws, username, guess) {
     try {
-      if (!ws || !username) {
-        return;
-      }
-      
-      const room = this._ensureRoomConsistency(ws);
-      if (room !== DICE_ROOM) {
-        return;
-      }
-      
-      if (!this._isDiceTime()) {
-        return;
-      }
-      
-      if (!this.diceAutoEnabled) {
-        return;
-      }
-      
-      const clients = this.wsClients.get(DICE_ROOM);
-      if (!clients?.size) {
-        return;
-      }
-      
-      if (this._isShowingDice || this._diceTimeout) {
-        if (this._diceQuestionStartTime) {
-          const elapsed = (Date.now() - this._diceQuestionStartTime) / 1000;
-          const answerTime = CONSTANTS.DICE_ANSWER_TIME_MS / 1000;
-          if (elapsed >= answerTime) {
+        if (!ws || !username) {
             return;
-          }
         }
-      }
-      
-      if (!this.currentDiceRoll) {
-        this._startDiceIfNeeded();
+        
+        const room = this._ensureRoomConsistency(ws);
+        if (room !== DICE_ROOM) {
+            return;
+        }
+        
+        if (!this._isDiceTime()) {
+            return;
+        }
+        
+        if (!this.diceAutoEnabled) {
+            return;
+        }
+        
+        const clients = this.wsClients.get(DICE_ROOM);
+        if (!clients?.size) {
+            return;
+        }
+        
+        if (this._isShowingDice || this._diceTimeout) {
+            if (this._diceQuestionStartTime) {
+                const elapsed = (Date.now() - this._diceQuestionStartTime) / 1000;
+                const answerTime = CONSTANTS.DICE_ANSWER_TIME_MS / 1000;
+                if (elapsed >= answerTime) {
+                    return;
+                }
+            }
+        }
+        
         if (!this.currentDiceRoll) {
-          return;
+            this._startDiceIfNeeded();
+            if (!this.currentDiceRoll) {
+                return;
+            }
         }
-      }
-      
-      const guessValue = parseInt(guess, 10);
-      const isValidGuess = !isNaN(guessValue) && guessValue >= 1 && guessValue <= 6;
-      
-      if (this.diceAnswered.has(username)) {
-        return;
-      }
-      
-      const hasWinner = this.diceHasWinner && this.diceWinner;
-      if (hasWinner) {
-        this.diceAnswered.add(username);
-        return;
-      }
-      
-      const diceValue = this.currentDiceRoll?.value;
-      const answerRemaining = this._getDiceAnswerRemainingTime();
-      
-      if (answerRemaining <= 0) {
-        this.diceAnswered.add(username);
-        return;
-      }
-      
-      const isCorrect = isValidGuess && guessValue === diceValue;
-      
-      this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
-        username: username,
-        guess: guessValue,
-        round: this._diceRound || 1
-      }]);
-      
-      if (isCorrect) {
-        this.diceHasWinner = true;
-        this.diceWinner = username;
         
-        const points = await this._getDicePoints();
-        points[username] = (points[username] || 0) + 1;
-        await this.diceGameSystem.setPoints(points);
-        this._kvCache.delete('dice_points');
+        const guessValue = parseInt(guess, 10);
+        const isValidGuess = !isNaN(guessValue) && guessValue >= 1 && guessValue <= 6;
         
-        this.diceAnswered.add(username);
-      } else {
-        this.diceAnswered.add(username);
-      }
-      
-    } catch(e) {}
-  }
+        // Cek apakah user sudah menjawab
+        if (this.diceAnswered.has(username)) {
+            return;
+        }
+        
+        // HAPUS BLOK INI - jangan cek pemenang untuk blokir jawaban
+        // const hasWinner = this.diceHasWinner && this.diceWinner;
+        // if (hasWinner) {
+        //     this.diceAnswered.add(username);
+        //     return;
+        // }
+        
+        const diceValue = this.currentDiceRoll?.value;
+        const answerRemaining = this._getDiceAnswerRemainingTime();
+        
+        if (answerRemaining <= 0) {
+            this.diceAnswered.add(username);
+            return;
+        }
+        
+        const isCorrect = isValidGuess && guessValue === diceValue;
+        
+        // Broadcast jawaban (tetap pakai yang sudah ada)
+        this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
+            username: username,
+            guess: guessValue,
+            round: this._diceRound || 1
+        }]);
+        
+        // Jika benar, catat pemenang (tanpa blokir yang lain)
+        if (isCorrect) {
+            // Catat pemenang pertama saja
+            if (!this.diceHasWinner) {
+                this.diceHasWinner = true;
+                this.diceWinner = username;
+                
+                const points = await this._getDicePoints();
+                points[username] = (points[username] || 0) + 1;
+                await this.diceGameSystem.setPoints(points);
+                this._kvCache.delete('dice_points');
+                
+                // Broadcast pemenang (tetap pakai yang sudah ada)
+                this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
+                    username: username,
+                    totalPoints: points[username] || 0,
+                    diceValue: diceValue,
+                    round: this._diceRound || 1
+                }]);
+            }
+            
+            // Tandai user sudah menjawab
+            this.diceAnswered.add(username);
+        } else {
+            // Jawaban salah - tetap tandai sudah menjawab
+            this.diceAnswered.add(username);
+        }
+        
+    } catch(e) {
+        // Error handling
+    }
+}
 
   _startDiceLoop() {
     // Dice loop already handled by scheduler
