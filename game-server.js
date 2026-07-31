@@ -2011,13 +2011,7 @@ export class GameServer extends CPUProtection {
                 await this.diceGameSystem.setPoints(points);
                 this._kvCache.delete('dice_points');
                 
-                // Broadcast pemenang (tetap pakai yang sudah ada)
-                this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
-                    username: username,
-                    totalPoints: points[username] || 0,
-                    diceValue: diceValue,
-                    round: this._diceRound || 1
-                }]);
+                
             }
             
             // Tandai user sudah menjawab
