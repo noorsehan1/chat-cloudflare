@@ -74,7 +74,7 @@ const CONSTANTS = {
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 3 },
-    { start: 11, end: 18 },
+    { start: 11, end: 16 },
     { start: 21, end: 22 }
   ],
   TIMEZONE_OFFSET: 8,
@@ -3616,7 +3616,7 @@ export class GameServer extends CPUProtection {
       }
       if (game.players.has(usernameClean)) {
         if (game.eliminated?.has(usernameClean)) {
-          this._safeSend(ws, ["gameLowCardError", "You have been eliminated from this game"]);
+          this._safeSend(ws, ["gameLowCardError", "You have been eliminated"]);
           return;
         }
         const existingWsId = game.playerWsId.get(usernameClean);
