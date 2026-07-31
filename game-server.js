@@ -1187,7 +1187,7 @@ export class GameServer extends CPUProtection {
         
         this._safeSend(ws, ["startRecordingResult", {
           success: true,
-          message: "Game started with recording"
+          message: "started with recording"
         }]);
         
         this._startRegistration(room, game);
@@ -2946,7 +2946,7 @@ export class GameServer extends CPUProtection {
       const activeIds = this._getActivePlayerIds(game);
       if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired && this._isGameActuallyRunning(game)) {
         game.evaluationLocked = true;
-        this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+        this._broadcastToRoom(room, ["gameLowCardWait", "wait results"]);
         game._evalTimer = setTimeout(() => { 
           try { 
             this._evaluateRound(room, game); 
@@ -3154,7 +3154,7 @@ export class GameServer extends CPUProtection {
           .filter(id => !game.eliminated?.has(id) && !game.numbers?.has(id));
         for (const botId of activeBotIds) this._forceBotDraw(room, botId, game);
       }
-      this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+      this._broadcastToRoom(room, ["gameLowCardWait", "wait results"]);
       if (game._evalTimer) { 
         clearTimeout(game._evalTimer); 
         game._evalTimer = null; 
@@ -3656,7 +3656,7 @@ export class GameServer extends CPUProtection {
           clearTimeout(game._evalTimer); 
           game._evalTimer = null; 
         }
-        this._broadcastToRoom(room, ["gameLowCardWait", "Please wait for results..."]);
+        this._broadcastToRoom(room, ["gameLowCardWait", "wait results"]);
         game._evalTimer = setTimeout(() => {
           try {
             const currentGame = this.activeGames.get(room);
