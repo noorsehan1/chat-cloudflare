@@ -74,7 +74,7 @@ const CONSTANTS = {
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 3 },
-    { start: 11, end: 18 },
+    { start: 11, end: 16 },
     { start: 21, end: 22 }
   ],
   TIMEZONE_OFFSET: 8,
@@ -1836,7 +1836,7 @@ export class GameServer extends CPUProtection {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remainingTime: `30 seconds remaining`,
           remaining: 30,
-          message: "Guess the dice value NOW!",
+          message: "Go! Go! Cheers! Catch",
           round: this._diceRound
         });
         
@@ -2357,7 +2357,7 @@ export class GameServer extends CPUProtection {
         timestamp: Date.now(),
         answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
         canAnswerNow: true,
-        message: "Guess the number NOW!",
+        message: "Go! Go! Cheers! Catch",
         round: this._diceRound || 1,
         timerNotifications: [20, 10]
       };
