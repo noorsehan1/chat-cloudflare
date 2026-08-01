@@ -1776,24 +1776,7 @@ export class GameServer extends CPUProtection {
       this._tieBreakerAnswers.clear();
       this._tieBreakerHighestValue = -1;
       
-      // Kirim data jawaban yang sudah ada
-      const answers = [];
-      for (const player of tiedPlayers) {
-        const answer = this._diceAllAnswers.get(player);
-        answers.push({ player, answer });
-      }
-      
-      this._broadcastDiceNotification("diceError", {
-        message: `⚔️ TIE BREAKER ROUND ${this._tieBreakerRound}! Between: ${tiedPlayers.join(', ')}`,
-        remaining: -1,
-        isTieBreaker: true,
-        round: this._tieBreakerRound,
-        players: tiedPlayers,
-        answers: answers,
-        timestamp: Date.now()
-      });
-      
-      // Proses tie breaker dengan nilai yang sudah ada (tanpa roll baru)
+      // LANGSUNG PROSES KE _processTieBreakerRound (TANPA BROADCAST DI SINI)
       await this._processTieBreakerRound(room, tiedPlayers, diceValue);
       
     } catch(e) {
@@ -1811,7 +1794,6 @@ export class GameServer extends CPUProtection {
       let highestPlayers = [];
       
       for (const player of players) {
-        // Ambil jawaban dari tie breaker answers (jika ada) atau dari all answers
         let answer = this._tieBreakerAnswers.get(player);
         if (answer === undefined) {
           answer = this._diceAllAnswers.get(player);
@@ -1848,7 +1830,7 @@ export class GameServer extends CPUProtection {
         }]);
         
         this._broadcastDiceNotification("diceError", {
-          message: `🏆 ${winner} WINS TIE BREAKER ROUND ${this._tieBreakerRound}! Highest value: ${highestValue}`,
+          message: `${winner} wins tie breaker round ${this._tieBreakerRound}! highest value: ${highestValue}`,
           username: winner,
           totalPoints: points[winner] || 0,
           diceValue: diceValue,
@@ -1875,7 +1857,7 @@ export class GameServer extends CPUProtection {
       } else if (highestPlayers.length > 1) {
         // ==================== MASIH ADA YANG SAMA (NILAI SAMA) ====================
         this._broadcastDiceNotification("diceError", {
-          message: `🔄 Still tied with value ${highestValue} between: ${highestPlayers.join(', ')}. Submit new values!`,
+          message: `still tied with value ${highestValue} between: ${highestPlayers.join(', ')}. submit new values!`,
           remaining: -1,
           isTieBreaker: true,
           round: this._tieBreakerRound,
@@ -1910,7 +1892,7 @@ export class GameServer extends CPUProtection {
         await this._broadcastDiceRoll(newDiceValue);
         
         this._broadcastDiceNotification("diceError", {
-          message: `🎲 TIE BREAKER ROUND ${this._tieBreakerRound}! ${highestPlayers.join(', ')} guess the new value!`,
+          message: `tie breaker round ${this._tieBreakerRound}! ${highestPlayers.join(', ')} guess the new value!`,
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remaining: 30,
           isTieBreaker: true,
@@ -1925,10 +1907,7 @@ export class GameServer extends CPUProtection {
         this._diceTimeout = setTimeout(async () => {
           try {
             this._canSubmitDiceAnswer = false;
-            
-            // Proses round berikutnya dengan dice value baru
             await this._processTieBreakerRound(room, highestPlayers, newDiceValue);
-            
           } catch(e) {
             this._isTieBreakerActive = false;
             this._tieBreakerPlayers = [];
@@ -1938,25 +1917,6 @@ export class GameServer extends CPUProtection {
             this._isShowingDice = false;
           }
         }, CONSTANTS.DICE_TOTAL_TIME_MS);
-        
-      } else {
-        // ==================== TIDAK ADA YANG PUNYA NILAI ====================
-        this._broadcastDiceNotification("diceError", {
-          message: `😅 No valid values! Trying again...`,
-          remaining: -1,
-          isTieBreaker: true,
-          round: this._tieBreakerRound,
-          timestamp: Date.now()
-        });
-        
-        // Reset untuk round baru dengan semua player
-        this._tieBreakerPlayers = [...players];
-        this._tieBreakerAnswers.clear();
-        this._tieBreakerRound++;
-        
-        setTimeout(() => {
-          this._processTieBreakerRound(room, players, diceValue);
-        }, 3000);
       }
       
     } catch(e) {
@@ -2109,7 +2069,7 @@ export class GameServer extends CPUProtection {
             // JIKA ADA TIE -> MULAI TIE BREAKER (TANPA ROLL BARU)
             if (tiedPlayers.length > 1) {
               this._broadcastDiceNotification("diceError", {
-                message: `⚔️ TIE DETECTED! ${tiedPlayers.join(', ')} have the same value: ${diceValue}`,
+                message: `tie detected! ${tiedPlayers.join(', ')} have the same value: ${diceValue}`,
                 remaining: -1,
                 isTieBreaker: true,
                 players: tiedPlayers,
@@ -2148,7 +2108,7 @@ export class GameServer extends CPUProtection {
                 diceValue: diceValue,
                 round: roundNumber,
                 remaining: -1,
-                message: `🏆 ${this.diceWinner} WINS with value ${diceValue}!`
+                message: `${this.diceWinner} wins with value ${diceValue}!`
               });
             } else {
               this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
@@ -2325,7 +2285,7 @@ export class GameServer extends CPUProtection {
               }]);
               
               this._broadcastDiceNotification("diceError", {
-                message: `🏆 ${winner} WINS TIE BREAKER ROUND ${this._tieBreakerRound}! Highest value: ${highestValue}`,
+                message: `${winner} wins tie breaker round ${this._tieBreakerRound}! highest value: ${highestValue}`,
                 username: winner,
                 totalPoints: points[winner] || 0,
                 diceValue: diceValue,
@@ -2350,7 +2310,7 @@ export class GameServer extends CPUProtection {
             } else if (highestPlayers.length > 1) {
               // MASIH ADA YANG SAMA (NILAI SAMA)
               this._broadcastDiceNotification("diceError", {
-                message: `🔄 Still tied with value ${highestValue} between: ${highestPlayers.join(', ')}. Submit new values!`,
+                message: `still tied with value ${highestValue} between: ${highestPlayers.join(', ')}. submit new values!`,
                 remaining: -1,
                 isTieBreaker: true,
                 round: this._tieBreakerRound,
@@ -2384,7 +2344,7 @@ export class GameServer extends CPUProtection {
               await this._broadcastDiceRoll(newDiceValue);
               
               this._broadcastDiceNotification("diceError", {
-                message: `🎲 TIE BREAKER ROUND ${this._tieBreakerRound}! ${highestPlayers.join(', ')} guess the new value!`,
+                message: `tie breaker round ${this._tieBreakerRound}! ${highestPlayers.join(', ')} guess the new value!`,
                 answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
                 remaining: 30,
                 isTieBreaker: true,
