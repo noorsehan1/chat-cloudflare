@@ -944,7 +944,6 @@ export class GameServer extends CPUProtection {
         return true;
       }
       
-      // ===== SIMPAN LANGSUNG KE KV TANPA DELAY =====
       this._recordingEnabled.set(roomName, true);
       this._kvCache.delete(`recording_${roomName}`);
       this._kvCache.delete(`winners_${roomName}`);
@@ -976,7 +975,6 @@ export class GameServer extends CPUProtection {
         return true;
       }
       
-      // ===== HAPUS LANGSUNG DARI KV TANPA DELAY =====
       this._recordingEnabled.set(room, false);
       this._kvCache.delete(`recording_${room}`);
       this._kvCache.delete(`winners_${room}`);
@@ -1216,7 +1214,6 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ===== SIMPAN WINNER LANGSUNG KE KV TANPA DELAY =====
   async _addLowCardWinner(room, username) {
     try {
       if (!room || !username) return false;
@@ -1234,7 +1231,6 @@ export class GameServer extends CPUProtection {
       
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       
-      // ===== BACA LANGSUNG DARI KV =====
       let roomWinners = await this.env.QUESTIONS.get(key, 'json') || {};
       
       let currentCount = 0;
@@ -1246,7 +1242,6 @@ export class GameServer extends CPUProtection {
       
       roomWinners[username] = newCount + "x";
       
-      // ===== SIMPAN LANGSUNG KE KV =====
       await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       
       this._kvCache.delete(`winners_${room}`);
@@ -3909,7 +3904,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== START GAME (USER) ====================
+  // ==================== START GAME (USER) - TANPA LOCK ====================
 
   async startGame(ws, bet, username) {
     try {
@@ -3922,7 +3917,7 @@ export class GameServer extends CPUProtection {
         return;
       }
       const usernameClean = username.trim();
-      const room = this._ensureRoomConsistency(ws);
+      const room = ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
       if (!room) {
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
         return;
@@ -3940,86 +3935,52 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      const startKey = `start_${room}`;
-      if (this._gameStartFlags.has(startKey)) {
-        this._safeSend(ws, ["gameLowCardError", "Game is already starting..."]);
-        return;
-      }
-      
       const existingGame = this.activeGames.get(room);
       if (existingGame?._isActive && !existingGame._gameEnded) {
         this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
         return;
       }
       
-      this._gameStartFlags.set(startKey, Date.now());
-      
       if (existingGame) {
         await this._forceCleanupGame(room, existingGame);
       }
       
-      const now = Date.now();
-      const lockTime = this._gameLocks.get(room);
-      if (lockTime && (now - lockTime) < CONSTANTS.START_LOCK_DURATION_MS) {
-        this._safeSend(ws, ["gameLowCardError", "Game is starting, please wait"]);
-        this._gameStartFlags.delete(startKey);
+      const betAmount = parseInt(bet, 10) || 0;
+      if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
+        this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
         return;
       }
-      this._gameLocks.set(room, now);
       
-      try {
-        if (this.activeGames.size >= this._maxGames) {
-          this._safeSend(ws, ["gameLowCardError", "Server is busy"]);
-          this._gameLocks.delete(room);
-          this._gameStartFlags.delete(startKey);
-          return;
-        }
-        
-        const betAmount = parseInt(bet, 10) || 0;
-        if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
-          this._safeSend(ws, ["gameLowCardError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
-          this._gameLocks.delete(room);
-          this._gameStartFlags.delete(startKey);
-          return;
-        }
-        
-        const wsId = this._getWsId(ws);
-        const game = {
-          room, players: new Map(), botPlayers: new Map(), registrationOpen: true,
-          round: 1, numbers: new Map(), tanda: new Map(), eliminated: new Set(),
-          betAmount, hostId: usernameClean, hostName: usernameClean, useBots: false,
-          evaluationLocked: false, drawTimeExpired: false,
-          _isActive: true, _gameEnded: false, _phase: 'registration',
-          _botTimeouts: new Set(), _botsAdded: false,
-          _registrationTimer: null, _drawTimer: null, _evalTimer: null, _safetyTimer: null,
-          _isEvaluating: false, _createdAt: Date.now(), _drawPhaseStart: null, _endTime: null,
-          playerWsId: new Map(),
-          _startedByRecording: false,
-          _startedBy: 'user'
-        };
-        
-        game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
-        game.playerWsId.set(usernameClean, wsId);
-        this.activeGames.set(room, game);
-        this._addClient(room, ws, usernameClean, false);
-        this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
-        this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
-        this._startRegistration(room, game);
-        
-        setTimeout(() => {
-          try {
-            this._gameStartFlags.delete(startKey);
-            if (this._gameLocks.get(room) === now) this._gameLocks.delete(room);
-          } catch(e) {}
-        }, CONSTANTS.START_LOCK_DURATION_MS + 1000);
-        
-      } catch(e) {
-        this._deleteGame(room, this.activeGames.get(room));
-        this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
-        this._gameLocks.delete(room);
-        this._gameStartFlags.delete(startKey);
+      if (this.activeGames.size >= this._maxGames) {
+        this._safeSend(ws, ["gameLowCardError", "Server is busy"]);
+        return;
       }
+      
+      const wsId = ws._wsId;
+      const game = {
+        room, players: new Map(), botPlayers: new Map(), registrationOpen: true,
+        round: 1, numbers: new Map(), tanda: new Map(), eliminated: new Set(),
+        betAmount, hostId: usernameClean, hostName: usernameClean, useBots: false,
+        evaluationLocked: false, drawTimeExpired: false,
+        _isActive: true, _gameEnded: false, _phase: 'registration',
+        _botTimeouts: new Set(), _botsAdded: false,
+        _registrationTimer: null, _drawTimer: null, _evalTimer: null, _safetyTimer: null,
+        _isEvaluating: false, _createdAt: Date.now(), _drawPhaseStart: null, _endTime: null,
+        playerWsId: new Map(),
+        _startedByRecording: false,
+        _startedBy: 'user'
+      };
+      
+      game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
+      game.playerWsId.set(usernameClean, wsId);
+      this.activeGames.set(room, game);
+      this._addClient(room, ws, usernameClean, false);
+      this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
+      this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
+      this._startRegistration(room, game);
+      
     } catch(e) {
+      console.error("Error in startGame:", e);
       this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
     }
   }
@@ -4054,7 +4015,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== JOIN GAME ====================
+  // ==================== JOIN GAME - TANPA LOCK ====================
 
   async joinGame(ws, username) {
     try {
@@ -4067,52 +4028,45 @@ export class GameServer extends CPUProtection {
         return; 
       }
       const usernameClean = username.trim();
-      const wsId = this._getWsId(ws);
-      const room = this._ensureRoomConsistency(ws);
+      const wsId = ws._wsId;
+      const room = ws.room || ws.roomname || this.clientRooms.get(wsId);
       if (!room) { 
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
         return; 
       }
-      const lockKey = `join_${room}_${usernameClean}`;
-      if (this._joinLocks.has(lockKey)) { 
-        this._safeSend(ws, ["gameLowCardError", "Join in progress, please wait"]); 
-        return; 
+      
+      const game = this.activeGames.get(room);
+      if (!game?._isActive || game._gameEnded || !game.players) {
+        this._safeSend(ws, ["gameLowCardError", "No active game in this room"]);
+        return;
       }
-      this._joinLocks.set(lockKey, Date.now());
-      try {
-        const game = this.activeGames.get(room);
-        if (!game?._isActive || game._gameEnded || !game.players) {
-          this._safeSend(ws, ["gameLowCardError", "No active game in this room"]);
+      if (game.players.has(usernameClean)) {
+        if (game.eliminated?.has(usernameClean)) {
+          this._safeSend(ws, ["gameLowCardError", "You have been eliminated"]);
           return;
         }
-        if (game.players.has(usernameClean)) {
-          if (game.eliminated?.has(usernameClean)) {
-            this._safeSend(ws, ["gameLowCardError", "You have been eliminated"]);
-            return;
-          }
-          const finalWsId = this._ensureSingleConnection(room, usernameClean, ws, wsId);
-          if (game.numbers.has(usernameClean)) {
-            this._safeSend(ws, ["gameLowCardPlayerDraw", usernameClean, game.numbers.get(usernameClean), game.tanda.get(usernameClean) || ""]);
-          }
-          return;
+        const finalWsId = this._ensureSingleConnection(room, usernameClean, ws, wsId);
+        if (game.numbers.has(usernameClean)) {
+          this._safeSend(ws, ["gameLowCardPlayerDraw", usernameClean, game.numbers.get(usernameClean), game.tanda.get(usernameClean) || ""]);
         }
-        if (!game.registrationOpen) {
-          this._safeSend(ws, ["gameLowCardNoJoin", usernameClean, game.betAmount]);
-          this._safeSend(ws, ["gameLowCardError", "Registration is closed"]);
-          return;
-        }
-        if (game.players.size >= CONSTANTS.MAX_PLAYERS_PER_GAME) {
-          this._safeSend(ws, ["gameLowCardError", "Game is full"]);
-          return;
-        }
-        game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
-        this._addClient(room, ws, usernameClean, false);
-        game.playerWsId.set(usernameClean, wsId);
-        this._broadcastToRoom(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
-      } finally {
-        this._joinLocks.delete(lockKey);
+        return;
       }
+      if (!game.registrationOpen) {
+        this._safeSend(ws, ["gameLowCardNoJoin", usernameClean, game.betAmount]);
+        this._safeSend(ws, ["gameLowCardError", "Registration is closed"]);
+        return;
+      }
+      if (game.players.size >= CONSTANTS.MAX_PLAYERS_PER_GAME) {
+        this._safeSend(ws, ["gameLowCardError", "Game is full"]);
+        return;
+      }
+      game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
+      this._addClient(room, ws, usernameClean, false);
+      game.playerWsId.set(usernameClean, wsId);
+      this._broadcastToRoom(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
+      
     } catch(e) {
+      console.error("Error in joinGame:", e);
       this._safeSend(ws, ["gameLowCardError", "Failed to join game"]);
     }
   }
@@ -4130,8 +4084,8 @@ export class GameServer extends CPUProtection {
         return; 
       }
       const usernameClean = username.trim();
-      const wsId = this._getWsId(ws);
-      const room = this._ensureRoomConsistency(ws);
+      const wsId = ws._wsId;
+      const room = ws.room || ws.roomname || this.clientRooms.get(wsId);
       if (!room) { 
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
         return; 
@@ -4211,7 +4165,7 @@ export class GameServer extends CPUProtection {
         return; 
       }
       const usernameClean = username.trim();
-      const room = this._ensureRoomConsistency(ws);
+      const room = ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
       if (!room) { 
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
         return; 
@@ -4240,7 +4194,7 @@ export class GameServer extends CPUProtection {
         return; 
       }
       let room = roomname;
-      if (!room) room = this._ensureRoomConsistency(ws);
+      if (!room) room = ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
       if (!room) { 
         this._safeSend(ws, ["gameStatus", "false"]);
         return; 
@@ -4350,7 +4304,7 @@ export class GameServer extends CPUProtection {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
-      const wsId = this._getWsId(ws);
+      const wsId = ws._wsId;
       if (wsId && this._isRateLimited(wsId, evt)) {
         this._safeSend(ws, ["gameLowCardError", "Too many requests"]);
         return;
@@ -4361,20 +4315,20 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== HANDLER EVENT INTERNAL ====================
+  // ==================== HANDLER EVENT INTERNAL - VERSI SEDERHANA ====================
   async _handleEventInternal(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
 
-      // ==================== SWITCH ROOM (TIDAK PERLU CHECK CONSISTENCY) ====================
+      // ==================== SWITCH ROOM ====================
       if (evt === "switchRoom") {
         const [_, room, username] = data;
         await this.switchRoom(ws, room, username);
         return;
       }
 
-      // ==================== DICE EVENTS (TIDAK PERLU CHECK CONSISTENCY) ====================
+      // ==================== DICE EVENTS ====================
       if (evt === "submitDiceAnswer") {
         const [_, username, guess] = data;
         await this.submitDiceAnswer(ws, username, guess);
@@ -4402,9 +4356,7 @@ export class GameServer extends CPUProtection {
           const sorted = Object.entries(points)
             .sort((a, b) => b[1] - a[1])
             .slice(0, limit);
-          const result = sorted.map(([username, score]) => 
-            `${username}|${score}`
-          );
+          const result = sorted.map(([username, score]) => `${username}|${score}`);
           this._safeSend(ws, ["diceLeaderboard", result]);
         } catch(e) {
           this._safeSend(ws, ["diceLeaderboard", []]);
@@ -4525,7 +4477,7 @@ export class GameServer extends CPUProtection {
       }
 
       if (evt === "getRoomWinners") {
-        const room = data[1] || this._ensureRoomConsistency(ws);
+        const room = data[1] || ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
         if (!room) {
           this._safeSend(ws, ["recordingError", "Room name required"]);
           return;
@@ -4548,7 +4500,7 @@ export class GameServer extends CPUProtection {
       }
 
       if (evt === "lowCardWinnerUpdate") {
-        const room = data[1] || this._ensureRoomConsistency(ws);
+        const room = data[1] || ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
         if (!room) {
           this._safeSend(ws, ["recordingError", "Room name required"]);
           return;
@@ -4569,51 +4521,41 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== LOWCARD GAME EVENTS (PERLU CHECK CONSISTENCY) ====================
-      const room = this._ensureRoomConsistency(ws);
-      if (!room) { 
-        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]); 
-        return; 
-      }
-      if (room === DICE_ROOM) { 
-        this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]); 
-        return; 
-      }
-
-      // LOCK PER ROOM UNTUK MENCEGAH RACE CONDITION
-      const gameLockKey = `game_${room}`;
-      if (this._gameLocks.has(gameLockKey)) {
-        this._safeSend(ws, ["gameLowCardError", "Game is busy, please wait"]);
+      // ==================== LOWCARD GAME EVENTS - TANPA LOCK BERLEBIH ====================
+      const room = ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
+      
+      if (!room) {
+        this._safeSend(ws, ["gameLowCardError", "Please switch to a room first!"]);
         return;
       }
-      this._gameLocks.set(gameLockKey, Date.now());
-
-      try {
-        switch (evt) {
-          case "gameLowCardStart":
-            await this.startGame(ws, data[1], data[2]);
-            break;
-          case "gameLowCardJoin":
-            await this.joinGame(ws, data[1]);
-            break;
-          case "gameLowCardNumber":
-            await this.submitNumber(ws, data[1], data[2] || "", data[3]);
-            break;
-          case "gameLowCardLeave":
-            await this.leaveGame(ws, data[1]);
-            break;
-          case "checkGameRunning":
-            await this.checkGameRunning(ws, data[1]);
-            break;
-          default:
-            break;
-        }
-      } finally {
-        setTimeout(() => {
-          this._gameLocks.delete(gameLockKey);
-        }, 2000);
+      
+      if (room === DICE_ROOM) {
+        this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]);
+        return;
       }
+
+      switch (evt) {
+        case "gameLowCardStart":
+          await this.startGame(ws, data[1], data[2]);
+          break;
+        case "gameLowCardJoin":
+          await this.joinGame(ws, data[1]);
+          break;
+        case "gameLowCardNumber":
+          await this.submitNumber(ws, data[1], data[2] || "", data[3]);
+          break;
+        case "gameLowCardLeave":
+          await this.leaveGame(ws, data[1]);
+          break;
+        case "checkGameRunning":
+          await this.checkGameRunning(ws, data[1]);
+          break;
+        default:
+          break;
+      }
+      
     } catch(e) {
+      console.error("Error in _handleEventInternal:", e);
       this._safeSend(ws, ["gameLowCardError", "Error processing event"]);
     }
   }
@@ -5054,14 +4996,14 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  // ==================== WEBSOCKET CLOSE - LANGSUNG HAPUS TANPA TUNDA ====================
+  // ==================== WEBSOCKET CLOSE ====================
   webSocketClose(ws) {
     try {
       if (!ws) return;
       
       ws._closing = true;
       
-      const wsId = this._getWsId(ws);
+      const wsId = ws._wsId;
       const username = ws.username;
       const room = ws.room || ws.roomname || this.clientRooms.get(wsId);
       
@@ -5107,14 +5049,14 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== WEBSOCKET ERROR - LANGSUNG HAPUS TANPA TUNDA ====================
+  // ==================== WEBSOCKET ERROR ====================
   async webSocketError(ws) {
     try {
       if (!ws) return;
       
       ws._closing = true;
       
-      const wsId = this._getWsId(ws);
+      const wsId = ws._wsId;
       const username = ws.username;
       const room = ws.room || ws.roomname || this.clientRooms.get(wsId);
       
