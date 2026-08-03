@@ -70,9 +70,8 @@ const CONSTANTS = {
   DICE_MIN_PLAYERS_TO_AUTO_START: 1,
   DICE_CHECK_INTERVAL_MS: 5000,
   
-  // ===== TAMBAHAN UNTUK WEEKLY RESET =====
   DICE_LAST_RESET_WEEK: 'dice_last_reset_week',
-  WEEKLY_RESET_CHECK_INTERVAL_MS: 60000,
+  WEEKLY_RESET_CHECK_INTERVAL_MS: 300000, // 5 MENIT
 };
 
 const QUIZ_SCHEDULE = {
@@ -608,8 +607,9 @@ export class GameServer extends CPUProtection {
       this._tieTimer = null;
       this._playerAnswers = new Map();
 
-      // ===== TAMBAHAN: WEEKLY RESET INTERVAL =====
-      this._weeklyResetInterval = null;
+      // ===== CACHE UNTUK dice_last_reset_week =====
+      this._cachedResetWeek = null;
+      this._cachedResetWeekTimestamp = 0;
 
       this._initAsync();
       this._startHealthCheck();
@@ -630,7 +630,23 @@ export class GameServer extends CPUProtection {
         }
       }, 8000);
 
-      // ===== TAMBAHAN: CEK WEEKLY RESET SAAT STARTUP =====
+      // ===== AMBIL dice_last_reset_week DARI KV SAAT STARTUP =====
+      setTimeout(async () => {
+        try {
+          if (!this.closing && !this.isDestroyed) {
+            const lastResetWeek = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_RESET_WEEK);
+            if (lastResetWeek) {
+              this._cachedResetWeek = lastResetWeek;
+              this._cachedResetWeekTimestamp = Date.now();
+              console.log('[Cache] Loaded dice_last_reset_week:', lastResetWeek);
+            }
+          }
+        } catch(e) {
+          console.error('[Cache] Failed to load dice_last_reset_week:', e.message);
+        }
+      }, 1000);
+
+      // ===== CEK WEEKLY RESET SAAT STARTUP =====
       setTimeout(async () => {
         try {
           if (!this.closing && !this.isDestroyed) {
@@ -639,16 +655,35 @@ export class GameServer extends CPUProtection {
         } catch(e) {}
       }, 3000);
 
-      // ===== TAMBAHAN: INTERVAL WEEKLY RESET =====
-      this._weeklyResetInterval = setInterval(async () => {
-        try {
-          if (!this.closing && !this.isDestroyed) {
-            await this._checkAndResetWeeklyDice();
-          }
-        } catch(e) {}
-      }, CONSTANTS.WEEKLY_RESET_CHECK_INTERVAL_MS || 60000);
-
     } catch(e) {}
+  }
+
+  // ==================== GET LAST RESET WEEK DARI CACHE ====================
+  async _getCachedResetWeek() {
+    try {
+      if (this._cachedResetWeek !== null) {
+        return this._cachedResetWeek;
+      }
+      
+      if (this.env?.QUESTIONS) {
+        const lastResetWeek = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_RESET_WEEK);
+        if (lastResetWeek) {
+          this._cachedResetWeek = lastResetWeek;
+          this._cachedResetWeekTimestamp = Date.now();
+          return lastResetWeek;
+        }
+      }
+      
+      return null;
+    } catch(e) {
+      return null;
+    }
+  }
+
+  // ==================== UPDATE CACHE ====================
+  async _updateCachedResetWeek(week) {
+    this._cachedResetWeek = week;
+    this._cachedResetWeekTimestamp = Date.now();
   }
 
   // ==================== SETUP SCHEDULER ====================
@@ -661,7 +696,8 @@ export class GameServer extends CPUProtection {
       this._healthCheckTask();
     });
 
-    this._scheduler.registerTask('weeklyReset', 60000, async () => {
+    // ===== WEEKLY RESET (SATU-SATUNYA, 5 MENIT) =====
+    this._scheduler.registerTask('weeklyReset', 300000, async () => {
       await this._checkAndResetWeeklyDice();
     });
 
@@ -1364,27 +1400,34 @@ export class GameServer extends CPUProtection {
       const now = new Date();
       const currentWeek = this._generateCurrentWeek(now);
       
-      // Ambil last reset week dari KV
-      let lastResetWeek = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_RESET_WEEK);
+      // === AMBIL LAST RESET WEEK DARI CACHE ===
+      let lastResetWeek = await this._getCachedResetWeek();
       
-      // Jika belum pernah reset, set ke minggu lalu agar langsung reset
+      // Jika belum pernah reset, set ke minggu lalu
       if (!lastResetWeek) {
         const lastWeekDate = new Date(now);
         lastWeekDate.setDate(lastWeekDate.getDate() - 7);
         lastResetWeek = this._generateCurrentWeek(lastWeekDate);
+        
+        // Simpan ke cache
+        await this._updateCachedResetWeek(lastResetWeek);
+        
+        // Simpan ke KV
+        await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_RESET_WEEK, lastResetWeek);
       }
       
-      // CEK APAKAH PERLU RESET
-      const needsReset = (lastResetWeek !== currentWeek);
-      
-      if (!needsReset) {
+      // === BANDINGKAN (PAKAI CACHE) ===
+      if (lastResetWeek === currentWeek) {
         return false;
       }
       
-      // === STEP 1: AMBIL DATA POINTS ===
+      // === BERBEDA, LAKUKAN RESET ===
+      console.log(`[Reset] Week change: ${lastResetWeek} -> ${currentWeek}`);
+      
+      // Ambil data points
       const points = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
       
-      // === STEP 2: TENTUKAN PEMENANG ===
+      // Cari pemenang
       let winner = null;
       let highestScore = 0;
       
@@ -1398,7 +1441,7 @@ export class GameServer extends CPUProtection {
         }
       }
       
-      // === STEP 3: SIMPAN PEMENANG (jika ada) ===
+      // Simpan pemenang
       if (winner && highestScore > 0) {
         const winnerData = {
           username: winner,
@@ -1412,7 +1455,6 @@ export class GameServer extends CPUProtection {
           JSON.stringify(winnerData)
         );
         
-        // Broadcast pemenang ke semua client
         this._broadcastToRoom(DICE_ROOM, [
           "diceLastWeekWinner",
           winner,
@@ -1425,38 +1467,36 @@ export class GameServer extends CPUProtection {
           winner: winner,
           score: highestScore,
           week: lastResetWeek,
-          remaining: -1,
-          type: 'weekly_winner'
+          remaining: -1
         });
-        
       } else {
-        // Tidak ada pemenang, hapus data winner lama
         await this.env.QUESTIONS.delete(CONSTANTS.DICE_LAST_WEEK_WINNER);
         this._kvCache.delete('dice_last_week_winner');
       }
       
-      // === STEP 4: RESET POINTS ===
+      // Reset points
       await this.env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify({}));
       
-      // === STEP 5: UPDATE LAST RESET WEEK ===
+      // === UPDATE CACHE + KV ===
+      await this._updateCachedResetWeek(currentWeek);
       await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_RESET_WEEK, currentWeek);
       
-      // === STEP 6: CLEAR CACHE ===
+      // Clear cache lain
       this._kvCache.delete('dice_points');
       this._kvCache.delete('dice_last_week_winner');
       this.diceGameSystem.userScores.clear();
       
-      // === STEP 7: BROADCAST RESET NOTIFICATION ===
+      // Broadcast reset
       this._broadcastDiceNotification("diceError", {
         message: `🔄 Weekly points reset! New week: ${currentWeek}`,
         week: currentWeek,
-        remaining: -1,
-        type: 'weekly_reset'
+        remaining: -1
       });
       
       return true;
       
     } catch(e) {
+      console.error('[Reset] Error:', e.message);
       return false;
     }
   }
@@ -1860,8 +1900,6 @@ export class GameServer extends CPUProtection {
   // ==================== SHOW DICE QUESTION SILENT ====================
   async _showDiceQuestionSilent() {
     try {
-      await this._checkAndResetWeeklyDice();
-
       if (this._isShowingDice) return;
       if (this._diceTimeUpCooldown) return;
       this._lastActivityTime = Date.now();
@@ -2071,8 +2109,6 @@ export class GameServer extends CPUProtection {
   // ==================== SHOW DICE QUESTION ====================
   async _showDiceQuestion() {
     try {
-      await this._checkAndResetWeeklyDice();
-
       if (this._isShowingDice) return;
       if (this._diceTimeUpCooldown) return;
       this._lastActivityTime = Date.now();
@@ -4432,7 +4468,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== HANDLER EVENT INTERNAL - VERSI SEDERHANA ====================
+  // ==================== HANDLER EVENT INTERNAL ====================
   async _handleEventInternal(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
@@ -4529,6 +4565,29 @@ export class GameServer extends CPUProtection {
       if (evt === "getDiceStatus") {
         const isActive = !!this.currentDiceRoll && this._canSubmitDiceAnswer;
         this._safeSend(ws, ["diceStatus", isActive, this._diceRound || 1]);
+        return;
+      }
+
+      // ===== GET CACHED RESET STATUS =====
+      if (evt === "getCachedResetStatus") {
+        try {
+          const now = new Date();
+          const currentWeek = this._generateCurrentWeek(now);
+          const lastResetWeek = await this._getCachedResetWeek();
+          const cacheAge = this._cachedResetWeekTimestamp ? 
+            Math.round((Date.now() - this._cachedResetWeekTimestamp) / 1000) : 0;
+          
+          this._safeSend(ws, ["cachedResetStatus", {
+            currentWeek: currentWeek,
+            lastResetWeek: lastResetWeek || 'never',
+            needsReset: lastResetWeek !== currentWeek,
+            cacheAge: cacheAge + 's',
+            fromCache: true,
+            timestamp: Date.now()
+          }]);
+        } catch(e) {
+          this._safeSend(ws, ["cachedResetStatus", { error: e.message }]);
+        }
         return;
       }
 
@@ -4638,31 +4697,7 @@ export class GameServer extends CPUProtection {
         return;
       }
 
-      // ==================== TAMBAHAN: CEK STATUS WEEKLY RESET ====================
-      if (evt === "getWeeklyResetStatus") {
-        try {
-          const now = new Date();
-          const currentWeek = this._generateCurrentWeek(now);
-          const lastResetWeek = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_RESET_WEEK);
-          const winnerData = await this.diceGameSystem.getLastWeekWinner();
-          const points = await this.diceGameSystem.getPoints();
-          const totalPlayers = Object.keys(points).length;
-          
-          this._safeSend(ws, ["weeklyResetStatus", {
-            currentWeek: currentWeek,
-            lastResetWeek: lastResetWeek || 'never',
-            needsReset: lastResetWeek !== currentWeek,
-            winner: winnerData,
-            totalPlayers: totalPlayers,
-            isDiceTime: this._isDiceTime()
-          }]);
-        } catch(e) {
-          this._safeSend(ws, ["weeklyResetStatus", { error: e.message }]);
-        }
-        return;
-      }
-
-      // ==================== LOWCARD GAME EVENTS - TANPA LOCK BERLEBIH ====================
+      // ==================== LOWCARD GAME EVENTS ====================
       const room = ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
       
       if (!room) {
@@ -4983,12 +5018,6 @@ export class GameServer extends CPUProtection {
       if (this.isDestroyed) return;
       this.isDestroyed = true;
       this.closing = true;
-      
-      // Hapus interval weekly reset
-      if (this._weeklyResetInterval) {
-        clearInterval(this._weeklyResetInterval);
-        this._weeklyResetInterval = null;
-      }
       
       if (this._diceAutoCheckInterval) {
         clearInterval(this._diceAutoCheckInterval);
