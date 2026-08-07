@@ -71,7 +71,7 @@
   DICE_CHECK_INTERVAL_MS: 5000,
   
   DICE_LAST_RESET_WEEK: 'dice_last_reset_week',
-  WEEKLY_RESET_CHECK_INTERVAL_MS: 300000, // 5 MENIT
+  WEEKLY_RESET_CHECK_INTERVAL_MS: 300000,
 };
 
 const QUIZ_SCHEDULE = {
@@ -3561,51 +3561,132 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== PERBAIKAN: ADD BOTS ====================
   _addBots(room, count) {
     try {
       const game = this.activeGames.get(room);
       if (!this._isGameActuallyRunning(game)) return;
+      
       const botNames = ["moz1", "moz2", "moz3", "moz4"];
       const existingBots = Array.from(game.players.keys()).filter(id => id.startsWith('BOT_'));
       const existingBotCount = existingBots.length;
+      
+      // HITUNG BERAPA BOT YANG BISA DITAMBAHKAN
       const maxBotsToAdd = Math.min(count, CONSTANTS.MAX_BOTS_PER_GAME - existingBotCount);
       if (maxBotsToAdd <= 0) return;
+      
       for (let i = 0; i < maxBotsToAdd; i++) {
         const botId = `BOT_${room}_${i}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         const botName = botNames[(existingBotCount + i) % botNames.length];
+        
         if (!game.players.has(botId)) {
           game.players.set(botId, { id: botId, name: botName });
           if (!game.botPlayers) game.botPlayers = new Map();
           game.botPlayers.set(botId, botName);
         }
       }
+      
       game._botsAdded = true;
       game.useBots = true;
-    } catch(e) {}
+      
+      // BROADCAST BOT JOIN
+      const botNamesAdded = Array.from(game.botPlayers.values());
+      this._broadcastToRoom(room, ["gameLowCardBotJoin", botNamesAdded]);
+      
+      console.log(`[Game] ${room} - Added ${maxBotsToAdd} bots. Total players: ${game.players.size}`);
+      
+    } catch(e) {
+      console.error('Error in _addBots:', e);
+    }
+  }
+
+  // ==================== PERBAIKAN: CLOSE REGISTRATION ====================
+  _closeRegistration(room, game) {
+    try {
+      if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
+      game.registrationOpen = false;
+      if (game._registrationTimer) { 
+        clearInterval(game._registrationTimer); 
+        game._registrationTimer = null; 
+      }
+      
+      // HITUNG HUMAN PLAYERS
+      const humanPlayers = Array.from(game.players.keys()).filter(id => !id.startsWith('BOT_'));
+      const humanCount = humanPlayers.length;
+      
+      console.log(`[Game] ${room} - Registration closed. Human: ${humanCount}, Total: ${game.players.size}`);
+      
+      // TAMBAHKAN BOT JIKA KURANG DARI 2 PLAYER ATAU HANYA HOST
+      if (!game._botsAdded) {
+        // Jika hanya host (1 player) atau tidak ada player, tambahkan 4 bot
+        if (humanCount <= 1) {
+          this._addBots(room, 4);
+          game._botsAdded = true;
+        } 
+        // Jika total player < 2 (host + 1 bot atau kurang)
+        else if (game.players.size < 2) {
+          const needed = Math.min(4 - game.players.size, CONSTANTS.MAX_BOTS_PER_GAME);
+          if (needed > 0) {
+            this._addBots(room, needed);
+            game._botsAdded = true;
+          }
+        }
+        // Jika total player 2-4, tambahkan bot sampai minimal 4 player
+        else if (game.players.size < 4) {
+          const needed = 4 - game.players.size;
+          this._addBots(room, needed);
+          game._botsAdded = true;
+        }
+      }
+      
+      // CEK APAKAH CUKUP PLAYER UNTUK MAIN
+      if (this._isGameActuallyRunning(game) && game.players.size >= 2) {
+        this._startDrawPhase(room, game);
+      } else {
+        // JIKA TIDAK CUKUP, END GAME
+        game._gameEnded = true;
+        game._isActive = false;
+        game._endTime = Date.now();
+        this._broadcastToRoom(room, ["gameLowCardError", "Not enough players"]);
+        this._scheduleGameCleanup(room, game);
+      }
+    } catch(e) {
+      console.error('Error in _closeRegistration:', e);
+    }
   }
 
   _startBotDraws(room, game) {
     try {
       if (!this._isGameActuallyRunning(game) || !game.botPlayers) return;
       if (!game._botTimeouts) game._botTimeouts = new Set();
+      
+      // AMBIL BOT YANG BELUM DRAW DAN BELUM TERELIMINASI
       const notDrawn = Array.from(game.botPlayers.keys())
         .filter(id => !game.eliminated?.has(id) && !game.numbers?.has(id))
         .slice(0, CONSTANTS.MAX_BOT_DRAWS_PER_ROUND);
+      
       for (const botId of notDrawn) {
         const delay = this._getRandomDrawDelay();
         const timeout = setTimeout(() => {
           try {
             const currentGame = this.activeGames.get(room);
-            if (this._isGameActuallyRunning(currentGame) && !currentGame.drawTimeExpired &&
-                !currentGame.evaluationLocked && !currentGame.numbers?.has(botId) && !currentGame.eliminated?.has(botId)) {
+            if (this._isGameActuallyRunning(currentGame) && 
+                !currentGame.drawTimeExpired &&
+                !currentGame.evaluationLocked && 
+                !currentGame.numbers?.has(botId) && 
+                !currentGame.eliminated?.has(botId)) {
               this._handleBotDraw(room, botId, currentGame);
             }
             currentGame?._botTimeouts?.delete(timeout);
-          } catch(e) {}
+          } catch(e) {
+            console.error('Error in bot draw:', e);
+          }
         }, delay);
         game._botTimeouts.add(timeout);
       }
-    } catch(e) {}
+    } catch(e) {
+      console.error('Error in _startBotDraws:', e);
+    }
   }
 
   _handleBotDraw(room, botId, game) {
@@ -3628,7 +3709,9 @@ export class GameServer extends CPUProtection {
           } catch(e) {} 
         }, CONSTANTS.EVALUATION_DELAY_MS);
       }
-    } catch(e) {}
+    } catch(e) {
+      console.error('Error in _handleBotDraw:', e);
+    }
   }
 
   _forceBotDraw(room, botId, game) {
@@ -3675,41 +3758,6 @@ export class GameServer extends CPUProtection {
         }
       }, 1000);
       game._registrationTimer = timer;
-    } catch(e) {}
-  }
-
-  _closeRegistration(room, game) {
-    try {
-      if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
-      game.registrationOpen = false;
-      if (game._registrationTimer) { 
-        clearInterval(game._registrationTimer); 
-        game._registrationTimer = null; 
-      }
-      const humanPlayers = Array.from(game.players.keys()).filter(id => !id.startsWith('BOT_'));
-      const humanCount = humanPlayers.length;
-      if (!game._botsAdded) {
-        if (humanCount === 1 || humanCount === 0) { 
-          this._addBots(room, 4); 
-          game._botsAdded = true; 
-        }
-        else if (game.players.size < 2) {
-          const needed = Math.min(4 - game.players.size, CONSTANTS.MAX_BOTS_PER_GAME);
-          if (needed > 0) { 
-            this._addBots(room, needed); 
-            game._botsAdded = true; 
-          }
-        }
-      }
-      if (this._isGameActuallyRunning(game) && game.players.size >= 2) {
-        this._startDrawPhase(room, game);
-      } else {
-        game._gameEnded = true;
-        game._isActive = false;
-        game._endTime = Date.now();
-        this._broadcastToRoom(room, ["gameLowCardError", "Not enough players"]);
-        this._scheduleGameCleanup(room, game);
-      }
     } catch(e) {}
   }
 
