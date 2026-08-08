@@ -76,7 +76,7 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 3 },
+    { start: 1, end: 2 },
     { start: 14, end: 15 },
     { start: 21, end: 22 }
   ],
@@ -1698,15 +1698,15 @@ export class GameServer extends CPUProtection {
           if (remainingInt === 20 && !this._diceNotifiedFlags[20]) {
             this._diceNotifiedFlags[20] = true;
             shouldSend = true;
-            message = "20 seconds remaining";
+            message = "20s remaining";
           } else if (remainingInt === 10 && !this._diceNotifiedFlags[10]) {
             this._diceNotifiedFlags[10] = true;
             shouldSend = true;
-            message = "10 seconds remaining";
+            message = "10s remaining";
           } else if (remainingInt === 5 && !this._diceNotifiedFlags[5]) {
             this._diceNotifiedFlags[5] = true;
             shouldSend = true;
-            message = "5 seconds remaining";
+            message = "5s remaining";
           } else if (remainingInt <= 0 && !this._diceNotifiedFlags.timeup) {
             this._diceNotifiedFlags.timeup = true;
             shouldSend = true;
@@ -1739,7 +1739,7 @@ export class GameServer extends CPUProtection {
     this._diceTimeUpCooldown = true;
     
     this._broadcastDiceNotification("diceError", {
-      message: "wait 15 seconds",
+      message: "wait 15s",
       remaining: 15,
       isDiceTime: true,
       isActive: false,
@@ -1980,12 +1980,10 @@ export class GameServer extends CPUProtection {
       status: 'waiting'
     });
     
-    const playerNames = players.join(', ');
     this._broadcastDiceNotification("diceError", {
-      message: `Tie breaker started with ${players.length} players: ${playerNames}`,
+      message: `Tie Breaker - ${players.length} players`,
       remaining: -1,
-      isTieBreaker: true,
-      players: players
+      isTieBreaker: true
     });
     
     await this._runTieRound(room, id, players);
@@ -2004,23 +2002,12 @@ export class GameServer extends CPUProtection {
     
     const playerNames = players.join(', ');
     
-    // Kirim via diceNotification agar client Java bisa menampilkan
     this._broadcastDiceNotification("diceError", {
-      message: `Tie Breaker Round ${this._tieRound} - Players: ${playerNames}`,
+      message: `Round ${this._tieRound}: ${playerNames}`,
       remaining: 20,
       isTieBreaker: true,
-      round: this._tieRound,
-      players: players,
-      playerCount: players.length
+      round: this._tieRound
     });
-    
-    // Kirim via diceTieRound untuk client yang support
-    this._broadcastToRoom(DICE_ROOM, ["diceTieRound", {
-      round: this._tieRound,
-      players: players,
-      playerCount: players.length,
-      message: `Tie Breaker Round ${this._tieRound} - ${players.length} players: ${playerNames}`
-    }]);
     
     this._canSubmitDiceAnswer = true;
     this._diceQuestionStartTime = Date.now();
@@ -2050,40 +2037,37 @@ export class GameServer extends CPUProtection {
       if (timeLeft === 15 && !notified[15]) {
         notified[15] = true;
         this._broadcastDiceNotification("diceError", {
-          message: `15 seconds remaining - Tie Breaker Round ${this._tieRound}`,
+          message: `15s remaining`,
           remaining: 15,
-          isTieBreaker: true,
-          round: this._tieRound
+          isTieBreaker: true
         });
       }
       
       if (timeLeft === 10 && !notified[10]) {
         notified[10] = true;
         this._broadcastDiceNotification("diceError", {
-          message: `10 seconds remaining - Tie Breaker Round ${this._tieRound}`,
+          message: `10s remaining`,
           remaining: 10,
-          isTieBreaker: true,
-          round: this._tieRound
+          isTieBreaker: true
         });
       }
       
       if (timeLeft === 5 && !notified[5]) {
         notified[5] = true;
         this._broadcastDiceNotification("diceError", {
-          message: `5 seconds remaining - Tie Breaker Round ${this._tieRound}`,
+          message: `5s remaining`,
           remaining: 5,
-          isTieBreaker: true,
-          round: this._tieRound
+          isTieBreaker: true
         });
       }
       
       if (timeLeft === 3 && !notified[3]) {
         notified[3] = true;
         this._broadcastDiceNotification("diceError", {
-          message: `3 seconds remaining - Tie Breaker Round ${this._tieRound}`,
+          message: `3s remaining`,
           remaining: 3,
-          isTieBreaker: true,
-          round: this._tieRound        });
+          isTieBreaker: true
+        });
       }
       
       if (timeLeft <= 0) {
@@ -2097,22 +2081,10 @@ export class GameServer extends CPUProtection {
       this._isShowingDice = false;
       
       this._broadcastDiceNotification("diceError", {
-        message: `Time up for Tie Breaker Round ${this._tieRound}`,
+        message: `Time up`,
         remaining: -1,
-        isTieBreaker: true,
-        round: this._tieRound
+        isTieBreaker: true
       });
-      
-      const unanswered = players.filter(p => !this._tieAnswers.has(p));
-      if (unanswered.length > 0) {
-        this._broadcastDiceNotification("diceError", {
-          message: `${unanswered.join(', ')} did not answer in Round ${this._tieRound}`,
-          remaining: -1,
-          isTieBreaker: true,
-          round: this._tieRound,
-          unanswered: unanswered
-        });
-      }
       
       const tieId = this._getActiveTieBreakerId();
       if (tieId) {
@@ -2154,10 +2126,9 @@ export class GameServer extends CPUProtection {
     
     if (answeredPlayers.length === 0) {
       this._broadcastDiceNotification("diceError", {
-        message: `No one answered - Tie Breaker Round ${this._tieRound} cancelled`,
+        message: `No answer - cancelled`,
         remaining: -1,
-        isTieBreaker: true,
-        round: this._tieRound
+        isTieBreaker: true
       });
       
       this._resetTieBreakerState(id);
@@ -2172,22 +2143,12 @@ export class GameServer extends CPUProtection {
       const winner = highestPlayers[0];
       
       this._broadcastDiceNotification("diceError", {
-        message: `🏆 Winner: ${winner} with value ${highest} in Tie Breaker Round ${this._tieRound}!`,
+        message: `Winner: ${winner} (${highest})`,
         remaining: -1,
         isTieBreaker: true,
-        round: this._tieRound,
         winner: winner,
-        value: highest,
-        totalRounds: this._tieRound
+        value: highest
       });
-      
-      this._broadcastToRoom(DICE_ROOM, ["diceTieWinner", {
-        winner: winner,
-        value: highest,
-        round: this._tieRound,
-        totalRounds: this._tieRound,
-        message: `${winner} wins tie breaker with value ${highest} in round ${this._tieRound}`
-      }]);
       
       const points = await this._getDicePoints();
       points[winner] = (points[winner] || 0) + 1;
@@ -2212,22 +2173,10 @@ export class GameServer extends CPUProtection {
       const playerNames = highestPlayers.join(', ');
       
       this._broadcastDiceNotification("diceError", {
-        message: `⚖️ Draw! ${highestPlayers.length} players tied with value ${highest}: ${playerNames}. Continuing to Round ${this._tieRound + 1}`,
+        message: `Draw: ${playerNames} (${highest}) -> Round ${this._tieRound + 1}`,
         remaining: -1,
-        isTieBreaker: true,
-        round: this._tieRound,
-        players: highestPlayers,
-        tieValue: highest,
-        nextRound: this._tieRound + 1
+        isTieBreaker: true
       });
-      
-      this._broadcastToRoom(DICE_ROOM, ["diceTieBreak", {
-        round: this._tieRound,
-        players: highestPlayers,
-        value: highest,
-        nextRound: this._tieRound + 1,
-        message: `Tie break - ${playerNames} with value ${highest} - continuing to round ${this._tieRound + 1}`
-      }]);
       
       this._tiePlayers = highestPlayers;
       this._tieAnswers = new Map();
@@ -2238,16 +2187,6 @@ export class GameServer extends CPUProtection {
       
       setTimeout(() => {
         if (this._tieActive && this._tiePlayers.length > 1) {
-          const nextPlayerNames = this._tiePlayers.join(', ');
-          this._broadcastDiceNotification("diceError", {
-            message: `Tie Breaker Round ${this._tieRound + 1} - Players: ${nextPlayerNames}`,
-            remaining: 20,
-            isTieBreaker: true,
-            round: this._tieRound + 1,
-            players: this._tiePlayers,
-            playerCount: this._tiePlayers.length
-          });
-          
           this._runTieRound(room, id, this._tiePlayers);
         } else {
           if (this._tiePlayers.length === 1) {
@@ -2261,10 +2200,9 @@ export class GameServer extends CPUProtection {
     }
     
     this._broadcastDiceNotification("diceError", {
-      message: `Tie Breaker Round ${this._tieRound} ended unexpectedly`,
+      message: `Tie ended`,
       remaining: -1,
-      isTieBreaker: true,
-      round: this._tieRound
+      isTieBreaker: true
     });
     
     this._resetTieBreakerState(id);
@@ -2273,20 +2211,10 @@ export class GameServer extends CPUProtection {
 
   async _processSingleWinner(room, id, winner) {
     this._broadcastDiceNotification("diceError", {
-      message: `🏆 Winner: ${winner} (only player remaining in Tie Breaker Round ${this._tieRound})`,
+      message: `Winner: ${winner}`,
       remaining: -1,
-      isTieBreaker: true,
-      round: this._tieRound,
-      winner: winner
+      isTieBreaker: true
     });
-    
-    this._broadcastToRoom(DICE_ROOM, ["diceTieWinner", {
-      winner: winner,
-      value: 'auto',
-      round: this._tieRound,
-      totalRounds: this._tieRound,
-      message: `${winner} wins tie breaker - only player remaining`
-    }]);
     
     const points = await this._getDicePoints();
     points[winner] = (points[winner] || 0) + 1;
@@ -2413,7 +2341,7 @@ export class GameServer extends CPUProtection {
         
         this._broadcastDiceNotification("diceError", {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
-          remainingTime: `20 seconds remaining`,
+          remainingTime: `20s remaining`,
           remaining: 20,
           message: "Go Cheers Catch draw",
           round: this._diceRound
@@ -2566,7 +2494,7 @@ export class GameServer extends CPUProtection {
           this._isShowingDice = false;
           
           this._broadcastDiceNotification("diceError", {
-            message: `All players answered in Tie Breaker Round ${this._tieRound} - processing...`,
+            message: `All answered - Round ${this._tieRound}`,
             remaining: -1,
             isTieBreaker: true,
             round: this._tieRound
@@ -2868,9 +2796,9 @@ export class GameServer extends CPUProtection {
           
           let displayTime = "";
           if (remainingInt >= 20) {
-            displayTime = "20 seconds remaining";
+            displayTime = "20s remaining";
           } else if (remainingInt >= 10) {
-            displayTime = "10 seconds remaining";
+            displayTime = "10s remaining";
           } else if (remainingInt > 0) {
             displayTime = `${timeText} remaining`;
           }
@@ -3313,11 +3241,11 @@ export class GameServer extends CPUProtection {
         if (remainingInt > 0) {
           let displayTime = "";
           if (remainingInt >= 20) {
-            displayTime = "20 seconds remaining";
+            displayTime = "20s remaining";
           } else if (remainingInt >= 10) {
-            displayTime = "10 seconds remaining";
+            displayTime = "10s remaining";
           } else if (remainingInt >= 5) {
-            displayTime = "5 seconds remaining";
+            displayTime = "5s remaining";
           } else {
             displayTime = `${remainingInt}s remaining`;
           }
