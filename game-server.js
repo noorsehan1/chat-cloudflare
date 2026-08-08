@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS - FULL CLASS FINAL (FIXED) ====================
+// ==================== GAME-SERVER.JS - FULL CLASS FINAL (W33 FIXED) ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -607,15 +607,25 @@ export class GameServer extends CPUProtection {
       this._tieTimer = null;
       this._playerAnswers = new Map();
 
-      // ===== CACHE UNTUK dice_last_reset_week =====
+      // CACHE UNTUK dice_last_reset_week
       this._cachedResetWeek = null;
       this._cachedResetWeekTimestamp = 0;
 
+      // ===== INISIALISASI (TANPA RESET) =====
       this._initAsync();
-      this._startHealthCheck();
 
-      this._initRecordingStatusFromKV();
+      // ===== INISIALISASI WEEKLY RESET - TANPA VALIDASI =====
+      setTimeout(async () => {
+        try {
+          if (!this.closing && !this.isDestroyed) {
+            await this._initResetWeek();
+          }
+        } catch(e) {
+          console.error('[Init] Failed to initialize reset week:', e.message);
+        }
+      }, 1000);
 
+      // ===== LOAD DICE SCORES =====
       setTimeout(async () => {
         try {
           if (!this.closing && !this.isDestroyed) {
@@ -624,38 +634,45 @@ export class GameServer extends CPUProtection {
         } catch(e) {}
       }, 5000);
 
+      // ===== FORCE START DICE =====
       setTimeout(() => {
         if (!this.closing && !this.isDestroyed && !this._isShowingDice) {
           this.forceStartDice();
         }
       }, 8000);
 
-      // ===== AMBIL dice_last_reset_week DARI KV SAAT STARTUP =====
-      setTimeout(async () => {
-        try {
-          if (!this.closing && !this.isDestroyed) {
-            const lastResetWeek = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_RESET_WEEK);
-            if (lastResetWeek) {
-              this._cachedResetWeek = lastResetWeek;
-              this._cachedResetWeekTimestamp = Date.now();
-              console.log('[Cache] Loaded dice_last_reset_week:', lastResetWeek);
-            }
-          }
-        } catch(e) {
-          console.error('[Cache] Failed to load dice_last_reset_week:', e.message);
-        }
-      }, 1000);
+      // ===== START DICE AUTO CHECKER =====
+      this._startDiceAutoChecker();
 
-      // ===== CEK WEEKLY RESET SAAT STARTUP =====
-      setTimeout(async () => {
-        try {
-          if (!this.closing && !this.isDestroyed) {
-            await this._checkAndResetWeeklyDice();
-          }
-        } catch(e) {}
-      }, 3000);
+    } catch(e) {
+      console.error('[Constructor] Error:', e.message);
+    }
+  }
 
-    } catch(e) {}
+  // ==================== INIT RESET WEEK (TANPA VALIDASI) ====================
+  async _initResetWeek() {
+    try {
+      if (!this.env?.QUESTIONS) return;
+
+      const existingResetWeek = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_RESET_WEEK);
+      const currentWeek = this._generateCurrentWeek(new Date());
+
+      if (!existingResetWeek) {
+        // SET ke current week (TANPA RESET)
+        await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_RESET_WEEK, currentWeek);
+        await this._updateCachedResetWeek(currentWeek);
+        console.log('[Init] Initialized reset week to:', currentWeek);
+        return;
+      }
+
+      // ✅ TERIMA SAJA apapun nilai lastResetWeek (termasuk W33)
+      // ❌ TIDAK ADA VALIDASI future week
+      console.log('[Init] Using existing reset week:', existingResetWeek);
+      await this._updateCachedResetWeek(existingResetWeek);
+
+    } catch(e) {
+      console.error('[Init] Error:', e.message);
+    }
   }
 
   // ==================== GET LAST RESET WEEK DARI CACHE ====================
@@ -686,6 +703,17 @@ export class GameServer extends CPUProtection {
     this._cachedResetWeekTimestamp = Date.now();
   }
 
+  // ==================== IS WEEK GREATER ====================
+  _isWeekGreater(weekA, weekB) {
+    try {
+      const numA = parseInt(weekA.split('-W')[1]);
+      const numB = parseInt(weekB.split('-W')[1]);
+      return numA > numB;
+    } catch(e) {
+      return false;
+    }
+  }
+
   // ==================== SETUP SCHEDULER ====================
   _setupScheduler() {
     this._scheduler.registerTask('cpuMonitor', 100, () => {
@@ -696,7 +724,8 @@ export class GameServer extends CPUProtection {
       this._healthCheckTask();
     });
 
-    this._scheduler.registerTask('weeklyReset', 300000, async () => {
+    // ✅ WEEKLY RESET - CEK SETIAP 1 MENIT
+    this._scheduler.registerTask('weeklyReset', 60000, async () => {
       await this._checkAndResetWeeklyDice();
     });
 
@@ -727,15 +756,167 @@ export class GameServer extends CPUProtection {
     this._scheduler.start(CONSTANTS.SCHEDULER_LOOP_INTERVAL_MS || 50);
   }
 
+  // ==================== CHECK AND RESET WEEKLY DICE (TANPA VALIDASI) ====================
+  async _checkAndResetWeeklyDice() {
+    try {
+      if (!this.env?.QUESTIONS) return false;
+      
+      const now = new Date();
+      const currentWeek = this._generateCurrentWeek(now);
+      
+      // 1. AMBIL lastResetWeek dari KV
+      let lastResetWeek = await this._getCachedResetWeek();
+      
+      // 2. Jika NULL, SET ke current week (TANPA RESET)
+      if (!lastResetWeek) {
+        await this._updateCachedResetWeek(currentWeek);
+        await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_RESET_WEEK, currentWeek);
+        console.log('[Reset] Initialized reset week to:', currentWeek);
+        return false;
+      }
+      
+      // ✅ TERIMA SAJA lastResetWeek (termasuk W33)
+      // ❌ TIDAK ADA VALIDASI future week
+      
+      // 3. CEK: Apakah minggu sudah berganti?
+      const weekChanged = lastResetWeek !== currentWeek;
+      
+      if (!weekChanged) {
+        return false; // Masih minggu yang sama
+      }
+      
+      // 4. CEK: Apakah sudah hari Senin? (UTC)
+      const dayOfWeek = now.getUTCDay(); // 1 = Monday
+      const hours = now.getUTCHours();
+      const minutes = now.getUTCMinutes();
+      
+      // Reset di UTC 00:00 (Senin pagi)
+      const isMonday = dayOfWeek === 1;
+      const isResetTime = hours === 0 && minutes === 0;
+      
+      // 5. RESET hanya jika: Minggu berganti + Hari Senin + Jam 00:00 UTC
+      if (weekChanged && isMonday && isResetTime) {
+        console.log('[Reset] Weekly reset triggered at UTC 00:00!');
+        console.log(`[Reset] ${lastResetWeek} → ${currentWeek}`);
+        
+        // === LAKUKAN RESET ===
+        const points = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
+        
+        // Cari pemenang minggu lalu
+        let winner = null;
+        let highestScore = 0;
+        
+        for (const [username, score] of Object.entries(points)) {
+          const numericScore = typeof score === 'number' ? score : parseInt(score, 10) || 0;
+          if (numericScore > highestScore) {
+            highestScore = numericScore;
+            winner = username;
+          }
+        }
+        
+        // Simpan pemenang minggu lalu
+        if (winner && highestScore > 0) {
+          const winnerData = {
+            username: winner,
+            score: highestScore,
+            week: lastResetWeek,
+            timestamp: Date.now()
+          };
+          
+          await this.env.QUESTIONS.put(
+            CONSTANTS.DICE_LAST_WEEK_WINNER,
+            JSON.stringify(winnerData)
+          );
+          
+          this._broadcastToRoom(DICE_ROOM, [
+            "diceLastWeekWinner",
+            winner,
+            highestScore,
+            lastResetWeek
+          ]);
+          
+          this._broadcastDiceNotification("diceError", {
+            message: `🏆 WEEKLY WINNER: ${winner} with ${highestScore} points! (Week ${lastResetWeek})`,
+            winner: winner,
+            score: highestScore,
+            week: lastResetWeek,
+            remaining: -1
+          });
+        } else {
+          await this.env.QUESTIONS.delete(CONSTANTS.DICE_LAST_WEEK_WINNER);
+          this._kvCache.delete('dice_last_week_winner');
+        }
+        
+        // RESET POINTS
+        await this.env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify({}));
+        
+        // UPDATE lastResetWeek
+        await this._updateCachedResetWeek(currentWeek);
+        await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_RESET_WEEK, currentWeek);
+        
+        // Clear cache
+        this._kvCache.delete('dice_points');
+        this._kvCache.delete('dice_last_week_winner');
+        this.diceGameSystem.userScores.clear();
+        
+        this._broadcastDiceNotification("diceError", {
+          message: `🔄 Weekly points reset! New week: ${currentWeek}`,
+          week: currentWeek,
+          remaining: -1
+        });
+        
+        return true;
+      }
+      
+      // 6. Jika minggu berganti tapi belum Senin
+      if (weekChanged && !isMonday) {
+        console.log(`[Reset] Week changed from ${lastResetWeek} to ${currentWeek}, waiting for Monday 00:00 UTC...`);
+        
+        // Kirim notifikasi sekali saja
+        const notificationKey = `week_change_${currentWeek}`;
+        if (!this._kvCache.get(notificationKey)) {
+          this._kvCache.set(notificationKey, true, 3600000); // 1 hour TTL
+          
+          this._broadcastDiceNotification("diceError", {
+            message: `📅 New week: ${currentWeek}. Reset on Monday 00:00 UTC!`,
+            week: currentWeek,
+            remaining: -1
+          });
+        }
+      }
+      
+      // 7. Jika sudah Senin tapi belum jam 00:00
+      if (weekChanged && isMonday && !isResetTime) {
+        console.log(`[Reset] Monday ${currentWeek}, waiting for 00:00 UTC...`);
+      }
+      
+      return false;
+      
+    } catch(e) {
+      console.error('[Reset] Error:', e.message);
+      return false;
+    }
+  }
+
+  // ==================== GENERATE CURRENT WEEK ====================
+  _generateCurrentWeek(date) {
+    try {
+      const now = date || new Date();
+      const year = now.getUTCFullYear();
+      const startOfYear = new Date(Date.UTC(year, 0, 1));
+      const diff = now - startOfYear;
+      const week = Math.ceil((diff / 86400000 + startOfYear.getUTCDay() + 1) / 7);
+      return `${year}-W${String(week).padStart(2, '0')}`;
+    } catch(e) {
+      return '2026-W01';
+    }
+  }
+
   // ==================== SCHEDULER TASKS ====================
   _healthCheckTask() {
     try {
       this._performHealthCheck();
     } catch(e) {}
-  }
-
-  async _weeklyResetTask() {
-    await this._checkAndResetWeeklyDice();
   }
 
   _diceKeepAliveTask() {
@@ -1386,131 +1567,6 @@ export class GameServer extends CPUProtection {
       
     } catch(e) {
       this._winnerProcessed = false;
-    }
-  }
-
-  // ==================== WEEKLY RESET OTOMATIS ====================
-  async _checkAndResetWeeklyDice() {
-    try {
-      if (!this.env?.QUESTIONS) {
-        return false;
-      }
-      
-      const now = new Date();
-      const currentWeek = this._generateCurrentWeek(now);
-      
-      // === AMBIL LAST RESET WEEK DARI CACHE ===
-      let lastResetWeek = await this._getCachedResetWeek();
-      
-      // Jika belum pernah reset, set ke minggu lalu
-      if (!lastResetWeek) {
-        const lastWeekDate = new Date(now);
-        lastWeekDate.setDate(lastWeekDate.getDate() - 7);
-        lastResetWeek = this._generateCurrentWeek(lastWeekDate);
-        
-        // Simpan ke cache
-        await this._updateCachedResetWeek(lastResetWeek);
-        
-        // Simpan ke KV
-        await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_RESET_WEEK, lastResetWeek);
-      }
-      
-      // === BANDINGKAN (PAKAI CACHE) ===
-      if (lastResetWeek === currentWeek) {
-        return false;
-      }
-      
-      // === BERBEDA, LAKUKAN RESET ===
-      console.log(`[Reset] Week change: ${lastResetWeek} -> ${currentWeek}`);
-      
-      // Ambil data points
-      const points = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
-      
-      // Cari pemenang
-      let winner = null;
-      let highestScore = 0;
-      
-      if (Object.keys(points).length > 0) {
-        for (const [username, score] of Object.entries(points)) {
-          const numericScore = typeof score === 'number' ? score : parseInt(score, 10) || 0;
-          if (numericScore > highestScore) {
-            highestScore = numericScore;
-            winner = username;
-          }
-        }
-      }
-      
-      // Simpan pemenang
-      if (winner && highestScore > 0) {
-        const winnerData = {
-          username: winner,
-          score: highestScore,
-          week: lastResetWeek,
-          timestamp: Date.now()
-        };
-        
-        await this.env.QUESTIONS.put(
-          CONSTANTS.DICE_LAST_WEEK_WINNER,
-          JSON.stringify(winnerData)
-        );
-        
-        this._broadcastToRoom(DICE_ROOM, [
-          "diceLastWeekWinner",
-          winner,
-          highestScore,
-          lastResetWeek
-        ]);
-        
-        this._broadcastDiceNotification("diceError", {
-          message: `🏆 WEEKLY WINNER: ${winner} with ${highestScore} points! (Week ${lastResetWeek})`,
-          winner: winner,
-          score: highestScore,
-          week: lastResetWeek,
-          remaining: -1
-        });
-      } else {
-        await this.env.QUESTIONS.delete(CONSTANTS.DICE_LAST_WEEK_WINNER);
-        this._kvCache.delete('dice_last_week_winner');
-      }
-      
-      // Reset points
-      await this.env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify({}));
-      
-      // === UPDATE CACHE + KV ===
-      await this._updateCachedResetWeek(currentWeek);
-      await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_RESET_WEEK, currentWeek);
-      
-      // Clear cache lain
-      this._kvCache.delete('dice_points');
-      this._kvCache.delete('dice_last_week_winner');
-      this.diceGameSystem.userScores.clear();
-      
-      // Broadcast reset
-      this._broadcastDiceNotification("diceError", {
-        message: `🔄 Weekly points reset! New week: ${currentWeek}`,
-        week: currentWeek,
-        remaining: -1
-      });
-      
-      return true;
-      
-    } catch(e) {
-      console.error('[Reset] Error:', e.message);
-      return false;
-    }
-  }
-
-  // ==================== GENERATE CURRENT WEEK ====================
-  _generateCurrentWeek(date) {
-    try {
-      const now = date || new Date();
-      const year = now.getUTCFullYear();
-      const startOfYear = new Date(Date.UTC(year, 0, 1));
-      const diff = now - startOfYear;
-      const week = Math.ceil((diff / 86400000 + startOfYear.getUTCDay() + 1) / 7);
-      return `${year}-W${String(week).padStart(2, '0')}`;
-    } catch(e) {
-      return '2026-W01';
     }
   }
 
@@ -3117,12 +3173,7 @@ export class GameServer extends CPUProtection {
         this.roomViewers.get(room).add(username);
       }
       
-      // Log for debugging
-      // console.log(`[AddClient] Added ${username || 'anonymous'} to room ${room}, total clients: ${clients.size}`);
-      
-    } catch(e) {
-      // console.error('[AddClient] Error:', e.message);
-    }
+    } catch(e) {}
   }
 
   _removeClientFromRoom(room, wsId) {
@@ -3336,9 +3387,7 @@ export class GameServer extends CPUProtection {
         }
       }).catch(() => {});
       
-    } catch(e) {
-      // console.error('[SendGameState] Error:', e.message);
-    }
+    } catch(e) {}
   }
 
   _sendDiceNotificationOnSwitch(ws, wsId) {
@@ -4861,7 +4910,6 @@ export class GameServer extends CPUProtection {
           await this.checkGameRunning(ws, data[1]);
           break;
         case "getGameState":
-          // New event to explicitly request game state
           const targetRoom = data[1] || room;
           this._sendGameStateToClient(ws, targetRoom);
           break;
@@ -5236,6 +5284,8 @@ export class GameServer extends CPUProtection {
             timestamp: Date.now(),
             diceSchedule: QUIZ_SCHEDULE.SESSIONS.map(s => `${s.start}:00-${s.end}:00`),
             currentWITATime: this._getCurrentWITATime().formatted,
+            lastResetWeek: this._cachedResetWeek || 'unknown',
+            currentWeek: this._generateCurrentWeek(new Date()),
           };
           return new Response(JSON.stringify(status), {
             headers: { 'Content-Type': 'application/json' }
