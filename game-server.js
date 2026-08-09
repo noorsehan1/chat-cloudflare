@@ -803,7 +803,7 @@ class TieBreakerSystem {
         ]);
 
         this.gameServer._broadcastDiceNotification('diceError', {
-          message: '🏆 ' + winner + ' wins tie breaker with ',
+          message: '🏆 ' + winner + ' wins tie breaker with ' + highest,
           winner: winner,
           guess: highest,
           remaining: -1,
@@ -852,7 +852,7 @@ class TieBreakerSystem {
             }
           ]);
           this.gameServer._broadcastDiceNotification('diceError', {
-            message: '🏆 ' + this.players[0] + ' wins tie breaker with ',
+            message: '🏆 ' + this.players[0] + ' wins tie breaker with ' + highest,
             winner: this.players[0],
             guess: highest,
             remaining: -1,
@@ -2664,7 +2664,7 @@ export class GameServer extends CPUProtection {
         }]);
         
         this._broadcastDiceNotification("diceError", {
-          message: `🏆 ${winner} wins tie breaker `,
+          message: `🏆 ${winner} wins tie breaker with ${highest}`,
           winner: winner,
           guess: highest,
           remaining: -1,
@@ -2696,7 +2696,7 @@ export class GameServer extends CPUProtection {
         }
         
         this._broadcastDiceNotification("diceError", {
-          message: `♡ Next round: ${highestPlayers.join(', ')}`,
+          message: `⚖️ Tie at ${highest}. Next round: ${highestPlayers.join(', ')}`,
           highest: highest,
           players: highestPlayers,
           remaining: -1,
@@ -3250,7 +3250,7 @@ export class GameServer extends CPUProtection {
       }
       
       this._broadcastDiceNotification("diceError", {
-        message: "Dice game has ended ♡",
+        message: "Dice game has ended",
         remaining: -1,
         clearUI: true
       });
@@ -3322,7 +3322,7 @@ export class GameServer extends CPUProtection {
       
       const timeLeft = this._getTimeLeftUntilNextDice();
       this._broadcastDiceNotification("diceError", {
-        message: `♡ Next dice game in: ${timeLeft.text}`,
+        message: `Next dice game in: ${timeLeft.text}`,
         timeLeft: timeLeft.text,
         hours: timeLeft.hours,
         minutes: timeLeft.minutes,
@@ -3403,16 +3403,16 @@ export class GameServer extends CPUProtection {
       
       switch(errorType) {
         case "NOT_DICE_TIME":
-          message = `♡ Dice game will start in ${timeLeft.text}`;
+          message = `Dice game will start in ${timeLeft.text}`;
           break;
         case "DICE_DISABLED": 
-          message = `♡ Dice game is disabled. Next session: ${timeLeft.text}`; 
+          message = `Dice game is disabled. Next session: ${timeLeft.text}`; 
           break;
         case "DICE_ENDED":
-          message = `♡ Dice game ended. Next session: ${timeLeft.text}`;
+          message = `Dice game ended. Next session: ${timeLeft.text}`;
           break;
         case "DICE_NOT_STARTED": 
-          message = `♡Dice game not started. Next session: ${timeLeft.text}`; 
+          message = `Dice game not started. Next session: ${timeLeft.text}`; 
           break;
         default: 
           message = customMessage || `Next dice game: ${timeLeft.text}`;
