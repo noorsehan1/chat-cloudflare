@@ -76,7 +76,7 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 6 },
+    { start: 1, end: 2},
     { start: 14, end: 15 },
     { start: 22, end: 23 }
   ],
@@ -1253,11 +1253,6 @@ export class GameServer extends CPUProtection {
 
   _diceKeepAliveTask() {
     try {
-      // CEK TIE BREAKER - BLOCK DICE KEEP ALIVE
-      if (this._tieActive || this.tieBreaker.active) {
-        return;
-      }
-      
       this._lastHeartbeat = Date.now();
       
       if (!this._isDiceTime()) {
@@ -1288,11 +1283,6 @@ export class GameServer extends CPUProtection {
 
   async _diceAutoTask() {
     try {
-      // CEK TIE BREAKER - BLOCK DICE AUTO TASK
-      if (this._tieActive || this.tieBreaker.active) {
-        return;
-      }
-      
       await this._checkDiceAutoStatus();
       await this._checkAndRestartDice();
       
@@ -1347,11 +1337,6 @@ export class GameServer extends CPUProtection {
 
   _diceTimerTask() {
     try {
-      // CEK TIE BREAKER - BLOCK DICE TIMER
-      if (this._tieActive || this.tieBreaker.active) {
-        return;
-      }
-      
       if (this._isDiceTime()) {
         if (!this.currentDiceRoll && !this._diceTimeout && 
             !this._isShowingDice && !this._diceTimeUpCooldown) {
@@ -1375,11 +1360,6 @@ export class GameServer extends CPUProtection {
           if (this.closing || this.isDestroyed) {
             clearInterval(this._diceAutoCheckInterval);
             this._diceAutoCheckInterval = null;
-            return;
-          }
-          
-          // CEK TIE BREAKER
-          if (this._tieActive || this.tieBreaker.active) {
             return;
           }
           
@@ -1841,13 +1821,6 @@ export class GameServer extends CPUProtection {
 
   _broadcastDiceNotification(type, data) {
     try {
-      // CEK TIE BREAKER - BLOCK NOTIFIKASI DICE KECUALI TIE BREAKER
-      if (this._tieActive || this.tieBreaker.active) {
-        if (!data.isTieBreaker) {
-          return;
-        }
-      }
-      
       const wsIds = this.wsClients.get(DICE_ROOM);
       if (!wsIds?.size) return;
       
@@ -1945,11 +1918,6 @@ export class GameServer extends CPUProtection {
 
   async _checkDiceAutoStatus() {
     try {
-      // CEK TIE BREAKER
-      if (this._tieActive || this.tieBreaker.active) {
-        return true;
-      }
-      
       const isDiceTime = this._isDiceTime();
       if (isDiceTime) {
         this._diceOutOfTimeShown = false;
@@ -2007,11 +1975,6 @@ export class GameServer extends CPUProtection {
 
   forceStartDice() {
     try {
-      // CEK TIE BREAKER - BLOCK FORCE START
-      if (this._tieActive || this.tieBreaker.active) {
-        return false;
-      }
-      
       if (this._isShowingDice) return false;
       if (this._diceTimeUpCooldown) return false;
       if (!this._isDiceTime() || this.currentDiceRoll || this._diceTimeout || this._diceStartTimeout) {
@@ -2025,11 +1988,6 @@ export class GameServer extends CPUProtection {
 
   _checkAndRestartDice() {
     try {
-      // CEK TIE BREAKER
-      if (this._tieActive || this.tieBreaker.active) {
-        return;
-      }
-      
       if (!this._isDiceTime()) return;
       if (this._diceTimeUpCooldown) return;
       if (!this.currentDiceRoll && !this._diceTimeout && !this._diceBreakTimeout && !this._isShowingDice) {
@@ -2044,11 +2002,6 @@ export class GameServer extends CPUProtection {
 
   ensureDiceRunning() {
     try {
-      // CEK TIE BREAKER
-      if (this._tieActive || this.tieBreaker.active) {
-        return;
-      }
-      
       if (this._isShowingDice) return;
       if (this._diceTimeUpCooldown) return;
       this._forceStartDiceIfTime();
@@ -2063,11 +2016,6 @@ export class GameServer extends CPUProtection {
 
   _forceStartDiceIfTime() {
     try {
-      // CEK TIE BREAKER
-      if (this._tieActive || this.tieBreaker.active) {
-        return;
-      }
-      
       if (this._isShowingDice) return;
       if (this._diceTimeUpCooldown) return;
       if (!this._isDiceTime() || this.currentDiceRoll || this._diceTimeout || this._diceStartTimeout) {
@@ -2102,12 +2050,6 @@ export class GameServer extends CPUProtection {
       
       this._diceTimerInterval = setInterval(() => {
         try {
-          // CEK TIE BREAKER - STOP TIMER JIKA TIE AKTIF
-          if (this._tieActive || this.tieBreaker.active) {
-            this._stopDiceTimerNotifications();
-            return;
-          }
-          
           if (!this.currentDiceRoll || !this._diceQuestionStartTime) {
             this._stopDiceTimerNotifications();
             return;
@@ -2157,11 +2099,6 @@ export class GameServer extends CPUProtection {
   }
 
   _startTimeUpCooldown() {
-    // CEK TIE BREAKER
-    if (this._tieActive || this.tieBreaker.active) {
-      return;
-    }
-    
     if (this._diceTimeUpCooldown) return;
     
     this._diceTimeUpCooldown = true;
@@ -2194,11 +2131,6 @@ export class GameServer extends CPUProtection {
 
   async _showDiceQuestionSilent() {
     try {
-      // CEK TIE BREAKER - BLOCK DICE ROLL
-      if (this._tieActive || this.tieBreaker.active) {
-        return;
-      }
-      
       if (this._isShowingDice) return;
       if (this._diceTimeUpCooldown) return;
       this._lastActivityTime = Date.now();
@@ -2398,51 +2330,6 @@ export class GameServer extends CPUProtection {
     if (!players || players.length < 2) return;
     if (this._tieActive) return;
     
-    // MATIKAN SEMUA TIMER DICE
-    this._stopDiceTimerNotifications();
-    
-    if (this._diceTimeout) {
-      clearTimeout(this._diceTimeout);
-      this._diceTimeout = null;
-    }
-    
-    if (this._diceBreakTimeout) {
-      clearTimeout(this._diceBreakTimeout);
-      this._diceBreakTimeout = null;
-    }
-    
-    if (this._diceStartTimeout) {
-      clearTimeout(this._diceStartTimeout);
-      this._diceStartTimeout = null;
-    }
-    
-    if (this._diceTimeUpCooldownTimer) {
-      clearTimeout(this._diceTimeUpCooldownTimer);
-      this._diceTimeUpCooldownTimer = null;
-    }
-    
-    // RESET STATE DICE
-    this.currentDiceRoll = null;
-    this._isShowingDice = false;
-    this._canSubmitDiceAnswer = false;
-    this._diceQuestionStartTime = null;
-    this.diceHasWinner = false;
-    this.diceWinner = null;
-    this._winnerProcessed = false;
-    this._diceTimeUpCooldown = false;
-    
-    // RESET FLAGS
-    this._diceNotifiedFlags = {
-      20: false,
-      10: false,
-      5: false,
-      timeup: false
-    };
-    this._lastSentRemaining = -1;
-    this._lastNotificationKey = "";
-    this._lastNotificationTime = 0;
-    
-    // SET TIE ACTIVE
     this._tieActive = true;
     this._tieRound = 0;
     this._tiePlayers = [...players];
@@ -2768,7 +2655,6 @@ export class GameServer extends CPUProtection {
     this.currentDiceRoll = null;
     this.diceAnswered = new Set();
     this._processingTieResults = false;
-    this._winnerProcessed = false;
     
     if (this._tieTimer) {
       clearTimeout(this._tieTimer);
@@ -2791,11 +2677,6 @@ export class GameServer extends CPUProtection {
 
   async _showDiceQuestion() {
     try {
-      // CEK TIE BREAKER - BLOCK DICE ROLL
-      if (this._tieActive || this.tieBreaker.active) {
-        return;
-      }
-      
       if (this._isShowingDice) return;
       if (this._diceTimeUpCooldown) return;
       this._lastActivityTime = Date.now();
@@ -2984,7 +2865,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // CEK TIE BREAKER - REDIRECT KE TIE BREAKER
       const isTie = this._tieActive && this._tiePlayers.length > 0;
       
       if (isTie) {
@@ -3031,12 +2911,6 @@ export class GameServer extends CPUProtection {
             }, 500);
           }
         }
-        return;
-      }
-      
-      // DICE NORMAL - CEK TIE BREAKER ACTIVE
-      if (this._tieActive || this.tieBreaker.active) {
-        this._safeSend(ws, ["diceError", "Tie breaker in progress"]);
         return;
       }
       
@@ -3136,11 +3010,6 @@ export class GameServer extends CPUProtection {
 
   async startDiceWithDelay(delayMs) {
     try {
-      // CEK TIE BREAKER
-      if (this._tieActive || this.tieBreaker.active) {
-        return;
-      }
-      
       if (this._diceStartTimeout) return;
       this._diceStartTimeout = setTimeout(() => {
         try {
@@ -3148,6 +3017,7 @@ export class GameServer extends CPUProtection {
             this._diceStartTimeout = null; 
             return; 
           }
+          this._diceStartTimeout = null;
           if (!this.currentDiceRoll && this.diceAutoEnabled && !this._isShowingDice && !this._diceTimeUpCooldown) {
             this.forceStartDice();
           }
@@ -3239,13 +3109,6 @@ export class GameServer extends CPUProtection {
 
   async _broadcastDiceResult(type, data) {
     try {
-      // CEK TIE BREAKER - BLOCK DICE RESULT
-      if (this._tieActive || this.tieBreaker.active) {
-        if (!data.isTieBreaker) {
-          return;
-        }
-      }
-      
       const wsIds = this.wsClients.get(DICE_ROOM);
       if (!wsIds || wsIds.size === 0) return;
       
@@ -3277,11 +3140,6 @@ export class GameServer extends CPUProtection {
 
   _broadcastDiceTimeLeft() {
     try {
-      // CEK TIE BREAKER
-      if (this._tieActive || this.tieBreaker.active) {
-        return;
-      }
-      
       const wsIds = this.wsClients.get(DICE_ROOM);
       if (!wsIds?.size) return;
       const now = Date.now();
@@ -3329,11 +3187,6 @@ export class GameServer extends CPUProtection {
 
   _sendDiceTimeLeftToUser(ws) {
     try {
-      // CEK TIE BREAKER
-      if (this._tieActive || this.tieBreaker.active) {
-        return false;
-      }
-      
       if (!ws || ws.readyState !== 1) return false;
       const wsId = this._getWsId(ws);
       if (!wsId) return false;
@@ -3394,11 +3247,6 @@ export class GameServer extends CPUProtection {
 
   _sendDiceErrorWithTime(ws, errorType, customMessage = null) {
     try {
-      // CEK TIE BREAKER
-      if (this._tieActive || this.tieBreaker.active) {
-        return false;
-      }
-      
       if (!ws || ws.readyState !== 1) return false;
       const timeLeft = this._getTimeLeftUntilNextDice();
       let message = "";
@@ -3450,11 +3298,6 @@ export class GameServer extends CPUProtection {
 
   async _broadcastDiceRoll(diceValue) {
     try {
-      // CEK TIE BREAKER - BLOCK DICE ROLL BROADCAST
-      if (this._tieActive || this.tieBreaker.active) {
-        return;
-      }
-      
       const wsIds = this.wsClients.get(DICE_ROOM);
       if (!wsIds?.size) return;
 
@@ -3792,16 +3635,6 @@ export class GameServer extends CPUProtection {
 
   _sendDiceNotificationOnSwitch(ws, wsId) {
     try {
-      // CEK TIE BREAKER
-      if (this._tieActive || this.tieBreaker.active) {
-        this._sendDiceNotification(ws, "diceError", {
-          message: "Tie breaker in progress",
-          isTieBreaker: true,
-          remaining: -1
-        });
-        return;
-      }
-      
       this._diceTimeLeftNotified.delete(wsId);
       this._nextDiceNotified.delete(wsId);
       this._diceJoinedNotified.delete(wsId);
