@@ -78,7 +78,7 @@ const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 6 },
     { start: 14, end: 15 },
-    { start: 21, end: 22 }
+    { start: 22, end: 23 }
   ],
   TIMEZONE_OFFSET: 8,
 };
@@ -1797,29 +1797,17 @@ export class GameServer extends CPUProtection {
   _sendDiceEndNotificationOnce() {
     try {
       if (this.diceEndNotified) return;
-      if (this.diceEndMessageShown) return;
-      
       const timeLeft = this._getTimeLeftUntilNextDice();
-      
-      this.diceEndNotified = true;
-      this.diceEndMessageShown = true;
-      
       this._broadcastToRoom(DICE_ROOM, ["diceEnded", { 
         timeLeft: timeLeft.text, 
         status: "ended"
       }]);
-      
       this._broadcastDiceNotification("diceError", { 
         timeLeft: timeLeft.text,
         remaining: -1,
         message: `Dice game ended. Next session in: ${timeLeft.text}`
       });
-      
-      setTimeout(() => {
-        this.diceEndNotified = false;
-        this.diceEndMessageShown = false;
-      }, 5000);
-      
+      this.diceEndNotified = true;
     } catch(e) {}
   }
 
@@ -1893,7 +1881,7 @@ export class GameServer extends CPUProtection {
             if (clients && clients.size > 0) {
               this.diceAutoEnabled = true;
               this._broadcastDiceNotification("diceError", {
-                message: "❤︎ Dice game is starting now ❤︎",
+                message: "Dice game is starting now",
                 isDiceTime: true,
                 remaining: -1,
                 timestamp: Date.now()
@@ -2062,10 +2050,6 @@ export class GameServer extends CPUProtection {
       
       this._diceTimerInterval = setInterval(() => {
         try {
-          if (this._tieActive || this.tieBreaker.active) {
-            return;
-          }
-          
           if (!this.currentDiceRoll || !this._diceQuestionStartTime) {
             this._stopDiceTimerNotifications();
             return;
@@ -2218,14 +2202,13 @@ export class GameServer extends CPUProtection {
           timeup: false
         };
         
+        await this._broadcastDiceRoll(diceValue);
+        
         this._broadcastDiceNotification("diceError", {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remaining: 20,
           message: "Go Cheers Catch draw",
-          round: this._diceRound,
-          isDiceTime: true,
-          isActive: true,
-          isSilent: true
+          round: this._diceRound
         });
         
         this._startDiceTimerNotifications();
@@ -2541,7 +2524,7 @@ export class GameServer extends CPUProtection {
       }]);
       
       this._broadcastDiceNotification("diceError", {
-        message: `❤︎ ${winner} wins tie breaker with ${highest}`,
+        message: `🏆 ${winner} wins tie breaker with ${highest}`,
         winner: winner,
         guess: highest,
         remaining: -1,
@@ -2572,7 +2555,7 @@ export class GameServer extends CPUProtection {
       }
       
       this._broadcastDiceNotification("diceError", {
-        message: `❤︎ Tie at ${highest}. Next round: ${highestPlayers.join(', ')}`,
+        message: `⚖️ Tie at ${highest}. Next round: ${highestPlayers.join(', ')}`,
         highest: highest,
         players: highestPlayers,
         remaining: -1,
@@ -2718,7 +2701,7 @@ export class GameServer extends CPUProtection {
         const clients = this.wsClients.get(DICE_ROOM);
         if (clients?.size > 0) {
           this._broadcastDiceNotification("diceError", {
-            message: "♡ Dice game is starting soon ♡",
+            message: "Dice game is starting soon",
             isDiceTime: true,
             isActive: false,
             remaining: -1
@@ -3804,7 +3787,7 @@ export class GameServer extends CPUProtection {
   _getBotNumberByRound(round) {
     try {
       if (round <= 2) return Math.floor(Math.random() * 12) + 1;
-      return Math.random() < 0.7 ?
+      return Math.random() < 0.6 ?
         [8, 9, 10, 11, 12][Math.floor(Math.random() * 5)] :
         [1, 2, 3, 4, 5, 6, 7][Math.floor(Math.random() * 7)];
     } catch(e) { return 5; }
@@ -4941,6 +4924,7 @@ export class GameServer extends CPUProtection {
             const check = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
             if (!check) {
               this._safeSend(ws, ["diceLastWeekWinnerDeleted", true, "Last week winner deleted successfully"]);
+              this._broadcastToRoom(DICE_ROOM, ["diceNotification", "Last week winner data has been deleted"]);
             } else {
               this._safeSend(ws, ["diceLastWeekWinnerDeleted", false, "Failed to delete"]);
             }
