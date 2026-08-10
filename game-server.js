@@ -1811,7 +1811,7 @@ export class GameServer extends CPUProtection {
         this._broadcastDiceNotification("diceError", {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remaining: 20,
-          message: "🏍️💨 clik draw",
+          message: "♡ clik draw ♡",
           round: this._diceRound
         });
         
@@ -1996,7 +1996,7 @@ export class GameServer extends CPUProtection {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remainingTime: "20s remaining",
           remaining: 20,
-          message: "🏍️💨 clik draw",
+          message: "♡ clik draw ♡",
           round: this._diceRound
         });
         
@@ -2870,7 +2870,7 @@ export class GameServer extends CPUProtection {
         timestamp: Date.now(),
         answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
         canAnswerNow: true,
-        message: "🏍️💨 clik draw",
+        message: "♡ clik draw ♡",
         round: this._diceRound || 1,
         timerNotifications: [20, 10, 5]
       };
