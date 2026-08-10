@@ -2116,17 +2116,17 @@ export class GameServer extends CPUProtection {
       // ============ TIE BREAKER MODE ============
       if (this._tieActive) {
         if (!this._tiePlayers.includes(username)) {
-          this._safeSend(ws, ["diceError", "Not in tie breaker"]);
+          
           return;
         }
         
         if (this._tieAnswers.has(username)) {
-          this._safeSend(ws, ["diceError", "Already answered"]);
+          
           return;
         }
         
         if (!this._canSubmitDiceAnswer) {
-          this._safeSend(ws, ["diceError", "Cannot answer now"]);
+          
           return;
         }
         
@@ -2245,7 +2245,7 @@ export class GameServer extends CPUProtection {
     const playerNames = players.join(', ');
     
     this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
-      `TIE BREAKER ROUND ${this._tieRound}: ${playerNames}`
+      `♡ Round ${this._tieRound}: ${playerNames}`
     ]);
     
     this._canSubmitDiceAnswer = true;
@@ -2357,7 +2357,7 @@ export class GameServer extends CPUProtection {
     
     if (answeredPlayers.length === 0) {
       this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
-        `TIE BREAKER CANCELLED - No one answered`
+        `No one answered`
       ]);
       this._resetTieBreakerState(id);
       this._startCooldownAfterTieBreaker();
@@ -2383,9 +2383,7 @@ export class GameServer extends CPUProtection {
         finalWinner: true
       }]);
       
-      this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
-        `${winner} WINS TIE BREAKER`
-      ]);
+      
       
       this._resetTieBreakerState(id);
       this._startCooldownAfterTieBreaker();
@@ -2433,9 +2431,7 @@ export class GameServer extends CPUProtection {
       finalWinner: true
     }]);
     
-    this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
-      `${winner} WINS TIE BREAKER`
-    ]);
+    
     
     this._resetTieBreakerState(id);
     this._startCooldownAfterTieBreaker();
