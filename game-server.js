@@ -80,7 +80,7 @@ const CONSTANTS = {
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 2 },
-    { start: 14, end: 19 },
+    { start: 14, end: 18 },
     { start: 22, end: 23 }
   ],
   TIMEZONE_OFFSET: 8,
@@ -1261,7 +1261,7 @@ export class GameServer extends CPUProtection {
           winners: {},
           room: room,
           recording: true,
-          message: "✿No winner✿"
+          message: "No winner"
         }]);
       } else {
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
@@ -1888,7 +1888,7 @@ export class GameServer extends CPUProtection {
               });
             } else {
               this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-                message: `✿No winner✿`,
+                message: `No winner`,
                 value: diceValue,
                 round: roundNumber
               }]);
@@ -2073,7 +2073,7 @@ export class GameServer extends CPUProtection {
               });
             } else {
               this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-                message: `✿No winner✿`,
+                message: `No winner`,
                 value: diceValue,
                 round: roundNumber
               }]);
