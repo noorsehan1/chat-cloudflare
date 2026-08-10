@@ -1261,7 +1261,7 @@ export class GameServer extends CPUProtection {
           winners: {},
           room: room,
           recording: true,
-          message: "No winners yet"
+          message: "No winners 😭"
         }]);
       } else {
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
@@ -1811,7 +1811,7 @@ export class GameServer extends CPUProtection {
         this._broadcastDiceNotification("diceError", {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remaining: 20,
-          message: "Go Cheers Catch draw",
+          message: "🏁...🏎💨.. Catch draw",
           round: this._diceRound
         });
         
@@ -1888,7 +1888,7 @@ export class GameServer extends CPUProtection {
               });
             } else {
               this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-                message: `No winner - value was ${diceValue}`,
+                message: `No winner 😭`,
                 value: diceValue,
                 round: roundNumber
               }]);
@@ -1996,7 +1996,7 @@ export class GameServer extends CPUProtection {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remainingTime: "20s remaining",
           remaining: 20,
-          message: "Go Cheers Catch draw",
+          message: "🏁...🏎💨.. Catch draw",
           round: this._diceRound
         });
         
@@ -2073,7 +2073,7 @@ export class GameServer extends CPUProtection {
               });
             } else {
               this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-                message: `No winner - value was ${diceValue}`,
+                message: `No winner 😭`,
                 value: diceValue,
                 round: roundNumber
               }]);
@@ -2870,7 +2870,7 @@ export class GameServer extends CPUProtection {
         timestamp: Date.now(),
         answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
         canAnswerNow: true,
-        message: "Go Cheers Catch draw",
+        message: "🏁...🏎💨.. Catch draw",
         round: this._diceRound || 1,
         timerNotifications: [20, 10, 5]
       };
