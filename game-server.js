@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS - OPTIMIZED WITH SETINTERVAL ====================
+// ==================== GAME-SERVER.JS - OPTIMIZED WITH CACHE ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -295,17 +295,11 @@ class DiceGameSystem {
     }
   }
 
+  // ✅ LANGSUNG KE KV (TANPA CACHE)
   async getPoints() {
     try {
       if (!this.env?.QUESTIONS) return {};
-      const cacheKey = 'dice_points';
-      const cached = this.gameServer._kvCache?.get(cacheKey);
-      if (cached !== null) return cached;
-      
       const points = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
-      if (this.gameServer._kvCache) {
-        this.gameServer._kvCache.set(cacheKey, points, 5000);
-      }
       this.userScores.clear();
       for (const [username, score] of Object.entries(points)) {
         this.userScores.set(username, score);
@@ -316,13 +310,11 @@ class DiceGameSystem {
     }
   }
 
+  // ✅ LANGSUNG KE KV (TANPA CACHE)
   async setPoints(points) {
     try {
       if (!this.env?.QUESTIONS) return false;
       await this.env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify(points));
-      if (this.gameServer._kvCache) {
-        this.gameServer._kvCache.set('dice_points', points, 5000);
-      }
       this.userScores.clear();
       for (const [username, score] of Object.entries(points)) {
         this.userScores.set(username, score);
@@ -333,39 +325,33 @@ class DiceGameSystem {
     }
   }
 
+  // ✅ LANGSUNG KE KV (TANPA CACHE)
   async getLastWeekWinner() {
     try {
       if (!this.env?.QUESTIONS) return null;
-      const cached = this.gameServer._kvCache?.get('dice_last_week_winner');
-      if (cached !== null) return cached;
       const winnerData = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
-      if (winnerData && this.gameServer._kvCache) {
-        this.gameServer._kvCache.set('dice_last_week_winner', winnerData, 60000);
-      }
       return winnerData;
     } catch(e) {
       return null;
     }
   }
 
+  // ✅ LANGSUNG KE KV (TANPA CACHE)
   async setLastWeekWinner(winner) {
     try {
       if (!this.env?.QUESTIONS) return false;
       await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_WEEK_WINNER, JSON.stringify(winner));
-      if (this.gameServer._kvCache) {
-        this.gameServer._kvCache.set('dice_last_week_winner', winner, 60000);
-      }
       return true;
     } catch(e) {
       return false;
     }
   }
 
+  // ✅ LANGSUNG KE KV (TANPA CACHE)
   async deleteLastWeekWinner() {
     try {
       if (!this.env?.QUESTIONS) return false;
       await this.env.QUESTIONS.delete(CONSTANTS.DICE_LAST_WEEK_WINNER);
-      this.gameServer._kvCache?.delete('dice_last_week_winner');
       return true;
     } catch(e) {
       return false;
@@ -468,6 +454,7 @@ export class GameServer extends CPUProtection {
       this._diceQuestionStartTime = null;
       this._canSubmitDiceAnswer = false;
 
+      // ✅ CACHE UNTUK lowcard_recording_status_* (disimpan di memory)
       this._recordingEnabled = new Map();
 
       this._weeklyResetTimer = null;
@@ -513,69 +500,64 @@ export class GameServer extends CPUProtection {
       this._processingTieResults = false;
       this._lastTieLog = '';
 
+      // ✅ CACHE UNTUK dice_last_reset_week (disimpan di memory)
+      this._cachedResetWeek = null;
+      this._cachedResetWeekTimestamp = 0;
+
       this._kvCache = new KVCache();
       this._kvCache.startCleanup();
 
       this.diceGameSystem = new DiceGameSystem(this);
 
-      // ==================== ✅ SETINTERVAL TASKS (GANTI SCHEDULER) ====================
-      // CPU Monitor - setiap 100ms
+      // ==================== ✅ SETINTERVAL TASKS ====================
       this._cpuMonitorInterval = setInterval(() => {
         if (!this.closing && !this.isDestroyed) {
           this._cpuMonitorTask();
         }
       }, 100);
 
-      // Dice Keep Alive - setiap 5 detik (dari 1 detik - hemat 80%)
       this._diceKeepAliveInterval = setInterval(() => {
         if (!this.closing && !this.isDestroyed) {
           this._diceKeepAliveTask();
         }
       }, 5000);
 
-      // Health Check - setiap 10 detik
       this._healthCheckInterval = setInterval(() => {
         if (!this.closing && !this.isDestroyed) {
           this._healthCheckTask();
         }
       }, 10000);
 
-      // Weekly Reset - setiap 5 menit
       this._weeklyResetInterval = setInterval(async () => {
         if (!this.closing && !this.isDestroyed) {
           await this._checkAndResetWeeklyDice();
         }
       }, CONSTANTS.WEEKLY_RESET_CHECK_INTERVAL_MS || 300000);
 
-      // Dice Auto - setiap 1 menit
       this._diceAutoInterval = setInterval(async () => {
         if (!this.closing && !this.isDestroyed) {
           await this._diceAutoTask();
         }
       }, 60000);
 
-      // Dice Timer - setiap 30 detik
       this._diceTimerInterval2 = setInterval(() => {
         if (!this.closing && !this.isDestroyed) {
           this._diceTimerTask();
         }
       }, 30000);
 
-      // Stuck Games Check - setiap 15 detik
       this._stuckGamesInterval = setInterval(() => {
         if (!this.closing && !this.isDestroyed) {
           this._checkStuckGames();
         }
       }, 15000);
 
-      // Stale Games Cleanup - setiap 1 menit
       this._staleGamesInterval = setInterval(() => {
         if (!this.closing && !this.isDestroyed) {
           this._cleanupStaleGames();
         }
       }, 60000);
 
-      // Dead Connections Cleanup - setiap 30 detik
       this._deadConnectionsInterval = setInterval(() => {
         if (!this.closing && !this.isDestroyed) {
           this._cleanupDeadConnections();
@@ -583,9 +565,6 @@ export class GameServer extends CPUProtection {
       }, 30000);
 
       // ==================== END SETINTERVAL TASKS ====================
-
-      this._cachedResetWeek = null;
-      this._cachedResetWeekTimestamp = 0;
 
       this._initAsync();
 
@@ -616,6 +595,63 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== CACHE UNTUK dice_last_reset_week ====================
+
+  async _updateCachedResetWeek(week) {
+    this._cachedResetWeek = week;
+    this._cachedResetWeekTimestamp = Date.now();
+  }
+
+  async _getCachedResetWeek() {
+    try {
+      // ✅ CEK CACHE DULU
+      if (this._cachedResetWeek !== null) {
+        return this._cachedResetWeek;
+      }
+      
+      // ❌ KE KV HANYA JIKA CACHE KOSONG
+      if (this.env?.QUESTIONS) {
+        const lastResetWeek = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_RESET_WEEK);
+        if (lastResetWeek) {
+          this._cachedResetWeek = lastResetWeek;
+          this._cachedResetWeekTimestamp = Date.now();
+          return lastResetWeek;
+        }
+      }
+      
+      return null;
+    } catch(e) {
+      return null;
+    }
+  }
+
+  // ==================== CACHE UNTUK lowcard_recording_status_* ====================
+
+  async _getRecordingStatusFromKV(roomName) {
+    try {
+      if (!roomName) return false;
+      
+      // ✅ CEK CACHE DULU
+      if (this._recordingEnabled.has(roomName)) {
+        return this._recordingEnabled.get(roomName);
+      }
+      
+      // ❌ KE KV HANYA JIKA CACHE KOSONG
+      if (this.env?.QUESTIONS) {
+        const kvValue = await this.env.QUESTIONS.get(
+          CONSTANTS.LOWCARD_RECORDING_KEY + roomName
+        );
+        const isRecording = kvValue === 'true';
+        this._recordingEnabled.set(roomName, isRecording); // ✅ SIMPAN KE CACHE
+        return isRecording;
+      }
+      
+      return false;
+    } catch(e) {
+      return false;
+    }
+  }
+
   async _initResetWeek() {
     try {
       if (!this.env?.QUESTIONS) return;
@@ -632,32 +668,6 @@ export class GameServer extends CPUProtection {
       await this._updateCachedResetWeek(existingResetWeek);
 
     } catch(e) {}
-  }
-
-  async _getCachedResetWeek() {
-    try {
-      if (this._cachedResetWeek !== null) {
-        return this._cachedResetWeek;
-      }
-      
-      if (this.env?.QUESTIONS) {
-        const lastResetWeek = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_RESET_WEEK);
-        if (lastResetWeek) {
-          this._cachedResetWeek = lastResetWeek;
-          this._cachedResetWeekTimestamp = Date.now();
-          return lastResetWeek;
-        }
-      }
-      
-      return null;
-    } catch(e) {
-      return null;
-    }
-  }
-
-  async _updateCachedResetWeek(week) {
-    this._cachedResetWeek = week;
-    this._cachedResetWeekTimestamp = Date.now();
   }
 
   _isWeekGreater(weekA, weekB) {
@@ -726,7 +736,6 @@ export class GameServer extends CPUProtection {
           );
         } else {
           await this.env.QUESTIONS.delete(CONSTANTS.DICE_LAST_WEEK_WINNER);
-          this._kvCache.delete('dice_last_week_winner');
         }
         
         await this.env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify({}));
@@ -734,8 +743,6 @@ export class GameServer extends CPUProtection {
         await this._updateCachedResetWeek(currentWeek);
         await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_RESET_WEEK, currentWeek);
         
-        this._kvCache.delete('dice_points');
-        this._kvCache.delete('dice_last_week_winner');
         this.diceGameSystem.userScores.clear();
         
         return true;
@@ -1022,37 +1029,7 @@ export class GameServer extends CPUProtection {
     }
   }
 
-  async _getRecordingStatusFromKV(roomName) {
-    try {
-      if (!roomName) return false;
-      
-      const memCached = this._recordingEnabled.get(roomName);
-      if (memCached !== undefined) {
-        return memCached;
-      }
-      
-      const cacheKey = `recording_${roomName}`;
-      const cached = this._kvCache.get(cacheKey);
-      if (cached !== null) {
-        this._recordingEnabled.set(roomName, cached);
-        return cached;
-      }
-      
-      if (this.env?.QUESTIONS) {
-        const kvValue = await this.env.QUESTIONS.get(
-          CONSTANTS.LOWCARD_RECORDING_KEY + roomName
-        );
-        const isRecording = kvValue === 'true';
-        this._recordingEnabled.set(roomName, isRecording);
-        this._kvCache.set(cacheKey, isRecording, 300000);
-        return isRecording;
-      }
-      
-      return false;
-    } catch(e) {
-      return false;
-    }
-  }
+  // ✅ CACHE UNTUK lowcard_recording_status_* (sudah di atas)
 
   async _startRecordingWinners(roomName) {
     try {
@@ -1064,9 +1041,8 @@ export class GameServer extends CPUProtection {
         return true;
       }
       
+      // ✅ UPDATE CACHE
       this._recordingEnabled.set(roomName, true);
-      this._kvCache.delete(`recording_${roomName}`);
-      this._kvCache.delete(`winners_${roomName}`);
       
       if (this.env?.QUESTIONS) {
         await this.env.QUESTIONS.put(
@@ -1095,9 +1071,8 @@ export class GameServer extends CPUProtection {
         return true;
       }
       
+      // ✅ UPDATE CACHE
       this._recordingEnabled.set(room, false);
-      this._kvCache.delete(`recording_${room}`);
-      this._kvCache.delete(`winners_${room}`);
       
       if (this.env?.QUESTIONS) {
         const statusKey = CONSTANTS.LOWCARD_RECORDING_KEY + room;
@@ -1147,6 +1122,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ✅ LANGSUNG KE KV (TANPA CACHE)
   async _getLowCardWinners(room) {
     try {
       if (!room) return {};
@@ -1157,21 +1133,14 @@ export class GameServer extends CPUProtection {
         return {};
       }
       
-      const cacheKey = `winners_${room}`;
-      const cached = this._kvCache.get(cacheKey);
-      if (cached !== null) return cached;
-      
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       const winners = await this.env.QUESTIONS.get(key, 'json');
       
       if (winners && typeof winners === 'object' && Object.keys(winners).length > 0) {
-        this._kvCache.set(cacheKey, winners, 60000);
         return winners;
       }
       
-      const empty = {};
-      this._kvCache.set(cacheKey, empty, 30000);
-      return empty;
+      return {};
     } catch(e) {
       return {};
     }
@@ -1206,6 +1175,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ✅ LANGSUNG KE KV (TANPA CACHE)
   async _addLowCardWinner(room, username) {
     try {
       if (!room || !username) return false;
@@ -1236,8 +1206,6 @@ export class GameServer extends CPUProtection {
       
       await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       
-      this._kvCache.delete(`winners_${room}`);
-      
       return true;
     } catch(e) {
       return false;
@@ -1257,8 +1225,6 @@ export class GameServer extends CPUProtection {
       const points = await this.diceGameSystem.getPoints();
       points[username] = (points[username] || 0) + 1;
       await this.diceGameSystem.setPoints(points);
-      
-      this._kvCache.delete('dice_points');
       
       this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
         username: username,
@@ -1283,35 +1249,11 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  async _getLastResetWeek() {
-    try {
-      if (!this.env?.QUESTIONS) return null;
-      return await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_RESET_WEEK);
-    } catch(e) { 
-      return null; 
-    }
-  }
-
-  async _setLastResetWeek(week) {
-    try {
-      if (!this.env?.QUESTIONS) return false;
-      await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_RESET_WEEK, week);
-      return true;
-    } catch(e) { 
-      return false; 
-    }
-  }
-
+  // ✅ LANGSUNG KE KV (TANPA CACHE)
   async _getDicePoints() {
     try {
       if (!this.env?.QUESTIONS) return {};
-      
-      const cacheKey = 'dice_points';
-      const cached = this._kvCache.get(cacheKey);
-      if (cached !== null) return cached;
-      
       const points = await this.diceGameSystem.getPoints();
-      this._kvCache.set(cacheKey, points, 5000);
       return points;
     } catch(e) {
       return {};
@@ -2123,7 +2065,6 @@ export class GameServer extends CPUProtection {
         const points = await this._getDicePoints();
         points[username] = (points[username] || 0) + 1;
         await this.diceGameSystem.setPoints(points);
-        this._kvCache.delete('dice_points');
       }
       
     } catch(e) {}
@@ -2300,7 +2241,6 @@ export class GameServer extends CPUProtection {
       const points = await this._getDicePoints();
       points[winner] = (points[winner] || 0) + 1;
       await this.diceGameSystem.setPoints(points);
-      this._kvCache.delete('dice_points');
       
       this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
         username: winner,
@@ -2346,7 +2286,6 @@ export class GameServer extends CPUProtection {
     const points = await this._getDicePoints();
     points[winner] = (points[winner] || 0) + 1;
     await this.diceGameSystem.setPoints(points);
-    this._kvCache.delete('dice_points');
     
     this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
       username: winner,
