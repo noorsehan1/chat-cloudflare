@@ -73,7 +73,6 @@ const CONSTANTS = {
   DICE_LAST_RESET_WEEK: 'dice_last_reset_week',
   WEEKLY_RESET_CHECK_INTERVAL_MS: 300000,
   
-  // Tie Breaker Constants
   TIE_BREAKER_TIME_LIMIT: 20,
   TIE_BREAKER_COOLDOWN: 15000,
 };
@@ -594,7 +593,6 @@ export class GameServer extends CPUProtection {
         timeup: false
       };
 
-      // ============ TIE BREAKER PROPERTIES ============
       this._tieBreakers = new Map();
       this._tieRound = 0;
       this._tieActive = false;
@@ -2143,6 +2141,10 @@ export class GameServer extends CPUProtection {
           tieRound: this._tieRound
         }]);
         
+        this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
+          `${username} answered ${guessValue}`
+        ]);
+        
         if (this._tieAnswers.size === this._tiePlayers.length) {
           if (this._tieTimer) {
             clearTimeout(this._tieTimer);
@@ -2155,6 +2157,10 @@ export class GameServer extends CPUProtection {
           
           this._canSubmitDiceAnswer = false;
           this._isShowingDice = false;
+          
+          this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
+            `All players answered. Processing...`
+          ]);
           
           const tieId = this._getActiveTieBreakerId();
           if (tieId) {
@@ -2246,24 +2252,9 @@ export class GameServer extends CPUProtection {
     
     const playerNames = players.join(', ');
     
-    // HANYA 1 EVENT UNTUK ROUND
-    this._broadcastToRoom(DICE_ROOM, ["tieBreakerRound", {
-      round: this._tieRound,
-      players: players,
-      playerNames: playerNames,
-      message: `Round ${this._tieRound}: ${playerNames}`,
-      timeLimit: 20,
-      status: 'waiting_for_answers',
-      totalPlayers: players.length
-    }]);
-    
-    this._broadcastDiceNotification("diceError", {
-      message: `Round ${this._tieRound}: ${playerNames}`,
-      remaining: 20,
-      isTieBreaker: true,
-      round: this._tieRound,
-      players: players
-    });
+    this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
+      `TIE BREAKER ROUND ${this._tieRound}: ${playerNames}`
+    ]);
     
     this._canSubmitDiceAnswer = true;
     this._diceQuestionStartTime = Date.now();
@@ -2293,22 +2284,16 @@ export class GameServer extends CPUProtection {
       
       if (timeLeft === 10 && !notified10) {
         notified10 = true;
-        this._broadcastDiceNotification("diceError", {
-          message: "10s remaining",
-          remaining: 10,
-          isTieBreaker: true,
-          round: this._tieRound
-        });
+        this._broadcastToRoom(DICE_ROOM, ["diceNotification", `10s remaining`]);
       }
       
       if (timeLeft === 5 && !notified5) {
         notified5 = true;
-        this._broadcastDiceNotification("diceError", {
-          message: "5s remaining",
-          remaining: 5,
-          isTieBreaker: true,
-          round: this._tieRound
-        });
+        this._broadcastToRoom(DICE_ROOM, ["diceNotification", `5s remaining`]);
+      }
+      
+      if (timeLeft === 3) {
+        this._broadcastToRoom(DICE_ROOM, ["diceNotification", `3s remaining`]);
       }
       
       if (timeLeft <= 0 && !isProcessed) {
@@ -2319,12 +2304,7 @@ export class GameServer extends CPUProtection {
         this._canSubmitDiceAnswer = false;
         this._isShowingDice = false;
         
-        this._broadcastDiceNotification("diceError", {
-          message: "TIME UP",
-          remaining: -1,
-          isTieBreaker: true,
-          round: this._tieRound
-        });
+        this._broadcastToRoom(DICE_ROOM, ["diceNotification", `TIME UP`]);
         
         const tieId = this._getActiveTieBreakerId();
         if (tieId) {
@@ -2347,12 +2327,7 @@ export class GameServer extends CPUProtection {
         this._canSubmitDiceAnswer = false;
         this._isShowingDice = false;
         
-        this._broadcastDiceNotification("diceError", {
-          message: "TIME UP",
-          remaining: -1,
-          isTieBreaker: true,
-          round: this._tieRound
-        });
+        this._broadcastToRoom(DICE_ROOM, ["diceNotification", `TIME UP`]);
         
         const tieId = this._getActiveTieBreakerId();
         if (tieId) {
@@ -2389,28 +2364,17 @@ export class GameServer extends CPUProtection {
     }
     
     if (answeredPlayers.length === 0) {
-      this._broadcastToRoom(DICE_ROOM, ["tieBreakerCancel", {
-        message: "No one answered. Tie breaker cancelled.",
-        round: this._tieRound
-      }]);
+      this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
+        `TIE BREAKER CANCELLED - No one answered`
+      ]);
       this._resetTieBreakerState(id);
       this._startCooldownAfterTieBreaker();
       return;
     }
     
-    const resultStrings = results.map(r => `${r.player}: ${r.answer}`);
-    const eliminatedPlayers = players.filter(p => !highestPlayers.includes(p));
+    const resultStrings = results.map(r => `${r.player}:${r.answer}`);
     
-    this._broadcastToRoom(DICE_ROOM, ["tieBreakerResults", {
-      round: this._tieRound,
-      results: resultStrings,
-      highest: highest,
-      highestPlayers: highestPlayers,
-      eliminated: eliminatedPlayers,
-      status: highestPlayers.length > 1 ? 'tie_continues' : 'has_winner'
-    }]);
-    
-    // Jika hanya 1 pemain dengan nilai tertinggi -> PEMENANG
+    // ============ CASE 1: HANYA 1 PEMENANG ============
     if (highestPlayers.length === 1) {
       const winner = highestPlayers[0];
       
@@ -2429,23 +2393,20 @@ export class GameServer extends CPUProtection {
         finalWinner: true
       }]);
       
-      this._broadcastDiceNotification("diceError", {
-        message: `${winner} wins tie breaker with ${highest}`,
-        winner: winner,
-        guess: highest,
-        remaining: -1,
-        isTieBreaker: true,
-        isTieBreakerWinner: true,
-        finalWinner: true
-      });
+      this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
+        `${winner} WINS TIE BREAKER`
+      ]);
       
       this._resetTieBreakerState(id);
       this._startCooldownAfterTieBreaker();
       return;
     }
     
-    // ============ MASIH TIE -> LANJUT ROUND BERIKUTNYA ============
+    // ============ CASE 2: MASIH TIE -> LANJUT ROUND ============
     if (highestPlayers.length > 1) {
+      const resultMessage = `ROUND ${this._tieRound} RESULT: ${resultStrings.join(', ')} | HIGH:${highest} (${highestPlayers.join(',')})`;
+      this._broadcastToRoom(DICE_ROOM, ["diceNotification", resultMessage]);
+      
       this._tiePlayers = highestPlayers;
       this._tieAnswers = new Map();
       data.players = highestPlayers;
@@ -2453,19 +2414,14 @@ export class GameServer extends CPUProtection {
       data.status = 'waiting';
       data.tieValue = highest;
       
-      // ============ HANYA 1 NOTIFICATION ============
-      // TIDAK ADA NOTIFICATION DI SINI! Biarkan _runTieRound yang mengirim
-      // NOTIFICATION SUDAH DIHAPUS DARI SINI UNTUK MENCEGAH DOUBLE EVENT
-      
       setTimeout(() => {
         if (this._tieActive && this._tiePlayers.length > 1) {
-          // _runTieRound akan mengirim notifikasi Round berikutnya
           this._runTieRound(room, id, this._tiePlayers);
         } else if (this._tiePlayers.length === 1) {
           const winner = this._tiePlayers[0];
           this._processSingleWinner(room, id, winner);
         }
-      }, 3000);
+      }, 2000);
       
       return;
     }
@@ -2490,14 +2446,9 @@ export class GameServer extends CPUProtection {
       finalWinner: true
     }]);
     
-    this._broadcastDiceNotification("diceError", {
-      message: `${winner} wins tie breaker`,
-      winner: winner,
-      remaining: -1,
-      isTieBreaker: true,
-      isTieBreakerWinner: true,
-      finalWinner: true
-    });
+    this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
+      `${winner} WINS TIE BREAKER`
+    ]);
     
     this._resetTieBreakerState(id);
     this._startCooldownAfterTieBreaker();
