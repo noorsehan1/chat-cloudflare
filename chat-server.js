@@ -174,25 +174,27 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
-    this._setupPeriodicCleanup();
+    // ✅ PERUBAHAN 1: Hapus panggilan _setupPeriodicCleanup()
+    // this._setupPeriodicCleanup();
     
     try {
       this.state.storage.setAlarm(Date.now() + C.ALARM_10_DETIK);
     } catch(e) {}
   }
   
-  _setupPeriodicCleanup() {
-    this._cleanupInterval = setInterval(() => {
-      if (this.closing || this.isDestroyed) {
-        clearInterval(this._cleanupInterval);
-        return;
-      }
-      this._cleanupStaleLocks();
-      this._cleanupMemory();
-    }, C.CLEANUP_INTERVAL);
-    
-    this._pendingTimeouts.add(this._cleanupInterval);
-  }
+  // ✅ PERUBAHAN 2: Hapus fungsi _setupPeriodicCleanup()
+  // _setupPeriodicCleanup() {
+  //   this._cleanupInterval = setInterval(() => {
+  //     if (this.closing || this.isDestroyed) {
+  //       clearInterval(this._cleanupInterval);
+  //       return;
+  //     }
+  //     this._cleanupStaleLocks();
+  //     this._cleanupMemory();
+  //   }, C.CLEANUP_INTERVAL);
+  //   
+  //   this._pendingTimeouts.add(this._cleanupInterval);
+  // }
   
   _cleanupStaleLocks() {
     try {
@@ -287,8 +289,37 @@ export class ChatServer {
     } catch(e) {}
   }
   
+  // ✅ PERUBAHAN 3: Optimasi _doCleanup() - Skip jika tidak perlu
   _doCleanup() {
     if (this._cleanupInProgress || this.closing || this.isDestroyed) return;
+    
+    // CEK: Apakah ada koneksi mati yang perlu dibersihkan?
+    let needsCleanup = false;
+    for (const ws of this.wsSet) {
+      if (!ws || ws.readyState !== 1 || ws._closing || this._cleaningUp.has(ws)) {
+        needsCleanup = true;
+        break;
+      }
+    }
+    
+    // CEK: Apakah ada user connection yang mati?
+    if (!needsCleanup) {
+      for (const [username, connections] of this.userConnections) {
+        for (const conn of connections) {
+          if (!conn || conn.readyState !== 1 || conn._closing || this._cleaningUp.has(conn)) {
+            needsCleanup = true;
+            break;
+          }
+        }
+        if (needsCleanup) break;
+      }
+    }
+    
+    // Jika tidak ada yang perlu dibersihkan, skip!
+    if (!needsCleanup) {
+      return;
+    }
+    
     this._cleanupInProgress = true;
     
     try {
@@ -1463,9 +1494,10 @@ export class ChatServer {
     }
     this._pendingTimeouts.clear();
     
-    if (this._cleanupInterval) {
-      clearInterval(this._cleanupInterval);
-    }
+    // ✅ PERUBAHAN 4: Hapus blok if (this._cleanupInterval)
+    // if (this._cleanupInterval) {
+    //   clearInterval(this._cleanupInterval);
+    // }
     
     const wsCopy = Array.from(this.wsSet);
     for (const ws of wsCopy) {
