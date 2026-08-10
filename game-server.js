@@ -80,7 +80,7 @@ const CONSTANTS = {
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 2 },
-    { start: 14, end: 18 },
+    { start: 14, end: 15 },
     { start: 22, end: 23 }
   ],
   TIMEZONE_OFFSET: 8,
@@ -2141,10 +2141,6 @@ export class GameServer extends CPUProtection {
           tieRound: this._tieRound
         }]);
         
-        this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
-          `${username} answered ${guessValue}`
-        ]);
-        
         if (this._tieAnswers.size === this._tiePlayers.length) {
           if (this._tieTimer) {
             clearTimeout(this._tieTimer);
@@ -2157,10 +2153,6 @@ export class GameServer extends CPUProtection {
           
           this._canSubmitDiceAnswer = false;
           this._isShowingDice = false;
-          
-          this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
-            `All players answered. Processing...`
-          ]);
           
           const tieId = this._getActiveTieBreakerId();
           if (tieId) {
@@ -2372,8 +2364,6 @@ export class GameServer extends CPUProtection {
       return;
     }
     
-    const resultStrings = results.map(r => `${r.player}:${r.answer}`);
-    
     // ============ CASE 1: HANYA 1 PEMENANG ============
     if (highestPlayers.length === 1) {
       const winner = highestPlayers[0];
@@ -2402,11 +2392,8 @@ export class GameServer extends CPUProtection {
       return;
     }
     
-    // ============ CASE 2: MASIH TIE -> LANJUT ROUND ============
+    // ============ CASE 2: MASIH TIE -> LANGSUNG ROUND BERIKUTNYA ============
     if (highestPlayers.length > 1) {
-      const resultMessage = `ROUND ${this._tieRound} RESULT: ${resultStrings.join(', ')} | HIGH:${highest} (${highestPlayers.join(',')})`;
-      this._broadcastToRoom(DICE_ROOM, ["diceNotification", resultMessage]);
-      
       this._tiePlayers = highestPlayers;
       this._tieAnswers = new Map();
       data.players = highestPlayers;
