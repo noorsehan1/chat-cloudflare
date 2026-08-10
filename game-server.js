@@ -1261,7 +1261,7 @@ export class GameServer extends CPUProtection {
           winners: {},
           room: room,
           recording: true,
-          message: "No winners 😭"
+          message: "✿No winner✿"
         }]);
       } else {
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", {
@@ -1888,7 +1888,7 @@ export class GameServer extends CPUProtection {
               });
             } else {
               this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-                message: `No winner 😭`,
+                message: `✿No winner✿`,
                 value: diceValue,
                 round: roundNumber
               }]);
@@ -2073,7 +2073,7 @@ export class GameServer extends CPUProtection {
               });
             } else {
               this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-                message: `No winner 😭`,
+                message: `✿No winner✿`,
                 value: diceValue,
                 round: roundNumber
               }]);
