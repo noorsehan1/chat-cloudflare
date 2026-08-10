@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS - FIXED PRODUCTION CODE ====================
+// ==================== GAME-SERVER.JS - OPTIMIZED WITH SETINTERVAL ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -391,97 +391,6 @@ class DiceGameSystem {
   }
 }
 
-// ==================== CENTRALIZED SCHEDULER ====================
-class CentralizedScheduler {
-  constructor() {
-    this.tasks = [];
-    this.isRunning = false;
-    this._lastRun = Date.now();
-    this._taskQueue = [];
-    this._loopInterval = null;
-  }
-
-  registerTask(name, interval, fn, options = {}) {
-    this.tasks.push({
-      name,
-      interval,
-      fn,
-      lastRun: 0,
-      options,
-      isRunning: false,
-      errorCount: 0
-    });
-  }
-
-  async run() {
-    if (this.isRunning) return;
-    this.isRunning = true;
-
-    try {
-      const now = Date.now();
-      
-      const dueTasks = this.tasks.filter(task => {
-        if (task.isRunning) return false;
-        const elapsed = now - task.lastRun;
-        return elapsed >= task.interval;
-      });
-
-      for (const task of dueTasks) {
-        task.isRunning = true;
-        task.lastRun = now;
-        
-        try {
-          if (this._shouldYieldCPU()) {
-            await this._yield();
-          }
-          
-          await task.fn();
-          task.errorCount = 0;
-          
-        } catch(e) {
-          task.errorCount++;
-          if (task.errorCount > 5) {
-            task.interval = task.interval * 2;
-            task.errorCount = 0;
-          }
-        } finally {
-          task.isRunning = false;
-        }
-        
-        await this._yield();
-      }
-
-    } finally {
-      this.isRunning = false;
-    }
-  }
-
-  _shouldYieldCPU() {
-    const elapsed = Date.now() - this._lastRun;
-    return elapsed > 8;
-  }
-
-  async _yield() {
-    return new Promise(resolve => setTimeout(resolve, 1));
-  }
-
-  start(intervalMs = 50) {
-    if (this._loopInterval) {
-      clearInterval(this._loopInterval);
-    }
-    this._loopInterval = setInterval(() => {
-      this.run();
-    }, intervalMs);
-  }
-
-  stop() {
-    if (this._loopInterval) {
-      clearInterval(this._loopInterval);
-      this._loopInterval = null;
-    }
-  }
-}
-
 // ==================== GAME SERVER CLASS ====================
 export class GameServer extends CPUProtection {
   constructor(state, env) {
@@ -609,8 +518,71 @@ export class GameServer extends CPUProtection {
 
       this.diceGameSystem = new DiceGameSystem(this);
 
-      this._scheduler = new CentralizedScheduler();
-      this._setupScheduler();
+      // ==================== ✅ SETINTERVAL TASKS (GANTI SCHEDULER) ====================
+      // CPU Monitor - setiap 100ms
+      this._cpuMonitorInterval = setInterval(() => {
+        if (!this.closing && !this.isDestroyed) {
+          this._cpuMonitorTask();
+        }
+      }, 100);
+
+      // Dice Keep Alive - setiap 5 detik (dari 1 detik - hemat 80%)
+      this._diceKeepAliveInterval = setInterval(() => {
+        if (!this.closing && !this.isDestroyed) {
+          this._diceKeepAliveTask();
+        }
+      }, 5000);
+
+      // Health Check - setiap 10 detik
+      this._healthCheckInterval = setInterval(() => {
+        if (!this.closing && !this.isDestroyed) {
+          this._healthCheckTask();
+        }
+      }, 10000);
+
+      // Weekly Reset - setiap 5 menit
+      this._weeklyResetInterval = setInterval(async () => {
+        if (!this.closing && !this.isDestroyed) {
+          await this._checkAndResetWeeklyDice();
+        }
+      }, CONSTANTS.WEEKLY_RESET_CHECK_INTERVAL_MS || 300000);
+
+      // Dice Auto - setiap 1 menit
+      this._diceAutoInterval = setInterval(async () => {
+        if (!this.closing && !this.isDestroyed) {
+          await this._diceAutoTask();
+        }
+      }, 60000);
+
+      // Dice Timer - setiap 30 detik
+      this._diceTimerInterval2 = setInterval(() => {
+        if (!this.closing && !this.isDestroyed) {
+          this._diceTimerTask();
+        }
+      }, 30000);
+
+      // Stuck Games Check - setiap 15 detik
+      this._stuckGamesInterval = setInterval(() => {
+        if (!this.closing && !this.isDestroyed) {
+          this._checkStuckGames();
+        }
+      }, 15000);
+
+      // Stale Games Cleanup - setiap 1 menit
+      this._staleGamesInterval = setInterval(() => {
+        if (!this.closing && !this.isDestroyed) {
+          this._cleanupStaleGames();
+        }
+      }, 60000);
+
+      // Dead Connections Cleanup - setiap 30 detik
+      this._deadConnectionsInterval = setInterval(() => {
+        if (!this.closing && !this.isDestroyed) {
+          this._cleanupDeadConnections();
+        }
+      }, 30000);
+
+      // ==================== END SETINTERVAL TASKS ====================
 
       this._cachedResetWeek = null;
       this._cachedResetWeekTimestamp = 0;
@@ -696,46 +668,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {
       return false;
     }
-  }
-
-  _setupScheduler() {
-    this._scheduler.registerTask('cpuMonitor', 100, () => {
-      this._cpuMonitorTask();
-    });
-
-    this._scheduler.registerTask('healthCheck', 10000, () => {
-      this._healthCheckTask();
-    });
-
-    this._scheduler.registerTask('weeklyReset', CONSTANTS.WEEKLY_RESET_CHECK_INTERVAL_MS, async () => {
-      await this._checkAndResetWeeklyDice();
-    });
-
-    this._scheduler.registerTask('diceKeepAlive', 1000, () => {
-      this._diceKeepAliveTask();
-    });
-
-    this._scheduler.registerTask('diceAuto', 60000, async () => {
-      await this._diceAutoTask();
-    });
-
-    this._scheduler.registerTask('diceTimer', 30000, () => {
-      this._diceTimerTask();
-    });
-
-    this._scheduler.registerTask('stuckGamesCheck', 15000, () => {
-      this._checkStuckGames();
-    });
-
-    this._scheduler.registerTask('staleGamesCleanup', 60000, () => {
-      this._cleanupStaleGames();
-    });
-
-    this._scheduler.registerTask('deadConnectionsCleanup', 30000, () => {
-      this._cleanupDeadConnections();
-    });
-
-    this._scheduler.start(CONSTANTS.SCHEDULER_LOOP_INTERVAL_MS || 50);
   }
 
   async _checkAndResetWeeklyDice() {
@@ -2116,17 +2048,14 @@ export class GameServer extends CPUProtection {
       // ============ TIE BREAKER MODE ============
       if (this._tieActive) {
         if (!this._tiePlayers.includes(username)) {
-          
           return;
         }
         
         if (this._tieAnswers.has(username)) {
-          
           return;
         }
         
         if (!this._canSubmitDiceAnswer) {
-          
           return;
         }
         
@@ -2383,8 +2312,6 @@ export class GameServer extends CPUProtection {
         finalWinner: true
       }]);
       
-      
-      
       this._resetTieBreakerState(id);
       this._startCooldownAfterTieBreaker();
       return;
@@ -2430,8 +2357,6 @@ export class GameServer extends CPUProtection {
       tieBreakerRound: this._tieRound,
       finalWinner: true
     }]);
-    
-    
     
     this._resetTieBreakerState(id);
     this._startCooldownAfterTieBreaker();
@@ -5095,6 +5020,44 @@ export class GameServer extends CPUProtection {
       this.isDestroyed = true;
       this.closing = true;
       
+      // ✅ CLEANUP SEMUA INTERVAL
+      if (this._cpuMonitorInterval) {
+        clearInterval(this._cpuMonitorInterval);
+        this._cpuMonitorInterval = null;
+      }
+      if (this._diceKeepAliveInterval) {
+        clearInterval(this._diceKeepAliveInterval);
+        this._diceKeepAliveInterval = null;
+      }
+      if (this._healthCheckInterval) {
+        clearInterval(this._healthCheckInterval);
+        this._healthCheckInterval = null;
+      }
+      if (this._weeklyResetInterval) {
+        clearInterval(this._weeklyResetInterval);
+        this._weeklyResetInterval = null;
+      }
+      if (this._diceAutoInterval) {
+        clearInterval(this._diceAutoInterval);
+        this._diceAutoInterval = null;
+      }
+      if (this._diceTimerInterval2) {
+        clearInterval(this._diceTimerInterval2);
+        this._diceTimerInterval2 = null;
+      }
+      if (this._stuckGamesInterval) {
+        clearInterval(this._stuckGamesInterval);
+        this._stuckGamesInterval = null;
+      }
+      if (this._staleGamesInterval) {
+        clearInterval(this._staleGamesInterval);
+        this._staleGamesInterval = null;
+      }
+      if (this._deadConnectionsInterval) {
+        clearInterval(this._deadConnectionsInterval);
+        this._deadConnectionsInterval = null;
+      }
+      
       if (this._diceAutoCheckInterval) {
         clearInterval(this._diceAutoCheckInterval);
         this._diceAutoCheckInterval = null;
@@ -5119,10 +5082,6 @@ export class GameServer extends CPUProtection {
       if (this._kvCache) {
         this._kvCache.stopCleanup();
         this._kvCache.clear();
-      }
-      
-      if (this._scheduler) {
-        this._scheduler.stop();
       }
       
       for (const [room, game] of this.activeGames) {
