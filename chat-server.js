@@ -16,7 +16,7 @@ const C = {
 const ROOMS = [
   "LowCard", "Quiz", "Gacor", "General", "LOVE BIRDS", "Birthday Party",
   "Sweet Memories", "Lounge Talk", "Noxxeliverothcifsa", "BESTIES",
-  "Happy Vibes"
+  "Happy Vibes", "The Chatter Room"
 ];
 
 const ROOMS_SET = new Set(ROOMS);
