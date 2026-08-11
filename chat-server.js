@@ -1,16 +1,20 @@
-// ==================== CHAT SERVER - ALARM 10 DETIK, NUMBER 90 TIK ====================
+// ==================== CHAT SERVER - TANPA RATE LIMITING ====================
 
 const C = {
+  // ===== KONFIGURASI DASAR =====
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 500,
   MAX_MESSAGE_SIZE: 5000,
-  ALARM_10_DETIK: 10000,
-  NUMBER_UPDATE_TIK: 90,
   MAX_NUMBER: 6,
   BATCH_SIZE: 20,
   LOCK_TIMEOUT: 10000,
-  CLEANUP_INTERVAL: 30000,
   MAX_ROOM_CLIENTS: 500,
+  
+  // ===== TIMER HYBRID =====
+  NUMBER_UPDATE_INTERVAL: 15 * 60 * 1000, // 15 menit
+  CLEANUP_INTERVAL: 5 * 60 * 1000, // 5 menit
+  
+  
 };
 
 const ROOMS = [
@@ -145,6 +149,7 @@ export class ChatServer {
     this.closing = false;
     this.isDestroyed = false;
     
+    // WebSocket tracking
     this.wsSet = new Set();
     this.userConnections = new Map();
     this.userSeat = new Map();
@@ -153,47 +158,137 @@ export class ChatServer {
     this.roomClients = new Map();
     this.rooms = new Map();
     this.wsActiveMulti = new Map();
+    this.wsRoomMap = new Map();
     
+    // Processing & cleanup
     this._processingMessages = new Set();
     this._cleaningUp = new Set();
     this._pendingTimeouts = new Set();
     this._cleanupInProgress = false;
     
+    // Locks
     this._joinLocks = new Map();
     this._kursiLocks = new Map();
     
-    this._roomMessageCount = new Map();
-    this._roomMessageReset = new Map();
+    // ❌ RATE LIMITING DIHAPUS
+    // this._roomMessageCount = new Map();
+    // this._roomMessageReset = new Map();
     
+    // Hybrid timers
     this.currentNumber = 1;
-    this._tikCounter = 0;
+    this._lastNumberUpdate = Date.now();
+    this._lastCleanup = Date.now();
     
+    // Inisialisasi rooms
     for (const room of ROOMS) {
       this.rooms.set(room, new RoomManager(room));
       this.roomClients.set(room, new Set());
     }
     
-    // ✅ PERUBAHAN 1: Hapus panggilan _setupPeriodicCleanup()
-    // this._setupPeriodicCleanup();
+    // Scheduled cleanup
+    this._scheduleCleanup();
+  }
+  
+  // ========== SCHEDULED CLEANUP ==========
+  
+  _scheduleCleanup() {
+    if (this.closing || this.isDestroyed) return;
+    
+    setTimeout(() => {
+      this._updateNumberIfNeeded();
+      this._doCleanup();
+      this._cleanupStaleLocks();
+      this._scheduleCleanup();
+    }, C.CLEANUP_INTERVAL);
+  }
+  
+  // ========== HELPER ROOM CLIENTS ==========
+  
+  _addToRoomClients(ws, roomName) {
+    if (!ws || !roomName || this.closing || this.isDestroyed) return false;
     
     try {
-      this.state.storage.setAlarm(Date.now() + C.ALARM_10_DETIK);
+      const currentRoom = this.wsRoomMap.get(ws);
+      if (currentRoom === roomName) return true;
+      
+      if (currentRoom) {
+        const oldClients = this.roomClients.get(currentRoom);
+        if (oldClients && oldClients.has(ws)) {
+          oldClients.delete(ws);
+        }
+      }
+      
+      const clients = this.roomClients.get(roomName);
+      if (clients) {
+        if (!clients.has(ws)) {
+          clients.add(ws);
+        }
+        this.wsRoomMap.set(ws, roomName);
+        return true;
+      }
+      
+      return false;
+    } catch(e) {
+      return false;
+    }
+  }
+  
+  _removeFromRoomClients(ws) {
+    if (!ws) return;
+    
+    try {
+      const currentRoom = this.wsRoomMap.get(ws);
+      if (currentRoom) {
+        const clients = this.roomClients.get(currentRoom);
+        if (clients) {
+          clients.delete(ws);
+        }
+        this.wsRoomMap.delete(ws);
+      }
+      
+      for (const [room, clients] of this.roomClients) {
+        if (clients.has(ws)) {
+          clients.delete(ws);
+        }
+      }
+      
+      this.wsActiveMulti.delete(ws);
     } catch(e) {}
   }
   
-  // ✅ PERUBAHAN 2: Hapus fungsi _setupPeriodicCleanup()
-  // _setupPeriodicCleanup() {
-  //   this._cleanupInterval = setInterval(() => {
-  //     if (this.closing || this.isDestroyed) {
-  //       clearInterval(this._cleanupInterval);
-  //       return;
-  //     }
-  //     this._cleanupStaleLocks();
-  //     this._cleanupMemory();
-  //   }, C.CLEANUP_INTERVAL);
-  //   
-  //   this._pendingTimeouts.add(this._cleanupInterval);
-  // }
+  _getWsRoom(ws) {
+    return this.wsRoomMap.get(ws) || null;
+  }
+  
+  // ========== UPDATE NUMBER ==========
+  
+  _updateNumberIfNeeded() {
+    const now = Date.now();
+    
+    if (now - this._lastNumberUpdate >= C.NUMBER_UPDATE_INTERVAL) {
+      this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
+      this._lastNumberUpdate = now;
+      
+      for (const room of this.rooms.values()) {
+        if (room) {
+          room.setNumber(this.currentNumber);
+        }
+      }
+      
+      const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
+      
+      for (const [room, clients] of this.roomClients) {
+        if (clients && clients.size > 0) {
+          this._broadcastToRoom(room, numberMsg);
+        }
+      }
+      
+      return true;
+    }
+    return false;
+  }
+  
+  // ========== CLEANUP ==========
   
   _cleanupStaleLocks() {
     try {
@@ -208,13 +303,6 @@ export class ChatServer {
       for (const [key, time] of this._kursiLocks) {
         if (now - time > C.LOCK_TIMEOUT) {
           this._kursiLocks.delete(key);
-        }
-      }
-      
-      for (const [room, resetTime] of this._roomMessageReset) {
-        if (now > resetTime + 60000) {
-          this._roomMessageCount.delete(room);
-          this._roomMessageReset.delete(room);
         }
       }
     } catch(e) {}
@@ -253,46 +341,9 @@ export class ChatServer {
     } catch(e) {}
   }
   
-  async alarm() {
-    if (this.closing || this.isDestroyed) return;
-    
-    try {
-      this._tikCounter++;
-      
-      if (this._tikCounter >= C.NUMBER_UPDATE_TIK) {
-        this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
-        
-        for (const room of this.rooms.values()) {
-          if (room) {
-            room.setNumber(this.currentNumber);
-          }
-        }
-        
-        const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
-        
-        for (const [room, clients] of this.roomClients) {
-          if (clients && clients.size > 0 && clients.size <= C.MAX_ROOM_CLIENTS) {
-            this._broadcastToRoom(room, numberMsg);
-          }
-        }
-        
-        this._tikCounter = 0;
-      }
-      
-      this._doCleanup();
-      
-    } catch(e) {}
-    
-    try {
-      this.state.storage.setAlarm(Date.now() + C.ALARM_10_DETIK);
-    } catch(e) {}
-  }
-  
-  // ✅ PERUBAHAN 3: Optimasi _doCleanup() - Skip jika tidak perlu
   _doCleanup() {
     if (this._cleanupInProgress || this.closing || this.isDestroyed) return;
     
-    // CEK: Apakah ada koneksi mati yang perlu dibersihkan?
     let needsCleanup = false;
     for (const ws of this.wsSet) {
       if (!ws || ws.readyState !== 1 || ws._closing || this._cleaningUp.has(ws)) {
@@ -301,7 +352,6 @@ export class ChatServer {
       }
     }
     
-    // CEK: Apakah ada user connection yang mati?
     if (!needsCleanup) {
       for (const [username, connections] of this.userConnections) {
         for (const conn of connections) {
@@ -314,10 +364,7 @@ export class ChatServer {
       }
     }
     
-    // Jika tidak ada yang perlu dibersihkan, skip!
-    if (!needsCleanup) {
-      return;
-    }
+    if (!needsCleanup) return;
     
     this._cleanupInProgress = true;
     
@@ -344,6 +391,7 @@ export class ChatServer {
           connections.delete(conn);
           this.wsSet.delete(conn);
           this.wsActiveMulti.delete(conn);
+          this.wsRoomMap.delete(conn);
         }
         if (connections.size === 0) {
           toRemoveUsers.push(username);
@@ -363,6 +411,7 @@ export class ChatServer {
         }
         for (const client of toRemoveClient) {
           clients.delete(client);
+          this.wsRoomMap.delete(client);
         }
         
         if (clients.size > C.MAX_ROOM_CLIENTS) {
@@ -370,6 +419,7 @@ export class ChatServer {
           const toRemoveExtra = clientsArray.slice(C.MAX_ROOM_CLIENTS);
           for (const ws of toRemoveExtra) {
             clients.delete(ws);
+            this.wsRoomMap.delete(ws);
             if (ws && ws.readyState === 1) {
               try {
                 ws.close(1000, "Room overloaded");
@@ -415,6 +465,8 @@ export class ChatServer {
     } catch(e) {}
   }
   
+  // ========== BROADCAST ==========
+  
   _broadcastToRoom(room, msgStr) {
     if (this.closing || this.isDestroyed || !room) return;
     
@@ -424,11 +476,10 @@ export class ChatServer {
     if (clients.size > C.MAX_ROOM_CLIENTS) return;
     
     const clientArray = Array.from(clients);
-    const BATCH_SIZE = C.BATCH_SIZE;
     const toRemove = new Set();
     
-    for (let i = 0; i < clientArray.length; i += BATCH_SIZE) {
-      const batch = clientArray.slice(i, Math.min(i + BATCH_SIZE, clientArray.length));
+    for (let i = 0; i < clientArray.length; i += C.BATCH_SIZE) {
+      const batch = clientArray.slice(i, Math.min(i + C.BATCH_SIZE, clientArray.length));
       
       for (const ws of batch) {
         if (!ws) {
@@ -452,6 +503,7 @@ export class ChatServer {
       for (const ws of toRemove) {
         try {
           clients.delete(ws);
+          this.wsRoomMap.delete(ws);
           if (ws && !this._cleaningUp.has(ws)) {
             this.cleanup(ws);
           }
@@ -466,6 +518,8 @@ export class ChatServer {
       this._broadcastToRoom(room, JSON.stringify(msg));
     } catch(e) {}
   }
+  
+  // ========== SAFE SEND ==========
   
   safeSend(ws, msg) {
     if (!ws) return false;
@@ -483,6 +537,8 @@ export class ChatServer {
     }
   }
   
+  // ========== UPDATE ROOM COUNT ==========
+  
   updateRoomCount(room) {
     if (this.closing || this.isDestroyed || !room) return 0;
     try {
@@ -495,6 +551,8 @@ export class ChatServer {
       return 0;
     }
   }
+  
+  // ========== SEND ALL STATE TO ==========
   
   sendAllStateTo(ws, room, excludeSelf = false) {
     if (!ws || !ws.username) return;
@@ -541,6 +599,8 @@ export class ChatServer {
     } catch(e) {}
   }
   
+  // ========== CLEANUP WEBSOCKET ==========
+  
   cleanup(ws) {
     if (!ws || ws._cleaning || this._cleaningUp.has(ws)) {
       return;
@@ -551,23 +611,8 @@ export class ChatServer {
     
     try {
       const username = ws.username;
-      const room = ws.room;
       
-      if (room) {
-        try {
-          const clients = this.roomClients.get(room);
-          if (clients) clients.delete(ws);
-        } catch(e) {}
-      }
-      
-      try {
-        const activeData = this.wsActiveMulti.get(ws);
-        if (activeData?.room) {
-          const clients = this.roomClients.get(activeData.room);
-          if (clients) clients.delete(ws);
-        }
-        this.wsActiveMulti.delete(ws);
-      } catch(e) {}
+      this._removeFromRoomClients(ws);
       
       if (username) {
         try {
@@ -605,6 +650,7 @@ export class ChatServer {
       
       try {
         this.wsSet.delete(ws);
+        this.wsRoomMap.delete(ws);
       } catch(e) {}
       
     } catch(e) {} finally {
@@ -619,8 +665,13 @@ export class ChatServer {
     }
   }
   
+  // ========== HANDLE MESSAGE ==========
+  
   async handleMessage(ws, raw) {
     if (!ws) return;
+    
+    // Update timers
+    this._cleanupStaleLocks();
     
     try {
       if (ws.readyState !== 1 || ws._closing || this._cleaningUp.has(ws) || this.closing || this.isDestroyed) {
@@ -711,9 +762,9 @@ export class ChatServer {
             this.userConnections.set(multiUsername, connections);
             
             this.wsActiveMulti.set(ws, { username: multiUsername, room: multiRoomname });
-            const roomClients = this.roomClients.get(multiRoomname);
-            if (roomClients && !roomClients.has(ws)) roomClients.add(ws);
+            this._addToRoomClients(ws, multiRoomname);
             
+            this.safeSend(ws, ["currentNumber", this.currentNumber]);
             this.safeSend(ws, ["rooMasukMulti", seat, multiRoomname]);
             this.broadcast(multiRoomname, ["roomUserCount", multiRoomname, roomMan.getCount()]);
           } catch(e) {}
@@ -731,12 +782,7 @@ export class ChatServer {
             const roomName = seatInfo.room;
             const seatNumber = seatInfo.seat;
             
-            const activeData = this.wsActiveMulti.get(ws);
-            if (activeData?.username === targetUsername) {
-              const roomClients = this.roomClients.get(roomName);
-              if (roomClients) roomClients.delete(ws);
-              this.wsActiveMulti.delete(ws);
-            }
+            this._removeFromRoomClients(ws);
             
             const roomMan = this.rooms.get(roomName);
             if (roomMan) {
@@ -775,20 +821,18 @@ export class ChatServer {
             const seatNumber = seatInfo.seat;
             
             const oldActive = this.wsActiveMulti.get(ws);
-            if (oldActive?.room) {
-              const oldClients = this.roomClients.get(oldActive.room);
-              if (oldClients) oldClients.delete(ws);
+            if (oldActive?.username !== targetUsername) {
+              this.wsActiveMulti.set(ws, { username: targetUsername, room: roomName });
             }
             
-            this.wsActiveMulti.set(ws, { username: targetUsername, room: roomName });
-            const roomClients = this.roomClients.get(roomName);
-            if (roomClients && !roomClients.has(ws)) roomClients.add(ws);
+            this._addToRoomClients(ws, roomName);
             
             ws.username = targetUsername;
             ws.idtarget = targetUsername;
             ws.room = roomName;
             ws.roomname = roomName;
             
+            this.safeSend(ws, ["currentNumber", this.currentNumber]);
             this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
             this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
           } catch(e) {}
@@ -837,32 +881,8 @@ export class ChatServer {
             
             if (!chatMsg || !ROOMS_SET.has(chatRoom)) break;
             
-            const now = Date.now();
-            const reset = this._roomMessageReset.get(chatRoom) || 0;
-            const count = this._roomMessageCount.get(chatRoom) || 0;
-            
-            if (now > reset) {
-              this._roomMessageReset.set(chatRoom, now + 1000);
-              this._roomMessageCount.set(chatRoom, 1);
-            } else {
-              if (count > 10) {
-                break;
-              }
-              this._roomMessageCount.set(chatRoom, count + 1);
-            }
-            
-            if (!ws._chatTime) ws._chatTime = 0;
-            if (!ws._chatCount) ws._chatCount = 0;
-            
-            if (now - ws._chatTime > 1000) {
-              ws._chatCount = 1;
-              ws._chatTime = now;
-            } else {
-              ws._chatCount++;
-              if (ws._chatCount > 2) {
-                break;
-              }
-            }
+            // ❌ RATE LIMITING DIHAPUS
+            // Kirim chat langsung tanpa batasan
             
             const clients = this.roomClients.get(chatRoom);
             if (!clients || clients.size === 0) break;
@@ -930,19 +950,8 @@ export class ChatServer {
           try {
             const [giftRoom, giftSender, giftReceiver, giftGiftName] = args;
             if (giftRoom && ROOMS_SET.has(giftRoom)) {
-              const now = Date.now();
-              if (!ws._giftTime) ws._giftTime = 0;
-              if (!ws._giftCount) ws._giftCount = 0;
-              
-              if (now - ws._giftTime > 1000) {
-                ws._giftCount = 1;
-                ws._giftTime = now;
-              } else {
-                ws._giftCount++;
-                if (ws._giftCount > 3) {
-                  break;
-                }
-              }
+              // ❌ RATE LIMITING DIHAPUS
+              // Kirim gift langsung tanpa batasan
               
               const clients = this.roomClients.get(giftRoom);
               if (!clients || clients.size === 0) break;
@@ -956,19 +965,8 @@ export class ChatServer {
           try {
             const [rollRoom, rollUser, rollAngka] = args;
             if (rollRoom && ROOMS_SET.has(rollRoom)) {
-              const now = Date.now();
-              if (!ws._rollTime) ws._rollTime = 0;
-              if (!ws._rollCount) ws._rollCount = 0;
-              
-              if (now - ws._rollTime > 1000) {
-                ws._rollCount = 1;
-                ws._rollTime = now;
-              } else {
-                ws._rollCount++;
-                if (ws._rollCount > 2) {
-                  break;
-                }
-              }
+              // ❌ RATE LIMITING DIHAPUS
+              // Kirim roll langsung tanpa batasan
               
               const clients = this.roomClients.get(rollRoom);
               if (!clients || clients.size === 0) break;
@@ -997,7 +995,9 @@ export class ChatServer {
         }
         
         case "getCurrentNumber":
-          try { this.safeSend(ws, ["currentNumber", this.currentNumber]); } catch(e) {}
+          try { 
+            this.safeSend(ws, ["currentNumber", this.currentNumber]); 
+          } catch(e) {}
           break;
         
         case "isUserOnline": {
@@ -1119,6 +1119,8 @@ export class ChatServer {
     }
   }
   
+  // ========== HANDLE SET ID ==========
+  
   async handleSetId(ws, username, isNewUser) {
     if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
       try { 
@@ -1149,6 +1151,7 @@ export class ChatServer {
             oldConnections.delete(conn);
             this.wsSet.delete(conn);
             this.wsActiveMulti.delete(conn);
+            this.wsRoomMap.delete(conn);
           }
         }
         
@@ -1193,6 +1196,7 @@ export class ChatServer {
           oldConnections.delete(conn);
           this.wsSet.delete(conn);
           this.wsActiveMulti.delete(conn);
+          this.wsRoomMap.delete(conn);
         }
         if (oldConnections.size === 0) {
           this.userConnections.delete(username);
@@ -1300,6 +1304,8 @@ export class ChatServer {
     } catch(e) {}
   }
   
+  // ========== HANDLE JOIN ==========
+  
   async handleJoin(ws, roomName) {
     if (!ws || !ws.username || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) {
       return false;
@@ -1309,6 +1315,20 @@ export class ChatServer {
     const lockKey = `join_${roomName}_${username}`;
     
     if (this._joinLocks.has(lockKey)) {
+      const currentRoom = this._getWsRoom(ws);
+      if (currentRoom === roomName) {
+        const roomMan = this.rooms.get(roomName);
+        if (roomMan) {
+          const seat = this.userSeat.get(username)?.seat;
+          if (seat) {
+            this.safeSend(ws, ["rooMasuk", seat, roomName]);
+            this.safeSend(ws, ["roomUserCount", roomName, roomMan.getCount()]);
+            this.sendAllStateTo(ws, roomName, true);
+            this.safeSend(ws, ["currentNumber", this.currentNumber]);
+          }
+        }
+        return true;
+      }
       this.safeSend(ws, ["roomFull", roomName]);
       return false;
     }
@@ -1322,8 +1342,10 @@ export class ChatServer {
     }
   }
   
+  // ========== HANDLE JOIN INTERNAL ==========
+  
   async _handleJoinInternal(ws, roomName, username) {
-    const oldRoom = ws.room;
+    const oldRoom = this._getWsRoom(ws);
     
     if (oldRoom && oldRoom !== roomName) {
       try {
@@ -1336,8 +1358,8 @@ export class ChatServer {
             this.updateRoomCount(oldRoom);
           }
         }
-        const oldClients = this.roomClients.get(oldRoom);
-        if (oldClients) oldClients.delete(ws);
+        
+        this._removeFromRoomClients(ws);
         this.userSeat.delete(username);
         this.userRoom.delete(username);
       } catch(e) {}
@@ -1376,9 +1398,9 @@ export class ChatServer {
       ws.roomname = roomName;
       ws.idtarget = username;
       
-      const roomClients = this.roomClients.get(roomName);
-      if (roomClients && !roomClients.has(ws)) roomClients.add(ws);
+      this._addToRoomClients(ws, roomName);
       
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
       this.safeSend(ws, ["rooMasuk", seat, roomName]);
       this.safeSend(ws, ["numberKursiSaya", seat]);
       this.safeSend(ws, ["muteTypeResponse", roomMan.getMuted(), roomName]);
@@ -1400,6 +1422,8 @@ export class ChatServer {
     
     return true;
   }
+  
+  // ========== FETCH ==========
   
   async fetch(req) {
     if (this.closing || this.isDestroyed) {
@@ -1459,6 +1483,8 @@ export class ChatServer {
     }
   }
   
+  // ========== WEB SOCKET HANDLERS ==========
+  
   async webSocketMessage(ws, msg) { 
     if (!ws || ws._closing || this._cleaningUp.has(ws) || this.closing || this.isDestroyed) return;
     try {
@@ -1480,6 +1506,8 @@ export class ChatServer {
     } catch(e) {}
   }
   
+  // ========== DESTROY ==========
+  
   async destroy() {
     if (this.isDestroyed) return;
     this.closing = true;
@@ -1492,11 +1520,6 @@ export class ChatServer {
       clearTimeout(timeout);
     }
     this._pendingTimeouts.clear();
-    
-    // ✅ PERUBAHAN 4: Hapus blok if (this._cleanupInterval)
-    // if (this._cleanupInterval) {
-    //   clearInterval(this._cleanupInterval);
-    // }
     
     const wsCopy = Array.from(this.wsSet);
     for (const ws of wsCopy) {
@@ -1521,11 +1544,12 @@ export class ChatServer {
     this.wsActiveMulti.clear();
     this.roomClients.clear();
     this.rooms.clear();
+    this.wsRoomMap.clear();
     this._processingMessages.clear();
     this._cleaningUp.clear();
-    this._roomMessageCount.clear();
-    this._roomMessageReset.clear();
   }
+  
+  // ========== GET CLIENT COUNTRY ==========
   
   _getClientCountry(req) {
     try {
