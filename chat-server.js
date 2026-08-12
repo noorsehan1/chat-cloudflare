@@ -1,4 +1,4 @@
-// ==================== CHAT SERVER - TANPA COUNTRY ====================
+// ==================== CHAT SERVER - TANPA DURABLE OBJECTS ====================
 
 const C = {
   MAX_SEATS: 45,
@@ -139,8 +139,9 @@ class RoomManager {
 }
 
 export class ChatServer {
-  constructor(state, env) {
-    this.state = state;
+  // ✅ HAPUS PARAMETER "state"
+  constructor(env) {
+    // ✅ HAPUS this.state = state;
     this.env = env;
     this.closing = false;
     this.isDestroyed = false;
@@ -174,9 +175,56 @@ export class ChatServer {
     
     this._setupPeriodicCleanup();
     
-    try {
-      this.state.storage.setAlarm(Date.now() + C.ALARM_10_DETIK);
-    } catch(e) {}
+    // ✅ GANTI state.storage.setAlarm() DENGAN setInterval()
+    this._startNumberUpdater();
+  }
+  
+  // ✅ TAMBAHKAN METHOD INI (PENGGANTI alarm())
+  _startNumberUpdater() {
+    // Hapus interval lama jika ada
+    if (this._numberInterval) {
+      clearInterval(this._numberInterval);
+      this._numberInterval = null;
+    }
+    
+    this._numberInterval = setInterval(() => {
+      if (this.closing || this.isDestroyed) {
+        clearInterval(this._numberInterval);
+        this._numberInterval = null;
+        return;
+      }
+      
+      try {
+        this._tikCounter++;
+        
+        if (this._tikCounter >= C.NUMBER_UPDATE_TIK) {
+          this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
+          
+          for (const room of this.rooms.values()) {
+            if (room) {
+              room.setNumber(this.currentNumber);
+            }
+          }
+          
+          const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
+          
+          for (const [room, clients] of this.roomClients) {
+            if (clients && clients.size > 0 && clients.size <= C.MAX_ROOM_CLIENTS) {
+              this._broadcastToRoom(room, numberMsg);
+            }
+          }
+          
+          this._tikCounter = 0;
+        }
+        
+        this._doCleanup();
+        
+      } catch(e) {
+        // DIAM
+      }
+    }, C.ALARM_10_DETIK);
+    
+    this._pendingTimeouts.add(this._numberInterval);
   }
   
   _setupPeriodicCleanup() {
@@ -250,40 +298,8 @@ export class ChatServer {
     } catch(e) {}
   }
   
-  async alarm() {
-    if (this.closing || this.isDestroyed) return;
-    
-    try {
-      this._tikCounter++;
-      
-      if (this._tikCounter >= C.NUMBER_UPDATE_TIK) {
-        this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
-        
-        for (const room of this.rooms.values()) {
-          if (room) {
-            room.setNumber(this.currentNumber);
-          }
-        }
-        
-        const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
-        
-        for (const [room, clients] of this.roomClients) {
-          if (clients && clients.size > 0 && clients.size <= C.MAX_ROOM_CLIENTS) {
-            this._broadcastToRoom(room, numberMsg);
-          }
-        }
-        
-        this._tikCounter = 0;
-      }
-      
-      this._doCleanup();
-      
-    } catch(e) {}
-    
-    try {
-      this.state.storage.setAlarm(Date.now() + C.ALARM_10_DETIK);
-    } catch(e) {}
-  }
+  // ❌ HAPUS METHOD alarm() - SUDAH DIGANTI DENGAN _startNumberUpdater()
+  // async alarm() { ... }  // HAPUS INI
   
   _doCleanup() {
     if (this._cleanupInProgress || this.closing || this.isDestroyed) return;
@@ -1388,13 +1404,8 @@ export class ChatServer {
       server._timeoutId = timeoutId;
       this._pendingTimeouts.add(timeoutId);
       
-      try { 
-        this.state.acceptWebSocket(server);
-      } catch(e) { 
-        clearTimeout(timeoutId);
-        this._pendingTimeouts.delete(timeoutId);
-        return new Response("WebSocket acceptance failed", { status: 500 }); 
-      }
+      // ✅ HAPUS this.state.acceptWebSocket(server);
+      // Di Worker biasa, WebSocket langsung bisa dipake
       
       server.username = null;
       server.room = null;
@@ -1439,6 +1450,12 @@ export class ChatServer {
     if (this.isDestroyed) return;
     this.closing = true;
     this.isDestroyed = true;
+    
+    // ✅ CLEANUP INTERVAL NUMBER UPDATER
+    if (this._numberInterval) {
+      clearInterval(this._numberInterval);
+      this._numberInterval = null;
+    }
     
     this._joinLocks.clear();
     this._kursiLocks.clear();
