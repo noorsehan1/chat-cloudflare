@@ -154,9 +154,10 @@ export class ChatServer {
     this.userConnections = new Map();
     this.userSeat = new Map();
     this.userRoom = new Map();
+    this.userCountry = new Map(); // Untuk multi
     this.roomClients = new Map();
     this.rooms = new Map();
-    this.wsActiveMulti = new Map();
+    this.wsActiveMulti = new Map(); // UNTUK MULTI
     this.wsRoomMap = new Map();
     
     // Processing & cleanup
@@ -607,7 +608,18 @@ export class ChatServer {
     try {
       const username = ws.username;
       
+      // MULTI: Hapus dari room clients
       this._removeFromRoomClients(ws);
+      
+      // MULTI: Hapus dari wsActiveMulti
+      try {
+        const activeData = this.wsActiveMulti.get(ws);
+        if (activeData?.room) {
+          const clients = this.roomClients.get(activeData.room);
+          if (clients) clients.delete(ws);
+        }
+        this.wsActiveMulti.delete(ws);
+      } catch(e) {}
       
       if (username) {
         try {
@@ -615,11 +627,14 @@ export class ChatServer {
           if (connections) {
             connections.delete(ws);
             
+            // MULTI: Cek apakah ini multi
             const seatInfo = this.userSeat.get(username);
             const isMulti = seatInfo?.isMulti === true;
             
+            // MULTI: Hanya hapus user dari rooms jika bukan multi
             if (!isMulti && connections.size === 0) {
               this.userConnections.delete(username);
+              this.userCountry.delete(username);
               
               if (seatInfo?.room) {
                 const roomMan = this.rooms.get(seatInfo.room);
@@ -706,12 +721,14 @@ export class ChatServer {
           await this.handleJoin(ws, args[0]);
           break;
         
+        // ========== MULTI JOIN ==========
         case "multiJoin": {
           const multiUsername = args[0];
           const multiRoomname = args[1];
           if (!multiUsername || !multiRoomname || this.closing || this.isDestroyed) break;
           
           try {
+            // MULTI: Cek apakah username sudah ada di room lain
             let existingSeat = null, existingRoom = null;
             for (const [roomName, roomMan] of this.rooms) {
               if (!roomMan) continue;
@@ -725,6 +742,7 @@ export class ChatServer {
               if (existingSeat) break;
             }
             
+            // MULTI: Hapus dari room sebelumnya jika ada
             if (existingSeat && existingRoom) {
               const oldRoomMan = this.rooms.get(existingRoom);
               if (oldRoomMan) {
@@ -740,21 +758,31 @@ export class ChatServer {
           const roomMan = this.rooms.get(multiRoomname);
           if (!roomMan || roomMan.getCount() >= C.MAX_SEATS) break;
           
+          // MULTI: Tambahkan seat dengan isMulti: true
           const seat = roomMan.addSeat(multiUsername, "", "", 0, 0, 0, 0);
           if (!seat) break;
           
           try {
+            // MULTI: Set user seat dengan flag isMulti
             this.userSeat.set(multiUsername, { room: multiRoomname, seat, isMulti: true });
             this.userRoom.set(multiUsername, multiRoomname);
             
+            // MULTI: Simpan country
+            if (!this.userCountry.has(multiUsername)) {
+              this.userCountry.set(multiUsername, ws.clientCountry || "Unknown");
+            }
+            
+            // MULTI: Tambahkan ke connections
             let connections = this.userConnections.get(multiUsername);
             if (!connections) connections = new Set();
             if (!connections.has(ws)) connections.add(ws);
             this.userConnections.set(multiUsername, connections);
             
+            // MULTI: Simpan di wsActiveMulti
             this.wsActiveMulti.set(ws, { username: multiUsername, room: multiRoomname });
             this._addToRoomClients(ws, multiRoomname);
             
+            // MULTI: Kirim response
             this.safeSend(ws, ["currentNumber", this.currentNumber]);
             this.safeSend(ws, ["rooMasukMulti", seat, multiRoomname]);
             this.broadcast(multiRoomname, ["roomUserCount", multiRoomname, roomMan.getCount()]);
@@ -762,6 +790,7 @@ export class ChatServer {
           break;
         }
         
+        // ========== MULTI EXIT ==========
         case "exitMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
@@ -773,8 +802,17 @@ export class ChatServer {
             const roomName = seatInfo.room;
             const seatNumber = seatInfo.seat;
             
+            // MULTI: Hapus dari wsActiveMulti
+            const activeData = this.wsActiveMulti.get(ws);
+            if (activeData?.username === targetUsername) {
+              const roomClients = this.roomClients.get(roomName);
+              if (roomClients) roomClients.delete(ws);
+              this.wsActiveMulti.delete(ws);
+            }
+            
             this._removeFromRoomClients(ws);
             
+            // MULTI: Hapus dari room
             const roomMan = this.rooms.get(roomName);
             if (roomMan) {
               roomMan.removeSeat(seatNumber);
@@ -782,17 +820,21 @@ export class ChatServer {
               this.broadcast(roomName, ["roomUserCount", roomName, roomMan.getCount()]);
             }
             
+            // MULTI: Hapus dari userSeat dan userRoom
             this.userSeat.delete(targetUsername);
             this.userRoom.delete(targetUsername);
             
+            // MULTI: Hapus dari connections
             const connections = this.userConnections.get(targetUsername);
             if (connections) {
               connections.delete(ws);
               if (connections.size === 0) {
                 this.userConnections.delete(targetUsername);
+                this.userCountry.delete(targetUsername);
               }
             }
             
+            // MULTI: Reset ws properties
             if (ws.username === targetUsername) {
               ws.username = null;
               ws.idtarget = null;
@@ -801,6 +843,7 @@ export class ChatServer {
           break;
         }
         
+        // ========== SET ACTIVE MULTI ==========
         case "setActiveMulti": {
           const targetUsername = args[0];
           try {
@@ -810,6 +853,7 @@ export class ChatServer {
             const roomName = seatInfo.room;
             const seatNumber = seatInfo.seat;
             
+            // MULTI: Hapus dari room lama
             const oldActive = this.wsActiveMulti.get(ws);
             if (oldActive?.username !== targetUsername) {
               this.wsActiveMulti.set(ws, { username: targetUsername, room: roomName });
@@ -817,11 +861,13 @@ export class ChatServer {
             
             this._addToRoomClients(ws, roomName);
             
+            // MULTI: Update ws properties
             ws.username = targetUsername;
             ws.idtarget = targetUsername;
             ws.room = roomName;
             ws.roomname = roomName;
             
+            // MULTI: Kirim response
             this.safeSend(ws, ["currentNumber", this.currentNumber]);
             this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
             this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
@@ -981,12 +1027,14 @@ export class ChatServer {
           } catch(e) {}
           break;
         
+        // ========== IS USER ONLINE (dengan Multi) ==========
         case "isUserOnline": {
           try {
             const [onlineTarget, onlineCallback] = args;
             let isOnline = false;
             const seatInfo = this.userSeat.get(onlineTarget);
             if (seatInfo?.seat) {
+              // MULTI: Cek jika multi
               if (seatInfo.isMulti) {
                 isOnline = true;
               } else {
@@ -1003,11 +1051,13 @@ export class ChatServer {
           break;
         }
         
+        // ========== GET ONLINE USERS (dengan Multi) ==========
         case "getOnlineUsers": {
           try {
             const users = [];
             for (const [username, seatInfo] of this.userSeat) {
               if (seatInfo?.seat) {
+                // MULTI: Langsung push jika multi
                 if (seatInfo.isMulti) {
                   users.push(username);
                 } else {
@@ -1117,6 +1167,7 @@ export class ChatServer {
       return;
     }
     
+    // ========== MULTI: Cek jika ini multi user ==========
     const existingSeatInfo = this.userSeat.get(username);
     if (existingSeatInfo?.isMulti === true && isNewUser === false) {
       try {
@@ -1155,6 +1206,7 @@ export class ChatServer {
         ws.roomname = null;
         ws._closing = false;
         
+        // MULTI: Kirim response multi user active
         this.safeSend(ws, ["multiUserActive", username]);
         
       } catch(e) {}
@@ -1367,6 +1419,7 @@ export class ChatServer {
     }
     
     try {
+      // MULTI: Set user seat dengan isMulti: false
       this.userSeat.set(username, { room: roomName, seat, isMulti: false });
       this.userRoom.set(username, roomName);
       ws.room = roomName;
@@ -1419,6 +1472,9 @@ export class ChatServer {
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       
+      // MULTI: Dapatkan country
+      const clientCountry = this._getClientCountry(req);
+      
       const timeoutId = setTimeout(() => {
         try {
           if (server && server.readyState === 0) {
@@ -1444,6 +1500,7 @@ export class ChatServer {
       server.idtarget = null;
       server._closing = false;
       server._wsId = Date.now() + Math.random();
+      server.clientCountry = clientCountry; // MULTI: Simpan country
       
       if (!this.wsSet.has(server)) {
         this.wsSet.add(server);
@@ -1453,6 +1510,18 @@ export class ChatServer {
       
     } catch(e) {
       return new Response("Internal Server Error", { status: 500 });
+    }
+  }
+  
+  // ========== GET CLIENT COUNTRY (untuk Multi) ==========
+  _getClientCountry(req) {
+    try {
+      const country = req.headers.get("CF-IPCountry") || 
+                      req.headers.get("X-Country-Code") ||
+                      "Unknown";
+      return country;
+    } catch(e) { 
+      return "Unknown"; 
     }
   }
   
@@ -1513,7 +1582,8 @@ export class ChatServer {
     this.userConnections.clear();
     this.userSeat.clear();
     this.userRoom.clear();
-    this.wsActiveMulti.clear();
+    this.userCountry.clear(); // MULTI
+    this.wsActiveMulti.clear(); // MULTI
     this.roomClients.clear();
     this.rooms.clear();
     this.wsRoomMap.clear();
