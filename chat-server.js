@@ -1,4 +1,4 @@
-BAGAIMANA DENGAN INI // ==================== CHAT SERVER - ALARM 10 DETIK, NUMBER 90 TIK ====================
+// ==================== CHAT SERVER - TANPA COUNTRY ====================
 
 const C = {
   MAX_SEATS: 45,
@@ -149,7 +149,6 @@ export class ChatServer {
     this.userConnections = new Map();
     this.userSeat = new Map();
     this.userRoom = new Map();
-    this.userCountry = new Map();
     this.roomClients = new Map();
     this.rooms = new Map();
     this.wsActiveMulti = new Map();
@@ -549,7 +548,6 @@ export class ChatServer {
             
             if (!isMulti && connections.size === 0) {
               this.userConnections.delete(username);
-              this.userCountry.delete(username);
               
               if (seatInfo?.room) {
                 const roomMan = this.rooms.get(seatInfo.room);
@@ -670,9 +668,6 @@ export class ChatServer {
           try {
             this.userSeat.set(multiUsername, { room: multiRoomname, seat, isMulti: true });
             this.userRoom.set(multiUsername, multiRoomname);
-            if (!this.userCountry.has(multiUsername)) {
-              this.userCountry.set(multiUsername, ws.clientCountry || "Unknown");
-            }
             
             let connections = this.userConnections.get(multiUsername);
             if (!connections) connections = new Set();
@@ -722,7 +717,6 @@ export class ChatServer {
               connections.delete(ws);
               if (connections.size === 0) {
                 this.userConnections.delete(targetUsername);
-                this.userCountry.delete(targetUsername);
               }
             }
             
@@ -1148,8 +1142,6 @@ export class ChatServer {
     }
     
     try {
-      const userCountry = ws.clientCountry || "Unknown";
-      
       const oldConnections = this.userConnections.get(username);
       if (oldConnections) {
         const toRemove = [];
@@ -1238,10 +1230,6 @@ export class ChatServer {
         ws.room = null;
         ws.roomname = null;
         ws._closing = false;
-        
-        if (!this.userCountry.has(username)) {
-          this.userCountry.set(username, userCountry);
-        }
         
         let connections = this.userConnections.get(username);
         if (!connections) {
@@ -1388,7 +1376,6 @@ export class ChatServer {
       
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
-      const clientCountry = this._getClientCountry(req);
       
       const timeoutId = setTimeout(() => {
         try {
@@ -1414,7 +1401,6 @@ export class ChatServer {
       server.roomname = null;
       server.idtarget = null;
       server._closing = false;
-      server.clientCountry = clientCountry;
       server._wsId = Date.now() + Math.random();
       
       if (!this.wsSet.has(server)) {
@@ -1485,7 +1471,6 @@ export class ChatServer {
     this.userConnections.clear();
     this.userSeat.clear();
     this.userRoom.clear();
-    this.userCountry.clear();
     this.wsActiveMulti.clear();
     this.roomClients.clear();
     this.rooms.clear();
@@ -1493,16 +1478,5 @@ export class ChatServer {
     this._cleaningUp.clear();
     this._roomMessageCount.clear();
     this._roomMessageReset.clear();
-  }
-  
-  _getClientCountry(req) {
-    try {
-      const country = req.headers.get("CF-IPCountry") || 
-                      req.headers.get("X-Country-Code") ||
-                      "Unknown";
-      return country;
-    } catch(e) { 
-      return "Unknown"; 
-    }
   }
 }
