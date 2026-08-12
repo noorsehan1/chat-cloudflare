@@ -1,4 +1,4 @@
-// ==================== CHAT SERVER - ALARM 10 DETIK, NUMBER 90 TIK ====================
+BAGAIMANA DENGAN INI // ==================== CHAT SERVER - ALARM 10 DETIK, NUMBER 90 TIK ====================
 
 const C = {
   MAX_SEATS: 45,
@@ -14,10 +14,9 @@ const C = {
 };
 
 const ROOMS = [
-  "LowCard", "Quiz", "Gacor", "General", "LOVE BIRDS", "Birthday Party", "Heart Lovers", "Cat lovers",
-  "Chikahan Tambayan", "Lounge Talk", "Noxxeliverothcifsa", "BESTIES",
-  "Happy Vibes", "Relax & Chat", "The Chatter Room","Pakistan", "Philippines",
-  "India"
+  "LowCard", "Quiz", "Gacor", "General", "LOVE BIRDS", "Birthday Party",
+  "Sweet Memories", "Lounge Talk", "Noxxeliverothcifsa", "BESTIES",
+  "Happy Vibes", "The Chatter Room"
 ];
 
 const ROOMS_SET = new Set(ROOMS);
