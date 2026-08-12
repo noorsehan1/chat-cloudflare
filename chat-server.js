@@ -139,9 +139,8 @@ class RoomManager {
 }
 
 export class ChatServer {
-  // ✅ HAPUS PARAMETER "state"
+  // ✅ TANPA PARAMETER state
   constructor(env) {
-    // ✅ HAPUS this.state = state;
     this.env = env;
     this.closing = false;
     this.isDestroyed = false;
@@ -175,13 +174,12 @@ export class ChatServer {
     
     this._setupPeriodicCleanup();
     
-    // ✅ GANTI state.storage.setAlarm() DENGAN setInterval()
+    // ✅ PAKAI setInterval BUKAN alarm
     this._startNumberUpdater();
   }
   
-  // ✅ TAMBAHKAN METHOD INI (PENGGANTI alarm())
+  // ✅ PENGGANTI ALARM
   _startNumberUpdater() {
-    // Hapus interval lama jika ada
     if (this._numberInterval) {
       clearInterval(this._numberInterval);
       this._numberInterval = null;
@@ -219,9 +217,7 @@ export class ChatServer {
         
         this._doCleanup();
         
-      } catch(e) {
-        // DIAM
-      }
+      } catch(e) {}
     }, C.ALARM_10_DETIK);
     
     this._pendingTimeouts.add(this._numberInterval);
@@ -298,8 +294,8 @@ export class ChatServer {
     } catch(e) {}
   }
   
-  // ❌ HAPUS METHOD alarm() - SUDAH DIGANTI DENGAN _startNumberUpdater()
-  // async alarm() { ... }  // HAPUS INI
+  // ❌ HAPUS METHOD alarm()
+  // async alarm() { ... }
   
   _doCleanup() {
     if (this._cleanupInProgress || this.closing || this.isDestroyed) return;
@@ -1404,8 +1400,8 @@ export class ChatServer {
       server._timeoutId = timeoutId;
       this._pendingTimeouts.add(timeoutId);
       
-      // ✅ HAPUS this.state.acceptWebSocket(server);
-      // Di Worker biasa, WebSocket langsung bisa dipake
+      // ✅ HAPUS INI: this.state.acceptWebSocket(server);
+      // Di Worker biasa, WebSocket langsung bisa dipakai
       
       server.username = null;
       server.room = null;
@@ -1451,7 +1447,7 @@ export class ChatServer {
     this.closing = true;
     this.isDestroyed = true;
     
-    // ✅ CLEANUP INTERVAL NUMBER UPDATER
+    // ✅ CLEANUP NUMBER UPDATER
     if (this._numberInterval) {
       clearInterval(this._numberInterval);
       this._numberInterval = null;
