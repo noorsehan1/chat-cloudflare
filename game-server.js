@@ -1,4 +1,4 @@
-// ==================== GAME-SERVER.JS - FIXED VERSION ====================
+// ==================== GAME-SERVER.JS - FULL CLASS TANPA DURABLE OBJECTS ====================
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -383,12 +383,11 @@ class DiceGameSystem {
   }
 }
 
-// ==================== GAME SERVER CLASS ====================
+// ==================== GAME SERVER CLASS - TANPA DURABLE OBJECTS ====================
 export class GameServer extends CPUProtection {
-  constructor(state, env) {
+  constructor(env) {
     try {
       super();
-      this.state = state;
       this.env = env;
       this.closing = false;
       this.isDestroyed = false;
@@ -515,50 +514,9 @@ export class GameServer extends CPUProtection {
 
       this.diceGameSystem = new DiceGameSystem(this);
 
-      // ==================== ✅ FIX: 1 INTERVAL SAJA UNTUK SEMUA ====================
-      // HAPUS SEMUA interval YANG BERJALAN BERBEDA
-      // GANTI DENGAN 1 INTERVAL SAJA
-      
-      this._mainInterval = setInterval(() => {
-        try {
-          if (this.closing || this.isDestroyed) {
-            clearInterval(this._mainInterval);
-            this._mainInterval = null;
-            return;
-          }
-          
-          // JALANKAN SEMUA TASK DALAM 1 INTERVAL
-          // TANPA AKSES KV - HANYA LOGIKA INTERNAL
-          
-          // 1. CPU Monitor
-          this._cpuMonitorTask();
-          
-          // 2. Dice Keep Alive
-          this._diceKeepAliveTask();
-          
-          // 3. Health Check
-          this._healthCheckTask();
-          
-          // 4. Cek stuck games
-          this._checkStuckGames();
-          
-          // 5. Cleanup stale games
-          this._cleanupStaleGames();
-          
-          // 6. Cleanup dead connections
-          this._cleanupDeadConnections();
-          
-          // 7. Dice timer task (tanpa interval terpisah)
-          this._diceTimerTask();
-          
-        } catch(e) {
-          // DIAM SAJA, JANGAN CRASH
-        }
-      }, 10000); // JALANKAN SETIAP 10 DETIK
-      
-      // ==================== END FIX ====================
+      // ✅ PAKAI setInterval BUKAN state.storage.setAlarm()
+      this._startMainInterval();
 
-      // TETAP JALANKAN INIT ASYNC
       this._initAsync();
 
       setTimeout(async () => {
@@ -583,13 +541,42 @@ export class GameServer extends CPUProtection {
         }
       }, 8000);
 
-      // PANGGIL START DICE AUTO CHECKER TAPI TANPA INTERVAL BARU
       this._startDiceAutoChecker();
 
     } catch(e) {}
   }
 
-  // ==================== CACHE UNTUK dice_last_reset_week ====================
+  // ✅ PENGGANTI ALARM
+  _startMainInterval() {
+    if (this._mainInterval) {
+      clearInterval(this._mainInterval);
+      this._mainInterval = null;
+    }
+
+    this._mainInterval = setInterval(() => {
+      try {
+        if (this.closing || this.isDestroyed) {
+          clearInterval(this._mainInterval);
+          this._mainInterval = null;
+          return;
+        }
+        
+        this._cpuMonitorTask();
+        this._diceKeepAliveTask();
+        this._healthCheckTask();
+        this._checkStuckGames();
+        this._cleanupStaleGames();
+        this._cleanupDeadConnections();
+        this._diceTimerTask();
+        
+      } catch(e) {}
+    }, 10000);
+  }
+
+  // ❌ HAPUS METHOD alarm()
+  // async alarm() { ... }
+
+  // ==================== CACHE METHODS ====================
 
   async _updateCachedResetWeek(week) {
     this._cachedResetWeek = week;
@@ -616,8 +603,6 @@ export class GameServer extends CPUProtection {
       return null;
     }
   }
-
-  // ==================== CACHE UNTUK lowcard_recording_status_* ====================
 
   async _getRecordingStatusFromKV(roomName) {
     try {
@@ -876,19 +861,13 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== ✅ FIX: TANPA INTERVAL BARU ====================
   _startDiceAutoChecker() {
     try {
-      // HAPUS interval, PANGGIL MANUAL SAJA
-      // TIDAK PERLU INTERVAL KARENA SUDAH ADA _mainInterval
-      
-      // PANGGIL SEKALI SAAT START
       setTimeout(() => {
         if (!this.closing && !this.isDestroyed) {
           this._diceAutoTask().catch(() => {});
         }
       }, 1000);
-      
     } catch(e) {}
   }
 
@@ -1464,10 +1443,8 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== ✅ FIX: TANPA INTERVAL BARU ====================
   _startDiceTimerNotifications() {
     try {
-      // HAPUS interval, GANTI DENGAN TIMEOUT
       if (this._diceTimerTimeout) {
         clearTimeout(this._diceTimerTimeout);
         this._diceTimerTimeout = null;
@@ -1489,13 +1466,11 @@ export class GameServer extends CPUProtection {
         timeup: false
       };
       
-      // PANGGIL PERTAMA KALI
       this._diceTimerTick();
       
     } catch(e) {}
   }
 
-  // ==================== ✅ FIX: TAMBAH METHOD TIMER TICK ====================
   _diceTimerTick() {
     try {
       if (!this.currentDiceRoll || !this._diceQuestionStartTime) {
@@ -1539,7 +1514,6 @@ export class GameServer extends CPUProtection {
         });
       }
       
-      // PANGGIL LAGI SETELAH 1 DETIK (PAKAI TIMEOUT, BUKAN INTERVAL)
       if (remainingInt > 0 && !this._diceNotifiedFlags.timeup) {
         this._diceTimerTimeout = setTimeout(() => {
           this._diceTimerTick();
@@ -1949,7 +1923,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== SUBMIT DICE ANSWER WITH TIE BREAKER ====================
+  // ==================== SUBMIT DICE ANSWER ====================
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) return;
@@ -1964,7 +1938,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // ============ TIE BREAKER MODE ============
       if (this._tieActive) {
         if (!this._tiePlayers.includes(username)) {
           return;
@@ -2015,7 +1988,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // ============ DICE NORMAL MODE ============
       if (this.diceAnswered.has(username)) return;
       
       const diceValue = this.currentDiceRoll?.value;
@@ -2118,7 +2090,6 @@ export class GameServer extends CPUProtection {
     let notified5 = false;
     let isProcessed = false;
     
-    // ✅ FIX: PAKAI INTERVAL TAPI HANYA UNTUK TIE BREAKER
     this._tieInterval = setInterval(() => {
       timeLeft--;
       
@@ -2212,7 +2183,6 @@ export class GameServer extends CPUProtection {
       return;
     }
     
-    // ============ CASE 1: HANYA 1 PEMENANG ============
     if (highestPlayers.length === 1) {
       const winner = highestPlayers[0];
       
@@ -2235,7 +2205,6 @@ export class GameServer extends CPUProtection {
       return;
     }
     
-    // ============ CASE 2: MASIH TIE -> LANGSUNG ROUND BERIKUTNYA ============
     if (highestPlayers.length > 1) {
       this._tiePlayers = highestPlayers;
       this._tieAnswers = new Map();
@@ -2413,8 +2382,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== CONTINUE WITH REMAINING METHODS ====================
-  
   async startDiceWithDelay(delayMs) {
     try {
       if (this._diceStartTimeout) return;
@@ -2541,7 +2508,6 @@ export class GameServer extends CPUProtection {
           }
         }
         
-        // ✅ TAMBAHKAN CPU YIELD
         if (Date.now() - startTime > 8) {
           await this._cpuYield();
           startTime = Date.now();
@@ -2743,7 +2709,6 @@ export class GameServer extends CPUProtection {
           }
         }
         
-        // ✅ TAMBAHKAN CPU YIELD
         if (Date.now() - startTime > 8) {
           await this._cpuYield();
           startTime = Date.now();
@@ -2752,8 +2717,6 @@ export class GameServer extends CPUProtection {
       
     } catch(e) {}
   }
-
-  // ==================== LOW CARD GAME METHODS ====================
 
   _stopDiceTimerNotifications() {
     try {
@@ -3146,7 +3109,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== ✅ FIX: TAMBAHKAN CPU YIELD DI BROADCAST ====================
+  // ==================== BROADCAST ====================
   async _broadcastToRoom(room, message) {
     try {
       if (this.closing || this.isDestroyed || !room || !message) return;
@@ -3168,7 +3131,6 @@ export class GameServer extends CPUProtection {
           }
         }
         
-        // ✅ TAMBAHKAN CPU YIELD
         if (Date.now() - startTime > 8) {
           await this._cpuYield();
           startTime = Date.now();
@@ -3680,7 +3642,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== ✅ FIX: TAMBAHKAN CPU YIELD DI EVALUATE ====================
+  // ==================== EVALUATE ROUND ====================
   async _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
@@ -3714,7 +3676,6 @@ export class GameServer extends CPUProtection {
       const submittedIds = new Set(numbers.keys());
       const activeIds = this._getActivePlayerIds(game);
       
-      // ✅ CEK CPU
       if (this._checkCPULimit()) await this._cpuYield();
       
       for (const id of activeIds) {
@@ -4262,7 +4223,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== ✅ FIX: TAMBAHKAN CPU YIELD DI EVENT QUEUE ====================
   async _processEventQueue() {
     try {
       if (this._isProcessingQueue || this._eventQueue.length === 0) return;
@@ -4279,7 +4239,6 @@ export class GameServer extends CPUProtection {
         } catch(e) {
           this._handleError('processEvent', e);
         }
-        // ✅ CEK CPU SETIAP ITEM
         if (this._checkCPULimit()) {
           await this._cpuYield();
           this._startCPUTimer();
@@ -4964,12 +4923,13 @@ export class GameServer extends CPUProtection {
       this.isDestroyed = true;
       this.closing = true;
       
-      // ✅ CLEANUP SEMUA INTERVAL
+      // ✅ CLEANUP MAIN INTERVAL
       if (this._mainInterval) {
         clearInterval(this._mainInterval);
         this._mainInterval = null;
       }
       
+      // ✅ CLEANUP SEMUA INTERVAL LAINNYA
       if (this._diceKeepAliveInterval) {
         clearInterval(this._diceKeepAliveInterval);
         this._diceKeepAliveInterval = null;
@@ -5032,6 +4992,7 @@ export class GameServer extends CPUProtection {
         this._kvCache.clear();
       }
       
+      // ✅ BERSIHKAN GAME
       for (const [room, game] of this.activeGames) {
         await this._forceCleanupGame(room, game);
       }
@@ -5040,6 +5001,7 @@ export class GameServer extends CPUProtection {
       await this.resetDice();
       this.diceGameSystem.clearCache();
       
+      // ✅ TUTUP SEMUA WEBSOCKET
       for (const [wsId, ws] of this.wsMap) {
         try {
           if (ws && ws.readyState === 1) {
@@ -5054,6 +5016,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== FETCH ====================
   async fetch(req) {
     try {
       if (this.closing || this.isDestroyed) {
@@ -5122,11 +5085,8 @@ export class GameServer extends CPUProtection {
           server._country = req.cf?.country || 'US';
           server._language = 'en';
           
-          try { 
-            this.state.acceptWebSocket(server); 
-          } catch(e) { 
-            return new Response("WebSocket acceptance failed", { status: 500 }); 
-          }
+          // ✅ HAPUS INI: this.state.acceptWebSocket(server);
+          // Di Worker biasa, WebSocket langsung bisa dipakai
           
           server.addEventListener("message", async (event) => {
             try {
