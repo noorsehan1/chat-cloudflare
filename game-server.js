@@ -2,7 +2,7 @@
 // ✅ TANPA CPU CHECK
 // ✅ SINGLE MASTER INTERVAL
 // ✅ BROADCAST BUFFERING
-// ✅ FULL CACHE
+// ✅ FULL CACHE (TANPA TTL - SINKRON DENGAN KV)
 // ✅ THROTTLED NOTIFICATIONS
 // ✅ GLOBAL GAME SCHEDULER
 // ✅ OPTIMAL UNTUK DURABLE OBJECT
@@ -82,7 +82,6 @@ const C = {
   TIE_BREAKER_COOLDOWN: 15000,
   MASTER_INTERVAL_MS: 10000,
   BROADCAST_BUFFER_FLUSH_MS: 100,
-  CACHE_TTL_MS: 30000,
 };
 
 const QUIZ_SCHEDULE = {
@@ -101,7 +100,6 @@ class BroadcastBuffer {
   constructor() {
     this.buffers = new Map();
     this.flushTimers = new Map();
-    this._flushInterval = null;
   }
 
   add(room, message) {
@@ -143,10 +141,6 @@ class BroadcastBuffer {
     return result;
   }
 
-  getSize(room) {
-    return this.buffers.get(room)?.length || 0;
-  }
-
   clear() {
     this.buffers.clear();
     for (const timer of this.flushTimers.values()) {
@@ -156,25 +150,23 @@ class BroadcastBuffer {
   }
 }
 
-// ==================== CACHE ====================
+// ==================== CACHE (TANPA TTL - SINKRON DENGAN KV) ====================
 class GameCache {
   constructor() {
     this.cache = new Map();
-    this._cleanupInterval = null;
   }
 
   get(key) {
     const entry = this.cache.get(key);
     if (!entry) return null;
-    if (Date.now() - entry.timestamp > entry.ttl) {
-      this.cache.delete(key);
-      return null;
-    }
     return entry.value;
   }
 
-  set(key, value, ttl = C.CACHE_TTL_MS) {
-    this.cache.set(key, { value, timestamp: Date.now(), ttl });
+  set(key, value) {
+    this.cache.set(key, {
+      value: value,
+      timestamp: Date.now()
+    });
   }
 
   delete(key) {
@@ -187,25 +179,6 @@ class GameCache {
 
   clear() {
     this.cache.clear();
-  }
-
-  startCleanup() {
-    if (this._cleanupInterval) return;
-    this._cleanupInterval = setInterval(() => {
-      const now = Date.now();
-      for (const [key, entry] of this.cache) {
-        if (now - entry.timestamp > entry.ttl) {
-          this.cache.delete(key);
-        }
-      }
-    }, 60000);
-  }
-
-  stopCleanup() {
-    if (this._cleanupInterval) {
-      clearInterval(this._cleanupInterval);
-      this._cleanupInterval = null;
-    }
   }
 }
 
@@ -247,18 +220,11 @@ class DiceGameSystem {
     this.userScores = new Map();
     this._isLoaded = false;
     this._loading = false;
-    this._lastLoadTime = 0;
-    this._cacheTTL = 5000;
-    this._cache = new GameCache();
+    this._cache = gameServer._cache;
   }
 
   async loadScores() {
     try {
-      const now = Date.now();
-      if (this._isLoaded && (now - this._lastLoadTime) < this._cacheTTL) {
-        return true;
-      }
-      
       if (this._loading) return this._isLoaded;
       this._loading = true;
       
@@ -276,7 +242,6 @@ class DiceGameSystem {
         }
         this._isLoaded = true;
         this._loading = false;
-        this._lastLoadTime = Date.now();
         return true;
       }
       
@@ -290,7 +255,6 @@ class DiceGameSystem {
       
       this._isLoaded = true;
       this._loading = false;
-      this._lastLoadTime = Date.now();
       return true;
     } catch(e) {
       this._loading = false;
@@ -301,6 +265,7 @@ class DiceGameSystem {
   async getPoints() {
     try {
       if (!this.env?.QUESTIONS) return {};
+      
       const cached = this._cache.get('dice_points');
       if (cached) {
         this.userScores.clear();
@@ -325,7 +290,11 @@ class DiceGameSystem {
   async setPoints(points) {
     try {
       if (!this.env?.QUESTIONS) return false;
+      
+      // 1. UPDATE KV
       await this.env.QUESTIONS.put(C.DICE_POINT_KEY, JSON.stringify(points));
+      
+      // 2. UPDATE CACHE (langsung, sama dengan KV)
       this._cache.set('dice_points', points);
       this.userScores.clear();
       for (const [username, score] of Object.entries(points)) {
@@ -361,7 +330,11 @@ class DiceGameSystem {
   async setLastWeekWinner(winner) {
     try {
       if (!this.env?.QUESTIONS) return false;
+      
+      // 1. UPDATE KV
       await this.env.QUESTIONS.put(C.DICE_LAST_WEEK_WINNER, JSON.stringify(winner));
+      
+      // 2. UPDATE CACHE (langsung, sama dengan KV)
       this._cache.set('dice_last_week_winner', winner);
       this.gameServer._cachedLastWeekWinner = winner;
       return true;
@@ -373,7 +346,11 @@ class DiceGameSystem {
   async deleteLastWeekWinner() {
     try {
       if (!this.env?.QUESTIONS) return false;
+      
+      // 1. DELETE KV
       await this.env.QUESTIONS.delete(C.DICE_LAST_WEEK_WINNER);
+      
+      // 2. DELETE CACHE (langsung)
       this._cache.delete('dice_last_week_winner');
       this.gameServer._cachedLastWeekWinner = null;
       return true;
@@ -397,7 +374,8 @@ class DiceGameSystem {
 
   clearCache() {
     this.userScores.clear();
-    this._cache.clear();
+    this._cache.delete('dice_points');
+    this._cache.delete('dice_last_week_winner');
   }
 }
 
@@ -523,8 +501,6 @@ export class GameServer {
     this._notifier = new ThrottledNotifier();
     this.diceGameSystem = new DiceGameSystem(this);
 
-    this._cache.startCleanup();
-
     // === SINGLE MASTER INTERVAL ===
     this._masterInterval = setInterval(() => {
       if (this.closing || this.isDestroyed) {
@@ -533,28 +509,13 @@ export class GameServer {
         return;
       }
       
-      // Flush broadcast buffer
       this._flushBroadcastBuffer();
-      
-      // Health check
       this._performHealthCheck();
-      
-      // Dice keep alive
       this._diceKeepAliveTask();
-      
-      // Check stuck games
       this._checkStuckGames();
-      
-      // Cleanup stale games
       this._cleanupStaleGames();
-      
-      // Cleanup dead connections
       this._cleanupDeadConnections();
-      
-      // Dice timer
       this._diceTimerTask();
-      
-      // Weekly reset check
       this._checkAndResetWeeklyDice();
       
     }, C.MASTER_INTERVAL_MS);
@@ -584,17 +545,24 @@ export class GameServer {
     }, 1000);
   }
 
-  // ==================== CACHE METHODS ====================
+  // ==================== CACHE METHODS (SINKRON DENGAN KV) ====================
 
   async _getRecordingStatus(roomName) {
     if (!roomName) return false;
-    const cached = this._cache.get(`recording_${roomName}`);
-    if (cached !== null) return cached;
     
+    // 1. Cek CACHE
+    const cached = this._cache.get(`recording_${roomName}`);
+    if (cached !== null) {
+      return cached;
+    }
+    
+    // 2. Baca dari KV
     if (this.env?.QUESTIONS) {
       const kvValue = await this.env.QUESTIONS.get(C.LOWCARD_RECORDING_KEY + roomName);
       const isRecording = kvValue === 'true';
-      this._cache.set(`recording_${roomName}`, isRecording, 60000);
+      
+      // 3. Simpan ke CACHE
+      this._cache.set(`recording_${roomName}`, isRecording);
       return isRecording;
     }
     return false;
@@ -602,23 +570,37 @@ export class GameServer {
 
   async _setRecordingStatus(roomName, value) {
     if (!roomName) return false;
-    this._cache.set(`recording_${roomName}`, value, 60000);
     
+    // 1. UPDATE KV
     if (this.env?.QUESTIONS) {
-      await this.env.QUESTIONS.put(C.LOWCARD_RECORDING_KEY + roomName, value ? 'true' : 'false');
+      await this.env.QUESTIONS.put(
+        C.LOWCARD_RECORDING_KEY + roomName,
+        value ? 'true' : 'false'
+      );
     }
+    
+    // 2. UPDATE CACHE (langsung, sama dengan KV)
+    this._cache.set(`recording_${roomName}`, value);
+    
     return true;
   }
 
   async _getLowCardWinners(room) {
     if (!room || !this.env?.QUESTIONS) return {};
-    const cached = this._cache.get(`winners_${room}`);
-    if (cached) return cached;
     
+    // 1. Cek CACHE
+    const cached = this._cache.get(`winners_${room}`);
+    if (cached) {
+      return cached;
+    }
+    
+    // 2. Baca dari KV
     const key = C.LOWCARD_WINNER_KEY + room;
     const winners = await this.env.QUESTIONS.get(key, 'json') || {};
+    
+    // 3. Simpan ke CACHE
     if (Object.keys(winners).length > 0) {
-      this._cache.set(`winners_${room}`, winners, 60000);
+      this._cache.set(`winners_${room}`, winners);
     }
     return winners;
   }
@@ -630,8 +612,11 @@ export class GameServer {
     if (!this.env?.QUESTIONS) return false;
     
     const key = C.LOWCARD_WINNER_KEY + room;
+    
+    // 1. Baca dari KV
     let roomWinners = await this.env.QUESTIONS.get(key, 'json') || {};
     
+    // 2. Update data
     let currentCount = 0;
     if (roomWinners[username]) {
       const valStr = String(roomWinners[username]);
@@ -639,9 +624,43 @@ export class GameServer {
     }
     roomWinners[username] = (currentCount + 1) + "x";
     
+    // 3. UPDATE KV
     await this.env.QUESTIONS.put(key, JSON.stringify(roomWinners));
-    this._cache.set(`winners_${room}`, roomWinners, 60000);
+    
+    // 4. UPDATE CACHE (langsung, sama dengan KV)
+    this._cache.set(`winners_${room}`, roomWinners);
     return true;
+  }
+
+  async _getCachedResetWeek() {
+    try {
+      if (this._cachedResetWeek !== null) {
+        return this._cachedResetWeek;
+      }
+      
+      if (this.env?.QUESTIONS) {
+        const lastResetWeek = await this.env.QUESTIONS.get(C.DICE_LAST_RESET_WEEK);
+        if (lastResetWeek) {
+          this._cachedResetWeek = lastResetWeek;
+          this._cachedResetWeekTimestamp = Date.now();
+          return lastResetWeek;
+        }
+      }
+      return null;
+    } catch(e) {
+      return null;
+    }
+  }
+
+  async _updateCachedResetWeek(week) {
+    // 1. UPDATE CACHE
+    this._cachedResetWeek = week;
+    this._cachedResetWeekTimestamp = Date.now();
+    
+    // 2. UPDATE KV
+    if (this.env?.QUESTIONS) {
+      await this.env.QUESTIONS.put(C.DICE_LAST_RESET_WEEK, week);
+    }
   }
 
   // ==================== BROADCAST BUFFER ====================
@@ -2840,7 +2859,6 @@ export class GameServer {
     const now = Date.now();
     this._lastHeartbeat = now;
     
-    // Fix stuck dice
     if (this._isDiceTime() && this.currentDiceRoll && this._diceStartTime) {
       const elapsed = (now - this._diceStartTime) / 1000;
       if (elapsed > (C.DICE_TOTAL_TIME_MS / 1000) + 30) {
@@ -2926,23 +2944,18 @@ export class GameServer {
             timestamp: Date.now()
           };
           
-          await this.env.QUESTIONS.put(C.DICE_LAST_WEEK_WINNER, JSON.stringify(winnerData));
-          this._cachedLastWeekWinner = winnerData;
-          this._cachedLastWeekWinnerTimestamp = Date.now();
+          // UPDATE KV & CACHE
+          await this.diceGameSystem.setLastWeekWinner(winnerData);
           
         } else {
-          await this.env.QUESTIONS.delete(C.DICE_LAST_WEEK_WINNER);
-          this._cachedLastWeekWinner = null;
-          this._cachedLastWeekWinnerTimestamp = 0;
+          await this.diceGameSystem.deleteLastWeekWinner();
         }
         
-        await this.env.QUESTIONS.put(C.DICE_POINT_KEY, JSON.stringify({}));
+        // RESET POIN - UPDATE KV & CACHE
+        await this.diceGameSystem.setPoints({});
         
-        this._cachedResetWeek = currentWeek;
-        this._cachedResetWeekTimestamp = Date.now();
-        await this.env.QUESTIONS.put(C.DICE_LAST_RESET_WEEK, currentWeek);
-        
-        this.diceGameSystem.clearCache();
+        // UPDATE RESET WEEK - UPDATE KV & CACHE
+        await this._updateCachedResetWeek(currentWeek);
         
         return true;
       }
@@ -2990,13 +3003,11 @@ export class GameServer {
     this.isDestroyed = true;
     this.closing = true;
     
-    // Clear master interval
     if (this._masterInterval) {
       clearInterval(this._masterInterval);
       this._masterInterval = null;
     }
     
-    // Clear all timers
     if (this._diceTimeout) {
       clearTimeout(this._diceTimeout);
       this._diceTimeout = null;
@@ -3026,20 +3037,16 @@ export class GameServer {
       this._tieInterval = null;
     }
     
-    // Clear cache
-    this._cache.stopCleanup();
     this._cache.clear();
     this._broadcastBuffer.clear();
     this._notifier.clear();
     this.diceGameSystem.clearCache();
     
-    // Cleanup games
     for (const [room, game] of this.activeGames) {
       await this._forceCleanupGame(room, game);
     }
     this.activeGames.clear();
     
-    // Close all connections
     for (const [wsId, ws] of this.wsMap) {
       try {
         if (ws && ws.readyState === 1) {
@@ -3505,6 +3512,3 @@ export class GameServer {
     } catch(e) {}
   }
 }
-
-// ==================== EXPORT ====================
-export default GameServer;
