@@ -8,7 +8,7 @@
 // ✅ OPTIMAL UNTUK DURABLE OBJECT
 // ✅ PERBAIKAN WEEKLY RESET
 // ✅ PERBAIKAN CRASH
-// ✅ PERBAIKAN ROUND TIDAK HILANG
+// ✅ PERBAIKAN ROUND TIDAK HILANG (UNTUK JAVA CLIENT)
 // ✅ TANPA LOG / CONSOLE
 
 const CONSTANTS = {
@@ -3085,60 +3085,25 @@ export class GameServer extends CPUProtection {
       if (!game._botTimeouts) game._botTimeouts = new Set();
       const playersList = this._getActivePlayers(game).map(p => p.name);
       
+      // ✅ BROADCAST CLOSED (CLIENT PAKE INI)
       this._broadcastToRoom(room, ["gameLowCardClosed", playersList]);
+      
+      // ✅ BROADCAST NEXT ROUND (CLIENT PAKE INI)
       this._broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
       
-      // ✅ KIRIM GAME STATE KE SEMUA CLIENT
-      this._broadcastGameStateToRoom(room);
+      // ✅ BROADCAST ROOM USER COUNT
+      this._broadcastToRoom(room, ["roomUserCount", room, game.players.size]);
+      
+      // ✅ BROADCAST YANG SUDAH SUBMIT
+      const submitted = Array.from(game.numbers?.keys() || []);
+      for (const player of submitted) {
+        const number = game.numbers.get(player);
+        const tanda = game.tanda.get(player) || "";
+        this._broadcastToRoom(room, ["gameLowCardPlayerDraw", player, number, tanda]);
+      }
       
       this._startDrawCountdown(room, game);
       if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) this._startBotDraws(room, game);
-    } catch(e) {}
-  }
-
-  // ==================== BROADCAST GAME STATE TO ROOM ====================
-  _broadcastGameStateToRoom(room) {
-    try {
-      if (!room) return;
-      
-      const game = this.activeGames.get(room);
-      if (!game || !game._isActive || game._gameEnded) {
-        this._broadcastToRoom(room, ["gameState", {
-          room: room,
-          hasGame: false,
-          gameType: 'lowcard'
-        }]);
-        return;
-      }
-      
-      const activePlayers = this._getActivePlayers(game);
-      const allPlayers = Array.from(game.players.values()).map(p => p.name);
-      const eliminated = Array.from(game.eliminated || []);
-      const submitted = Array.from(game.numbers?.keys() || []);
-      
-      const state = {
-        room: room,
-        hasGame: true,
-        gameType: 'lowcard',
-        isActive: game._isActive,
-        phase: game._phase || 'registration',
-        round: game.round || 1,
-        bet: game.betAmount || 0,
-        host: game.hostName || 'Unknown',
-        registrationOpen: game.registrationOpen || false,
-        players: allPlayers,
-        activePlayers: activePlayers.map(p => p.name),
-        eliminated: eliminated,
-        submitted: submitted,
-        playerCount: game.players.size,
-        activeCount: activePlayers.length,
-        isEvaluating: game._isEvaluating || false,
-        evaluationLocked: game.evaluationLocked || false,
-        drawTimeExpired: game.drawTimeExpired || false
-      };
-      
-      this._broadcastToRoom(room, ["gameState", state]);
-      
     } catch(e) {}
   }
 
@@ -3191,9 +3156,6 @@ export class GameServer extends CPUProtection {
         for (const botId of activeBotIds) this._forceBotDraw(room, botId, game);
       }
       this._broadcastToRoom(room, ["gameLowCardWait", "wait results"]);
-      
-      // ✅ KIRIM GAME STATE
-      this._broadcastGameStateToRoom(room);
       
       if (game._evalTimer) { 
         clearTimeout(game._evalTimer); 
@@ -3330,13 +3292,16 @@ export class GameServer extends CPUProtection {
         game._botTimeouts = new Set();
         
         const remainingNames = remaining.map(id => players.get(id)?.name || id);
-        this._broadcastToRoom(room, ["gameLowCardRoundResult", game.round - 1,
-          entries.map(([id, n]) => `${players.get(id)?.name || id}:${n}${tanda.get(id) ? `(${tanda.get(id)})` : ''}`),
-          [], remainingNames, true
-        ]);
+        const entriesStr = entries.map(([id, n]) => `${players.get(id)?.name || id}:${n}${tanda.get(id) ? `(${tanda.get(id)})` : ''}`);
         
-        // ✅ KIRIM GAME STATE SETELAH ROUND BARU
-        this._broadcastGameStateToRoom(room);
+        // ✅ BROADCAST ROUND RESULT (CLIENT PAKE INI)
+        this._broadcastToRoom(room, ["gameLowCardRoundResult", game.round - 1, entriesStr, [], remainingNames, true]);
+        
+        // ✅ BROADCAST NEXT ROUND (CLIENT PAKE INI)
+        this._broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
+        
+        // ✅ BROADCAST ROOM USER COUNT
+        this._broadcastToRoom(room, ["roomUserCount", room, game.players.size]);
         
         if (this._isGameActuallyRunning(game) && !game._gameEnded) {
           this._startDrawPhase(room, game);
@@ -3393,6 +3358,7 @@ export class GameServer extends CPUProtection {
       const loserNames = [...losers].map(id => players.get(id)?.name || id);
       const remainingNames = remaining.map(id => players.get(id)?.name || id);
       
+      // ✅ BROADCAST ROUND RESULT (CLIENT PAKE INI)
       this._broadcastToRoom(room, ["gameLowCardRoundResult", game.round, numbersArr, loserNames, remainingNames]);
       
       numbers.clear();
@@ -3411,8 +3377,11 @@ export class GameServer extends CPUProtection {
         game._safetyTimer = null; 
       }
       
-      // ✅ KIRIM GAME STATE SETELAH ROUND BARU
-      this._broadcastGameStateToRoom(room);
+      // ✅ BROADCAST NEXT ROUND (CLIENT PAKE INI)
+      this._broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
+      
+      // ✅ BROADCAST ROOM USER COUNT
+      this._broadcastToRoom(room, ["roomUserCount", room, game.players.size]);
       
       if (this._isGameActuallyRunning(game) && !game._gameEnded) {
         this._startDrawPhase(room, game);
@@ -3494,8 +3463,11 @@ export class GameServer extends CPUProtection {
       this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
       this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
       
-      // ✅ KIRIM GAME STATE KE SEMUA CLIENT
-      this._broadcastGameStateToRoom(room);
+      // ✅ KIRIM CLOSED + NEXT ROUND
+      const playersList = [usernameClean];
+      this._broadcastToRoom(room, ["gameLowCardClosed", playersList]);
+      this._broadcastToRoom(room, ["gameLowCardNextRound", 1]);
+      this._broadcastToRoom(room, ["roomUserCount", room, 1]);
       
       this._startRegistration(room, game);
       
@@ -3551,8 +3523,8 @@ export class GameServer extends CPUProtection {
       game.playerWsId.set(usernameClean, wsId);
       this._broadcastToRoom(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
       
-      // ✅ KIRIM GAME STATE KE SEMUA CLIENT
-      this._broadcastGameStateToRoom(room);
+      // ✅ BROADCAST ROOM USER COUNT
+      this._broadcastToRoom(room, ["roomUserCount", room, game.players.size]);
       
     } catch(e) {}
   }
@@ -3612,10 +3584,9 @@ export class GameServer extends CPUProtection {
       if (!validTandas.includes(tanda)) tanda = "";
       game.numbers.set(usernameClean, n);
       game.tanda.set(usernameClean, tanda);
-      this._broadcastToRoom(room, ["gameLowCardPlayerDraw", usernameClean, n, tanda]);
       
-      // ✅ KIRIM GAME STATE KE SEMUA CLIENT
-      this._broadcastGameStateToRoom(room);
+      // ✅ BROADCAST PLAYER DRAW
+      this._broadcastToRoom(room, ["gameLowCardPlayerDraw", usernameClean, n, tanda]);
       
       const activeIds = this._getActivePlayerIds(game);
       if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired &&
