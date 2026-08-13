@@ -8,6 +8,7 @@
 // ✅ OPTIMAL UNTUK DURABLE OBJECT
 // ✅ PERBAIKAN WEEKLY RESET
 // ✅ PERBAIKAN CRASH
+// ✅ PERBAIKAN ROUND TIDAK HILANG
 // ✅ TANPA LOG / CONSOLE
 
 const CONSTANTS = {
@@ -3019,6 +3020,7 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== START DRAW PHASE ====================
   async _startDrawPhase(room, game) {
     try {
       if (!this._isGameActuallyRunning(game)) return;
@@ -3034,6 +3036,7 @@ export class GameServer extends CPUProtection {
         for (const id of game._botTimeouts) clearTimeout(id); 
         game._botTimeouts.clear(); 
       }
+      
       const activePlayers = this._getActivePlayers(game);
       if (activePlayers.length < 2) {
         if (!game._botsAdded) {
@@ -3074,16 +3077,68 @@ export class GameServer extends CPUProtection {
           return;
         }
       }
+      
       game._phase = 'draw';
       game.drawTimeExpired = false;
       game.evaluationLocked = false;
       game._drawPhaseStart = Date.now();
       if (!game._botTimeouts) game._botTimeouts = new Set();
       const playersList = this._getActivePlayers(game).map(p => p.name);
+      
       this._broadcastToRoom(room, ["gameLowCardClosed", playersList]);
       this._broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
+      
+      // ✅ KIRIM GAME STATE KE SEMUA CLIENT
+      this._broadcastGameStateToRoom(room);
+      
       this._startDrawCountdown(room, game);
       if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) this._startBotDraws(room, game);
+    } catch(e) {}
+  }
+
+  // ==================== BROADCAST GAME STATE TO ROOM ====================
+  _broadcastGameStateToRoom(room) {
+    try {
+      if (!room) return;
+      
+      const game = this.activeGames.get(room);
+      if (!game || !game._isActive || game._gameEnded) {
+        this._broadcastToRoom(room, ["gameState", {
+          room: room,
+          hasGame: false,
+          gameType: 'lowcard'
+        }]);
+        return;
+      }
+      
+      const activePlayers = this._getActivePlayers(game);
+      const allPlayers = Array.from(game.players.values()).map(p => p.name);
+      const eliminated = Array.from(game.eliminated || []);
+      const submitted = Array.from(game.numbers?.keys() || []);
+      
+      const state = {
+        room: room,
+        hasGame: true,
+        gameType: 'lowcard',
+        isActive: game._isActive,
+        phase: game._phase || 'registration',
+        round: game.round || 1,
+        bet: game.betAmount || 0,
+        host: game.hostName || 'Unknown',
+        registrationOpen: game.registrationOpen || false,
+        players: allPlayers,
+        activePlayers: activePlayers.map(p => p.name),
+        eliminated: eliminated,
+        submitted: submitted,
+        playerCount: game.players.size,
+        activeCount: activePlayers.length,
+        isEvaluating: game._isEvaluating || false,
+        evaluationLocked: game.evaluationLocked || false,
+        drawTimeExpired: game.drawTimeExpired || false
+      };
+      
+      this._broadcastToRoom(room, ["gameState", state]);
+      
     } catch(e) {}
   }
 
@@ -3136,6 +3191,10 @@ export class GameServer extends CPUProtection {
         for (const botId of activeBotIds) this._forceBotDraw(room, botId, game);
       }
       this._broadcastToRoom(room, ["gameLowCardWait", "wait results"]);
+      
+      // ✅ KIRIM GAME STATE
+      this._broadcastGameStateToRoom(room);
+      
       if (game._evalTimer) { 
         clearTimeout(game._evalTimer); 
         game._evalTimer = null; 
@@ -3253,6 +3312,7 @@ export class GameServer extends CPUProtection {
       
       const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
       
+      // ALL SAME - LANJUTKAN ROUND
       if (allSame && remaining.length >= 2) {
         game._isEvaluating = false;
         if (game._safetyTimer) { 
@@ -3275,12 +3335,16 @@ export class GameServer extends CPUProtection {
           [], remainingNames, true
         ]);
         
+        // ✅ KIRIM GAME STATE SETELAH ROUND BARU
+        this._broadcastGameStateToRoom(room);
+        
         if (this._isGameActuallyRunning(game) && !game._gameEnded) {
           this._startDrawPhase(room, game);
         }
         return;
       }
       
+      // PEMENANG
       if (remaining.length === 1 && !game._gameEnded) {
         const winnerId = remaining[0];
         const winnerName = players.get(winnerId)?.name || winnerId;
@@ -3324,6 +3388,7 @@ export class GameServer extends CPUProtection {
         return;
       }
       
+      // ROUND BERIKUTNYA DENGAN ELIMINASI
       const numbersArr = entries.map(([id, n]) => `${players.get(id)?.name || id}:${n}${tanda.get(id) ? `(${tanda.get(id)})` : ''}`);
       const loserNames = [...losers].map(id => players.get(id)?.name || id);
       const remainingNames = remaining.map(id => players.get(id)?.name || id);
@@ -3345,6 +3410,9 @@ export class GameServer extends CPUProtection {
         clearTimeout(game._safetyTimer); 
         game._safetyTimer = null; 
       }
+      
+      // ✅ KIRIM GAME STATE SETELAH ROUND BARU
+      this._broadcastGameStateToRoom(room);
       
       if (this._isGameActuallyRunning(game) && !game._gameEnded) {
         this._startDrawPhase(room, game);
@@ -3426,15 +3494,8 @@ export class GameServer extends CPUProtection {
       this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
       this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
       
-      const allWsIds = this.wsClients.get(room);
-      if (allWsIds) {
-        for (const id of allWsIds) {
-          const client = this.wsMap.get(id);
-          if (client && client.readyState === 1) {
-            this._sendGameStateToClient(client, room);
-          }
-        }
-      }
+      // ✅ KIRIM GAME STATE KE SEMUA CLIENT
+      this._broadcastGameStateToRoom(room);
       
       this._startRegistration(room, game);
       
@@ -3490,15 +3551,8 @@ export class GameServer extends CPUProtection {
       game.playerWsId.set(usernameClean, wsId);
       this._broadcastToRoom(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
       
-      const allWsIds = this.wsClients.get(room);
-      if (allWsIds) {
-        for (const id of allWsIds) {
-          const client = this.wsMap.get(id);
-          if (client && client.readyState === 1) {
-            this._sendGameStateToClient(client, room);
-          }
-        }
-      }
+      // ✅ KIRIM GAME STATE KE SEMUA CLIENT
+      this._broadcastGameStateToRoom(room);
       
     } catch(e) {}
   }
@@ -3559,6 +3613,10 @@ export class GameServer extends CPUProtection {
       game.numbers.set(usernameClean, n);
       game.tanda.set(usernameClean, tanda);
       this._broadcastToRoom(room, ["gameLowCardPlayerDraw", usernameClean, n, tanda]);
+      
+      // ✅ KIRIM GAME STATE KE SEMUA CLIENT
+      this._broadcastGameStateToRoom(room);
+      
       const activeIds = this._getActivePlayerIds(game);
       if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired &&
           this._isGameActuallyRunning(game) && game._isActive && !game._gameEnded) {
