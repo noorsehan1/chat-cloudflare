@@ -5,6 +5,10 @@
 // ✅ RESET OTOMATIS SAAT MINGGU BERGANTI (PAKAI CACHE)
 // ✅ SIAP DEPLOY - HEMAT - DURABLE - ANTI HYBERNATE
 // ✅ SUPPORT startGameWithRecording DARI ANDROID
+// ✅ TAMBAH NOTIF LEFTIME SAAT MASUK ROOM QUIZ (DELAY 5 DETIK)
+// ✅ HAPUS NOTIF "Server is active"
+// ✅ HAPUS SEMUA LOG UNTUK DEPLOY
+// ✅ LAST WEEK WINNER SILENT (TANPA BROADCAST)
 
 const CONSTANTS = {
   REGISTRATION_TIME_MS: 20000,
@@ -18,7 +22,6 @@ const CONSTANTS = {
   DICE_BREAK_MS: 15000,
   DICE_ROOM: "Quiz",
   
-  // ✅ HANYA 1 INTERVAL (3 MENIT)
   ALARM_INTERVAL_MS: 180000,
   ALARM_MAX_IDLE_MS: 360000,
   
@@ -307,7 +310,6 @@ export class GameServer {
       this._recoveryAttempts = 0;
       this._maxRecoveryAttempts = 3;
 
-      // ✅ HANYA 1 INTERVAL (3 MENIT)
       this._alarmInterval = setInterval(() => {
         if (this.closing || this.isDestroyed) {
           clearInterval(this._alarmInterval);
@@ -372,7 +374,6 @@ export class GameServer {
         this._wakeupAttempts = 0;
       }
       
-      // ✅ ROTASI TASK
       const tickType = this._alarmCount % 6;
       
       switch(tickType) {
@@ -392,11 +393,9 @@ export class GameServer {
           this._diceAutoTask().catch(() => {});
           break;
         case 4:
-          // ✅ CEK RESET MINGGUAN - LANGSUNG RESET JIKA BEDA MINGGU
           this._checkAndResetWeeklyDice().catch(() => {});
           break;
         case 5:
-          // ✅ CEK CADANGAN - CEPAT DETEKSI PERGANTIAN MINGGU
           if (this._isWeekChanged()) {
             this._checkAndResetWeeklyDice().catch(() => {});
           }
@@ -429,10 +428,6 @@ export class GameServer {
         }
       }
       
-      const diceClients = this.wsClients.get(DICE_ROOM);
-      if (diceClients && diceClients.size > 0) {
-        this._broadcastToRoom(DICE_ROOM, ["diceNotification", "♡ Server is active"]);
-      }
     } catch(e) {}
   }
 
@@ -605,11 +600,10 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ==================== WEEKLY RESET METHODS (PAKAI CACHE) ====================
+  // ==================== WEEKLY RESET METHODS ====================
 
   async _getCachedResetWeek() {
     try {
-      // ✅ CEK CACHE DULU
       if (this._resetWeekCache !== null) {
         return this._resetWeekCache;
       }
@@ -656,7 +650,6 @@ export class GameServer {
     } catch(e) { return '2026-W01'; }
   }
 
-  // ✅ CEK PERGANTIAN MINGGU - PAKAI CACHE
   _isWeekChanged() {
     try {
       const currentWeek = this._generateCurrentWeek(new Date());
@@ -670,7 +663,6 @@ export class GameServer {
     }
   }
 
-  // ✅ CHECK AND RESET - LANGSUNG RESET JIKA BEDA MINGGU
   async _checkAndResetWeeklyDice() {
     try {
       if (!this.env?.QUESTIONS) return false;
@@ -678,7 +670,6 @@ export class GameServer {
       const now = new Date();
       const currentWeek = this._generateCurrentWeek(now);
       
-      // ✅ AMBIL DARI CACHE
       let lastResetWeek = this._resetWeekCache;
       
       if (lastResetWeek === null) {
@@ -690,12 +681,9 @@ export class GameServer {
         return false;
       }
       
-      // ✅ CEK BEDA MINGGU
       const weekChanged = lastResetWeek !== currentWeek;
       
       if (weekChanged) {
-        console.log(`🔄 Week changed! Resetting from ${lastResetWeek} to ${currentWeek}...`);
-        
         const points = await this.diceGameSystem.getPoints();
         
         let winner = null;
@@ -722,50 +710,33 @@ export class GameServer {
           await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_WEEK_WINNER, JSON.stringify(winnerData));
           this._cachedLastWeekWinner = winnerData;
           
-          const message = `🏆 Weekly Winner: ${winner} with ${highestScore} points! (Week ${lastResetWeek})`;
-          this._broadcastToRoom(DICE_ROOM, ["diceLastWeekWinner", winner, highestScore, lastResetWeek]);
-          this._broadcastToRoom(DICE_ROOM, ["diceNotification", message]);
+          // ✅ SILENT - TANPA BROADCAST
           
-          for (const [room, clients] of this.wsClients) {
-            if (room !== DICE_ROOM && clients && clients.size > 0) {
-              this._broadcastToRoom(room, ["diceNotification", message]);
-            }
-          }
         } else {
           await this.env.QUESTIONS.delete(CONSTANTS.DICE_LAST_WEEK_WINNER);
           this._cachedLastWeekWinner = null;
-          this._broadcastToRoom(DICE_ROOM, ["diceNotification", "📊 No winner last week"]);
         }
         
-        // ✅ Reset poin
         await this.env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify({}));
         
-        // ✅ Update cache + KV
         await this._updateCachedResetWeek(currentWeek);
         
-        // ✅ Clear cache
         this.diceGameSystem.clearCache();
-        
-        console.log(`✅ Weekly reset complete! New week: ${currentWeek}`);
         
         return true;
       }
       
       return false;
     } catch(e) {
-      console.error('❌ Error checking weekly reset:', e);
       return false;
     }
   }
 
-  // ✅ SCHEDULE RESET - CEK SETIAP KALI SERVER BANGUN
   async _scheduleWeeklyReset() {
     try {
-      // ✅ CEK DARI CACHE
       const weekChanged = this._isWeekChanged();
       
       if (weekChanged) {
-        console.log(`📅 Week changed detected! Resetting immediately...`);
         await this._checkAndResetWeeklyDice();
         return;
       }
@@ -781,17 +752,12 @@ export class GameServer {
       
       const delay = nextMonday.getTime() - witaTime.getTime();
       
-      console.log(`📅 Next reset scheduled in ${Math.round(delay / 86400000)} days (${Math.round(delay / 3600000)} hours)`);
-      
       setTimeout(async () => {
-        console.log(`🔄 Scheduled reset triggered!`);
         await this._checkAndResetWeeklyDice();
         this._scheduleWeeklyReset();
       }, delay);
       
-    } catch(e) {
-      console.error('❌ Error scheduling weekly reset:', e);
-    }
+    } catch(e) {}
   }
 
   // ==================== DICE METHODS ====================
@@ -3053,6 +3019,18 @@ export class GameServer {
         
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
         this._sendGameStateToClient(ws, roomName);
+        
+        // ✅ TAMBAH NOTIF LEFTIME SAAT MASUK ROOM QUIZ (DELAY 5 DETIK)
+        if (roomName === DICE_ROOM) {
+          setTimeout(() => {
+            if (!this.closing && !this.isDestroyed && ws && ws.readyState === 1) {
+              const timeLeft = this._getTimeLeftUntilNextDice();
+              const msg = `⏰ ${timeLeft.hours}h ${timeLeft.minutes}m`;
+              this._safeSend(ws, ["diceNotification", msg]);
+            }
+          }, 5000);
+        }
+        
         this._broadcastToRoom(roomName, ["userJoinedRoom", username, roomName]);
         if (currentRoom && currentRoom !== roomName) {
           this._broadcastToRoom(currentRoom, ["userLeftRoom", username, currentRoom]);
