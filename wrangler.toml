@@ -1,4 +1,4 @@
-name = "chat-cloudflare"
+name = "chat-cloudflare3"
 main = "index.js"
 compatibility_date = "2024-12-12"
 
