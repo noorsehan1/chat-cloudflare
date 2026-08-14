@@ -80,7 +80,7 @@ const CONSTANTS = {
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 2 },
-    { start: 14, end: 19 },
+    { start: 14, end: 20 },
     { start: 22, end: 23 }
   ],
   TIMEZONE_OFFSET: 8,
@@ -360,7 +360,7 @@ export class GameServer {
       this._cachedLastWeekWinner = null;
       this._cachedPoints = null;
       
-      // ✅ CACHE SEDERHANA - TANPA TTL
+      // CACHE SEDERHANA - TANPA TTL
       this._dicePointsCache = null;
       this._lastRemainingSent = -1;
 
@@ -713,8 +713,10 @@ export class GameServer {
         };
         this._lastRemainingSent = -1;
         
+        // 1. BROADCAST DICE ROLL (ONROLL) - PERTAMA
         await this._broadcastDiceRoll(diceValue);
         
+        // 2. BROADCAST "♡ clik draw ♡" - SETELAH ONROLL
         this._broadcastDiceNotification("diceError", {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remaining: 20,
@@ -754,6 +756,7 @@ export class GameServer {
             
             this._stopDiceTimerNotifications();
             
+            // 3. TIME UP
             this._broadcastDiceNotification("diceError", {
               remaining: 0,
               message: "TIME UP",
@@ -762,6 +765,7 @@ export class GameServer {
               isActive: true
             });
             
+            // 4. CEK WINNER ATAU NO WINNER
             if (!this._winnerProcessed) {
               if (this.diceHasWinner && this.diceWinner) {
                 const points = await this._getDicePoints();
@@ -796,6 +800,7 @@ export class GameServer {
             this._isShowingDice = false;
             this._canSubmitDiceAnswer = false;
             
+            // 5. WAIT 15s COOLDOWN - SETELAH WINNER/NO WINNER (JEDA 500ms)
             setTimeout(() => {
               this._startTimeUpCooldown();
             }, 500);
@@ -878,8 +883,10 @@ export class GameServer {
         };
         this._lastRemainingSent = -1;
         
+        // 1. BROADCAST DICE ROLL (ONROLL) - PERTAMA
         await this._broadcastDiceRoll(diceValue);
         
+        // 2. BROADCAST "♡ clik draw ♡" - SETELAH ONROLL
         this._broadcastDiceNotification("diceError", {
           answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
           remaining: 20,
@@ -4075,6 +4082,7 @@ export class GameServer {
       await this._initDice();
       
       this._startWeeklyResetChecker();
+      this._startHealthCheck();
       
       setTimeout(() => {
         if (!this.closing && !this.isDestroyed) {
