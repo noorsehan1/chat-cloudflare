@@ -1,6 +1,6 @@
 // ==================== GAME-SERVER.JS - FULL FIXED VERSION ====================
 
- const CONSTANTS = {
+const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
   REGISTRATION_TIME_MS: 20000,
   DRAW_TIME_MS: 20000,
@@ -339,7 +339,6 @@ export class GameServer {
       this._diceTimeUpCooldown = false;
       this._diceTimeUpCooldownTimer = null;
       
-      // FLAG NOTIFIKASI HANYA UNTUK 10 DAN 5
       this._diceNotifiedFlags = {
         10: false,
         5: false,
@@ -484,7 +483,7 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ==================== UPDATE DICE TIMER DISPLAY - YANG DIUBAH ====================
+  // ==================== UPDATE DICE TIMER DISPLAY ====================
   _updateDiceTimerDisplay() {
     try {
       if (!this.currentDiceRoll || !this._diceQuestionStartTime) {
@@ -728,29 +727,34 @@ export class GameServer {
             
             this._stopDiceTimerNotifications();
             
-            if (this.diceHasWinner && this.diceWinner) {
-              const points = await this._getDicePoints();
-              this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
-                username: this.diceWinner,
-                totalPoints: points[this.diceWinner] || 0,
-                diceValue: diceValue,
-                round: this._diceRound
-              }]);
+            // ✅ CEK SUDAH DIPROSES ATAU BELUM (CEGAH DOUBLE NOTIF)
+            if (!this._winnerProcessed) {
+              if (this.diceHasWinner && this.diceWinner) {
+                const points = await this._getDicePoints();
+                this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
+                  username: this.diceWinner,
+                  totalPoints: points[this.diceWinner] || 0,
+                  diceValue: diceValue,
+                  round: this._diceRound
+                }]);
+                
+                this._broadcastDiceNotification("diceError", {
+                  username: this.diceWinner,
+                  totalPoints: points[this.diceWinner] || 0,
+                  diceValue: diceValue,
+                  round: this._diceRound,
+                  remaining: -1,
+                  message: `${this.diceWinner} won with value ${diceValue}`
+                });
+              } else {
+                this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
+                  message: `No winner`,
+                  value: diceValue,
+                  round: this._diceRound
+                }]);
+              }
               
-              this._broadcastDiceNotification("diceError", {
-                username: this.diceWinner,
-                totalPoints: points[this.diceWinner] || 0,
-                diceValue: diceValue,
-                round: this._diceRound,
-                remaining: -1,
-                message: `${this.diceWinner} won with value ${diceValue}`
-              });
-            } else {
-              this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-                message: `No winner`,
-                value: diceValue,
-                round: this._diceRound
-              }]);
+              this._winnerProcessed = true;
             }
             
             this._diceTimeout = null;
@@ -877,29 +881,33 @@ export class GameServer {
             
             this._stopDiceTimerNotifications();
             
-            if (this.diceHasWinner && this.diceWinner) {
-              const points = await this._getDicePoints();
-              this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
-                username: this.diceWinner,
-                totalPoints: points[this.diceWinner] || 0,
-                diceValue: diceValue,
-                round: this._diceRound
-              }]);
+            if (!this._winnerProcessed) {
+              if (this.diceHasWinner && this.diceWinner) {
+                const points = await this._getDicePoints();
+                this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
+                  username: this.diceWinner,
+                  totalPoints: points[this.diceWinner] || 0,
+                  diceValue: diceValue,
+                  round: this._diceRound
+                }]);
+                
+                this._broadcastDiceNotification("diceError", {
+                  username: this.diceWinner,
+                  totalPoints: points[this.diceWinner] || 0,
+                  diceValue: diceValue,
+                  round: this._diceRound,
+                  remaining: -1,
+                  message: `${this.diceWinner} won with value ${diceValue}`
+                });
+              } else {
+                this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
+                  message: `No winner`,
+                  value: diceValue,
+                  round: this._diceRound
+                }]);
+              }
               
-              this._broadcastDiceNotification("diceError", {
-                username: this.diceWinner,
-                totalPoints: points[this.diceWinner] || 0,
-                diceValue: diceValue,
-                round: this._diceRound,
-                remaining: -1,
-                message: `${this.diceWinner} won with value ${diceValue}`
-              });
-            } else {
-              this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-                message: `No winner`,
-                value: diceValue,
-                round: this._diceRound
-              }]);
+              this._winnerProcessed = true;
             }
             
             this._diceTimeout = null;
@@ -1063,6 +1071,10 @@ export class GameServer {
       if (this.closing || this.isDestroyed) return;
       if (this._tieActive) return;
       
+      // ✅ CEK SUDAH DIPROSES ATAU BELUM
+      if (this._winnerProcessed) return;
+      this._winnerProcessed = true;
+      
       const currentClients = this.wsClients.get(DICE_ROOM);
       if (!currentClients?.size) {
         this.currentDiceRoll = null;
@@ -1074,44 +1086,10 @@ export class GameServer {
       const diceValue = this.currentDiceRoll?.value;
       const roundNumber = this._diceRound || 1;
       
-      if (this.diceHasWinner && this.diceWinner) {
-        const correctPlayers = [];
-        for (const player of this.diceAnswered) {
-          const answer = this._playerAnswers.get(player);
-          if (answer === this.currentDiceRoll?.value) {
-            correctPlayers.push(player);
-          }
-        }
-        
-        if (correctPlayers.length > 1 && !this._tieActive) {
-          await this._startTieBreaker(DICE_ROOM, correctPlayers);
-          return;
-        }
-        
-        const points = await this._getDicePoints();
-        this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
-          username: this.diceWinner,
-          totalPoints: points[this.diceWinner] || 0,
-          diceValue: diceValue,
-          round: roundNumber
-        }]);
-        
-        this._broadcastDiceNotification("diceError", {
-          username: this.diceWinner,
-          totalPoints: points[this.diceWinner] || 0,
-          diceValue: diceValue,
-          round: roundNumber,
-          remaining: -1,
-          message: `${this.diceWinner} won with value ${diceValue}`
-        });
-      } else {
-        this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-          message: `No winner`,
-          value: diceValue,
-          round: roundNumber
-        }]);
-      }
+      // ❌ HAPUS BROADCAST WINNER DI SINI (PINDAHKAN KE TIMEOUT)
+      // if (this.diceHasWinner && this.diceWinner) { ... }
       
+      // ✅ TINGGAL RESET STATE
       this.currentDiceRoll = null;
       this._isShowingDice = false;
       this._canSubmitDiceAnswer = false;
@@ -1822,6 +1800,7 @@ export class GameServer {
         round: this._diceRound || 1
       }]);
       
+      // ✅ HANYA SET WINNER, TAPI JANGAN BROADCAST LANGSUNG
       if (isCorrect && !this.diceHasWinner) {
         this.diceHasWinner = true;
         this.diceWinner = username;
@@ -1829,6 +1808,9 @@ export class GameServer {
         const points = await this._getDicePoints();
         points[username] = (points[username] || 0) + 1;
         await this.diceGameSystem.setPoints(points);
+        
+        // ❌ HAPUS BROADCAST DI SINI - TUNGGU SAMPAI TIME UP
+        // this._broadcastToRoom(DICE_ROOM, ["diceWinner", { ... }]);
       }
       
     } catch(e) {}
