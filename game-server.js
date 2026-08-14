@@ -78,7 +78,7 @@ const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 2 },
     { start: 14, end: 15 },
-    { start: 20, end: 23 }
+    { start: 22, end: 23 }
   ],
   TIMEZONE_OFFSET: 8,
 };
@@ -345,6 +345,9 @@ export class GameServer {
         timeup: false
       };
 
+      // FLAG UNTUK MENCEGAH DOBEL PROSES TIMEUP
+      this._diceTimeUpProcessed = false;
+
       this._tieBreakers = new Map();
       this._tieRound = 0;
       this._tieActive = false;
@@ -377,9 +380,7 @@ export class GameServer {
             return;
           }
           this._mainTick();
-        } catch(e) {
-          // DIAM
-        }
+        } catch(e) {}
       }, 1000);
 
       this._initAsync();
@@ -416,43 +417,33 @@ export class GameServer {
     try {
       this._tikCounter++;
       
-      // 1. DICE TIMER - SETIAP DETIK (KRITICAL!)
-      this._diceTimerTask();
-      
-      // 2. DICE KEEP ALIVE (setiap 5 detik)
       if (this._tikCounter % 5 === 0) {
         this._diceKeepAliveTask();
       }
       
-      // 3. HEALTH CHECK (setiap 10 detik)
       if (this._tikCounter % 10 === 0) {
         this._performHealthCheck();
       }
       
-      // 4. STUCK GAMES (setiap 30 detik)
       if (this._tikCounter % 30 === 0) {
         this._checkStuckGames();
-      }
-      
-      // 5. DEAD CONNECTIONS (setiap 30 detik)
-      if (this._tikCounter % 30 === 0) {
         this._cleanupDeadConnections();
       }
       
-      // 6. STALE GAMES (setiap 60 detik)
       if (this._tikCounter % 60 === 0) {
         this._cleanupStaleGames();
       }
       
-      // 7. WEEKLY RESET (setiap 300 detik)
       if (this._tikCounter % 300 === 0) {
         this._checkAndResetWeeklyDice().catch(() => {});
       }
       
-      // 8. DICE AUTO TASK (setiap 5 detik)
       if (this._tikCounter % 5 === 0) {
         this._diceAutoTask().catch(() => {});
       }
+      
+      // DICE TIMER - SETIAP DETIK
+      this._diceTimerTask();
       
     } catch(e) {}
   }
@@ -833,7 +824,6 @@ export class GameServer {
         return;
       }
       
-      // CEK JIKA DICE HARUS MULAI
       if (this._isDiceTime()) {
         if (!this.currentDiceRoll && !this._diceTimeout && 
             !this._isShowingDice && !this._diceTimeUpCooldown) {
@@ -844,7 +834,6 @@ export class GameServer {
         }
       }
       
-      // UPDATE DICE TIMER NOTIFICATIONS - SETIAP DETIK
       if (this.currentDiceRoll && this._diceQuestionStartTime && !this._tieActive) {
         this._updateDiceTimerDisplay();
       }
@@ -864,7 +853,6 @@ export class GameServer {
       const remaining = Math.max(0, totalTime - elapsed);
       const remainingInt = Math.floor(remaining);
       
-      // NOTIFIKASI HANYA PADA DETIK TERTENTU (20, 10, 5)
       if (remainingInt === 20 && !this._diceNotifiedFlags[20]) {
         this._diceNotifiedFlags[20] = true;
         this._broadcastDiceNotification("diceError", {
@@ -895,7 +883,6 @@ export class GameServer {
       } else if (remainingInt <= 0 && !this._diceNotifiedFlags.timeup) {
         this._diceNotifiedFlags.timeup = true;
         
-        // KIRIM TIME UP
         this._broadcastDiceNotification("diceError", {
           remaining: 0,
           message: "TIME UP",
@@ -904,13 +891,11 @@ export class GameServer {
           isActive: true
         });
         
-        // BROADCAST TIME UP KE ROOM
         this._broadcastToRoom(DICE_ROOM, ["diceNotification", "TIME UP"]);
         
-        // HENTIKAN NOTIFIKASI
         this._stopDiceTimerNotifications();
         
-        // PROSES TIME UP - DI SINI AKAN MUNCUL NO WINNER ATAU WINNER
+        // PROSES TIME UP - TIDAK PANGGIL COOLDOWN LANGSUNG
         if (!this._tieActive) {
           this._handleDiceTimeUp();
         }
@@ -925,20 +910,23 @@ export class GameServer {
       if (this.closing || this.isDestroyed) return;
       if (this._tieActive) return;
       
+      // CEGAH DOBEL PROSES
+      if (this._diceTimeUpProcessed) return;
+      this._diceTimeUpProcessed = true;
+      
       const currentClients = this.wsClients.get(DICE_ROOM);
       if (!currentClients?.size) {
         this.currentDiceRoll = null;
         this._isShowingDice = false;
         this._canSubmitDiceAnswer = false;
+        this._diceTimeUpProcessed = false;
         return;
       }
       
       const diceValue = this.currentDiceRoll?.value;
       const roundNumber = this._diceRound || 1;
       
-      // CEK APAKAH ADA PEMENANG
       if (this.diceHasWinner && this.diceWinner) {
-        // HITUNG JUMLAH PLAYER YANG MENJAWAB DENGAN BENAR
         const correctPlayers = [];
         for (const player of this.diceAnswered) {
           const answer = this._playerAnswers.get(player);
@@ -947,13 +935,12 @@ export class GameServer {
           }
         }
         
-        // JIKA LEBIH DARI 1 PLAYER BENAR, MULAI TIE BREAKER
         if (correctPlayers.length > 1 && !this._tieActive) {
           await this._startTieBreaker(DICE_ROOM, correctPlayers);
+          this._diceTimeUpProcessed = false;
           return;
         }
         
-        // KIRIM NOTIFIKASI PEMENANG
         const points = await this._getDicePoints();
         this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
           username: this.diceWinner,
@@ -972,7 +959,6 @@ export class GameServer {
         });
         
       } else {
-        // TIDAK ADA PEMENANG - KIRIM NO WINNER
         this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
           message: `No winner`,
           value: diceValue,
@@ -980,7 +966,6 @@ export class GameServer {
         }]);
       }
       
-      // RESET STATE
       this.currentDiceRoll = null;
       this._isShowingDice = false;
       this._canSubmitDiceAnswer = false;
@@ -990,19 +975,22 @@ export class GameServer {
         this._diceTimeout = null;
       }
       
-      // ✅ MULAI COOLDOWN 15 DETIK - SETELAH NO WINNER ATAU WINNER
+      // ✅ COOLDOWN DIPANGGIL DI SINI - HANYA SEKALI
       this._startTimeUpCooldown();
       
-    } catch(e) {}
+    } catch(e) {
+      this._diceTimeUpProcessed = false;
+    }
   }
 
   // ==================== START TIME UP COOLDOWN - FIXED ====================
   _startTimeUpCooldown() {
+    // CEGAH DOBEL
     if (this._diceTimeUpCooldown) return;
     
     this._diceTimeUpCooldown = true;
     
-    // ✅ KIRIM NOTIFIKASI WAIT 15S - INI AKHIR SETELAH NO WINNER ATAU WINNER
+    // WAIT 15S - HANYA SEKALI
     this._broadcastDiceNotification("diceError", {
       message: "wait 15s",
       remaining: 15,
@@ -1011,14 +999,14 @@ export class GameServer {
       cooldown: true
     });
     
-    // BROADCAST KE ROOM
     this._broadcastToRoom(DICE_ROOM, ["diceNotification", "wait 15s"]);
+    
+    this._diceTimeUpProcessed = false;
     
     this._diceTimeUpCooldownTimer = setTimeout(() => {
       this._diceTimeUpCooldownTimer = null;
       this._diceTimeUpCooldown = false;
       
-      // RESET FLAGS UNTUK RONDA SELANJUTNYA
       this._diceNotifiedFlags = {
         20: false,
         10: false,
@@ -1028,8 +1016,8 @@ export class GameServer {
       this._lastSentRemaining = -1;
       this._lastNotificationKey = "";
       this._lastNotificationTime = 0;
+      this._diceTimeUpProcessed = false;
       
-      // MULAI RONDA BERIKUTNYA
       this._showDiceQuestionSilent();
     }, CONSTANTS.DICE_AFTER_TIMEOUT_BREAK_MS || 15000);
   }
@@ -1106,7 +1094,6 @@ export class GameServer {
         this._diceRemainingShown = false;
         this._diceTimeUpShown = false;
         
-        // RESET NOTIFICATION FLAGS
         this._diceNotifiedFlags = {
           20: false,
           10: false,
@@ -1153,7 +1140,6 @@ export class GameServer {
             
             this._stopDiceTimerNotifications();
             
-            // PROSES HASIL
             if (this.diceHasWinner && this.diceWinner) {
               const points = await this._getDicePoints();
               this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
@@ -1184,7 +1170,6 @@ export class GameServer {
             this._isShowingDice = false;
             this._canSubmitDiceAnswer = false;
             
-            // MULAI COOLDOWN
             this._startTimeUpCooldown();
             
           } catch(e) {}
@@ -1394,14 +1379,12 @@ export class GameServer {
       const message = data.message || "";
       const remaining = data.remaining !== undefined ? data.remaining : -1;
       
-      // KEY UNTUK DUPLICATE DETECTION
       let key = `dice_${remaining}`;
       if (remaining === -1) key = `dice_msg_${message.substring(0, 30)}`;
       if (message === "TIME UP") key = "dice_timeup";
       if (message === "wait 15s") key = "dice_wait15s";
       if (data.cooldown) key = `cooldown_${remaining}`;
       
-      // CEGAH SPAM - KECUALI UNTUK MESSAGE PENTING
       if (message !== "TIME UP" && message !== "wait 15s") {
         if (this._lastNotificationKey === key && (now - this._lastNotificationTime) < 3000) return;
         if (remaining > 0 && this._lastSentRemaining === remaining && !data.cooldown) return;
@@ -1411,7 +1394,6 @@ export class GameServer {
       this._lastNotificationTime = now;
       if (remaining > 0) this._lastSentRemaining = remaining;
       
-      // KIRIM NOTIFIKASI
       this._broadcastToRoom(DICE_ROOM, ["diceNotification", message]);
     } catch(e) {}
   }
@@ -1431,7 +1413,6 @@ export class GameServer {
         return;
       }
       
-      // TIE BREAKER MODE
       if (this._tieActive) {
         if (!this._tiePlayers.includes(username)) return;
         if (this._tieAnswers.has(username)) return;
@@ -1468,7 +1449,6 @@ export class GameServer {
         return;
       }
       
-      // NORMAL MODE
       if (this.diceAnswered.has(username)) return;
       
       const diceValue = this.currentDiceRoll?.value;
