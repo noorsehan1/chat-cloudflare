@@ -1,6 +1,6 @@
 // ==================== CHAT SERVER - TANPA RATE LIMITING ====================
 
-const C = {
+ const C = {
   // ===== KONFIGURASI DASAR =====
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 500,
