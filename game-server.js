@@ -629,171 +629,175 @@ export class GameServer {
   }
 
   // ==================== SHOW DICE QUESTION ====================
-  async _showDiceQuestion() {
+
+async _showDiceQuestion() {
+  try {
+    if (this._tieActive) return;
+    if (this._isShowingDice) return;
+    if (this._diceTimeUpCooldown) return;
+    this._lastActivityTime = Date.now();
+    this._isDiceIdle = false;
+    
+    this._diceRemainingShown = false;
+    this._diceTimeUpShown = false;
+    this._diceOutOfTimeShown = false;
+    
+    if (!this._isDiceTime()) {
+      const clients = this.wsClients.get(DICE_ROOM);
+      if (clients?.size > 0 && !this.diceEndNotified) {
+        this._sendDiceEndNotificationOnce();
+      }
+      return;
+    }
+    
+    if (!this.diceAutoEnabled) {
+      this.diceAutoEnabled = true;
+      const clients = this.wsClients.get(DICE_ROOM);
+      if (clients?.size > 0) {
+        this._broadcastDiceNotification("diceError", {
+          message: "Dice game is starting soon",
+          isDiceTime: true,
+          isActive: false,
+          remaining: -1
+        });
+      }
+      return;
+    }
+    
+    if (this.isDestroyed || this._diceStartTimeout || this.currentDiceRoll) return;
+    
+    this._isShowingDice = true;
+    
     try {
-      if (this._tieActive) return;
-      if (this._isShowingDice) return;
-      if (this._diceTimeUpCooldown) return;
-      this._lastActivityTime = Date.now();
-      this._isDiceIdle = false;
+      this._diceRound = (this._diceRound || 0) + 1;
+      const diceValue = this.diceGameSystem.rollDice();
       
+      this.currentDiceRoll = {
+        value: diceValue,
+        timestamp: Date.now(),
+        round: this._diceRound
+      };
+      this._diceStartTime = Date.now();
+      this._diceQuestionStartTime = Date.now();
+      
+      this._canSubmitDiceAnswer = true;
+      this.diceAnswered = new Set();
+      this.diceHasWinner = false;
+      this.diceWinner = null;
+      this._winnerProcessed = false;
       this._diceRemainingShown = false;
       this._diceTimeUpShown = false;
-      this._diceOutOfTimeShown = false;
       
-      if (!this._isDiceTime()) {
-        const clients = this.wsClients.get(DICE_ROOM);
-        if (clients?.size > 0 && !this.diceEndNotified) {
-          this._sendDiceEndNotificationOnce();
-        }
-        return;
-      }
+      this._diceNotifiedFlags = {
+        10: false,
+        5: false,
+        timeup: false
+      };
       
-      if (!this.diceAutoEnabled) {
-        this.diceAutoEnabled = true;
-        const clients = this.wsClients.get(DICE_ROOM);
-        if (clients?.size > 0) {
-          this._broadcastDiceNotification("diceError", {
-            message: "Dice game is starting soon",
-            isDiceTime: true,
-            isActive: false,
-            remaining: -1
-          });
-        }
-        return;
-      }
+      // 1. BROADCAST DICE ROLL
+      await this._broadcastDiceRoll(diceValue);
       
-      if (this.isDestroyed || this._diceStartTimeout || this.currentDiceRoll) return;
+      this._broadcastDiceNotification("diceError", {
+        answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
+        remaining: 20,
+        message: "♡ clik draw ♡",
+        round: this._diceRound
+      });
       
-      this._isShowingDice = true;
+      this._startDiceTimerNotifications();
       
-      try {
-        this._diceRound = (this._diceRound || 0) + 1;
-        const diceValue = this.diceGameSystem.rollDice();
-        
-        this.currentDiceRoll = {
-          value: diceValue,
-          timestamp: Date.now(),
-          round: this._diceRound
-        };
-        this._diceStartTime = Date.now();
-        this._diceQuestionStartTime = Date.now();
-        
-        this._canSubmitDiceAnswer = true;
-        this.diceAnswered = new Set();
-        this.diceHasWinner = false;
-        this.diceWinner = null;
-        this._winnerProcessed = false;
-        this._diceRemainingShown = false;
-        this._diceTimeUpShown = false;
-        
-        this._diceNotifiedFlags = {
-          10: false,
-          5: false,
-          timeup: false
-        };
-        
-        // 1. BROADCAST DICE ROLL
-        await this._broadcastDiceRoll(diceValue);
-        
-        this._broadcastDiceNotification("diceError", {
-          answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
-          remaining: 20,
-          message: "♡ clik draw ♡",
-          round: this._diceRound
-        });
-        
-        this._startDiceTimerNotifications();
-        
-        if (this._diceTimeout) clearTimeout(this._diceTimeout);
-        if (this._diceBreakTimeout) clearTimeout(this._diceBreakTimeout);
-        
-        // TIMEOUT 20 DETIK
-        this._diceTimeout = setTimeout(async () => {
-          try {
-            if (this.closing || this.isDestroyed) { 
-              this._diceTimeout = null; 
-              this._isShowingDice = false;
-              this._canSubmitDiceAnswer = false;
-              this._stopDiceTimerNotifications();
-              return; 
-            }
-            
-            if (this._tieActive) {
-              this._diceTimeout = null;
-              return;
-            }
-            
-            const currentClients = this.wsClients.get(DICE_ROOM);
-            if (!currentClients?.size) { 
-              this._diceTimeout = null; 
-              this.currentDiceRoll = null;
-              this._isShowingDice = false;
-              this._canSubmitDiceAnswer = false;
-              this._stopDiceTimerNotifications();
-              return; 
-            }
-            
+      if (this._diceTimeout) clearTimeout(this._diceTimeout);
+      if (this._diceBreakTimeout) clearTimeout(this._diceBreakTimeout);
+      
+      // TIMEOUT 20 DETIK
+      this._diceTimeout = setTimeout(async () => {
+        try {
+          if (this.closing || this.isDestroyed) { 
+            this._diceTimeout = null; 
+            this._isShowingDice = false;
+            this._canSubmitDiceAnswer = false;
             this._stopDiceTimerNotifications();
-            
-            // TIME UP - HANYA DI SINI (1 KALI)
-            this._broadcastDiceNotification("diceError", {
-              remaining: 0,
-              message: "TIME UP",
-              round: this._diceRound || 1,
-              isDiceTime: true,
-              isActive: true
-            });
-            
-            // CEK WINNER ATAU NO WINNER
-            if (!this._winnerProcessed) {
-              if (this.diceHasWinner && this.diceWinner) {
-                const points = await this._getDicePoints();
-                this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
-                  username: this.diceWinner,
-                  totalPoints: points[this.diceWinner] || 0,
-                  diceValue: diceValue,
-                  round: this._diceRound
-                }]);
-                
-                this._broadcastDiceNotification("diceError", {
-                  username: this.diceWinner,
-                  totalPoints: points[this.diceWinner] || 0,
-                  diceValue: diceValue,
-                  round: this._diceRound,
-                  remaining: -1,
-                  message: `${this.diceWinner} won with value ${diceValue}`
-                });
-              } else {
-                this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-                  message: `No winner`,
-                  value: diceValue,
-                  round: this._diceRound
-                }]);
-              }
-              
-              this._winnerProcessed = true;
-            }
-            
+            return; 
+          }
+          
+          if (this._tieActive) {
             this._diceTimeout = null;
+            return;
+          }
+          
+          const currentClients = this.wsClients.get(DICE_ROOM);
+          if (!currentClients?.size) { 
+            this._diceTimeout = null; 
             this.currentDiceRoll = null;
             this._isShowingDice = false;
             this._canSubmitDiceAnswer = false;
+            this._stopDiceTimerNotifications();
+            return; 
+          }
+          
+          this._stopDiceTimerNotifications();
+          
+          // TIME UP - HANYA DI SINI (1 KALI)
+          this._broadcastDiceNotification("diceError", {
+            remaining: 0,
+            message: "TIME UP",
+            round: this._diceRound || 1,
+            isDiceTime: true,
+            isActive: true
+          });
+          
+          // CEK WINNER ATAU NO WINNER
+          if (!this._winnerProcessed) {
+            if (this.diceHasWinner && this.diceWinner) {
+              const points = await this._getDicePoints();
+              this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
+                username: this.diceWinner,
+                totalPoints: points[this.diceWinner] || 0,
+                diceValue: diceValue,
+                round: this._diceRound
+              }]);
+              
+              this._broadcastDiceNotification("diceError", {
+                username: this.diceWinner,
+                totalPoints: points[this.diceWinner] || 0,
+                diceValue: diceValue,
+                round: this._diceRound,
+                remaining: -1,
+                message: `${this.diceWinner} won with value ${diceValue}`
+              });
+            } else {
+              this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
+                message: `No winner`,
+                value: diceValue,
+                round: this._diceRound
+              }]);
+            }
             
-            // WAIT 15s COOLDOWN (SETELAH HASIL)
+            this._winnerProcessed = true;
+          }
+          
+          this._diceTimeout = null;
+          this.currentDiceRoll = null;
+          this._isShowingDice = false;
+          this._canSubmitDiceAnswer = false;
+          
+          // ✅ WAIT 15s COOLDOWN - SETELAH WINNER/NO WINNER
+          // PASTIKAN ADA JEDA SEBELUM WAIT 15s
+          setTimeout(() => {
             this._startTimeUpCooldown();
-            
-          } catch(e) {}
-        }, CONSTANTS.DICE_TOTAL_TIME_MS);
-        
-      } catch(e) {
-        this._isShowingDice = false;
-        this.currentDiceRoll = null;
-        this._canSubmitDiceAnswer = false;
-        this._stopDiceTimerNotifications();
-      }
-    } catch(e) {}
-  }
+          }, 500);
+          
+        } catch(e) {}
+      }, CONSTANTS.DICE_TOTAL_TIME_MS);
+      
+    } catch(e) {
+      this._isShowingDice = false;
+      this.currentDiceRoll = null;
+      this._canSubmitDiceAnswer = false;
+      this._stopDiceTimerNotifications();
+    }
+  } catch(e) {}
+}
 
   // ==================== SHOW DICE QUESTION SILENT ====================
   async _showDiceQuestionSilent() {
