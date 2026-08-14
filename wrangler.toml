@@ -12,7 +12,7 @@ bindings = [
 tag = "v1"
 new_sqlite_classes = ["ChatServer", "GameServer"]
 
-# ==================== KV STORAGE ====================
+# ✅ KV SUDAH BENAR
 [[kv_namespaces]]
-binding = "QUESTIONS"  # ← SUDAH SESUAI DENGAN KODE!
-id = "5008422bd04045db98e4059f2e863784"  # ← ID DARI DASHBOARD
+binding = "QUESTIONS"
+id = "5008422bd04045db98e4059f2e863784"
