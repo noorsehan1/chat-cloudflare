@@ -74,7 +74,7 @@ const CONSTANTS = {
   TIE_BREAKER_COOLDOWN: 15000,
 };
 
-// ✅ QUIZ_SCHEDULE - PINDAH KE ATAS (SETELAH CONSTANTS)
+// QUIZ_SCHEDULE - PINDAH KE ATAS (SETELAH CONSTANTS)
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 2 },   // 01:00 - 02:00 WITA
@@ -516,16 +516,16 @@ export class GameServer {
         });
       } else if (remainingInt <= 0 && !this._diceNotifiedFlags.timeup) {
         this._diceNotifiedFlags.timeup = true;
-        this._broadcastDiceNotification("diceError", {
-          remaining: 0,
-          message: "TIME UP",
-          round: this._diceRound || 1,
-          isDiceTime: true,
-          isActive: true
-        });
+        // HAPUS BROADCAST TIME UP DI SINI - HANYA DI TIMEOUT
+        // this._broadcastDiceNotification("diceError", {
+        //   remaining: 0,
+        //   message: "TIME UP",
+        //   round: this._diceRound || 1,
+        //   isDiceTime: true,
+        //   isActive: true
+        // });
         this._stopDiceTimerNotifications();
         // TIDAK PANGGIL _startTimeUpCooldown() DI SINI
-        // KARENA AKAN DI PANGGIL DI TIMEOUT _showDiceQuestion()
       }
       
     } catch(e) {}
@@ -736,7 +736,7 @@ export class GameServer {
             
             this._stopDiceTimerNotifications();
             
-            // TIME UP
+            // TIME UP - HANYA DI SINI (1 KALI)
             this._broadcastDiceNotification("diceError", {
               remaining: 0,
               message: "TIME UP",
