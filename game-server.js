@@ -78,7 +78,7 @@
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 2 },   // 01:00 - 02:00 WITA
-    { start: 14, end: 15 }, // 14:00 - 15:00 WITA
+    { start: 14, end: 17 }, // 14:00 - 15:00 WITA
     { start: 22, end: 23 }  // 22:00 - 23:00 WITA
   ],
   TIMEZONE_OFFSET: 8,
