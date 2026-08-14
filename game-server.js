@@ -524,10 +524,8 @@ export class GameServer {
           isActive: true
         });
         this._stopDiceTimerNotifications();
-        this._startTimeUpCooldown();
-        
-        // AUTO PROCESS TIME UP
-        this._handleDiceTimeUp();
+        // TIDAK PANGGIL _startTimeUpCooldown() DI SINI
+        // KARENA AKAN DI PANGGIL DI TIMEOUT _showDiceQuestion()
       }
       
     } catch(e) {}
@@ -562,10 +560,12 @@ export class GameServer {
 
   // ==================== START TIME UP COOLDOWN ====================
   _startTimeUpCooldown() {
+    // CEK SUDAH COOLDOWN ATAU BELUM
     if (this._diceTimeUpCooldown) return;
     
     this._diceTimeUpCooldown = true;
     
+    // BROADCAST WAIT 15s (HANYA 1 KALI, SETELAH HASIL)
     this._broadcastDiceNotification("diceError", {
       message: "wait 15s",
       remaining: 15,
@@ -602,6 +602,13 @@ export class GameServer {
       const now = Date.now();
       const message = data.message || "";
       const remaining = data.remaining !== undefined ? data.remaining : -1;
+      
+      // KUNCI UNTUK WAIT 15s - TIDAK KENA THROTTLE
+      if (data.cooldown && message === "wait 15s") {
+        // Kirim langsung tanpa throttle
+        this._broadcastToRoom(DICE_ROOM, ["diceNotification", message]);
+        return;
+      }
       
       let key = `dice_${remaining}`;
       if (remaining === -1) key = `dice_msg_${message.substring(0, 30)}`;
@@ -686,6 +693,7 @@ export class GameServer {
           timeup: false
         };
         
+        // 1. BROADCAST DICE ROLL
         await this._broadcastDiceRoll(diceValue);
         
         this._broadcastDiceNotification("diceError", {
@@ -700,6 +708,7 @@ export class GameServer {
         if (this._diceTimeout) clearTimeout(this._diceTimeout);
         if (this._diceBreakTimeout) clearTimeout(this._diceBreakTimeout);
         
+        // TIMEOUT 20 DETIK
         this._diceTimeout = setTimeout(async () => {
           try {
             if (this.closing || this.isDestroyed) { 
@@ -727,7 +736,16 @@ export class GameServer {
             
             this._stopDiceTimerNotifications();
             
-            // ✅ CEK SUDAH DIPROSES ATAU BELUM (CEGAH DOUBLE NOTIF)
+            // TIME UP
+            this._broadcastDiceNotification("diceError", {
+              remaining: 0,
+              message: "TIME UP",
+              round: this._diceRound || 1,
+              isDiceTime: true,
+              isActive: true
+            });
+            
+            // CEK WINNER ATAU NO WINNER
             if (!this._winnerProcessed) {
               if (this.diceHasWinner && this.diceWinner) {
                 const points = await this._getDicePoints();
@@ -761,6 +779,8 @@ export class GameServer {
             this.currentDiceRoll = null;
             this._isShowingDice = false;
             this._canSubmitDiceAnswer = false;
+            
+            // WAIT 15s COOLDOWN (SETELAH HASIL)
             this._startTimeUpCooldown();
             
           } catch(e) {}
@@ -880,6 +900,14 @@ export class GameServer {
             }
             
             this._stopDiceTimerNotifications();
+            
+            this._broadcastDiceNotification("diceError", {
+              remaining: 0,
+              message: "TIME UP",
+              round: this._diceRound || 1,
+              isDiceTime: true,
+              isActive: true
+            });
             
             if (!this._winnerProcessed) {
               if (this.diceHasWinner && this.diceWinner) {
@@ -1071,7 +1099,7 @@ export class GameServer {
       if (this.closing || this.isDestroyed) return;
       if (this._tieActive) return;
       
-      // ✅ CEK SUDAH DIPROSES ATAU BELUM
+      // CEK SUDAH DIPROSES ATAU BELUM
       if (this._winnerProcessed) return;
       this._winnerProcessed = true;
       
@@ -1083,13 +1111,10 @@ export class GameServer {
         return;
       }
       
-      const diceValue = this.currentDiceRoll?.value;
-      const roundNumber = this._diceRound || 1;
+      // HAPUS SEMUA BROADCAST DI SINI
+      // HAPUS PANGGILAN _startTimeUpCooldown() DI SINI
       
-      // ❌ HAPUS BROADCAST WINNER DI SINI (PINDAHKAN KE TIMEOUT)
-      // if (this.diceHasWinner && this.diceWinner) { ... }
-      
-      // ✅ TINGGAL RESET STATE
+      // TINGGAL RESET STATE
       this.currentDiceRoll = null;
       this._isShowingDice = false;
       this._canSubmitDiceAnswer = false;
@@ -1098,8 +1123,6 @@ export class GameServer {
         clearTimeout(this._diceTimeout);
         this._diceTimeout = null;
       }
-      
-      this._startTimeUpCooldown();
       
     } catch(e) {}
   }
@@ -1800,7 +1823,7 @@ export class GameServer {
         round: this._diceRound || 1
       }]);
       
-      // ✅ HANYA SET WINNER, TAPI JANGAN BROADCAST LANGSUNG
+      // HANYA SET WINNER, TAPI JANGAN BROADCAST LANGSUNG
       if (isCorrect && !this.diceHasWinner) {
         this.diceHasWinner = true;
         this.diceWinner = username;
@@ -1809,8 +1832,7 @@ export class GameServer {
         points[username] = (points[username] || 0) + 1;
         await this.diceGameSystem.setPoints(points);
         
-        // ❌ HAPUS BROADCAST DI SINI - TUNGGU SAMPAI TIME UP
-        // this._broadcastToRoom(DICE_ROOM, ["diceWinner", { ... }]);
+        // HAPUS BROADCAST DI SINI - TUNGGU SAMPAI TIME UP
       }
       
     } catch(e) {}
