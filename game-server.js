@@ -5,6 +5,7 @@
 // ✅ TANPA addEventListener
 // ✅ PAKAI ctx.acceptWebSocket()
 // ✅ FIX: Game bisa start setelah selesai
+// ✅ FIX: Winner notification hanya jika recording aktif
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -1603,13 +1604,11 @@ export class GameServer {
       if (!room || !game) return;
       if (game?._isActive && !game._gameEnded) return;
       
-      // Hapus cleanup timer
       if (this._cleanupTimers.has(room)) {
         this._clearTimer(this._cleanupTimers.get(room));
         this._cleanupTimers.delete(room);
       }
       
-      // Cleanup game
       if (game) {
         game._gameEnded = true;
         game._isActive = false;
@@ -1617,13 +1616,9 @@ export class GameServer {
         this._cleanupGame(game);
       }
       
-      // ✅ HAPUS DARI activeGames
       this.activeGames.delete(room);
-      
-      // ✅ BROADCAST GAME ENDED
       this._broadcastToRoom(room, ["gameLowCardEnd", "Game has ended"]);
       
-      // ✅ RESET STATE PLAYER - BIAR BISA START LAGI!
       for (const wsId of this.wsClients.get(room) || []) {
         const ws = this.wsMap.get(wsId);
         if (ws) {
@@ -1641,7 +1636,6 @@ export class GameServer {
     try {
       if (!game) return;
       
-      // Hapus semua timer
       const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
       for (const key of timers) {
         if (game[key]) { this._clearTimer(game[key]); game[key] = null; }
@@ -1652,18 +1646,13 @@ export class GameServer {
         game._botTimeouts = null;
       }
       
-      // Tandai game selesai
       game._gameEnded = true;
       game._isActive = false;
       game._endTime = Date.now();
       
-      // ✅ HAPUS DARI activeGames
       this.activeGames.delete(room);
-      
-      // ✅ BROADCAST
       this._broadcastToRoom(room, ["gameLowCardEnd", "Game force ended"]);
       
-      // ✅ RESET STATE PLAYER
       for (const wsId of this.wsClients.get(room) || []) {
         const ws = this.wsMap.get(wsId);
         if (ws) {
@@ -1673,7 +1662,6 @@ export class GameServer {
         }
       }
       
-      // Hapus cleanup timer
       if (this._cleanupTimers.has(room)) {
         this._clearTimer(this._cleanupTimers.get(room));
         this._cleanupTimers.delete(room);
@@ -1863,13 +1851,18 @@ export class GameServer {
             const winner = newActive[0]?.name || "Unknown";
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
             
-            await this.recordingSystem.addWinner(room, winner);
-            const winners = await this.recordingSystem.getWinners(room);
-            this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
+            // ✅ FIX: CEK RECORDING DULU!
+            const isRecording = await this.recordingSystem.getStatus(room);
             
+            if (isRecording) {
+              await this.recordingSystem.addWinner(room, winner);
+              const winners = await this.recordingSystem.getWinners(room);
+              this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
+            }
+            
+            this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
             game._gameEnded = true;
             game._isActive = false;
-            this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
             this._scheduleGameCleanup(room, game);
           } else {
             game._gameEnded = true;
@@ -1950,6 +1943,7 @@ export class GameServer {
     } catch(e) {}
   }
 
+  // ✅ FIX: _evaluateRound - CEK RECORDING SEBELUM SAVE WINNER
   async _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
@@ -1995,9 +1989,14 @@ export class GameServer {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        await this.recordingSystem.addWinner(room, winnerName);
-        const winners = await this.recordingSystem.getWinners(room);
-        this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
+        // ✅ FIX: CEK RECORDING DULU!
+        const isRecording = await this.recordingSystem.getStatus(room);
+        
+        if (isRecording) {
+          await this.recordingSystem.addWinner(room, winnerName);
+          const winners = await this.recordingSystem.getWinners(room);
+          this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
+        }
         
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         game._gameEnded = true;
@@ -2054,9 +2053,14 @@ export class GameServer {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        await this.recordingSystem.addWinner(room, winnerName);
-        const winners = await this.recordingSystem.getWinners(room);
-        this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
+        // ✅ FIX: CEK RECORDING DULU!
+        const isRecording = await this.recordingSystem.getStatus(room);
+        
+        if (isRecording) {
+          await this.recordingSystem.addWinner(room, winnerName);
+          const winners = await this.recordingSystem.getWinners(room);
+          this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
+        }
         
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         game._gameEnded = true;
@@ -2130,14 +2134,11 @@ export class GameServer {
         return;
       }
 
-      // ✅ FIX: CEK DAN CLEANUP GAME LAMA
       const existingGame = this.activeGames.get(room);
       if (existingGame) {
-        // Jika game sudah selesai, force cleanup dulu
         if (existingGame._gameEnded || !existingGame._isActive) {
           await this._forceCleanupGame(room, existingGame);
         } else if (existingGame._isActive) {
-          // Game masih berjalan
           this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
           return;
         }
@@ -2394,6 +2395,7 @@ export class GameServer {
     } catch(e) { return false; }
   }
 
+  // ✅ FIX: _checkGameCanContinue - CEK RECORDING
   async _checkGameCanContinue(room, game) {
     try {
       if (!game?._isActive || game._gameEnded || !game.players || game._isEvaluating || game.evaluationLocked || game.registrationOpen) return;
@@ -2420,13 +2422,18 @@ export class GameServer {
         const winner = activePlayers[0]?.name || "Unknown";
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
         
-        await this.recordingSystem.addWinner(room, winner);
-        const winners = await this.recordingSystem.getWinners(room);
-        this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
+        // ✅ FIX: CEK RECORDING DULU!
+        const isRecording = await this.recordingSystem.getStatus(room);
         
+        if (isRecording) {
+          await this.recordingSystem.addWinner(room, winner);
+          const winners = await this.recordingSystem.getWinners(room);
+          this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
+        }
+        
+        this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
         game._gameEnded = true;
         game._isActive = false;
-        this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
         this._scheduleGameCleanup(room, game);
       }
     } catch(e) {}
