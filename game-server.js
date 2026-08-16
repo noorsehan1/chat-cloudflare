@@ -1,3 +1,11 @@
+// ==================== GAME-SERVER-CACHE-KV-SYNC-FIXED.js ====================
+// ✅ CACHE & KV SELALU SINKRON
+// ✅ SETIAP PERUBAHAN KV → CACHE LANGSUNG REPLACE
+// ✅ SEMUA GET DARI CACHE
+// ✅ TANPA TTL
+// ✅ TANPA INTERVAL - PAKAI ALARM 30 DETIK
+// ✅ AMAN DARI EXCEEDED DURATION
+// ✅ OPTIMIZED FETCH() - PAKAI wsMap.size
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -2677,6 +2685,7 @@ export class GameServer {
           return new Response("WebSocket only", { status: 400 });
         }
         
+        // ✅ PAKAI wsMap.size LANGSUNG (tanpa _wsCount)
         if (this.wsMap.size >= CONSTANTS.MAX_WS_CLIENTS) {
           return new Response("Server at maximum capacity", { status: 503 });
         }
@@ -2692,20 +2701,20 @@ export class GameServer {
         server._createdAt = Date.now();
         server.username = null;
         
-        try { this.state.acceptWebSocket(server); } 
-        catch(e) { return new Response("WebSocket acceptance failed", { status: 500 }); }
+        try { 
+          this.state.acceptWebSocket(server); 
+        } catch(e) { 
+          return new Response("WebSocket acceptance failed", { status: 500 }); 
+        }
         
-        server.addEventListener("message", async (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (Array.isArray(data) && data.length > 0) {
-              await this.handleEvent(server, data);
-            }
-          } catch(e) { this._safeSend(server, ["gameLowCardError", e.message || "Error"]); }
-        });
+        // ✅ TANPA addEventListener!
+        // WebSocket events handled by:
+        //    - webSocketMessage() 
+        //    - webSocketClose()
+        //    - webSocketError()
+        // Ini membuat DO bisa tidur (hibernasi) dan menghemat kuota duration!
         
-        server.addEventListener("close", () => { this.webSocketClose(server); });
-        server.addEventListener("error", () => { this.webSocketError(server); });
+        this.wsMap.set(server._wsId, server);
         
         return new Response(null, { status: 101, webSocket: client });
       }
