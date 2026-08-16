@@ -2,7 +2,7 @@
 // VERSION: 3.0.0 - SUPER OPTIMIZED FOR CLOUDFLARE DO FREE TIER
 
 const CONSTANTS = {
-  MAX_LOWCARD_GAMES: 2,
+  MAX_LOWCARD_GAMES: 5,
   REGISTRATION_TIME_MS: 20000,
   DRAW_TIME_MS: 20000,
   EVALUATION_DELAY_MS: 2000,
@@ -58,7 +58,7 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 2 },
+    { start: 1, end: 4 },
     { start: 14, end: 15 },
     { start: 22, end: 23 }
   ],
