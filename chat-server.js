@@ -3,6 +3,8 @@
 // ✅ WEBSOCKET HIBERNATION API
 // ✅ TANPA addEventListener
 // ✅ TANPA lastActivity
+// ✅ TANPA RATE LIMITING (CHAT, GIFT, ROLL DLL)
+// ✅ TANPA MAX_ROOM_CLIENTS (KARENA SUDAH ADA MAX_SEATS 45)
 // ✅ FULL CLASS - LENGKAP
 
 const C = {
@@ -15,7 +17,7 @@ const C = {
   BATCH_SIZE: 20,
   LOCK_TIMEOUT: 10000,
   CLEANUP_INTERVAL: 900000,     // ✅ 15 MENIT!
-  MAX_ROOM_CLIENTS: 500,
+  // ❌ MAX_ROOM_CLIENTS: 500, - DIHAPUS! (pakai MAX_SEATS 45)
 };
 
 const ROOMS = [
@@ -163,10 +165,6 @@ export class ChatServer {
     this._joinLocks = new Map();
     this._kursiLocks = new Map();
     
-    // ==================== RATE LIMITING ====================
-    this._roomMessageCount = new Map();
-    this._roomMessageReset = new Map();
-    
     // ==================== NUMBER ====================
     this.currentNumber = 1;
     this._tikCounter = 0;
@@ -215,13 +213,6 @@ export class ChatServer {
       for (const [key, time] of this._kursiLocks) {
         if (now - time > C.LOCK_TIMEOUT) {
           this._kursiLocks.delete(key);
-        }
-      }
-      
-      for (const [room, resetTime] of this._roomMessageReset) {
-        if (now > resetTime + 60000) {
-          this._roomMessageCount.delete(room);
-          this._roomMessageReset.delete(room);
         }
       }
     } catch(e) {}
@@ -281,7 +272,7 @@ export class ChatServer {
         const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
         
         for (const [room, clients] of this.roomClients) {
-          if (clients && clients.size > 0 && clients.size <= C.MAX_ROOM_CLIENTS) {
+          if (clients && clients.size > 0) {
             this._broadcastToRoom(room, numberMsg);
           }
         }
@@ -348,20 +339,6 @@ export class ChatServer {
         for (const client of toRemoveClient) {
           clients.delete(client);
         }
-        
-        if (clients.size > C.MAX_ROOM_CLIENTS) {
-          const clientsArray = Array.from(clients);
-          const toRemoveExtra = clientsArray.slice(C.MAX_ROOM_CLIENTS);
-          for (const ws of toRemoveExtra) {
-            clients.delete(ws);
-            if (ws && ws.readyState === 1) {
-              try {
-                ws.close(1000, "Room overloaded");
-              } catch(e) {}
-            }
-            this.cleanup(ws);
-          }
-        }
       }
       
       for (const [roomName, roomMan] of this.rooms) {
@@ -406,8 +383,6 @@ export class ChatServer {
     
     const clients = this.roomClients.get(room);
     if (!clients || clients.size === 0) return;
-    
-    if (clients.size > C.MAX_ROOM_CLIENTS) return;
     
     const clientArray = Array.from(clients);
     const BATCH_SIZE = C.BATCH_SIZE;
@@ -638,6 +613,7 @@ export class ChatServer {
       
       const [evt, ...args] = data;
       
+      // ✅ VALIDASI ROOM
       if (evt === "chat" || evt === "updatePoint" || evt === "gift" || evt === "rollangak") {
         const room = args[0];
         if (room && !ROOMS_SET.has(room)) return;
@@ -818,38 +794,12 @@ export class ChatServer {
           break;
         }
         
+        // ✅ CHAT - TANPA RATE LIMITING
         case "chat": {
           try {
             const [chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor] = args;
             
             if (!chatMsg || !ROOMS_SET.has(chatRoom)) break;
-            
-            const now = Date.now();
-            const reset = this._roomMessageReset.get(chatRoom) || 0;
-            const count = this._roomMessageCount.get(chatRoom) || 0;
-            
-            if (now > reset) {
-              this._roomMessageReset.set(chatRoom, now + 1000);
-              this._roomMessageCount.set(chatRoom, 1);
-            } else {
-              if (count > 10) {
-                break;
-              }
-              this._roomMessageCount.set(chatRoom, count + 1);
-            }
-            
-            if (!ws._chatTime) ws._chatTime = 0;
-            if (!ws._chatCount) ws._chatCount = 0;
-            
-            if (now - ws._chatTime > 1000) {
-              ws._chatCount = 1;
-              ws._chatTime = now;
-            } else {
-              ws._chatCount++;
-              if (ws._chatCount > 2) {
-                break;
-              }
-            }
             
             const clients = this.roomClients.get(chatRoom);
             if (!clients || clients.size === 0) break;
@@ -913,24 +863,11 @@ export class ChatServer {
           break;
         }
         
+        // ✅ GIFT - TANPA RATE LIMITING
         case "gift": {
           try {
             const [giftRoom, giftSender, giftReceiver, giftGiftName] = args;
             if (giftRoom && ROOMS_SET.has(giftRoom)) {
-              const now = Date.now();
-              if (!ws._giftTime) ws._giftTime = 0;
-              if (!ws._giftCount) ws._giftCount = 0;
-              
-              if (now - ws._giftTime > 1000) {
-                ws._giftCount = 1;
-                ws._giftTime = now;
-              } else {
-                ws._giftCount++;
-                if (ws._giftCount > 3) {
-                  break;
-                }
-              }
-              
               const clients = this.roomClients.get(giftRoom);
               if (!clients || clients.size === 0) break;
               this._broadcastToRoom(giftRoom, JSON.stringify(["gift", giftRoom, giftSender, giftReceiver, giftGiftName, Date.now()]));
@@ -939,24 +876,11 @@ export class ChatServer {
           break;
         }
         
+        // ✅ ROLL - TANPA RATE LIMITING
         case "rollangak": {
           try {
             const [rollRoom, rollUser, rollAngka] = args;
             if (rollRoom && ROOMS_SET.has(rollRoom)) {
-              const now = Date.now();
-              if (!ws._rollTime) ws._rollTime = 0;
-              if (!ws._rollCount) ws._rollCount = 0;
-              
-              if (now - ws._rollTime > 1000) {
-                ws._rollCount = 1;
-                ws._rollTime = now;
-              } else {
-                ws._rollCount++;
-                if (ws._rollCount > 2) {
-                  break;
-                }
-              }
-              
               const clients = this.roomClients.get(rollRoom);
               if (!clients || clients.size === 0) break;
               this._broadcastToRoom(rollRoom, JSON.stringify(["rollangakBroadcast", rollRoom, rollUser, rollAngka]));
@@ -1401,6 +1325,11 @@ export class ChatServer {
         });
       }
       
+      // ✅ CEK BATAS KONEKSI GLOBAL
+      if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
+        return new Response("Server full", { status: 503 });
+      }
+      
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       
@@ -1512,7 +1441,5 @@ export class ChatServer {
     this.rooms.clear();
     this._processingMessages.clear();
     this._cleaningUp.clear();
-    this._roomMessageCount.clear();
-    this._roomMessageReset.clear();
   }
 }
