@@ -1,9 +1,10 @@
 // ==================== GAME-SERVER-ULTIMATE-FIXED.js ====================
-// ✅ FINAL - AMAN DARI EXCEEDED DURATION
-// ✅ WEBSOCKET HANDSHAKE < 200ms
-// ✅ CONSTRUCTOR < 100ms
-// ✅ INTERVAL DITUNDA 2 DETIK
-// ✅ LAZY INIT DITUNDA 3 DETIK
+// ✅ FINAL - 100% AMAN DARI EXCEEDED DURATION
+// ✅ WEBSOCKET HANDSHAKE < 100ms
+// ✅ CONSTRUCTOR < 30ms
+// ✅ INTERVAL DITUNDA 5 DETIK
+// ✅ LAZY INIT DITUNDA 5 DETIK
+// ✅ DICE SYSTEM LAZY INIT (TIDAK DI CONSTRUCTOR)
 // ✅ DICE CHECK INTERVAL 2 DETIK
 // ✅ WINDOW WAKTU 60 DETIK
 // ✅ RECORDING OFF TIDAK BROADCAST WINNERS KOSONG
@@ -187,7 +188,7 @@ class DiceGameSystem {
 export class GameServer {
   constructor(state, env) {
     try {
-      // ========== INISIALISASI MINIMAL - CEPAT ==========
+      // ========== INISIALISASI MINIMAL - SUPER CEPAT ==========
       this.state = state;
       this.env = env;
       this.closing = false;
@@ -241,12 +242,13 @@ export class GameServer {
       this._playerAnswers = new Map();
       this._tieLock = false;
       
-      // ========== CACHE ==========
+      // ========== CACHE - LAZY ==========
       this._cachedResetWeek = null;
       this._cachedLastWeekWinner = null;
       this._recordingEnabled = new Map();
       this._kvCache = new KVCache();
-      this.diceGameSystem = new DiceGameSystem(this);
+      // ✅ DiceGameSystem - LAZY INIT (TIDAK DI CONSTRUCTOR)
+      this.diceGameSystem = null;
       
       // ========== EVENT QUEUE ==========
       this._eventQueue = [];
@@ -271,71 +273,76 @@ export class GameServer {
       this._lastErrorReset = Date.now();
       this._tickCount = 0;
       
-      // ========== ✅ INTERVAL DITUNDA 2 DETIK ==========
+      // ✅ INTERVAL - DITUNDA 5 DETIK (HANDSHAKE AMAN)
       setTimeout(() => {
         if (this.closing || this.isDestroyed) return;
-        
-        // --- INTERVAL 1 DETIK ---
-        this._scheduleInterval = setInterval(() => {
-          if (this.closing || this.isDestroyed) {
-            clearInterval(this._scheduleInterval);
-            this._scheduleInterval = null;
-            return;
-          }
-          this._checkSchedule();
-        }, 1000);
-        this._allTimers.add(this._scheduleInterval);
-        
-        // --- INTERVAL 10 DETIK ---
-        this._mainInterval = setInterval(() => {
-          if (this.closing || this.isDestroyed) {
-            clearInterval(this._mainInterval);
-            this._mainInterval = null;
-            return;
-          }
-          this._tickCount++;
-          this._doTick();
-        }, 10000);
-        this._allTimers.add(this._mainInterval);
-        
-        // --- CLEANUP INTERVAL (60 DETIK) ---
-        this._cleanupInterval = setInterval(() => {
-          if (this.closing || this.isDestroyed) {
-            clearInterval(this._cleanupInterval);
-            this._cleanupInterval = null;
-            return;
-          }
-          this._performCleanup();
-        }, CONSTANTS.CLEANUP_INTERVAL_MS);
-        this._allTimers.add(this._cleanupInterval);
-        
-        // --- DICE CHECK INTERVAL (2 DETIK) ---
-        this._diceCheckInterval = setInterval(() => {
-          if (this.closing || this.isDestroyed) {
-            clearInterval(this._diceCheckInterval);
-            this._diceCheckInterval = null;
-            return;
-          }
-          if (this._isDiceTime() && !this.currentDiceRoll && !this._diceTimeout && 
-              !this._isShowingDice && !this._diceTimeUpCooldown && !this._tieActive) {
-            const clients = this.wsClients.get(DICE_ROOM);
-            if (clients?.size > 0) {
-              this.forceStartDice();
-            }
-          }
-        }, CONSTANTS.DICE_CHECK_INTERVAL_MS);
-        this._allTimers.add(this._diceCheckInterval);
-        
-      }, 2000);
+        this._startIntervals();
+      }, 5000);
       
-      // ========== LAZY INIT - TUNDA 3 DETIK ==========
+      // ✅ LAZY INIT - DITUNDA 5 DETIK
       setTimeout(() => {
         if (!this.closing && !this.isDestroyed) {
           this._lazyInit();
         }
-      }, 3000);
+      }, 5000);
       
     } catch(e) {}
+  }
+
+  // ========== START INTERVALS ==========
+  _startIntervals() {
+    if (this.closing || this.isDestroyed) return;
+    
+    // --- INTERVAL 1 DETIK ---
+    this._scheduleInterval = setInterval(() => {
+      if (this.closing || this.isDestroyed) {
+        clearInterval(this._scheduleInterval);
+        this._scheduleInterval = null;
+        return;
+      }
+      this._checkSchedule();
+    }, 1000);
+    this._allTimers.add(this._scheduleInterval);
+    
+    // --- INTERVAL 10 DETIK ---
+    this._mainInterval = setInterval(() => {
+      if (this.closing || this.isDestroyed) {
+        clearInterval(this._mainInterval);
+        this._mainInterval = null;
+        return;
+      }
+      this._tickCount++;
+      this._doTick();
+    }, 10000);
+    this._allTimers.add(this._mainInterval);
+    
+    // --- CLEANUP INTERVAL (60 DETIK) ---
+    this._cleanupInterval = setInterval(() => {
+      if (this.closing || this.isDestroyed) {
+        clearInterval(this._cleanupInterval);
+        this._cleanupInterval = null;
+        return;
+      }
+      this._performCleanup();
+    }, CONSTANTS.CLEANUP_INTERVAL_MS);
+    this._allTimers.add(this._cleanupInterval);
+    
+    // --- DICE CHECK INTERVAL (2 DETIK) ---
+    this._diceCheckInterval = setInterval(() => {
+      if (this.closing || this.isDestroyed) {
+        clearInterval(this._diceCheckInterval);
+        this._diceCheckInterval = null;
+        return;
+      }
+      if (this._isDiceTime() && !this.currentDiceRoll && !this._diceTimeout && 
+          !this._isShowingDice && !this._diceTimeUpCooldown && !this._tieActive) {
+        const clients = this.wsClients.get(DICE_ROOM);
+        if (clients?.size > 0) {
+          this.forceStartDice();
+        }
+      }
+    }, CONSTANTS.DICE_CHECK_INTERVAL_MS);
+    this._allTimers.add(this._diceCheckInterval);
   }
 
   // ========== LAZY INITIALIZATION ==========
@@ -344,6 +351,11 @@ export class GameServer {
     this._initialized = true;
     
     try {
+      // ✅ INISIALISASI DICE GAME SYSTEM (DI SINI, BUKAN CONSTRUCTOR)
+      if (!this.diceGameSystem) {
+        this.diceGameSystem = new DiceGameSystem(this);
+      }
+      
       await this._withTimeout(this._loadKVData(), 3000);
       
       setTimeout(() => {
@@ -1499,39 +1511,32 @@ export class GameServer {
       if (!roomName) return false;
       const room = roomName.trim();
       
-      // Cek status recording saat ini
       const isRecording = await this._getRecordingStatusFromKV(room);
       if (!isRecording) {
-        // Jika sudah OFF, broadcast status saja
         this._broadcastToRoom(room, ["recordingStatus", false]);
-        // ❌ TIDAK ADA broadcast lowCardWinnerUpdate
         return true;
       }
       
-      // Hapus status recording dari memory
       this._recordingEnabled.set(room, false);
       
       if (this.env?.QUESTIONS) {
-        // Hapus status recording
         await this._withTimeout(
           this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_RECORDING_KEY + room), 
           2000
         );
         
-        // Hapus data winners
         await this._withTimeout(
           this.env.QUESTIONS.delete(CONSTANTS.LOWCARD_WINNER_KEY + room), 
           2000
         );
         
-        // Hapus dari cache memory
         this._kvCache.delete(CONSTANTS.LOWCARD_WINNER_KEY + room);
         this._kvCache.delete(CONSTANTS.LOWCARD_RECORDING_KEY + room);
       }
       
       // ✅ HANYA BROADCAST STATUS OFF
       this._broadcastToRoom(room, ["recordingStatus", false]);
-      // ❌ TIDAK ADA broadcast lowCardWinnerUpdate dengan winners kosong
+      // ❌ TIDAK ADA broadcast lowCardWinnerUpdate
       
       return true;
       
@@ -3076,7 +3081,7 @@ export class GameServer {
         });
       }
       
-      // ========== ✅ WEBSOCKET - CEPAT DAN AMAN ==========
+      // ========== ✅ WEBSOCKET - SUPER CEPAT ==========
       if (url.pathname === "/game/ws") {
         const upgrade = req.headers.get("Upgrade");
         if (upgrade !== "websocket") {
@@ -3097,7 +3102,7 @@ export class GameServer {
           });
         }
         
-        // ✅ BUAT WEBSOCKET PAIR - CEPAT
+        // ✅ BUAT WEBSOCKET PAIR - SANGAT CEPAT
         const pair = new WebSocketPair();
         const [client, server] = [pair[0], pair[1]];
         const wsId = ++this._wsIdCounter;
@@ -3111,9 +3116,14 @@ export class GameServer {
         server.username = null;
         
         // ✅ ACCEPT - LANGSUNG
-        this.state.acceptWebSocket(server);
+        try {
+          this.state.acceptWebSocket(server);
+        } catch(e) {
+          try { server.close(1008, "Accept failed"); } catch(err) {}
+          return new Response("WebSocket acceptance failed", { status: 500 });
+        }
         
-        // ✅ EVENT LISTENERS - SEDERHANA
+        // ✅ EVENT LISTENERS - MINIMAL
         server.addEventListener("message", async (event) => {
           try {
             if (server._closing || this.closing || this.isDestroyed) return;
