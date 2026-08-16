@@ -2,10 +2,10 @@
 // ✅ WEBSOCKET HIBERNATION API
 // ✅ DO BISA TIDUR SAAT TIDAK AKTIF
 // ✅ HEMAT KUOTA DURATION
-// ✅ TANPA addEventListener
-// ✅ PAKAI ctx.acceptWebSocket()
+// ✅ TANPA addEventListener (PAKAI ctx.acceptWebSocket)
 // ✅ FIX: Game bisa start setelah selesai
 // ✅ FIX: Winner notification hanya jika recording aktif
+// ✅ LOGIKA LOWCARD DARI KODE YANG BENAR
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -383,7 +383,7 @@ class RecordingSystem {
   }
 }
 
-// ==================== GAME SERVER - HIBERNATION ====================
+// ==================== GAME SERVER - HIBERNATION + FIXED LOGIC ====================
 export class GameServer {
   constructor(state, env) {
     try {
@@ -479,7 +479,7 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ==================== ALARM - GANTI SEMUA INTERVAL ====================
+  // ==================== ALARM ====================
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
@@ -498,7 +498,7 @@ export class GameServer {
         }
       }
       
-      // 3. Cleanup game (hanya kadang-kadang)
+      // 3. Cleanup game
       this._tickCount++;
       if (this._tickCount % 6 === 0) {
         this._cleanupStaleGamesLight();
@@ -514,7 +514,6 @@ export class GameServer {
       this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_INTERVAL_MS);
       
     } catch(e) {
-      // Jika error, tetap set alarm
       try {
         this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_INTERVAL_MS);
       } catch(e2) {}
