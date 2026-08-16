@@ -58,7 +58,7 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 4 },
+    { start: 1, end: 6 },
     { start: 14, end: 15 },
     { start: 22, end: 23 }
   ],
@@ -906,6 +906,33 @@ export class GameServer {
     } catch(e) { return {}; }
   }
 
+  // ========== GET TIME LEFT UNTIL NEXT DICE ==========
+  _getTimeLeftUntilNextDice() {
+    try {
+      const witaTime = this._getCurrentWITATime();
+      const currentTotal = witaTime.totalMinutes;
+      let minDiff = Infinity;
+      for (const session of QUIZ_SCHEDULE.SESSIONS) {
+        let startTotal = session.start * 60;
+        let diff = startTotal - currentTotal;
+        if (diff < 0) diff += 24 * 60;
+        if (diff < minDiff) minDiff = diff;
+      }
+      const hours = Math.floor(minDiff / 60);
+      const minutes = Math.floor(minDiff % 60);
+      const isRunning = this._isDiceTime();
+      return { 
+        hours, 
+        minutes, 
+        totalMs: minDiff * 60 * 1000,
+        text: `${hours}h ${minutes}m`,
+        isRunning: isRunning
+      };
+    } catch(e) {
+      return { hours: 0, minutes: 0, totalMs: 0, text: '0h 0m', isRunning: false };
+    }
+  }
+
   // ========== LOAD KV DATA ==========
   async _loadKVData() {
     try {
@@ -1686,7 +1713,11 @@ export class GameServer {
       if (currentRoom === roomName) {
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
         this._sendGameStateToClient(ws, roomName);
-        if (roomName === DICE_ROOM) this._sendDiceNotificationOnSwitch(ws, wsId);
+        
+        // ✅ KIRIM NOTIFIKASI LEFTTIME SAAT SWITCH KE QUIZ
+        if (roomName === DICE_ROOM) {
+          this._sendDiceNotificationOnSwitch(ws, wsId);
+        }
         return;
       }
       
@@ -1722,7 +1753,12 @@ export class GameServer {
         
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
         this._sendGameStateToClient(ws, roomName);
-        if (roomName === DICE_ROOM) this._sendDiceNotificationOnSwitch(ws, wsId);
+        
+        // ✅ KIRIM NOTIFIKASI LEFTTIME SAAT SWITCH KE QUIZ
+        if (roomName === DICE_ROOM) {
+          this._sendDiceNotificationOnSwitch(ws, wsId);
+        }
+        
         this._broadcastToRoom(roomName, ["userJoinedRoom", username, roomName]);
         if (currentRoom && currentRoom !== roomName) {
           this._broadcastToRoom(currentRoom, ["userLeftRoom", username, currentRoom]);
@@ -1766,31 +1802,57 @@ export class GameServer {
     } catch(e) {}
   }
 
+  // ========== SEND DICE NOTIFICATION ON SWITCH - HANYA LEFTTIME ==========
   _sendDiceNotificationOnSwitch(ws, wsId) {
     try {
+      if (!ws || ws.readyState !== 1) return;
+      
+      // HAPUS CACHE NOTIFIKASI SEBELUMNYA
+      this._diceTimeLeftNotified?.delete(wsId);
+      this._nextDiceNotified?.delete(wsId);
+      this._diceJoinedNotified?.delete(wsId);
+      
+      // CEK APAKAH DICE SEDANG BERJALAN
       const isGameActive = this.currentDiceRoll && this._canSubmitDiceAnswer;
+      
+      // ============ KASUS 1: DICE SEDANG BERJALAN ============
       if (isGameActive) {
         const elapsed = (Date.now() - this._diceStartTime) / 1000;
-        const remaining = Math.max(0, Math.floor(CONSTANTS.DICE_TOTAL_TIME_MS / 1000 - elapsed));
-        if (remaining > 0) {
-          let displayTime = "";
-          if (remaining >= 20) displayTime = "20s remaining";
-          else if (remaining >= 10) displayTime = "10s remaining";
-          else if (remaining >= 5) displayTime = "5s remaining";
-          else displayTime = `${remaining}s remaining`;
-          this._safeSend(ws, ["diceNotification", displayTime]);
+        const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
+        const remaining = Math.max(0, totalTime - elapsed);
+        const remainingInt = Math.floor(remaining);
+        
+        if (remainingInt > 0) {
+          // ✅ HANYA SISA WAKTU - TANPA KONDISI
+          this._safeSend(ws, ["diceNotification", `${remainingInt}s remaining`]);
         }
+        return;
       }
       
-      if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
-        this._safeSend(ws, ["diceRoll", {
-          value: this.currentDiceRoll.value,
-          timestamp: this.currentDiceRoll.timestamp,
-          answerTime: CONSTANTS.DICE_ANSWER_TIME_MS / 1000,
-          canAnswerNow: true,
-          round: this._diceRound || 1
-        }]);
+      // ============ KASUS 2: DICE BELUM DIMULAI / SESSION BELUM JAM ============
+      const timeLeft = this._getTimeLeftUntilNextDice();
+      const isDiceTime = this._isDiceTime();
+      
+      // ✅ HANYA NOTIFIKASI LEFTTIME
+      if (!isDiceTime || !this.diceAutoEnabled) {
+        this._safeSend(ws, ["diceNotification", 
+          `Next dice game in: ${timeLeft.text}`
+        ]);
+        return;
       }
+      
+      // ============ KASUS 3: DICE AKTIF TAPI BELUM MULAI ============
+      // ❌ TIDAK ADA NOTIFIKASI "Dice game will start in 5s"
+      // LANGSUNG START DICE SETELAH DELAY 5 DETIK
+      if (isDiceTime && !this.currentDiceRoll && this.diceAutoEnabled) {
+        // START DICE SETELAH DELAY 5 DETIK (TANPA NOTIF)
+        setTimeout(() => {
+          if (!this.closing && !this.isDestroyed && !this.currentDiceRoll && !this._isShowingDice) {
+            this.forceStartDice();
+          }
+        }, 5000);
+      }
+      
     } catch(e) {}
   }
 
