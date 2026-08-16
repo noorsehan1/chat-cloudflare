@@ -1,11 +1,3 @@
-// ==================== GAME-SERVER-CACHE-KV-SYNC-FIXED.js ====================
-// ✅ CACHE & KV SELALU SINKRON
-// ✅ SETIAP PERUBAHAN KV → CACHE LANGSUNG REPLACE
-// ✅ SEMUA GET DARI CACHE
-// ✅ TANPA TTL
-// ✅ TANPA INTERVAL - PAKAI ALARM 30 DETIK
-// ✅ AMAN DARI EXCEEDED DURATION
-// ✅ OPTIMIZED FETCH() - PAKAI COUNTER
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -399,7 +391,6 @@ export class GameServer {
 
       // ==================== WEBSOCKET ====================
       this._wsIdCounter = 0;
-      this._wsCount = 0; // ✅ COUNTER UNTUK CEPAT CEK KAPASITAS
       this.wsClients = new Map();
       this.clientRooms = new Map();
       this.wsMap = new Map();
@@ -617,9 +608,6 @@ export class GameServer {
           this.wsMap.delete(wsId);
         }
       }
-      
-      // ✅ Update counter
-      this._wsCount = this.wsMap.size;
     } catch(e) {}
   }
 
@@ -662,9 +650,6 @@ export class GameServer {
           this.wsMap.delete(wsId);
         }
       }
-      
-      // ✅ Update counter
-      this._wsCount = this.wsMap.size;
     } catch(e) {}
   }
 
@@ -1349,9 +1334,6 @@ export class GameServer {
       ws.room = room;
       ws.roomname = room;
       if (username) ws.username = username;
-      
-      // ✅ Update counter
-      this._wsCount = this.wsMap.size;
     } catch(e) {}
   }
 
@@ -1380,9 +1362,6 @@ export class GameServer {
       ws.roomname = null;
       ws._wsId = null;
       ws.username = null;
-      
-      // ✅ Update counter
-      this._wsCount = this.wsMap.size;
     } catch(e) {}
   }
 
@@ -2698,8 +2677,7 @@ export class GameServer {
           return new Response("WebSocket only", { status: 400 });
         }
         
-        // ✅ PAKAI COUNTER - CEPAT!
-        if (this._wsCount >= CONSTANTS.MAX_WS_CLIENTS) {
+        if (this.wsMap.size >= CONSTANTS.MAX_WS_CLIENTS) {
           return new Response("Server at maximum capacity", { status: 503 });
         }
         
@@ -2714,17 +2692,20 @@ export class GameServer {
         server._createdAt = Date.now();
         server.username = null;
         
-        try { 
-          this.state.acceptWebSocket(server);
-        } catch(e) { 
-          return new Response("WebSocket acceptance failed", { status: 500 }); 
-        }
+        try { this.state.acceptWebSocket(server); } 
+        catch(e) { return new Response("WebSocket acceptance failed", { status: 500 }); }
         
-        // ✅ HAPUS addEventListener - Pakai method terpisah
-        // server.addEventListener("message", ...); // ← SUDAH DIHAPUS!
+        server.addEventListener("message", async (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (Array.isArray(data) && data.length > 0) {
+              await this.handleEvent(server, data);
+            }
+          } catch(e) { this._safeSend(server, ["gameLowCardError", e.message || "Error"]); }
+        });
         
-        this.wsMap.set(server._wsId, server);
-        this._wsCount = this.wsMap.size; // ✅ Update counter
+        server.addEventListener("close", () => { this.webSocketClose(server); });
+        server.addEventListener("error", () => { this.webSocketError(server); });
         
         return new Response(null, { status: 101, webSocket: client });
       }
@@ -2758,9 +2739,6 @@ export class GameServer {
       ws.username = null;
       ws._closing = true;
       
-      // ✅ Update counter
-      this._wsCount = this.wsMap.size;
-      
       const clients = this.wsClients.get(DICE_ROOM);
       if (clients?.size > 0) this.ensureDiceRunning();
     } catch(e) {}
@@ -2788,9 +2766,6 @@ export class GameServer {
       ws._wsId = null;
       ws.username = null;
       ws._closing = true;
-      
-      // ✅ Update counter
-      this._wsCount = this.wsMap.size;
     } catch(e) {}
   }
 
@@ -2869,7 +2844,6 @@ export class GameServer {
       this.wsMap.clear();
       this.wsClients.clear();
       this.clientRooms.clear();
-      this._wsCount = 0;
       
     } catch(e) {}
   }
