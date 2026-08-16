@@ -58,7 +58,7 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 5 },
+    { start: 1, end: 4 },
     { start: 14, end: 15 },
     { start: 22, end: 23 }
   ],
@@ -532,7 +532,7 @@ export class GameServer {
     }
   }
 
-  // ========== TIE BREAKER ==========
+  // ========== TIE BREAKER - TANPA DADU BARU ==========
   
   async _startTieBreaker(room, players) {
     if (this._tieLock) return;
@@ -577,15 +577,7 @@ export class GameServer {
     data.status = 'running';
     data.players = players;
     
-    // GENERATE DADU BARU UNTUK TIE BREAKER
-    const tieDiceValue = Math.floor(Math.random() * 6) + 1;
-    this.currentDiceRoll = { 
-      value: tieDiceValue, 
-      timestamp: Date.now(), 
-      round: this._diceRound,
-      isTieBreaker: true,
-      tieRound: this._tieRound
-    };
+    // ❌ TANPA DADU BARU - TIDAK PAKAI currentDiceRoll
     
     this._diceQuestionStartTime = Date.now();
     this._canSubmitDiceAnswer = true;
@@ -595,16 +587,7 @@ export class GameServer {
     this.diceHasWinner = false;
     this.diceWinner = null;
     
-    this._broadcastToRoom(DICE_ROOM, ["diceRoll", {
-      value: tieDiceValue,
-      timestamp: Date.now(),
-      answerTime: 20,
-      canAnswerNow: true,
-      round: this._diceRound,
-      isTieBreaker: true,
-      tieRound: this._tieRound
-    }]);
-    
+    // ✅ BROADCAST TANPA DADU - HANYA NOTIFIKASI
     this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
       `♡ Tie Round ${this._tieRound}: ${players.join(', ')}`
     ]);
@@ -673,6 +656,7 @@ export class GameServer {
     const data = this._tieBreakers.get(id);
     if (!data) return;
     
+    // ✅ CARI NILAI TERTINGGI DARI JAWABAN (TANPA DADU)
     let highest = 0, highestPlayers = [];
     for (const player of players) {
       const answer = this._tieAnswers.get(player);
@@ -694,7 +678,7 @@ export class GameServer {
       return;
     }
     
-    // 1 PEMENANG
+    // ✅ 1 PEMENANG (NILAI TERTINGGI)
     if (highestPlayers.length === 1) {
       const winner = highestPlayers[0];
       
@@ -729,7 +713,7 @@ export class GameServer {
       return;
     }
     
-    // MASIH TIE - ROUND LAGI
+    // ✅ MASIH TIE (NILAI SAMA) → ROUND LAGI
     if (highestPlayers.length > 1) {
       this._tiePlayers = highestPlayers;
       this._tieAnswers = new Map();
@@ -737,9 +721,7 @@ export class GameServer {
       data.round = this._tieRound;
       data.status = 'waiting';
       
-      this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
-        `⚡ Still tied! ${highestPlayers.length} players: ${highestPlayers.join(', ')}`
-      ]);
+      // TANPA NOTIF "Still tied"
       
       const nextTimer = setTimeout(() => {
         if (this._tieActive && this._tiePlayers.length > 1) {
@@ -834,7 +816,7 @@ export class GameServer {
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) return;
-      if (!this._canSubmitDiceAnswer || !this.currentDiceRoll) return;
+      if (!this._canSubmitDiceAnswer) return;
       if (this.diceAnswered.has(username)) return;
       
       const guessValue = parseInt(guess, 10);
@@ -843,10 +825,9 @@ export class GameServer {
         return;
       }
       
-      const isTieBreaker = this.currentDiceRoll.isTieBreaker || false;
-      const tieRound = this.currentDiceRoll.tieRound || 0;
-      
-      if (isTieBreaker) {
+      // ============ TIE BREAKER MODE ============
+      if (this._tieActive) {
+        // Hanya pemain yang terlibat tie yang bisa jawab
         if (!this._tiePlayers.includes(username)) {
           this._safeSend(ws, ["diceError", "You are not in tie breaker"]);
           return;
@@ -856,32 +837,49 @@ export class GameServer {
           return;
         }
         
+        // ✅ SIMPAN JAWABAN TIE (TANPA DADU)
         this._tieAnswers.set(username, guessValue);
         this.diceAnswered.add(username);
         
         this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
           username,
           guess: guessValue,
-          round: this._diceRound || 1,
           isTieBreaker: true,
-          tieRound: tieRound
+          tieRound: this._tieRound
         }]);
         
+        // Jika semua pemain tie sudah menjawab → proses hasil
         if (this._tieAnswers.size === this._tiePlayers.length) {
           this._canSubmitDiceAnswer = false;
           this._isShowingDice = false;
+          
+          if (this._tieTimer) {
+            clearTimeout(this._tieTimer);
+            this._tieTimer = null;
+          }
+          if (this._tieInterval) {
+            clearInterval(this._tieInterval);
+            this._tieInterval = null;
+          }
           
           const tieId = this._getActiveTieBreakerId();
           if (tieId) {
             setTimeout(async () => {
               await this._processTieResults(DICE_ROOM, tieId, this._tiePlayers);
             }, 500);
+          } else {
+            this._resetTieBreakerState(null);
+            this._startCooldownAfterTieBreaker();
           }
         }
         return;
       }
       
-      // DICE NORMAL
+      // ============ DICE NORMAL MODE ============
+      if (!this.currentDiceRoll) return;
+      
+      const diceValue = this.currentDiceRoll.value;
+      
       this._playerAnswers.set(username, guessValue);
       this.diceAnswered.add(username);
       
@@ -890,6 +888,12 @@ export class GameServer {
         guess: guessValue,
         round: this._diceRound || 1
       }]);
+      
+      // ✅ CEK APAKAH JAWABAN BENAR (LANGSUNG DETEKSI)
+      if (guessValue === diceValue && !this.diceHasWinner) {
+        this.diceHasWinner = true;
+        this.diceWinner = username;
+      }
       
     } catch(e) {}
   }
