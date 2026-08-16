@@ -1,10 +1,10 @@
-// ==================== GAME-SERVER-HIBERNATION.js ====================
+// ==================== GAME-SERVER-HIBERNATION-FIXED.js ====================
 // ✅ WEBSOCKET HIBERNATION API
 // ✅ DO BISA TIDUR SAAT TIDAK AKTIF
 // ✅ HEMAT KUOTA DURATION
 // ✅ TANPA addEventListener
 // ✅ PAKAI ctx.acceptWebSocket()
-// ✅ GAME LANGSUNG DIHAPUS SETELAH SELESAI
+// ✅ FIX: Game bisa start setelah selesai
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -389,7 +389,7 @@ export class GameServer {
       // ==================== STATE ====================
       this.state = state;
       this.env = env;
-      this.ctx = state;
+      this.ctx = state;  // ✅ UNTUK HIBERNATION API
       this.closing = false;
       this.isDestroyed = false;
 
@@ -483,9 +483,6 @@ export class GameServer {
     if (this.closing || this.isDestroyed) return;
     
     try {
-      // ✅ CLEANUP FORCE - HAPUS GAME YANG SUDAH SELESAI
-      this._cleanupStaleGamesForce();
-      
       // 1. Health check (batasi 20 WS per alarm)
       this._performHealthCheckLight();
       
@@ -521,38 +518,6 @@ export class GameServer {
         this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_INTERVAL_MS);
       } catch(e2) {}
     }
-  }
-
-  // ==================== CLEANUP FORCE - HAPUS GAME SELESAI ====================
-  _cleanupStaleGamesForce() {
-    try {
-      const now = Date.now();
-      const toRemove = [];
-      
-      for (const [room, game] of this.activeGames) {
-        // Hapus game yang sudah selesai > 5 detik
-        if (game._gameEnded || !game._isActive) {
-          const endTime = game._endTime || game._createdAt || now;
-          if ((now - endTime) > 5000) {
-            toRemove.push(room);
-          }
-        }
-        
-        // Hapus game yang stuck di registration > 60 detik
-        if (game._phase === 'registration' && game.registrationOpen) {
-          if (game._createdAt && (now - game._createdAt) > 60000) {
-            toRemove.push(room);
-          }
-        }
-      }
-      
-      for (const room of toRemove) {
-        const game = this.activeGames.get(room);
-        if (game) {
-          this._forceCleanupGame(room, game);
-        }
-      }
-    } catch(e) {}
   }
 
   // ==================== LOAD ALL DATA TO CACHE ====================
@@ -1632,22 +1597,88 @@ export class GameServer {
     } catch(e) {}
   }
 
+  // ✅ FIX: _deleteGame - HAPUS GAME DENGAN BENAR
   _deleteGame(room, game) {
     try {
       if (!room || !game) return;
       if (game?._isActive && !game._gameEnded) return;
+      
+      // Hapus cleanup timer
       if (this._cleanupTimers.has(room)) {
         this._clearTimer(this._cleanupTimers.get(room));
         this._cleanupTimers.delete(room);
       }
+      
+      // Cleanup game
       if (game) {
         game._gameEnded = true;
         game._isActive = false;
         game.playerWsId = null;
         this._cleanupGame(game);
       }
+      
+      // ✅ HAPUS DARI activeGames
       this.activeGames.delete(room);
-      this._broadcastToRoom(room, ["gameLowCardEnd", []]);
+      
+      // ✅ BROADCAST GAME ENDED
+      this._broadcastToRoom(room, ["gameLowCardEnd", "Game has ended"]);
+      
+      // ✅ RESET STATE PLAYER - BIAR BISA START LAGI!
+      for (const wsId of this.wsClients.get(room) || []) {
+        const ws = this.wsMap.get(wsId);
+        if (ws) {
+          ws.inGame = false;
+          ws.currentGame = null;
+          this._safeSend(ws, ["gameLowCardIdle", "Game ended. Start new with /start [bet]"]);
+        }
+      }
+      
+    } catch(e) {}
+  }
+
+  // ✅ FIX: _forceCleanupGame - FORCE HAPUS GAME
+  async _forceCleanupGame(room, game) {
+    try {
+      if (!game) return;
+      
+      // Hapus semua timer
+      const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
+      for (const key of timers) {
+        if (game[key]) { this._clearTimer(game[key]); game[key] = null; }
+      }
+      if (game._botTimeouts) {
+        for (const id of game._botTimeouts) this._clearTimer(id);
+        game._botTimeouts.clear();
+        game._botTimeouts = null;
+      }
+      
+      // Tandai game selesai
+      game._gameEnded = true;
+      game._isActive = false;
+      game._endTime = Date.now();
+      
+      // ✅ HAPUS DARI activeGames
+      this.activeGames.delete(room);
+      
+      // ✅ BROADCAST
+      this._broadcastToRoom(room, ["gameLowCardEnd", "Game force ended"]);
+      
+      // ✅ RESET STATE PLAYER
+      for (const wsId of this.wsClients.get(room) || []) {
+        const ws = this.wsMap.get(wsId);
+        if (ws) {
+          ws.inGame = false;
+          ws.currentGame = null;
+          this._safeSend(ws, ["gameLowCardIdle", "Game ended. Start new with /start [bet]"]);
+        }
+      }
+      
+      // Hapus cleanup timer
+      if (this._cleanupTimers.has(room)) {
+        this._clearTimer(this._cleanupTimers.get(room));
+        this._cleanupTimers.delete(room);
+      }
+      
     } catch(e) {}
   }
 
@@ -1655,6 +1686,7 @@ export class GameServer {
     try {
       if (!game) return;
       if (game._isActive && !game._gameEnded) return;
+      
       const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
       for (const key of timers) {
         if (game[key]) { this._clearTimer(game[key]); game[key] = null; }
@@ -1804,10 +1836,7 @@ export class GameServer {
         game._gameEnded = true;
         game._isActive = false;
         this._broadcastToRoom(room, ["gameLowCardError", "Not enough players"]);
-        // 🔥 HAPUS GAME LANGSUNG
-        this.activeGames.delete(room);
-        this._broadcastToRoom(room, ["gameLowCardEnd", []]);
-        this._cleanupGame(game);
+        this._scheduleGameCleanup(room, game);
       }
     } catch(e) {}
   }
@@ -1841,18 +1870,12 @@ export class GameServer {
             game._gameEnded = true;
             game._isActive = false;
             this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
-            // 🔥 HAPUS GAME LANGSUNG
-            this.activeGames.delete(room);
-            this._broadcastToRoom(room, ["gameLowCardEnd", []]);
-            this._cleanupGame(game);
+            this._scheduleGameCleanup(room, game);
           } else {
             game._gameEnded = true;
             game._isActive = false;
             this._broadcastToRoom(room, ["gameLowCardError", "Not enough players"]);
-            // 🔥 HAPUS GAME LANGSUNG
-            this.activeGames.delete(room);
-            this._broadcastToRoom(room, ["gameLowCardEnd", []]);
-            this._cleanupGame(game);
+            this._scheduleGameCleanup(room, game);
           }
           return;
         }
@@ -1927,7 +1950,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // 🔥 ==================== EVALUATE ROUND - DENGAN HAPUS GAME ====================
   async _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
@@ -1964,10 +1986,7 @@ export class GameServer {
         this._broadcastToRoom(room, ["gameLowCardError", "No numbers drawn this round"]);
         game._gameEnded = true;
         game._isActive = false;
-        // 🔥 HAPUS GAME LANGSUNG
-        this.activeGames.delete(room);
-        this._broadcastToRoom(room, ["gameLowCardEnd", []]);
-        this._cleanupGame(game);
+        this._scheduleGameCleanup(room, game);
         return;
       }
       
@@ -1985,10 +2004,7 @@ export class GameServer {
         game._isActive = false;
         game._isEvaluating = false;
         if (game._safetyTimer) { this._clearTimer(game._safetyTimer); game._safetyTimer = null; }
-        // 🔥 HAPUS GAME LANGSUNG
-        this.activeGames.delete(room);
-        this._broadcastToRoom(room, ["gameLowCardEnd", []]);
-        this._cleanupGame(game);
+        this._scheduleGameCleanup(room, game);
         return;
       }
       
@@ -2033,7 +2049,6 @@ export class GameServer {
         return;
       }
       
-      // 🔥 WINNER DITEMUKAN - HAPUS GAME LANGSUNG
       if (remaining.length === 1 && !game._gameEnded) {
         const winnerId = remaining[0];
         const winnerName = players.get(winnerId)?.name || winnerId;
@@ -2048,10 +2063,7 @@ export class GameServer {
         game._isActive = false;
         game._isEvaluating = false;
         if (game._safetyTimer) { this._clearTimer(game._safetyTimer); game._safetyTimer = null; }
-        // 🔥 HAPUS GAME LANGSUNG
-        this.activeGames.delete(room);
-        this._broadcastToRoom(room, ["gameLowCardEnd", []]);
-        this._cleanupGame(game);
+        this._scheduleGameCleanup(room, game);
         return;
       }
       
@@ -2061,10 +2073,7 @@ export class GameServer {
         game._gameEnded = true;
         game._isActive = false;
         this._broadcastToRoom(room, ["gameLowCardError", "All players eliminated"]);
-        // 🔥 HAPUS GAME LANGSUNG
-        this.activeGames.delete(room);
-        this._broadcastToRoom(room, ["gameLowCardEnd", []]);
-        this._cleanupGame(game);
+        this._scheduleGameCleanup(room, game);
         return;
       }
       
@@ -2091,7 +2100,7 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ==================== GAME START ====================
+  // ==================== GAME START - FIXED ====================
 
   async startGame(ws, bet, username) {
     try {
@@ -2121,24 +2130,17 @@ export class GameServer {
         return;
       }
 
-      // ✅ CEK DAN HAPUS GAME YANG SUDAH SELESAI
+      // ✅ FIX: CEK DAN CLEANUP GAME LAMA
       const existingGame = this.activeGames.get(room);
       if (existingGame) {
-        // Jika game sudah selesai atau tidak aktif, hapus paksa
+        // Jika game sudah selesai, force cleanup dulu
         if (existingGame._gameEnded || !existingGame._isActive) {
           await this._forceCleanupGame(room, existingGame);
-          this.activeGames.delete(room);
-        } else {
-          // Game masih aktif
+        } else if (existingGame._isActive) {
+          // Game masih berjalan
           this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
           return;
         }
-      }
-      
-      // ✅ CEK ULANG setelah cleanup
-      if (this.activeGames.has(room)) {
-        this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
-        return;
       }
       
       const betAmount = parseInt(bet, 10) || 0;
@@ -2173,10 +2175,10 @@ export class GameServer {
       this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
       this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
       this._startRegistration(room, game);
+      
     } catch(e) {}
   }
 
-  // 🔥 ==================== FORCE CLEANUP GAME ====================
   async _forceCleanupGame(room, game) {
     try {
       if (!game) return;
@@ -2191,14 +2193,12 @@ export class GameServer {
       game._gameEnded = true;
       game._isActive = false;
       game._endTime = Date.now();
-      // 🔥 HAPUS DARI activeGames
-      this.activeGames.delete(room);
       this._broadcastToRoom(room, ["gameLowCardEnd", []]);
+      this.activeGames.delete(room);
       if (this._cleanupTimers.has(room)) {
         this._clearTimer(this._cleanupTimers.get(room));
         this._cleanupTimers.delete(room);
       }
-      this._cleanupGame(game);
     } catch(e) {}
   }
 
@@ -2367,16 +2367,7 @@ export class GameServer {
         this._safeSend(ws, ["gameStatus", "false"]);
         return;
       }
-      
-      // ✅ CLEANUP STALE GAME
       const game = this.activeGames.get(room);
-      if (game && (game._gameEnded || !game._isActive)) {
-        await this._forceCleanupGame(room, game);
-        this.activeGames.delete(room);
-        this._safeSend(ws, ["gameStatus", "false"]);
-        return;
-      }
-      
       const isRunning = game?._isActive && !game._gameEnded && game.players?.size > 0;
       this._safeSend(ws, ["gameStatus", isRunning ? "true" : "false"]);
       if (isRunning) this._sendGameStateToClient(ws, room);
@@ -2415,9 +2406,7 @@ export class GameServer {
         game._gameEnded = true;
         game._isActive = false;
         this._broadcastToRoom(room, ["gameLowCardEnd", []]);
-        // 🔥 HAPUS GAME LANGSUNG
-        this.activeGames.delete(room);
-        this._cleanupGame(game);
+        this._scheduleGameCleanup(room, game);
         return;
       }
       if (activePlayers.length === 1 && !game._gameEnded) {
@@ -2438,10 +2427,7 @@ export class GameServer {
         game._gameEnded = true;
         game._isActive = false;
         this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
-        // 🔥 HAPUS GAME LANGSUNG
-        this.activeGames.delete(room);
-        this._broadcastToRoom(room, ["gameLowCardEnd", []]);
-        this._cleanupGame(game);
+        this._scheduleGameCleanup(room, game);
       }
     } catch(e) {}
   }
@@ -2773,6 +2759,7 @@ export class GameServer {
           return new Response("WebSocket only", { status: 400 });
         }
         
+        // ✅ PAKAI wsMap.size LANGSUNG
         if (this.wsMap.size >= CONSTANTS.MAX_WS_CLIENTS) {
           return new Response("Server at maximum capacity", { status: 503 });
         }
@@ -2788,11 +2775,19 @@ export class GameServer {
         server._createdAt = Date.now();
         server.username = null;
         
+        // ✅ HIBERNATION API: pakai ctx.acceptWebSocket()
         try { 
           this.ctx.acceptWebSocket(server); 
         } catch(e) { 
           return new Response("WebSocket acceptance failed", { status: 500 }); 
         }
+        
+        // ✅ TANPA addEventListener!
+        // WebSocket events handled by:
+        //    - webSocketMessage() 
+        //    - webSocketClose()
+        //    - webSocketError()
+        // Ini membuat DO bisa hibernasi dan menghemat kuota duration!
         
         this.wsMap.set(server._wsId, server);
         
@@ -2863,12 +2858,6 @@ export class GameServer {
   async webSocketMessage(ws, msg) {
     try {
       if (!ws || ws._closing || this.closing || this.isDestroyed || !ws._wsId) return;
-      
-      // ✅ Cleanup stale games sebelum proses
-      if (this._tickCount % 10 === 0) {
-        this._cleanupStaleGamesForce();
-      }
-      
       const data = JSON.parse(msg);
       if (Array.isArray(data) && data.length > 0) {
         await this.handleEvent(ws, data);
