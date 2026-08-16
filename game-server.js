@@ -506,9 +506,7 @@ export class GameServer {
         this._diceLock = false;
         this._isShowingDice = false;
         
-        this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
-          `⚡ TIE BREAKER! ${correctPlayers.length} players tied: ${correctPlayers.join(', ')}`
-        ]);
+       
         
         await this._startTieBreaker(DICE_ROOM, correctPlayers);
         return;
