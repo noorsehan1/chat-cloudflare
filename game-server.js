@@ -1,11 +1,11 @@
-// ==================== GAME-SERVER-HIBERNATION-FIXED.js ====================
+// ==================== GAME-SERVER-HIBERNATION.js ====================
 // ✅ WEBSOCKET HIBERNATION API
 // ✅ DO BISA TIDUR SAAT TIDAK AKTIF
 // ✅ HEMAT KUOTA DURATION
-// ✅ TANPA addEventListener (PAKAI ctx.acceptWebSocket)
-// ✅ FIX: Game bisa start setelah selesai
-// ✅ FIX: Winner notification hanya jika recording aktif
-// ✅ LOGIKA LOWCARD DARI KODE YANG BENAR
+// ✅ TANPA addEventListener
+// ✅ PAKAI ctx.acceptWebSocket()
+// ✅ AUTO ACTIVATE KETIKA IDLE
+// ✅ RECORD OFF → NO SCORE SENT TO USER
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -42,6 +42,10 @@ const CONSTANTS = {
   KV_TIMEOUT_MS: 2000,
   BROADCAST_BATCH_SIZE: 20,
   ALARM_INTERVAL_MS: 60000,
+  
+  HIBERNATION_IDLE_TIMEOUT_MS: 300000,
+  HIBERNATION_CHECK_INTERVAL_MS: 30000,
+  MAX_HIBERNATION_WAKE_ATTEMPTS: 3,
 };
 
 const QUIZ_SCHEDULE = {
@@ -55,7 +59,7 @@ const QUIZ_SCHEDULE = {
 
 const DICE_ROOM = "Quiz";
 
-// ==================== KV CACHE - SYNC SYSTEM ====================
+// ==================== KV CACHE ====================
 class KVCache {
   constructor() {
     this.cache = new Map();
@@ -124,7 +128,7 @@ class KVCache {
   }
 }
 
-// ==================== DICE GAME SYSTEM - SYNC ====================
+// ==================== DICE GAME SYSTEM ====================
 class DiceGameSystem {
   constructor(gameServer) {
     this.gameServer = gameServer;
@@ -278,7 +282,7 @@ class DiceGameSystem {
   }
 }
 
-// ==================== RECORDING SYSTEM - SYNC ====================
+// ==================== RECORDING SYSTEM ====================
 class RecordingSystem {
   constructor(gameServer) {
     this.gameServer = gameServer;
@@ -381,24 +385,26 @@ class RecordingSystem {
     }
     return true;
   }
+  
+  // ✅ BARU: Cek apakah recording aktif sebelum kirim score
+  async shouldSendScore(room) {
+    return await this.getStatus(room);
+  }
 }
 
-// ==================== GAME SERVER - HIBERNATION + FIXED LOGIC ====================
+// ==================== GAME SERVER ====================
 export class GameServer {
   constructor(state, env) {
     try {
-      // ==================== STATE ====================
       this.state = state;
       this.env = env;
-      this.ctx = state;  // ✅ UNTUK HIBERNATION API
+      this.ctx = state;
       this.closing = false;
       this.isDestroyed = false;
 
-      // ==================== GAME ====================
       this.activeGames = new Map();
       this._maxGames = CONSTANTS.MAX_LOWCARD_GAMES;
 
-      // ==================== WEBSOCKET ====================
       this._wsIdCounter = 0;
       this.wsClients = new Map();
       this.clientRooms = new Map();
@@ -408,7 +414,6 @@ export class GameServer {
       this._switchLocks = new Map();
       this._switchRetries = new Map();
 
-      // ==================== DICE ====================
       this.diceAnswered = new Set();
       this.diceHasWinner = false;
       this.diceWinner = null;
@@ -431,7 +436,6 @@ export class GameServer {
       this._lastNotificationTime = 0;
       this._lastSentRemaining = -1;
 
-      // ==================== TIE BREAKER ====================
       this._tieBreakers = new Map();
       this._tieRound = 0;
       this._tieActive = false;
@@ -441,7 +445,6 @@ export class GameServer {
       this._tieInterval = null;
       this._playerAnswers = new Map();
 
-      // ==================== CACHE SYSTEM ====================
       this._cachedResetWeek = null;
       this._cachedLastWeekWinner = null;
       this._kvCache = new KVCache();
@@ -449,23 +452,26 @@ export class GameServer {
       this.diceGameSystem = new DiceGameSystem(this);
       this.recordingSystem = new RecordingSystem(this);
 
-      // ==================== EVENT QUEUE ====================
       this._eventQueue = [];
       this._isProcessingQueue = false;
       this._diceTaskRunning = false;
 
-      // ==================== TIMER MANAGEMENT ====================
       this._allTimers = new Set();
       this._lastHeartbeat = Date.now();
       this._startTime = Date.now();
       this._tickCount = 0;
       this._lastErrorReset = Date.now();
       this._errorCount = 0;
+      
+      this._hibernationState = 'active';
+      this._idleStartTime = null;
+      this._lastActivityTime = Date.now();
+      this._wakeAttempts = 0;
+      this._pendingWakeEvents = [];
+      this._hibernationMonitorTimer = null;
 
-      // ==================== LOAD KV KE CACHE ====================
       this._loadAllCache();
 
-      // ==================== START DICE ====================
       const startDiceTimer = setTimeout(() => {
         if (!this.closing && !this.isDestroyed && !this._isShowingDice) {
           this.forceStartDice();
@@ -473,21 +479,195 @@ export class GameServer {
       }, 3000);
       this._trackTimer(startDiceTimer);
 
-      // ==================== SET ALARM PERTAMA ====================
       this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_INTERVAL_MS);
+      this._startHibernationMonitor();
 
     } catch(e) {}
+  }
+
+  // ==================== HIBERNATION MONITOR ====================
+  _startHibernationMonitor() {
+    const monitorTimer = setInterval(() => {
+      if (this.closing || this.isDestroyed) return;
+      this._checkHibernationState();
+    }, CONSTANTS.HIBERNATION_CHECK_INTERVAL_MS);
+    this._trackTimer(monitorTimer);
+    this._hibernationMonitorTimer = monitorTimer;
+  }
+
+  _checkHibernationState() {
+    const now = Date.now();
+    const idleTime = now - this._lastActivityTime;
+    const hasClients = this.wsMap.size > 0;
+    const hasActiveGames = this.activeGames.size > 0;
+    const isDiceRunning = !!this.currentDiceRoll;
+    
+    const isIdle = !hasClients && !hasActiveGames && !isDiceRunning && !this._tieActive;
+    
+    if (isIdle) {
+      if (!this._idleStartTime) {
+        this._idleStartTime = now;
+        this._hibernationState = 'idle';
+      }
+      
+      if (now - this._idleStartTime > CONSTANTS.HIBERNATION_IDLE_TIMEOUT_MS) {
+        this._enterHibernation();
+      }
+    } else {
+      this._idleStartTime = null;
+      if (this._hibernationState === 'idle' || this._hibernationState === 'hibernating') {
+        this._hibernationState = 'active';
+      }
+      this._lastActivityTime = now;
+    }
+  }
+
+  async _enterHibernation() {
+    if (this._hibernationState === 'hibernating' || this.closing || this.isDestroyed) return;
+    
+    this._hibernationState = 'hibernating';
+    
+    try {
+      await this._saveHibernationState();
+      this._cleanupBeforeHibernation();
+    } catch(e) {
+      this._hibernationState = 'active';
+    }
+  }
+
+  async _saveHibernationState() {
+    try {
+      const state = {
+        version: 1,
+        timestamp: Date.now(),
+        activeGames: Array.from(this.activeGames.keys()),
+        diceRound: this._diceRound || 0,
+        cacheData: this._kvCache.getAll(),
+        resetWeek: this._cachedResetWeek,
+        lastWeekWinner: this._cachedLastWeekWinner,
+        recordingStatus: Array.from(this.recordingSystem._recordingEnabled.entries()),
+      };
+      
+      await this.state.storage.put('hibernationState', JSON.stringify(state));
+      
+    } catch(e) {}
+  }
+
+  _cleanupBeforeHibernation() {
+    for (const timer of this._allTimers) {
+      try { clearTimeout(timer); clearInterval(timer); } catch(e) {}
+    }
+    this._allTimers.clear();
+  }
+
+  async _wakeFromHibernation() {
+    if (this._hibernationState !== 'hibernating') return;
+    
+    this._hibernationState = 'waking';
+    this._wakeAttempts++;
+    
+    try {
+      await this._restoreHibernationState();
+      this._forceStartDiceIfTime();
+      await this._processPendingWakeEvents();
+      await this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_INTERVAL_MS);
+      
+      this._hibernationState = 'active';
+      this._lastActivityTime = Date.now();
+      this._idleStartTime = null;
+      
+    } catch(e) {
+      this._hibernationState = 'active';
+    }
+  }
+
+  async _restoreHibernationState() {
+    try {
+      const savedState = await this.state.storage.get('hibernationState');
+      if (!savedState) return;
+      
+      const state = JSON.parse(savedState);
+      
+      if (state.cacheData) {
+        this._kvCache.replaceAll(state.cacheData);
+      }
+      
+      if (state.diceRound) {
+        this._diceRound = state.diceRound;
+      }
+      
+      if (state.resetWeek) {
+        this._cachedResetWeek = state.resetWeek;
+      }
+      
+      if (state.lastWeekWinner) {
+        this._cachedLastWeekWinner = state.lastWeekWinner;
+      }
+      
+      if (state.recordingStatus) {
+        for (const [room, enabled] of state.recordingStatus) {
+          this.recordingSystem._recordingEnabled.set(room, enabled);
+        }
+      }
+      
+      await this.diceGameSystem.loadScores();
+      
+    } catch(e) {}
+  }
+
+  async _processPendingWakeEvents() {
+    if (this._pendingWakeEvents.length === 0) return;
+    
+    const events = [...this._pendingWakeEvents];
+    this._pendingWakeEvents = [];
+    
+    for (const event of events) {
+      try {
+        await this._handleWakeEvent(event);
+      } catch(e) {}
+    }
+  }
+
+  async _handleWakeEvent(event) {
+    switch (event.type) {
+      case 'websocket_connect':
+        break;
+      case 'alarm':
+        break;
+      case 'http_request':
+        break;
+      default:
+        break;
+    }
+  }
+
+  // ==================== HIBERNATION API HANDLERS ====================
+  async webSocketHibernation() {
+    await this._saveHibernationState();
+    this._hibernationState = 'hibernating';
+  }
+
+  async webSocketWakeup() {
+    await this._wakeFromHibernation();
+  }
+
+  webSocketHibernationTimeout(ws) {
+    this._lastActivityTime = Date.now() - CONSTANTS.HIBERNATION_IDLE_TIMEOUT_MS;
+    this._checkHibernationState();
   }
 
   // ==================== ALARM ====================
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
+    if (this._hibernationState === 'hibernating') {
+      await this._wakeFromHibernation();
+      return;
+    }
+    
     try {
-      // 1. Health check (batasi 20 WS per alarm)
       this._performHealthCheckLight();
       
-      // 2. Dice - cek hanya jika ada player
       const clients = this.wsClients.get(DICE_ROOM);
       if (clients?.size > 0) {
         const isDiceTime = this._isDiceTime();
@@ -498,24 +678,23 @@ export class GameServer {
         }
       }
       
-      // 3. Cleanup game
       this._tickCount++;
       if (this._tickCount % 6 === 0) {
         this._cleanupStaleGamesLight();
         this._cleanupDeadConnectionsLight();
       }
       
-      // 4. Check stuck games
       if (this._tickCount % 3 === 0) {
         this._checkStuckGamesLight();
       }
       
-      // 5. Schedule next alarm
-      this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_INTERVAL_MS);
+      this._checkHibernationState();
+      
+      await this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_INTERVAL_MS);
       
     } catch(e) {
       try {
-        this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_INTERVAL_MS);
+        await this.state.storage.setAlarm(Date.now() + CONSTANTS.ALARM_INTERVAL_MS);
       } catch(e2) {}
     }
   }
@@ -920,7 +1099,7 @@ export class GameServer {
     }, 15000));
   }
 
-  // ==================== GET DICE POINTS - DARI CACHE ====================
+  // ==================== GET DICE POINTS ====================
   async _getDicePoints() {
     try {
       if (!this.env?.QUESTIONS) return {};
@@ -1381,7 +1560,7 @@ export class GameServer {
     } catch(e) { return false; }
   }
 
-  // ==================== BROADCAST DENGAN BATCH ====================
+  // ==================== BROADCAST ====================
   async _broadcastToRoom(room, message) {
     try {
       if (this.closing || this.isDestroyed || !room || !message) return;
@@ -1597,75 +1776,22 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ✅ FIX: _deleteGame - HAPUS GAME DENGAN BENAR
   _deleteGame(room, game) {
     try {
       if (!room || !game) return;
       if (game?._isActive && !game._gameEnded) return;
-      
       if (this._cleanupTimers.has(room)) {
         this._clearTimer(this._cleanupTimers.get(room));
         this._cleanupTimers.delete(room);
       }
-      
       if (game) {
         game._gameEnded = true;
         game._isActive = false;
         game.playerWsId = null;
         this._cleanupGame(game);
       }
-      
       this.activeGames.delete(room);
-      this._broadcastToRoom(room, ["gameLowCardEnd", "Game has ended"]);
-      
-      for (const wsId of this.wsClients.get(room) || []) {
-        const ws = this.wsMap.get(wsId);
-        if (ws) {
-          ws.inGame = false;
-          ws.currentGame = null;
-          this._safeSend(ws, ["gameLowCardIdle", "Game ended. Start new with /start [bet]"]);
-        }
-      }
-      
-    } catch(e) {}
-  }
-
-  // ✅ FIX: _forceCleanupGame - FORCE HAPUS GAME
-  async _forceCleanupGame(room, game) {
-    try {
-      if (!game) return;
-      
-      const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
-      for (const key of timers) {
-        if (game[key]) { this._clearTimer(game[key]); game[key] = null; }
-      }
-      if (game._botTimeouts) {
-        for (const id of game._botTimeouts) this._clearTimer(id);
-        game._botTimeouts.clear();
-        game._botTimeouts = null;
-      }
-      
-      game._gameEnded = true;
-      game._isActive = false;
-      game._endTime = Date.now();
-      
-      this.activeGames.delete(room);
-      this._broadcastToRoom(room, ["gameLowCardEnd", "Game force ended"]);
-      
-      for (const wsId of this.wsClients.get(room) || []) {
-        const ws = this.wsMap.get(wsId);
-        if (ws) {
-          ws.inGame = false;
-          ws.currentGame = null;
-          this._safeSend(ws, ["gameLowCardIdle", "Game ended. Start new with /start [bet]"]);
-        }
-      }
-      
-      if (this._cleanupTimers.has(room)) {
-        this._clearTimer(this._cleanupTimers.get(room));
-        this._cleanupTimers.delete(room);
-      }
-      
+      this._broadcastToRoom(room, ["gameLowCardEnd", []]);
     } catch(e) {}
   }
 
@@ -1673,7 +1799,6 @@ export class GameServer {
     try {
       if (!game) return;
       if (game._isActive && !game._gameEnded) return;
-      
       const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
       for (const key of timers) {
         if (game[key]) { this._clearTimer(game[key]); game[key] = null; }
@@ -1850,8 +1975,8 @@ export class GameServer {
             const winner = newActive[0]?.name || "Unknown";
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
             
-            // ✅ FIX: CEK RECORDING DULU!
-            const isRecording = await this.recordingSystem.getStatus(room);
+            // ✅ CEK RECORDING SEBELUM KIRIM SCORE
+            const isRecording = await this.recordingSystem.shouldSendScore(room);
             
             if (isRecording) {
               await this.recordingSystem.addWinner(room, winner);
@@ -1859,9 +1984,9 @@ export class GameServer {
               this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
             }
             
-            this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
             game._gameEnded = true;
             game._isActive = false;
+            this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
             this._scheduleGameCleanup(room, game);
           } else {
             game._gameEnded = true;
@@ -1942,7 +2067,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ✅ FIX: _evaluateRound - CEK RECORDING SEBELUM SAVE WINNER
   async _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
@@ -1988,8 +2112,8 @@ export class GameServer {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        // ✅ FIX: CEK RECORDING DULU!
-        const isRecording = await this.recordingSystem.getStatus(room);
+        // ✅ CEK RECORDING SEBELUM KIRIM SCORE
+        const isRecording = await this.recordingSystem.shouldSendScore(room);
         
         if (isRecording) {
           await this.recordingSystem.addWinner(room, winnerName);
@@ -2052,8 +2176,8 @@ export class GameServer {
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
         
-        // ✅ FIX: CEK RECORDING DULU!
-        const isRecording = await this.recordingSystem.getStatus(room);
+        // ✅ CEK RECORDING SEBELUM KIRIM SCORE
+        const isRecording = await this.recordingSystem.shouldSendScore(room);
         
         if (isRecording) {
           await this.recordingSystem.addWinner(room, winnerName);
@@ -2103,7 +2227,7 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ==================== GAME START - FIXED ====================
+  // ==================== GAME START ====================
 
   async startGame(ws, bet, username) {
     try {
@@ -2134,14 +2258,11 @@ export class GameServer {
       }
 
       const existingGame = this.activeGames.get(room);
-      if (existingGame) {
-        if (existingGame._gameEnded || !existingGame._isActive) {
-          await this._forceCleanupGame(room, existingGame);
-        } else if (existingGame._isActive) {
-          this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
-          return;
-        }
+      if (existingGame?._isActive && !existingGame._gameEnded) {
+        this._safeSend(ws, ["gameLowCardError", "Game is already running"]);
+        return;
       }
+      if (existingGame) await this._forceCleanupGame(room, existingGame);
       
       const betAmount = parseInt(bet, 10) || 0;
       if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
@@ -2175,7 +2296,6 @@ export class GameServer {
       this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
       this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
       this._startRegistration(room, game);
-      
     } catch(e) {}
   }
 
@@ -2394,7 +2514,6 @@ export class GameServer {
     } catch(e) { return false; }
   }
 
-  // ✅ FIX: _checkGameCanContinue - CEK RECORDING
   async _checkGameCanContinue(room, game) {
     try {
       if (!game?._isActive || game._gameEnded || !game.players || game._isEvaluating || game.evaluationLocked || game.registrationOpen) return;
@@ -2421,8 +2540,8 @@ export class GameServer {
         const winner = activePlayers[0]?.name || "Unknown";
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
         
-        // ✅ FIX: CEK RECORDING DULU!
-        const isRecording = await this.recordingSystem.getStatus(room);
+        // ✅ CEK RECORDING SEBELUM KIRIM SCORE
+        const isRecording = await this.recordingSystem.shouldSendScore(room);
         
         if (isRecording) {
           await this.recordingSystem.addWinner(room, winner);
@@ -2430,9 +2549,9 @@ export class GameServer {
           this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
         }
         
-        this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
         game._gameEnded = true;
         game._isActive = false;
+        this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
         this._scheduleGameCleanup(room, game);
       }
     } catch(e) {}
@@ -2562,6 +2681,14 @@ export class GameServer {
       if (evt === "sendWinnersToRoom" || evt === "lowCardWinnerUpdate") {
         const room = data[1] || ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
         if (!room) { this._safeSend(ws, ["recordingError", "Room name required"]); return; }
+        
+        // ✅ CEK RECORDING SEBELUM KIRIM WINNERS
+        const isRecording = await this.recordingSystem.shouldSendScore(room);
+        if (!isRecording) {
+          this._safeSend(ws, ["sendWinnersResult", { success: false, message: "Recording is OFF" }]);
+          return;
+        }
+        
         const winners = await this.recordingSystem.getWinners(room);
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
         this._safeSend(ws, ["sendWinnersResult", { success: true, message: "Winners refreshed" }]);
@@ -2571,7 +2698,14 @@ export class GameServer {
       if (evt === "getRoomWinners") {
         const room = data[1] || ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
         if (!room) { this._safeSend(ws, ["recordingError", "Room name required"]); return; }
-        const isRecording = await this.recordingSystem.getStatus(room);
+        
+        // ✅ CEK RECORDING SEBELUM KIRIM WINNERS
+        const isRecording = await this.recordingSystem.shouldSendScore(room);
+        if (!isRecording) {
+          this._safeSend(ws, ["sendWinnersResult", { success: false, message: "Recording is OFF" }]);
+          return;
+        }
+        
         const winners = await this.recordingSystem.getWinners(room);
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: isRecording }]);
         this._safeSend(ws, ["sendWinnersResult", { success: true, message: "Winners updated" }]);
@@ -2729,7 +2863,7 @@ export class GameServer {
     }
   }
 
-  // ==================== FETCH - DENGAN HIBERNATION ====================
+  // ==================== FETCH ====================
 
   async fetch(req) {
     try {
@@ -2739,10 +2873,22 @@ export class GameServer {
       
       const url = new URL(req.url);
       
+      if (this._hibernationState === 'hibernating') {
+        this._pendingWakeEvents.push({
+          type: 'http_request',
+          path: url.pathname,
+          timestamp: Date.now()
+        });
+        await this._wakeFromHibernation();
+      }
+      
+      this._lastActivityTime = Date.now();
+      
       if (url.pathname === "/health") {
         const status = {
           status: "ok",
           uptime: Date.now() - this._startTime,
+          hibernationState: this._hibernationState,
           diceActive: !!this.currentDiceRoll,
           diceRound: this._diceRound || 0,
           gamesRunning: this.activeGames.size,
@@ -2752,9 +2898,38 @@ export class GameServer {
           currentWITATime: this._getCurrentWITATime().hours + ":" + String(this._getCurrentWITATime().minutes).padStart(2, '0'),
           lastResetWeek: this._cachedResetWeek || 'unknown',
           tieActive: this._tieActive,
-          cacheSize: this._kvCache.size
+          cacheSize: this._kvCache.size,
+          idleTime: this._idleStartTime ? Date.now() - this._idleStartTime : 0
         };
         return new Response(JSON.stringify(status), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      
+      if (url.pathname === "/hibernation/status") {
+        const status = {
+          status: "ok",
+          hibernationState: this._hibernationState,
+          wsConnections: this.wsMap.size,
+          gamesRunning: this.activeGames.size,
+          idleTime: this._idleStartTime ? Date.now() - this._idleStartTime : 0,
+          uptime: Date.now() - this._startTime,
+          lastHeartbeat: this._lastHeartbeat,
+          wakeAttempts: this._wakeAttempts
+        };
+        return new Response(JSON.stringify(status), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      
+      if (url.pathname === "/hibernation/wake") {
+        if (this._hibernationState === 'hibernating') {
+          await this._wakeFromHibernation();
+          return new Response(JSON.stringify({ status: 'woke' }), {
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        return new Response(JSON.stringify({ status: 'already_active' }), {
           headers: { 'Content-Type': 'application/json' }
         });
       }
@@ -2765,7 +2940,6 @@ export class GameServer {
           return new Response("WebSocket only", { status: 400 });
         }
         
-        // ✅ PAKAI wsMap.size LANGSUNG
         if (this.wsMap.size >= CONSTANTS.MAX_WS_CLIENTS) {
           return new Response("Server at maximum capacity", { status: 503 });
         }
@@ -2781,19 +2955,11 @@ export class GameServer {
         server._createdAt = Date.now();
         server.username = null;
         
-        // ✅ HIBERNATION API: pakai ctx.acceptWebSocket()
         try { 
           this.ctx.acceptWebSocket(server); 
         } catch(e) { 
           return new Response("WebSocket acceptance failed", { status: 500 }); 
         }
-        
-        // ✅ TANPA addEventListener!
-        // WebSocket events handled by:
-        //    - webSocketMessage() 
-        //    - webSocketClose()
-        //    - webSocketError()
-        // Ini membuat DO bisa hibernasi dan menghemat kuota duration!
         
         this.wsMap.set(server._wsId, server);
         
@@ -2806,7 +2972,7 @@ export class GameServer {
     }
   }
 
-  // ==================== WEBSOCKET HANDLERS (HIBERNATION) ====================
+  // ==================== WEBSOCKET HANDLERS ====================
 
   webSocketClose(ws) {
     try {
@@ -2833,6 +2999,8 @@ export class GameServer {
       
       const clients = this.wsClients.get(DICE_ROOM);
       if (clients?.size > 0) this.ensureDiceRunning();
+      
+      this._lastActivityTime = Date.now();
     } catch(e) {}
   }
 
@@ -2858,13 +3026,34 @@ export class GameServer {
       ws._wsId = null;
       ws.username = null;
       ws._closing = true;
+      
+      this._lastActivityTime = Date.now();
     } catch(e) {}
   }
 
   async webSocketMessage(ws, msg) {
     try {
       if (!ws || ws._closing || this.closing || this.isDestroyed || !ws._wsId) return;
-      const data = JSON.parse(msg);
+      
+      this._lastActivityTime = Date.now();
+      
+      if (this._hibernationState === 'hibernating') {
+        this._pendingWakeEvents.push({
+          type: 'websocket_connect',
+          timestamp: Date.now()
+        });
+        await this._wakeFromHibernation();
+      }
+      
+      let data;
+      if (typeof msg === 'string') {
+        data = JSON.parse(msg);
+      } else if (msg instanceof ArrayBuffer) {
+        data = JSON.parse(new TextDecoder().decode(msg));
+      } else {
+        return;
+      }
+      
       if (Array.isArray(data) && data.length > 0) {
         await this.handleEvent(ws, data);
       }
@@ -2899,6 +3088,11 @@ export class GameServer {
       if (this.isDestroyed) return;
       this.isDestroyed = true;
       this.closing = true;
+      
+      if (this._hibernationMonitorTimer) {
+        this._clearTimer(this._hibernationMonitorTimer);
+        this._hibernationMonitorTimer = null;
+      }
       
       for (const timer of this._allTimers) {
         try { clearTimeout(timer); clearInterval(timer); } catch(e) {}
