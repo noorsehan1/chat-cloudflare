@@ -1,15 +1,20 @@
-// ==================== CHAT SERVER - TANPA COUNTRY ====================
+// ==================== CHAT SERVER - ALARM 15 MENIT + HIBERNATION ====================
+// ✅ ALARM 15 MENIT (PALING HEMAT)
+// ✅ WEBSOCKET HIBERNATION API
+// ✅ TANPA addEventListener
+// ✅ TANPA lastActivity
+// ✅ FULL CLASS - LENGKAP
 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 500,
   MAX_MESSAGE_SIZE: 5000,
-  ALARM_10_DETIK: 10000,
-  NUMBER_UPDATE_TIK: 90,
+  ALARM_INTERVAL_MS: 900000,    // ✅ 15 MENIT!
+  NUMBER_UPDATE_TIK: 6,         // 6 × 15 menit = 90 menit
   MAX_NUMBER: 6,
   BATCH_SIZE: 20,
   LOCK_TIMEOUT: 10000,
-  CLEANUP_INTERVAL: 30000,
+  CLEANUP_INTERVAL: 900000,     // ✅ 15 MENIT!
   MAX_ROOM_CLIENTS: 500,
 };
 
@@ -21,6 +26,7 @@ const ROOMS = [
 
 const ROOMS_SET = new Set(ROOMS);
 
+// ==================== ROOM MANAGER ====================
 class RoomManager {
   constructor(name) {
     this.name = name;
@@ -28,7 +34,6 @@ class RoomManager {
     this.points = new Map();
     this.muted = false;
     this.number = 1;
-    this.lastActivity = Date.now();
   }
 
   getAvailableSeat() {
@@ -57,7 +62,6 @@ class RoomManager {
       vip: vip || 0,
       viptanda: viptanda || 0,
     });
-    this.lastActivity = Date.now();
     return seat;
   }
 
@@ -73,13 +77,11 @@ class RoomManager {
       vip: data.vip || 0,
       viptanda: data.viptanda || 0
     });
-    this.lastActivity = Date.now();
     return true;
   }
 
   removeSeat(seat) {
     this.points.delete(seat);
-    this.lastActivity = Date.now();
     return this.seats.delete(seat);
   }
   
@@ -100,7 +102,6 @@ class RoomManager {
 
   setMuted(val) { 
     this.muted = !!val; 
-    this.lastActivity = Date.now();
     return this.muted; 
   }
   
@@ -114,7 +115,6 @@ class RoomManager {
   updatePoint(seat, x, y, fast) {
     if (!this.seats.has(seat)) return false;
     this.points.set(seat, { x: x || 0, y: y || 0, fast: !!fast });
-    this.lastActivity = Date.now();
     return true;
   }
 
@@ -132,19 +132,19 @@ class RoomManager {
     }
     return result;
   }
-
-  isInactive(timeout = 3600000) {
-    return Date.now() - this.lastActivity > timeout && this.getCount() === 0;
-  }
 }
 
+// ==================== CHAT SERVER FULL CLASS ====================
 export class ChatServer {
+  // ==================== CONSTRUCTOR ====================
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    this.ctx = state;  // ✅ Untuk Hibernation API
     this.closing = false;
     this.isDestroyed = false;
     
+    // ==================== WEBSOCKET ====================
     this.wsSet = new Set();
     this.userConnections = new Map();
     this.userSeat = new Map();
@@ -153,32 +153,41 @@ export class ChatServer {
     this.rooms = new Map();
     this.wsActiveMulti = new Map();
     
+    // ==================== PROCESSING & CLEANUP ====================
     this._processingMessages = new Set();
     this._cleaningUp = new Set();
     this._pendingTimeouts = new Set();
     this._cleanupInProgress = false;
     
+    // ==================== LOCKS ====================
     this._joinLocks = new Map();
     this._kursiLocks = new Map();
     
+    // ==================== RATE LIMITING ====================
     this._roomMessageCount = new Map();
     this._roomMessageReset = new Map();
     
+    // ==================== NUMBER ====================
     this.currentNumber = 1;
     this._tikCounter = 0;
+    this._startTime = Date.now();
     
+    // ==================== INIT ROOMS ====================
     for (const room of ROOMS) {
       this.rooms.set(room, new RoomManager(room));
       this.roomClients.set(room, new Set());
     }
     
+    // ✅ Cleanup interval 15 menit
     this._setupPeriodicCleanup();
     
+    // ✅ Alarm pertama 15 menit
     try {
-      this.state.storage.setAlarm(Date.now() + C.ALARM_10_DETIK);
+      this.state.storage.setAlarm(Date.now() + C.ALARM_INTERVAL_MS);
     } catch(e) {}
   }
-  
+
+  // ==================== PERIODIC CLEANUP ====================
   _setupPeriodicCleanup() {
     this._cleanupInterval = setInterval(() => {
       if (this.closing || this.isDestroyed) {
@@ -191,7 +200,8 @@ export class ChatServer {
     
     this._pendingTimeouts.add(this._cleanupInterval);
   }
-  
+
+  // ==================== CLEANUP STALE LOCKS ====================
   _cleanupStaleLocks() {
     try {
       const now = Date.now();
@@ -216,7 +226,8 @@ export class ChatServer {
       }
     } catch(e) {}
   }
-  
+
+  // ==================== CLEANUP MEMORY ====================
   _cleanupMemory() {
     try {
       for (const [username, connections] of this.userConnections) {
@@ -235,7 +246,7 @@ export class ChatServer {
       }
       
       for (const [roomName, roomMan] of this.rooms) {
-        if (roomMan && roomMan.isInactive()) {
+        if (roomMan) {
           const pointsToRemove = [];
           for (const [seat] of roomMan.points) {
             if (!roomMan.seats.has(seat)) {
@@ -249,13 +260,15 @@ export class ChatServer {
       }
     } catch(e) {}
   }
-  
+
+  // ==================== ALARM 15 MENIT ====================
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
     try {
       this._tikCounter++;
       
+      // ✅ Update nomor setiap 6 tik (90 menit)
       if (this._tikCounter >= C.NUMBER_UPDATE_TIK) {
         this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
         
@@ -276,15 +289,18 @@ export class ChatServer {
         this._tikCounter = 0;
       }
       
+      // ✅ Cleanup koneksi mati
       this._doCleanup();
       
     } catch(e) {}
     
+    // ✅ Set alarm berikutnya (15 MENIT LAGI)
     try {
-      this.state.storage.setAlarm(Date.now() + C.ALARM_10_DETIK);
+      this.state.storage.setAlarm(Date.now() + C.ALARM_INTERVAL_MS);
     } catch(e) {}
   }
-  
+
+  // ==================== DO CLEANUP ====================
   _doCleanup() {
     if (this._cleanupInProgress || this.closing || this.isDestroyed) return;
     this._cleanupInProgress = true;
@@ -366,7 +382,8 @@ export class ChatServer {
       this._cleanupInProgress = false;
     }
   }
-  
+
+  // ==================== REMOVE USER FROM ROOMS ====================
   _removeUserFromRooms(username) {
     try {
       const seatInfo = this.userSeat.get(username);
@@ -382,7 +399,8 @@ export class ChatServer {
       }
     } catch(e) {}
   }
-  
+
+  // ==================== BROADCAST TO ROOM ====================
   _broadcastToRoom(room, msgStr) {
     if (this.closing || this.isDestroyed || !room) return;
     
@@ -427,14 +445,16 @@ export class ChatServer {
       }
     }
   }
-  
+
+  // ==================== BROADCAST ====================
   broadcast(room, msg) {
     if (this.closing || this.isDestroyed || !room || !msg) return;
     try {
       this._broadcastToRoom(room, JSON.stringify(msg));
     } catch(e) {}
   }
-  
+
+  // ==================== SAFE SEND ====================
   safeSend(ws, msg) {
     if (!ws) return false;
     
@@ -450,7 +470,8 @@ export class ChatServer {
       return false;
     }
   }
-  
+
+  // ==================== UPDATE ROOM COUNT ====================
   updateRoomCount(room) {
     if (this.closing || this.isDestroyed || !room) return 0;
     try {
@@ -463,7 +484,8 @@ export class ChatServer {
       return 0;
     }
   }
-  
+
+  // ==================== SEND ALL STATE TO CLIENT ====================
   sendAllStateTo(ws, room, excludeSelf = false) {
     if (!ws || !ws.username) return;
     
@@ -508,7 +530,8 @@ export class ChatServer {
       }
     } catch(e) {}
   }
-  
+
+  // ==================== CLEANUP ====================
   cleanup(ws) {
     if (!ws || ws._cleaning || this._cleaningUp.has(ws)) {
       return;
@@ -585,7 +608,8 @@ export class ChatServer {
       } catch(e) {}
     }
   }
-  
+
+  // ==================== HANDLE MESSAGE ====================
   async handleMessage(ws, raw) {
     if (!ws) return;
     
@@ -1081,7 +1105,8 @@ export class ChatServer {
       } catch(e) {}
     }
   }
-  
+
+  // ==================== HANDLE SET ID ====================
   async handleSetId(ws, username, isNewUser) {
     if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
       try { 
@@ -1256,7 +1281,8 @@ export class ChatServer {
       
     } catch(e) {}
   }
-  
+
+  // ==================== HANDLE JOIN ====================
   async handleJoin(ws, roomName) {
     if (!ws || !ws.username || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) {
       return false;
@@ -1278,7 +1304,7 @@ export class ChatServer {
       this._joinLocks.delete(lockKey);
     }
   }
-  
+
   async _handleJoinInternal(ws, roomName, username) {
     const oldRoom = ws.room;
     
@@ -1357,7 +1383,8 @@ export class ChatServer {
     
     return true;
   }
-  
+
+  // ==================== FETCH - DENGAN HIBERNATION ====================
   async fetch(req) {
     if (this.closing || this.isDestroyed) {
       return new Response("Shutting down", { status: 503 });
@@ -1383,18 +1410,25 @@ export class ChatServer {
             server.close(1000, "Timeout");
           }
         } catch(e) {}
-      }, 5000);
+      }, 10000);
       
       server._timeoutId = timeoutId;
       this._pendingTimeouts.add(timeoutId);
       
+      // ✅ HIBERNATION API - pakai ctx.acceptWebSocket()
       try { 
-        this.state.acceptWebSocket(server);
+        this.ctx.acceptWebSocket(server);
       } catch(e) { 
         clearTimeout(timeoutId);
         this._pendingTimeouts.delete(timeoutId);
         return new Response("WebSocket acceptance failed", { status: 500 }); 
       }
+      
+      // ✅ TANPA addEventListener!
+      // Cloudflare otomatis panggil:
+      // - webSocketMessage()
+      // - webSocketClose()
+      // - webSocketError()
       
       server.username = null;
       server.room = null;
@@ -1413,28 +1447,30 @@ export class ChatServer {
       return new Response("Internal Server Error", { status: 500 });
     }
   }
-  
+
+  // ==================== WEBSOCKET HANDLERS ====================
   async webSocketMessage(ws, msg) { 
     if (!ws || ws._closing || this._cleaningUp.has(ws) || this.closing || this.isDestroyed) return;
     try {
       await this.handleMessage(ws, msg);
     } catch(e) {}
   }
-  
+
   async webSocketClose(ws) { 
     if (!ws) return;
     try {
       this.cleanup(ws);
     } catch(e) {}
   }
-  
+
   async webSocketError(ws) { 
     if (!ws) return;
     try {
       this.cleanup(ws);
     } catch(e) {}
   }
-  
+
+  // ==================== DESTROY ====================
   async destroy() {
     if (this.isDestroyed) return;
     this.closing = true;
