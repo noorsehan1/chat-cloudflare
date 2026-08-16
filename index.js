@@ -2,9 +2,8 @@
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
 
-// Cache untuk instance management
+// Cache untuk instance
 const instanceCache = new Map();
-const CACHE_TTL = 60000; // 1 menit
 
 export default {
   async fetch(request, env) {
@@ -12,26 +11,39 @@ export default {
       const url = new URL(request.url);
       const pathname = url.pathname;
       
-      // ========== CHAT SERVER ==========
+      // CHAT SERVER
       if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
         const id = env.CHAT_SERVER.idFromName("global");
         const obj = env.CHAT_SERVER.get(id);
         return obj.fetch(request);
       }
       
-      // ========== GAME SERVER - WebSocket dengan Load Balancing ==========
+      // GAME SERVER - WebSocket dengan load balancing
       if (pathname === "/game/ws") {
-        // Ambil room dari query parameter untuk distribusi
+        // Ambil room dari query parameter
         const room = url.searchParams.get("room") || "default";
         
-        // Dapatkan instance yang sesuai dengan room
-        const obj = await getGameInstance(room, env);
+        // Hash room untuk distribusi ke 3 instance
+        const hash = await hashString(room);
+        const instanceId = Math.abs(hash) % 3;
         
-        // 🔥 KRITICAL: Tambahkan timeout untuk mencegah hang
+        const cacheKey = `game_${instanceId}`;
+        let obj = instanceCache.get(cacheKey);
+        
+        if (!obj) {
+          const id = env.GAME_SERVER.idFromName(`game_${instanceId}`);
+          obj = env.GAME_SERVER.get(id);
+          instanceCache.set(cacheKey, obj);
+          
+          // Bersihkan cache jika terlalu banyak
+          if (instanceCache.size > 100) {
+            instanceCache.clear();
+          }
+        }
+        
+        // ✅ KRITIKAL: Fetch dengan timeout 3 detik
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => {
-          controller.abort();
-        }, 3000); // 3 detik timeout
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
         
         try {
           const response = await obj.fetch(request, {
@@ -42,14 +54,11 @@ export default {
         } catch (error) {
           clearTimeout(timeoutId);
           if (error.name === 'AbortError') {
-            return new Response(JSON.stringify({
-              error: "Server busy, please retry",
-              retryAfter: 5
-            }), { 
+            return new Response("Server busy, please retry", { 
               status: 503,
               headers: { 
                 'Retry-After': '5',
-                'Content-Type': 'application/json'
+                'Content-Type': 'text/plain'
               }
             });
           }
@@ -57,12 +66,11 @@ export default {
         }
       }
       
-      // ========== GAME SERVER - Health Check ==========
+      // GAME SERVER - health check
       if (pathname === "/game/health") {
         try {
-          // Cek beberapa instance
-          const instances = [];
-          for (let i = 0; i < 5; i++) {
+          const results = [];
+          for (let i = 0; i < 3; i++) {
             try {
               const id = env.GAME_SERVER.idFromName(`game_${i}`);
               const obj = env.GAME_SERVER.get(id);
@@ -71,116 +79,56 @@ export default {
               });
               if (resp.ok) {
                 const data = await resp.json();
-                instances.push({ 
-                  id: i, 
-                  status: "healthy",
-                  connections: data.connections || 0,
-                  games: data.games || 0,
-                  queue: data.queue || 0
-                });
+                results.push({ id: i, status: "healthy", ...data });
               } else {
-                instances.push({ id: i, status: "unhealthy" });
+                results.push({ id: i, status: "unhealthy" });
               }
             } catch(e) {
-              instances.push({ id: i, status: "error", error: e.message });
+              results.push({ id: i, status: "error", error: e.message });
             }
           }
           
           return new Response(JSON.stringify({
             status: "ok",
             timestamp: Date.now(),
-            instances: instances,
-            totalConnections: instances.reduce((sum, inst) => sum + (inst.connections || 0), 0),
-            totalGames: instances.reduce((sum, inst) => sum + (inst.games || 0), 0)
+            instances: results,
+            totalConnections: results.reduce((sum, r) => sum + (r.connections || 0), 0)
           }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' }
           });
         } catch(e) {
-          return new Response(JSON.stringify({
-            status: "degraded",
-            error: e.message
-          }), {
-            status: 200,
+          return new Response(JSON.stringify({ error: e.message }), {
+            status: 500,
             headers: { 'Content-Type': 'application/json' }
           });
         }
       }
       
-      // ========== GAME SERVER - Status ==========
       if (pathname === "/game") {
         return new Response(JSON.stringify({
           status: "running",
-          version: "1.0.0",
-          timestamp: Date.now(),
-          endpoints: {
-            websocket: "/game/ws?room={room_name}",
-            health: "/game/health"
-          },
-          instances: 5
+          version: "3.0.0",
+          instances: 3,
+          timestamp: Date.now()
         }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' }
         });
       }
       
-      // ========== DEFAULT ==========
       return new Response("Server running", { status: 200 });
       
     } catch(e) {
-      console.error("Fetch error:", e);
-      return new Response(JSON.stringify({
-        error: "Internal Server Error",
-        message: e.message || "Unknown error"
-      }), { 
+      return new Response("Error: " + e.message, { 
         status: 500,
-        headers: { 
-          'Retry-After': '30',
-          'Content-Type': 'application/json'
-        }
+        headers: { 'Content-Type': 'text/plain' }
       });
     }
   }
 };
 
-// ========== HELPER: Get Game Instance dengan Caching ==========
-async function getGameInstance(room, env) {
-  const cacheKey = `game_${room}`;
-  const cached = instanceCache.get(cacheKey);
-  
-  // Gunakan cache jika masih valid
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return cached.instance;
-  }
-  
-  // Hash room untuk distribusi ke 5 instance
-  const hash = await hashString(room);
-  const instanceId = Math.abs(hash) % 5; // 5 instance game
-  
-  // Buat ID dan dapatkan object
-  const id = env.GAME_SERVER.idFromName(`game_${instanceId}`);
-  const obj = env.GAME_SERVER.get(id);
-  
-  // Simpan di cache
-  instanceCache.set(cacheKey, {
-    instance: obj,
-    timestamp: Date.now()
-  });
-  
-  // Cleanup cache periodically
-  if (instanceCache.size > 100) {
-    const now = Date.now();
-    for (const [key, value] of instanceCache) {
-      if (now - value.timestamp > CACHE_TTL) {
-        instanceCache.delete(key);
-      }
-    }
-  }
-  
-  return obj;
-}
-
-// ========== HELPER: Simple Hash Function ==========
+// Helper hash
 async function hashString(str) {
   const encoder = new TextEncoder();
   const data = encoder.encode(str);
