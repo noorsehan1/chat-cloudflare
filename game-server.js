@@ -1801,58 +1801,73 @@ export class GameServer {
   }
 
   // ========== SEND DICE NOTIFICATION ON SWITCH - HANYA LEFTTIME ==========
-  _sendDiceNotificationOnSwitch(ws, wsId) {
-    try {
-      if (!ws || ws.readyState !== 1) return;
+  // ========== SEND DICE NOTIFICATION ON SWITCH - DELAY 5 DETIK SEBELUM KIRIM NOTIF ==========
+_sendDiceNotificationOnSwitch(ws, wsId) {
+  try {
+    if (!ws || ws.readyState !== 1) return;
+    
+    // HAPUS CACHE NOTIFIKASI SEBELUMNYA
+    this._diceTimeLeftNotified?.delete(wsId);
+    this._nextDiceNotified?.delete(wsId);
+    this._diceJoinedNotified?.delete(wsId);
+    
+    // CEK APAKAH DICE SEDANG BERJALAN
+    const isGameActive = this.currentDiceRoll && this._canSubmitDiceAnswer;
+    
+    // ============ KASUS 1: DICE SEDANG BERJALAN ============
+    if (isGameActive) {
+      const elapsed = (Date.now() - this._diceStartTime) / 1000;
+      const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
+      const remaining = Math.max(0, totalTime - elapsed);
+      const remainingInt = Math.floor(remaining);
       
-      // HAPUS CACHE NOTIFIKASI SEBELUMNYA
-      this._diceTimeLeftNotified?.delete(wsId);
-      this._nextDiceNotified?.delete(wsId);
-      this._diceJoinedNotified?.delete(wsId);
-      
-      // CEK APAKAH DICE SEDANG BERJALAN
-      const isGameActive = this.currentDiceRoll && this._canSubmitDiceAnswer;
-      
-      // ============ KASUS 1: DICE SEDANG BERJALAN ============
-      if (isGameActive) {
-        const elapsed = (Date.now() - this._diceStartTime) / 1000;
-        const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
-        const remaining = Math.max(0, totalTime - elapsed);
-        const remainingInt = Math.floor(remaining);
-        
-        if (remainingInt > 0) {
-          // ✅ HANYA SISA WAKTU - TANPA KONDISI
-          this._safeSend(ws, ["diceNotification", `${remainingInt}s remaining`]);
+      if (remainingInt > 0) {
+        // ✅ KIRIM LANGSUNG (TANPA DELAY) KARENA DICE SEDANG JALAN
+        this._safeSend(ws, ["diceNotification", `${remainingInt}s remaining`]);
+      }
+      return;
+    }
+    
+    // ============ KASUS 2: DICE BELUM DIMULAI / SESSION BELUM JAM ============
+    const timeLeft = this._getTimeLeftUntilNextDice();
+    const isDiceTime = this._isDiceTime();
+    
+    if (!isDiceTime || !this.diceAutoEnabled) {
+      // ✅ DELAY 5 DETIK SEBELUM KIRIM NOTIFIKASI LEFTTIME
+      setTimeout(() => {
+        if (!this.closing && !this.isDestroyed && ws && ws.readyState === 1) {
+          // ✅ KIRIM NOTIFIKASI LEFTTIME SETELAH DELAY 5 DETIK
+          this._safeSend(ws, ["diceNotification", `Next dice game in: ${timeLeft.text}`]);
         }
-        return;
-      }
+      }, 5000);
       
-      // ============ KASUS 2: DICE BELUM DIMULAI / SESSION BELUM JAM ============
-      const timeLeft = this._getTimeLeftUntilNextDice();
-      const isDiceTime = this._isDiceTime();
-      
-      // ✅ HANYA NOTIFIKASI LEFTTIME
-      if (!isDiceTime || !this.diceAutoEnabled) {
-        this._safeSend(ws, ["diceNotification", 
-          `Next dice game in: ${timeLeft.text}`
-        ]);
-        return;
-      }
-      
-      // ============ KASUS 3: DICE AKTIF TAPI BELUM MULAI ============
-      // ❌ TIDAK ADA NOTIFIKASI "Dice game will start in 5s"
-      // LANGSUNG START DICE SETELAH DELAY 5 DETIK
-      if (isDiceTime && !this.currentDiceRoll && this.diceAutoEnabled) {
-        // START DICE SETELAH DELAY 5 DETIK (TANPA NOTIF)
-        setTimeout(() => {
-          if (!this.closing && !this.isDestroyed && !this.currentDiceRoll && !this._isShowingDice) {
+      // ✅ START DICE SETELAH JAM + 5 DETIK
+      const waitTime = timeLeft.totalMs + 5000;
+      setTimeout(() => {
+        if (!this.closing && !this.isDestroyed && !this.currentDiceRoll && !this._isShowingDice) {
+          if (this._isDiceTime()) {
             this.forceStartDice();
           }
-        }, 5000);
-      }
+        }
+      }, waitTime);
       
-    } catch(e) {}
-  }
+      return;
+    }
+    
+    // ============ KASUS 3: DICE AKTIF TAPI BELUM MULAI ============
+    if (isDiceTime && !this.currentDiceRoll && this.diceAutoEnabled) {
+      // ❌ TIDAK ADA NOTIFIKASI
+      
+      // ✅ DELAY 5 DETIK SEBELUM START
+      setTimeout(() => {
+        if (!this.closing && !this.isDestroyed && !this.currentDiceRoll && !this._isShowingDice) {
+          this.forceStartDice();
+        }
+      }, 5000);
+    }
+    
+  } catch(e) {}
+}
 
   // ========== GET LAST WEEK WINNER ==========
   async _getLastWeekWinnerAndReset() {
