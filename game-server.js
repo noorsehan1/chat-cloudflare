@@ -1,11 +1,9 @@
-// ==================== GAME-SERVER-CACHE-KV-SYNC-FIXED.js ====================
-// ✅ CACHE & KV SELALU SINKRON
-// ✅ SETIAP PERUBAHAN KV → CACHE LANGSUNG REPLACE
-// ✅ SEMUA GET DARI CACHE
-// ✅ TANPA TTL
-// ✅ TANPA INTERVAL - PAKAI ALARM 30 DETIK
-// ✅ AMAN DARI EXCEEDED DURATION
-// ✅ OPTIMIZED FETCH() - PAKAI wsMap.size
+// ==================== GAME-SERVER-HIBERNATION.js ====================
+// ✅ WEBSOCKET HIBERNATION API
+// ✅ DO BISA TIDUR SAAT TIDAK AKTIF
+// ✅ HEMAT KUOTA DURATION
+// ✅ TANPA addEventListener
+// ✅ PAKAI ctx.acceptWebSocket()
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -41,7 +39,7 @@ const CONSTANTS = {
   
   KV_TIMEOUT_MS: 2000,
   BROADCAST_BATCH_SIZE: 20,
-  ALARM_INTERVAL_MS: 30000,
+  ALARM_INTERVAL_MS: 60000,
 };
 
 const QUIZ_SCHEDULE = {
@@ -383,13 +381,14 @@ class RecordingSystem {
   }
 }
 
-// ==================== GAME SERVER ====================
+// ==================== GAME SERVER - HIBERNATION ====================
 export class GameServer {
   constructor(state, env) {
     try {
       // ==================== STATE ====================
       this.state = state;
       this.env = env;
+      this.ctx = state;  // ✅ UNTUK HIBERNATION API
       this.closing = false;
       this.isDestroyed = false;
 
@@ -2649,7 +2648,7 @@ export class GameServer {
     }
   }
 
-  // ==================== FETCH ====================
+  // ==================== FETCH - DENGAN HIBERNATION ====================
 
   async fetch(req) {
     try {
@@ -2685,7 +2684,7 @@ export class GameServer {
           return new Response("WebSocket only", { status: 400 });
         }
         
-        // ✅ PAKAI wsMap.size LANGSUNG (tanpa _wsCount)
+        // ✅ PAKAI wsMap.size LANGSUNG
         if (this.wsMap.size >= CONSTANTS.MAX_WS_CLIENTS) {
           return new Response("Server at maximum capacity", { status: 503 });
         }
@@ -2701,8 +2700,9 @@ export class GameServer {
         server._createdAt = Date.now();
         server.username = null;
         
+        // ✅ HIBERNATION API: pakai ctx.acceptWebSocket()
         try { 
-          this.state.acceptWebSocket(server); 
+          this.ctx.acceptWebSocket(server); 
         } catch(e) { 
           return new Response("WebSocket acceptance failed", { status: 500 }); 
         }
@@ -2712,7 +2712,7 @@ export class GameServer {
         //    - webSocketMessage() 
         //    - webSocketClose()
         //    - webSocketError()
-        // Ini membuat DO bisa tidur (hibernasi) dan menghemat kuota duration!
+        // Ini membuat DO bisa hibernasi dan menghemat kuota duration!
         
         this.wsMap.set(server._wsId, server);
         
@@ -2724,6 +2724,8 @@ export class GameServer {
       return new Response("Internal Server Error", { status: 500 });
     }
   }
+
+  // ==================== WEBSOCKET HANDLERS (HIBERNATION) ====================
 
   webSocketClose(ws) {
     try {
