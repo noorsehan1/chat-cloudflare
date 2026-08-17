@@ -1,7 +1,7 @@
 // ==================== GAME-SERVER.JS ====================
 // VERSION: 3.0.5 - LIGHTWEIGHT (NO CPU PROTECTION)
 
-const CONSTANTS = {
+ const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
   REGISTRATION_TIME_MS: 20000,
   DRAW_TIME_MS: 20000,
