@@ -1,5 +1,5 @@
  // ==================== GAME-SERVER.JS ====================
-// VERSION: 3.0.2 - CACHE FIRST, NO UNNECESSARY LOOPS
+ // VERSION: 3.0.2 - CACHE FIRST, NO UNNECESSARY LOOPS
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
