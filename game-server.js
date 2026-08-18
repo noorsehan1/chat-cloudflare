@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 3.0.6 - FULL CLASS LENGKAP
+// VERSION: 3.0.7 - FIXED ASYNC ERROR
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -2245,7 +2245,8 @@ export class GameServer {
     } catch(e) {}
   }
 
-  _closeDrawPhase(room, game) {
+  // ========== ✅ FIXED: _closeDrawPhase DENGAN ASYNC ==========
+  async _closeDrawPhase(room, game) {
     try {
       if (!this._isGameActuallyRunning(game) || game.drawTimeExpired || game.evaluationLocked) return;
       game.drawTimeExpired = true;
@@ -2258,12 +2259,12 @@ export class GameServer {
         for (const botId of activeBotIds) this._forceBotDraw(room, botId, game);
       }
       
-      // ✅ CEK APAKAH ADA PLAYER YANG SUBMIT
+      // CEK APAKAH ADA PLAYER YANG SUBMIT
       const activeIds = this._getActivePlayerIds(game);
       const submittedIds = new Set(game.numbers?.keys() || []);
       const notSubmitted = activeIds.filter(id => !submittedIds.has(id) && !game.eliminated?.has(id));
       
-      // ✅ JIKA SEMUA PLAYER TIDAK SUBMIT → GAME BERAKHIR
+      // JIKA SEMUA PLAYER TIDAK SUBMIT → GAME BERAKHIR
       if (notSubmitted.length > 0 && submittedIds.size === 0) {
         this._broadcastToRoom(room, ["gameLowCardError", "No one submitted numbers"]);
         game._gameEnded = true;
@@ -2273,7 +2274,7 @@ export class GameServer {
         return;
       }
       
-      // ✅ ELIMINASI PLAYER YANG TIDAK SUBMIT
+      // ELIMINASI PLAYER YANG TIDAK SUBMIT
       for (const id of notSubmitted) {
         if (!game.eliminated) game.eliminated = new Set();
         game.eliminated.add(id);
@@ -2281,7 +2282,7 @@ export class GameServer {
         game.tanda?.delete(id);
       }
       
-      // ✅ CEK PLAYER YANG TERSISA
+      // CEK PLAYER YANG TERSISA
       const remaining = Array.from(game.players.keys()).filter(id => !game.eliminated?.has(id));
       
       if (remaining.length === 1 && !game._gameEnded) {
@@ -2360,7 +2361,7 @@ export class GameServer {
         if (!submittedIds.has(id)) eliminated.add(id);
       }
       
-      // ✅ JIKA TIDAK ADA YANG SUBMIT
+      // JIKA TIDAK ADA YANG SUBMIT
       if (entries.length === 0) {
         game._isEvaluating = false;
         if (game._safetyTimer) { this._clearTimer(game._safetyTimer); game._safetyTimer = null; }
@@ -2396,7 +2397,7 @@ export class GameServer {
         return;
       }
       
-      // ✅ EVALUASI NORMAL
+      // EVALUASI NORMAL
       const values = entries.map(([, n]) => n);
       const allSame = values.every(v => v === values[0]);
       let losers = [];
@@ -2409,7 +2410,7 @@ export class GameServer {
       
       const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
       
-      // ✅ ALL SAME → ROUND LAGI
+      // ALL SAME → ROUND LAGI
       if (allSame && remaining.length >= 2) {
         game._isEvaluating = false;
         if (game._safetyTimer) { this._clearTimer(game._safetyTimer); game._safetyTimer = null; }
@@ -2434,7 +2435,7 @@ export class GameServer {
         return;
       }
       
-      // ✅ 1 PEMENANG
+      // 1 PEMENANG
       if (remaining.length === 1 && !game._gameEnded) {
         const winnerId = remaining[0];
         const winnerName = players.get(winnerId)?.name || winnerId;
@@ -2455,7 +2456,7 @@ export class GameServer {
         return;
       }
       
-      // ✅ TIDAK ADA PLAYER TERSISA
+      // TIDAK ADA PLAYER TERSISA
       if (remaining.length === 0) {
         game._isEvaluating = false;
         if (game._safetyTimer) { this._clearTimer(game._safetyTimer); game._safetyTimer = null; }
@@ -2466,7 +2467,7 @@ export class GameServer {
         return;
       }
       
-      // ✅ LANJUT ROUND BERIKUTNYA
+      // LANJUT ROUND BERIKUTNYA
       const numbersArr = entries.map(([id, n]) => `${players.get(id)?.name || id}:${n}${tanda.get(id) ? `(${tanda.get(id)})` : ''}`);
       const loserNames = [...losers].map(id => players.get(id)?.name || id);
       const remainingNames = remaining.map(id => players.get(id)?.name || id);
