@@ -1,7 +1,7 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 3.0.5 - LIGHTWEIGHT (NO CPU PROTECTION)
+// VERSION: 3.0.6 - FULL CLASS LENGKAP
 
- const CONSTANTS = {
+const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
   REGISTRATION_TIME_MS: 20000,
   DRAW_TIME_MS: 20000,
@@ -16,7 +16,7 @@
   STUCK_DRAW_TIMEOUT_MS: 60000,
   STUCK_REGISTRATION_TIMEOUT_MS: 30000,
   MAX_WS_CLIENTS: 50,
-  MAX_EVENT_QUEUE_SIZE: 50,  // Turunkan dari 1000
+  MAX_EVENT_QUEUE_SIZE: 50,
   ERROR_RESET_INTERVAL_MS: 60000,
   LOWCARD_WINNER_KEY: 'lowcard_winner_',
   LOWCARD_RECORDING_KEY: 'lowcard_recording_status_',
@@ -34,13 +34,13 @@
   TIE_BREAKER_COOLDOWN: 15000,
   
   KV_TIMEOUT_MS: 1500,
-  BROADCAST_BATCH_SIZE: 10,  // Naikkan dari 5
+  BROADCAST_BATCH_SIZE: 10,
   CPU_YIELD_MS: 1,
   
   MAX_PROCESS_TIME_MS: 500,
   EVENT_BATCH_SIZE: 1,
   MAX_QUEUE_SIZE: 50,
-  CLEANUP_INTERVAL_MS: 60000,  // Naikkan dari 30000
+  CLEANUP_INTERVAL_MS: 60000,
   HAND_SHAKE_TIMEOUT_MS: 3000,
   RATE_LIMIT_MAX: 100,
   RATE_LIMIT_WINDOW_MS: 60000,
@@ -176,7 +176,7 @@ class DiceGameSystem {
   clearCache() { this.userScores.clear(); this._isLoaded = false; }
 }
 
-// ==================== GAME SERVER ====================
+// ==================== GAME SERVER FULL CLASS ====================
 export class GameServer {
   constructor(state, env) {
     try {
@@ -197,7 +197,7 @@ export class GameServer {
       this.clientRooms = new Map();
       this.userConnections = new Map();
       
-      // ========== DICE ==========
+      // ========== DICE VARIABLES ==========
       this.diceGameSystem = null;
       this.currentDiceRoll = null;
       this._diceLock = false;
@@ -263,7 +263,7 @@ export class GameServer {
       this._kvCache = new KVCache();
       this.DICE_ROOM = DICE_ROOM;
       
-      // ========== INTERVAL - HANYA 1 UNTUK SEMUA ==========
+      // ========== INTERVAL ==========
       this._mainInterval = null;
       this._cleanupInterval = null;
       
@@ -300,11 +300,10 @@ export class GameServer {
     }
   }
 
-  // ========== MAIN INTERVAL - HANYA 1 ==========
+  // ========== MAIN INTERVAL ==========
   _startMainInterval() {
     if (this.closing || this.isDestroyed) return;
     
-    // ✅ HANYA 1 INTERVAL - 10 DETIK
     this._mainInterval = setInterval(() => {
       if (this.closing || this.isDestroyed) {
         clearInterval(this._mainInterval);
@@ -316,7 +315,6 @@ export class GameServer {
     
     this._allTimers.add(this._mainInterval);
     
-    // ✅ CLEANUP - 60 DETIK (JARANG)
     this._cleanupInterval = setInterval(() => {
       if (this.closing || this.isDestroyed) {
         clearInterval(this._cleanupInterval);
@@ -438,7 +436,7 @@ export class GameServer {
     }
   }
 
-  // ========== END DICE ROUND - DENGAN TIE BREAKER ==========
+  // ========== END DICE ROUND ==========
   async _endDiceRound() {
     try {
       if (this._diceTimerInterval) {
@@ -517,7 +515,7 @@ export class GameServer {
     }
   }
 
-  // ========== TIE BREAKER - TANPA DADU BARU ==========
+  // ========== TIE BREAKER ==========
   async _startTieBreaker(room, players) {
     if (this._tieLock) return;
     this._tieLock = true;
@@ -1037,10 +1035,12 @@ export class GameServer {
       const now = Date.now();
       for (const [room, game] of this.activeGames) {
         if (!game?._isActive || game._gameEnded) continue;
+        
         if (game._phase === 'draw' && game._drawPhaseStart &&
             (now - game._drawPhaseStart) > CONSTANTS.STUCK_DRAW_TIMEOUT_MS) {
           this._closeDrawPhase(room, game);
         }
+        
         if (game._phase === 'registration' && game.registrationOpen &&
             game._createdAt && (now - game._createdAt) > CONSTANTS.STUCK_REGISTRATION_TIMEOUT_MS) {
           this._closeRegistration(room, game);
@@ -1174,7 +1174,6 @@ export class GameServer {
         server.username = null;
         server._createdAt = Date.now();
         
-        // ✅ LANGSUNG ACCEPT - TANPA state.acceptWebSocket()
         try {
           server.accept();
         } catch(e) {
@@ -1262,7 +1261,6 @@ export class GameServer {
       const startTime = Date.now();
       let processed = 0;
       
-      // ✅ PROSES MAX 3 ITEM PER TICK
       while (this._eventQueue.length > 0 && processed < 3) {
         if (Date.now() - startTime > CONSTANTS.MAX_PROCESS_TIME_MS) break;
         
@@ -1643,7 +1641,6 @@ export class GameServer {
       const msgStr = JSON.stringify(message);
       const wsIdArray = Array.from(wsIds);
       
-      // ✅ BATCH LEBIH BESAR - 10 CLIENT
       for (let i = 0; i < wsIdArray.length; i += 10) {
         const batch = wsIdArray.slice(i, i + 10);
         for (const wsId of batch) {
@@ -1766,7 +1763,7 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== SEND DICE NOTIFICATION ON SWITCH - HANYA LEFTTIME ==========
+  // ========== SEND DICE NOTIFICATION ON SWITCH ==========
   _sendDiceNotificationOnSwitch(ws, wsId) {
     try {
       if (!ws || ws.readyState !== 1) return;
@@ -1793,7 +1790,6 @@ export class GameServer {
       const isDiceTime = this._isDiceTime();
       
       if (!isDiceTime || !this.diceAutoEnabled) {
-        // DELAY 5 DETIK SEBELUM KIRIM NOTIF
         setTimeout(() => {
           if (!this.closing && !this.isDestroyed && ws && ws.readyState === 1) {
             this._safeSend(ws, ["diceNotification", `Next dice game in: ${timeLeft.text}`]);
@@ -1813,7 +1809,6 @@ export class GameServer {
       }
       
       if (isDiceTime && !this.currentDiceRoll && this.diceAutoEnabled) {
-        // TANPA NOTIF, LANGSUNG START 5 DETIK
         setTimeout(() => {
           if (!this.closing && !this.isDestroyed && !this.currentDiceRoll && !this._isShowingDice) {
             this.forceStartDice();
@@ -1916,8 +1911,11 @@ export class GameServer {
     } catch(e) { return 0; }
   }
 
-  // ========== LOW CARD GAME ==========
-  _isGameActuallyRunning(game) { return game?._isActive === true && !game?._gameEnded; }
+  // ========== LOW CARD GAME - FULL METHODS ==========
+
+  _isGameActuallyRunning(game) { 
+    return game?._isActive === true && !game?._gameEnded; 
+  }
 
   _getActivePlayers(game) {
     try {
@@ -1935,9 +1933,13 @@ export class GameServer {
     } catch(e) { return []; }
   }
 
-  _getRandomCardTanda() { return ["C1", "C2", "C3", "C4"][Math.floor(Math.random() * 4)]; }
+  _getRandomCardTanda() { 
+    return ["C1", "C2", "C3", "C4"][Math.floor(Math.random() * 4)]; 
+  }
 
-  _getRandomDrawDelay() { return (Math.floor(Math.random() * 14) + 2) * 1000; }
+  _getRandomDrawDelay() { 
+    return (Math.floor(Math.random() * 14) + 2) * 1000; 
+  }
 
   _getBotNumberByRound(round) {
     if (round <= 2) return Math.floor(Math.random() * 12) + 1;
@@ -2135,13 +2137,17 @@ export class GameServer {
       
       const humanPlayers = Array.from(game.players.keys()).filter(id => !id.startsWith('BOT_'));
       const humanCount = humanPlayers.length;
+      
       if (!game._botsAdded) {
-        if (humanCount === 1 || humanCount === 0) { this._addBots(room, 4); game._botsAdded = true; }
-        else if (game.players.size < 2) {
+        if (humanCount === 1 || humanCount === 0) {
+          this._addBots(room, 4);
+          game._botsAdded = true;
+        } else if (game.players.size < 2) {
           const needed = Math.min(4 - game.players.size, CONSTANTS.MAX_BOTS_PER_GAME);
           if (needed > 0) { this._addBots(room, needed); game._botsAdded = true; }
         }
       }
+      
       if (this._isGameActuallyRunning(game) && game.players.size >= 2) {
         this._startDrawPhase(room, game);
       } else {
@@ -2174,11 +2180,13 @@ export class GameServer {
           if (newActive.length === 1 && !game._gameEnded) {
             const winner = newActive[0]?.name || "Unknown";
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
+            
             if (game._startedByRecording) {
               await this._addLowCardWinner(room, winner);
               const winners = await this._getLowCardWinners(room);
               this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
             }
+            
             game._gameEnded = true;
             game._isActive = false;
             this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
@@ -2203,7 +2211,9 @@ export class GameServer {
       this._broadcastToRoom(room, ["gameLowCardClosed", playersList]);
       this._broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
       this._startDrawCountdown(room, game);
-      if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) this._startBotDraws(room, game);
+      if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) {
+        this._startBotDraws(room, game);
+      }
     } catch(e) {}
   }
 
@@ -2248,6 +2258,60 @@ export class GameServer {
         for (const botId of activeBotIds) this._forceBotDraw(room, botId, game);
       }
       
+      // ✅ CEK APAKAH ADA PLAYER YANG SUBMIT
+      const activeIds = this._getActivePlayerIds(game);
+      const submittedIds = new Set(game.numbers?.keys() || []);
+      const notSubmitted = activeIds.filter(id => !submittedIds.has(id) && !game.eliminated?.has(id));
+      
+      // ✅ JIKA SEMUA PLAYER TIDAK SUBMIT → GAME BERAKHIR
+      if (notSubmitted.length > 0 && submittedIds.size === 0) {
+        this._broadcastToRoom(room, ["gameLowCardError", "No one submitted numbers"]);
+        game._gameEnded = true;
+        game._isActive = false;
+        game._endTime = Date.now();
+        this._scheduleGameCleanup(room, game);
+        return;
+      }
+      
+      // ✅ ELIMINASI PLAYER YANG TIDAK SUBMIT
+      for (const id of notSubmitted) {
+        if (!game.eliminated) game.eliminated = new Set();
+        game.eliminated.add(id);
+        game.numbers?.delete(id);
+        game.tanda?.delete(id);
+      }
+      
+      // ✅ CEK PLAYER YANG TERSISA
+      const remaining = Array.from(game.players.keys()).filter(id => !game.eliminated?.has(id));
+      
+      if (remaining.length === 1 && !game._gameEnded) {
+        const winnerId = remaining[0];
+        const winnerName = game.players.get(winnerId)?.name || winnerId;
+        const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
+        
+        if (game._startedByRecording) {
+          await this._addLowCardWinner(room, winnerName);
+          const winners = await this._getLowCardWinners(room);
+          this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
+        }
+        
+        this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
+        game._gameEnded = true;
+        game._isActive = false;
+        game._endTime = Date.now();
+        this._scheduleGameCleanup(room, game);
+        return;
+      }
+      
+      if (remaining.length === 0) {
+        this._broadcastToRoom(room, ["gameLowCardError", "All players eliminated"]);
+        game._gameEnded = true;
+        game._isActive = false;
+        game._endTime = Date.now();
+        this._scheduleGameCleanup(room, game);
+        return;
+      }
+      
       this._broadcastToRoom(room, ["gameLowCardWait", "wait results"]);
       if (game._evalTimer) { this._clearTimer(game._evalTimer); game._evalTimer = null; }
       const evalTimer = this._trackTimer(setTimeout(() => {
@@ -2259,6 +2323,7 @@ export class GameServer {
         } catch(e) {}
       }, CONSTANTS.EVALUATION_DELAY_MS));
       game._evalTimer = evalTimer;
+      
     } catch(e) {}
   }
 
@@ -2270,7 +2335,10 @@ export class GameServer {
       
       game._isEvaluating = true;
       const safetyTimer = this._trackTimer(setTimeout(() => {
-        if (game?._isEvaluating) { game._isEvaluating = false; this._scheduleGameCleanup(room, game); }
+        if (game?._isEvaluating) { 
+          game._isEvaluating = false; 
+          this._scheduleGameCleanup(room, game); 
+        }
       }, CONSTANTS.EVALUATION_TIMEOUT_MS));
       game._safetyTimer = safetyTimer;
       
@@ -2292,41 +2360,43 @@ export class GameServer {
         if (!submittedIds.has(id)) eliminated.add(id);
       }
       
+      // ✅ JIKA TIDAK ADA YANG SUBMIT
       if (entries.length === 0) {
         game._isEvaluating = false;
         if (game._safetyTimer) { this._clearTimer(game._safetyTimer); game._safetyTimer = null; }
+        
+        const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
+        
+        if (remaining.length === 1) {
+          const winnerId = remaining[0];
+          const winnerName = players.get(winnerId)?.name || winnerId;
+          const totalCoin = (game.betAmount || 0) * players.size;
+          
+          if (game._startedByRecording) {
+            await this._addLowCardWinner(room, winnerName);
+            const winners = await this._getLowCardWinners(room);
+            this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
+          }
+          
+          this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
+          game._gameEnded = true;
+          game._isActive = false;
+          game._isEvaluating = false;
+          if (game._safetyTimer) { this._clearTimer(game._safetyTimer); game._safetyTimer = null; }
+          this._scheduleGameCleanup(room, game);
+          return;
+        }
+        
         this._broadcastToRoom(room, ["gameLowCardError", "No numbers drawn this round"]);
         game._gameEnded = true;
         game._isActive = false;
-        this._scheduleGameCleanup(room, game);
-        return;
-      }
-      
-      if (entries.length === 1 && eliminated.size >= activeIds.length - 1) {
-        const winnerId = entries[0][0];
-        const winnerName = players.get(winnerId)?.name || winnerId;
-        const totalCoin = (game.betAmount || 0) * players.size;
-        if (game._startedByRecording) {
-          await this._addLowCardWinner(room, winnerName);
-          const winners = await this._getLowCardWinners(room);
-          this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
-        }
-        this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
-        game._gameEnded = true;
-        game._isActive = false;
         game._isEvaluating = false;
         if (game._safetyTimer) { this._clearTimer(game._safetyTimer); game._safetyTimer = null; }
         this._scheduleGameCleanup(room, game);
         return;
       }
       
-      const activePlayerIds = this._getActivePlayerIds(game);
-      if (game.numbers.size < activePlayerIds.length) {
-        game._isEvaluating = false;
-        if (game._safetyTimer) { this._clearTimer(game._safetyTimer); game._safetyTimer = null; }
-        return;
-      }
-      
+      // ✅ EVALUASI NORMAL
       const values = entries.map(([, n]) => n);
       const allSame = values.every(v => v === values[0]);
       let losers = [];
@@ -2339,6 +2409,7 @@ export class GameServer {
       
       const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
       
+      // ✅ ALL SAME → ROUND LAGI
       if (allSame && remaining.length >= 2) {
         game._isEvaluating = false;
         if (game._safetyTimer) { this._clearTimer(game._safetyTimer); game._safetyTimer = null; }
@@ -2357,19 +2428,24 @@ export class GameServer {
           entries.map(([id, n]) => `${players.get(id)?.name || id}:${n}${tanda.get(id) ? `(${tanda.get(id)})` : ''}`),
           [], remainingNames, true
         ]);
-        if (this._isGameActuallyRunning(game) && !game._gameEnded) this._startDrawPhase(room, game);
+        if (this._isGameActuallyRunning(game) && !game._gameEnded) {
+          this._startDrawPhase(room, game);
+        }
         return;
       }
       
+      // ✅ 1 PEMENANG
       if (remaining.length === 1 && !game._gameEnded) {
         const winnerId = remaining[0];
         const winnerName = players.get(winnerId)?.name || winnerId;
         const totalCoin = (game.betAmount || 0) * players.size;
+        
         if (game._startedByRecording) {
           await this._addLowCardWinner(room, winnerName);
           const winners = await this._getLowCardWinners(room);
           this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners, room, recording: true }]);
         }
+        
         this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
         game._gameEnded = true;
         game._isActive = false;
@@ -2379,6 +2455,7 @@ export class GameServer {
         return;
       }
       
+      // ✅ TIDAK ADA PLAYER TERSISA
       if (remaining.length === 0) {
         game._isEvaluating = false;
         if (game._safetyTimer) { this._clearTimer(game._safetyTimer); game._safetyTimer = null; }
@@ -2389,6 +2466,7 @@ export class GameServer {
         return;
       }
       
+      // ✅ LANJUT ROUND BERIKUTNYA
       const numbersArr = entries.map(([id, n]) => `${players.get(id)?.name || id}:${n}${tanda.get(id) ? `(${tanda.get(id)})` : ''}`);
       const loserNames = [...losers].map(id => players.get(id)?.name || id);
       const remainingNames = remaining.map(id => players.get(id)?.name || id);
@@ -2407,12 +2485,15 @@ export class GameServer {
       game._isEvaluating = false;
       
       if (game._safetyTimer) { this._clearTimer(game._safetyTimer); game._safetyTimer = null; }
-      if (this._isGameActuallyRunning(game) && !game._gameEnded) this._startDrawPhase(room, game);
+      if (this._isGameActuallyRunning(game) && !game._gameEnded) {
+        this._startDrawPhase(room, game);
+      }
       
     } catch(e) {}
   }
 
-  // ========== GAME START ==========
+  // ========== GAME START METHODS ==========
+
   async startGame(ws, bet, username) {
     try {
       if (this.isDestroyed) {
@@ -2899,6 +2980,20 @@ export class GameServer {
       ws.username = null;
       ws._closing = true;
     } catch(e) {}
+  }
+
+  forceStartDice() {
+    try {
+      if (this._tieActive) return false;
+      if (this._isShowingDice) return false;
+      if (this._diceTimeUpCooldown) return false;
+      if (!this._isDiceTime() || this.currentDiceRoll || this._diceTimeout || this._diceStartTimeout) {
+        return false;
+      }
+      this.diceAutoEnabled = true;
+      this._startDiceFast();
+      return true;
+    } catch(e) { return false; }
   }
 
   // ========== HANDLE ERROR ==========
