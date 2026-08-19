@@ -1,7 +1,6 @@
 // ==================== INDEX.JS ====================
-// ==================== NON-DURABLE OBJECT VERSION ====================
+// ==================== FIXED VERSION ====================
 
-// IMPORT FILE YANG BENAR (sesuai dengan nama file di repository)
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
 
@@ -21,8 +20,8 @@ export default {
       const url = new URL(request.url);
       const pathname = url.pathname;
 
-      // ==================== CHAT SERVER ====================
-      if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
+      // ==================== ROOT / CHAT ====================
+      if (pathname === "/" || pathname === "/ws" || pathname === "/chat") {
         if (!chatServerInstance) {
           chatServerInstance = new ChatServer(env);
         }
@@ -35,8 +34,8 @@ export default {
         return chatServerInstance.fetch(request);
       }
 
-      // ==================== GAME SERVER ====================
-      if (pathname === "/game/ws" || pathname === "/game") {
+      // ==================== GAME ====================
+      if (pathname === "/game" || pathname === "/game/ws") {
         if (!gameServerInstance) {
           gameServerInstance = new GameServer(env);
         }
@@ -55,7 +54,10 @@ export default {
           timestamp: Date.now()
         };
         return new Response(JSON.stringify(status), {
-          headers: { "Content-Type": "application/json" }
+          headers: { 
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+          }
         });
       }
 
@@ -65,7 +67,12 @@ export default {
         return new Response("Shutting down", { status: 200 });
       }
 
-      return new Response("Server running", { status: 200 });
+      return new Response("Server running", { 
+        status: 200,
+        headers: {
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
 
     } catch(e) {
       console.error("Fetch error:", e);
