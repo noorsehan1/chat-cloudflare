@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 4.0.0 - DURABLE OBJECTS OPTIMIZED
+// VERSION: 4.0.1 - FULLY OPTIMIZED
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -73,7 +73,6 @@ const QUIZ_SCHEDULE = {
 
 const DICE_ROOM = "Quiz";
 
-// ==================== KV CACHE ====================
 class KVCache {
   constructor() {
     this.cache = new Map();
@@ -109,7 +108,6 @@ class KVCache {
   }
 }
 
-// ==================== DICE GAME SYSTEM ====================
 class DiceGameSystem {
   constructor(gameServer) {
     this.gameServer = gameServer;
@@ -182,7 +180,6 @@ class DiceGameSystem {
   clearCache() { this.userScores.clear(); this._isLoaded = false; }
 }
 
-// ==================== GAME SERVER FULL CLASS ====================
 export class GameServer {
   constructor(state, env) {
     try {
@@ -281,7 +278,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== LAZY INIT ==========
   _initLazy() {
     if (this._initialized || this.closing || this.isDestroyed) return;
     this._initialized = true;
@@ -305,7 +301,6 @@ export class GameServer {
     }
   }
 
-  // ========== MAIN INTERVAL ==========
   _startMainInterval() {
     if (this.closing || this.isDestroyed) return;
     
@@ -340,7 +335,6 @@ export class GameServer {
     this._allTimers.add(this._cleanupInterval);
   }
 
-  // ========== IDLE CHECKER ==========
   _startIdleChecker() {
     this._idleCheckInterval = setInterval(() => {
       try {
@@ -364,7 +358,6 @@ export class GameServer {
     this._allTimers.add(this._idleCheckInterval);
   }
 
-  // ========== STUCK GAME CHECKER ==========
   _startStuckGameChecker() {
     if (this._stuckGameChecker) {
       clearInterval(this._stuckGameChecker);
@@ -416,7 +409,6 @@ export class GameServer {
     this._allTimers.add(this._stuckGameChecker);
   }
 
-  // ========== TICK ==========
   _doTick() {
     try {
       const tick = this._tickCount % 3;
@@ -435,7 +427,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== CHECK DICE ==========
   _checkDice() {
     try {
       const clients = this.wsClients?.get(DICE_ROOM);
@@ -455,7 +446,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== IS DICE TIME ==========
   _isDiceTime() {
     try {
       const witaTime = this._getCurrentWITATime();
@@ -478,7 +468,6 @@ export class GameServer {
     } catch(e) { return { hours: 0, minutes: 0, totalMinutes: 0 }; }
   }
 
-  // ========== START DICE ==========
   _startDiceFast() {
     try {
       if (this._diceLock || this.currentDiceRoll || this._isShowingDice) return;
@@ -537,7 +526,6 @@ export class GameServer {
     }
   }
 
-  // ========== END DICE ROUND ==========
   async _endDiceRound() {
     try {
       if (this._diceTimerInterval) {
@@ -616,7 +604,6 @@ export class GameServer {
     }
   }
 
-  // ========== TIE BREAKER ==========
   async _startTieBreaker(room, players) {
     if (this._tieLock) return;
     this._tieLock = true;
@@ -886,7 +873,6 @@ export class GameServer {
     return null;
   }
 
-  // ========== SUBMIT DICE ANSWER ==========
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) return;
@@ -966,7 +952,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== GET DICE POINTS ==========
   async _getDicePoints() {
     try {
       if (!this.env?.QUESTIONS) return {};
@@ -1000,7 +985,6 @@ export class GameServer {
     }
   }
 
-  // ========== LOAD KV DATA ==========
   async _loadKVData() {
     try {
       if (this.closing || this.isDestroyed || !this.env?.QUESTIONS) return;
@@ -1026,7 +1010,6 @@ export class GameServer {
     return `${year}-W${String(week).padStart(2, '0')}`;
   }
 
-  // ========== CLEANUP ==========
   _cleanupMemory() {
     try {
       if (this.wsMap.size === 0 && this.activeGames.size === 0) return;
@@ -1174,7 +1157,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== CHECK STUCK GAMES ==========
   _checkStuckGames() {
     try {
       if (this.activeGames.size === 0) return;
@@ -1201,7 +1183,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== TIMER MANAGEMENT ==========
   _trackTimer(timer) {
     if (timer) {
       timer._creationTime = Date.now();
@@ -1232,7 +1213,6 @@ export class GameServer {
     promise.catch(() => {});
   }
 
-  // ========== FETCH ==========
   async fetch(req) {
     try {
       if (this._circuitOpen) {
@@ -1364,7 +1344,6 @@ export class GameServer {
     }
   }
 
-  // ========== PROCESS WITH TIMEOUT ==========
   async _processWithTimeout(ws, data, timeoutMs = 500) {
     try {
       const timeoutPromise = new Promise((_, reject) => {
@@ -1381,7 +1360,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== HANDLE EVENT ==========
   async handleEvent(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data?.[0]) return;
@@ -1442,7 +1420,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== HANDLE EVENT INTERNAL ==========
   async _handleEventInternal(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
@@ -1567,7 +1544,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== RECORDING ==========
   async _getRecordingStatusFromKV(roomName) {
     try {
       if (!roomName) return false;
@@ -1674,7 +1650,6 @@ export class GameServer {
     } catch(e) { return false; }
   }
 
-  // ========== WS HELPERS ==========
   _getWsId(ws) { return ws?._wsId || null; }
 
   _ensureRoomConsistency(ws) {
@@ -1780,7 +1755,6 @@ export class GameServer {
     } catch(e) { return false; }
   }
 
-  // ========== BROADCAST ==========
   _broadcastToRoom(room, message) {
     try {
       if (this.closing || this.isDestroyed || !room || !message) return;
@@ -1802,7 +1776,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== SWITCH ROOM ==========
   async switchRoom(ws, room, username = null) {
     try {
       if (this.isDestroyed) {
@@ -1912,7 +1885,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== SEND DICE NOTIFICATION ON SWITCH ==========
   _sendDiceNotificationOnSwitch(ws, wsId) {
     try {
       if (!ws || ws.readyState !== 1) return;
@@ -1968,7 +1940,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== GET LAST WEEK WINNER ==========
   async _getLastWeekWinnerAndReset() {
     try {
       if (!this.env?.QUESTIONS) return null;
@@ -2059,8 +2030,6 @@ export class GameServer {
       return parseInt(wA) - parseInt(wB);
     } catch(e) { return 0; }
   }
-
-  // ========== LOW CARD GAME - FULL METHODS ==========
 
   _isGameActuallyRunning(game) { 
     return game?._isActive === true && !game?._gameEnded; 
@@ -2255,8 +2224,11 @@ export class GameServer {
     try {
       if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
       if (game._registrationTimer) { this._clearTimer(game._registrationTimer); game._registrationTimer = null; }
+      
       let timeLeft = 20;
       let isClosed = false;
+      
+      this._broadcastToRoom(room, ["gameLowCardTimeLeft", "20s"]);
       
       const timer = this._trackTimer(setInterval(() => {
         try {
@@ -2265,7 +2237,7 @@ export class GameServer {
             if (game._registrationTimer === timer) game._registrationTimer = null;
             return;
           }
-          if (timeLeft === 15 || timeLeft === 10 || timeLeft === 5) {
+          if (timeLeft === 15 || timeLeft === 10 || timeLeft === 5 || timeLeft === 3) {
             this._broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
           }
           if (timeLeft === 0) {
@@ -2314,12 +2286,18 @@ export class GameServer {
       const humanCount = humanPlayers.length;
       
       if (!game._botsAdded) {
-        if (humanCount === 1 || humanCount === 0) {
+        if (humanCount === 0) {
           this._addBots(room, 4);
+          game._botsAdded = true;
+        } else if (humanCount === 1) {
+          this._addBots(room, 3);
           game._botsAdded = true;
         } else if (game.players.size < 2) {
           const needed = Math.min(4 - game.players.size, CONSTANTS.MAX_BOTS_PER_GAME);
-          if (needed > 0) { this._addBots(room, needed); game._botsAdded = true; }
+          if (needed > 0) { 
+            this._addBots(room, needed); 
+            game._botsAdded = true; 
+          }
         }
       }
       
@@ -2352,12 +2330,18 @@ export class GameServer {
       }
       
       const activePlayers = this._getActivePlayers(game);
+      
       if (activePlayers.length < 2) {
         if (!game._botsAdded) {
           const needed = Math.min(4 - activePlayers.length, CONSTANTS.MAX_BOTS_PER_GAME);
-          if (needed > 0) { this._addBots(room, needed); game._botsAdded = true; }
+          if (needed > 0) { 
+            this._addBots(room, needed); 
+            game._botsAdded = true; 
+          }
         }
+        
         const newActive = this._getActivePlayers(game);
+        
         if (newActive.length < 2) {
           if (newActive.length === 1 && !game._gameEnded) {
             const winner = newActive[0]?.name || "Unknown";
@@ -2394,6 +2378,7 @@ export class GameServer {
       const playersList = this._getActivePlayers(game).map(p => p.name);
       this._broadcastToRoom(room, ["gameLowCardClosed", playersList]);
       this._broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
+      
       this._startDrawCountdown(room, game);
       if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) {
         this._startBotDraws(room, game);
@@ -2414,6 +2399,8 @@ export class GameServer {
       let timeLeft = 20;
       let isClosed = false;
       
+      this._broadcastToRoom(room, ["gameLowCardTimeLeft", "20s"]);
+      
       const timer = this._trackTimer(setInterval(() => {
         try {
           if (isClosed || !this._isGameActuallyRunning(game) || game.drawTimeExpired) {
@@ -2421,7 +2408,7 @@ export class GameServer {
             if (game._drawTimer === timer) game._drawTimer = null;
             return;
           }
-          if (timeLeft === 15 || timeLeft === 10 || timeLeft === 5) {
+          if (timeLeft === 15 || timeLeft === 10 || timeLeft === 5 || timeLeft === 3) {
             this._broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
           }
           if (timeLeft === 0) {
@@ -2736,8 +2723,6 @@ export class GameServer {
       this._scheduleGameCleanup(room, game);
     }
   }
-
-  // ========== GAME START METHODS ==========
 
   async startGame(ws, bet, username) {
     try {
@@ -3224,7 +3209,6 @@ export class GameServer {
     }
   }
 
-  // ========== WEBSOCKET HANDLERS ==========
   webSocketClose(ws) {
     try {
       if (!ws) return;
@@ -3316,7 +3300,6 @@ export class GameServer {
     } catch(e) { return false; }
   }
 
-  // ========== HANDLE ERROR ==========
   _handleError(type, error) {
     try {
       const now = Date.now();
@@ -3333,7 +3316,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== DESTROY ==========
   async destroy() {
     try {
       if (this.isDestroyed) return;
