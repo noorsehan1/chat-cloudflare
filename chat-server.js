@@ -1,5 +1,5 @@
-// ==================== CHAT-SERVER.JS - PURE MEMORY VERSION ====================
-// VERSION: 4.0.0 - PURE WORKER WITH MEMORY STATE
+// ==================== CHAT-SERVER.JS - WITH GLOBAL STATE ====================
+// VERSION: 5.0.0 - GLOBAL SHARED STATE
 
 const C = {
   MAX_SEATS: 45,
@@ -9,7 +9,7 @@ const C = {
   MAX_NUMBER: 6,
   BATCH_SIZE: 20,
   LOCK_TIMEOUT: 10000,
-  CLEANUP_INTERVAL: 60000,
+  CLEANUP_INTERVAL: 30000,
   MAX_EVENT_QUEUE: 100,
   MAX_PROCESS_TIME_MS: 500,
   CPU_YIELD_MS: 1,
@@ -26,14 +26,27 @@ const ROOMS_SET = new Set(ROOMS);
 
 // ==================== ROOM MANAGER ====================
 class RoomManager {
-  constructor(name) {
+  constructor(name, sharedState) {
     this.name = name;
-    this.seats = new Map();
-    this.points = new Map();
-    this.muted = false;
-    this.number = 1;
+    this.sharedState = sharedState;
+    
+    // Gunakan sharedState untuk data yang perlu di-share
+    if (!sharedState.chatRooms.has(name)) {
+      sharedState.chatRooms.set(name, {
+        seats: new Map(),
+        points: new Map(),
+        muted: false,
+        number: 1,
+        users: new Set() // Track user yang online di room ini
+      });
+    }
+    this._data = sharedState.chatRooms.get(name);
   }
 
+  get seats() { return this._data.seats; }
+  get points() { return this._data.points; }
+  get users() { return this._data.users; }
+  
   getAvailableSeat() {
     for (let seat = 1; seat <= C.MAX_SEATS; seat++) {
       if (!this.seats.has(seat)) return seat;
@@ -60,6 +73,8 @@ class RoomManager {
       vip: vip || 0,
       viptanda: viptanda || 0,
     });
+    
+    this.users.add(userId);
     return seat;
   }
 
@@ -79,6 +94,10 @@ class RoomManager {
   }
 
   removeSeat(seat) {
+    const data = this.seats.get(seat);
+    if (data?.namauser) {
+      this.users.delete(data.namauser);
+    }
     this.points.delete(seat);
     return this.seats.delete(seat);
   }
@@ -99,16 +118,16 @@ class RoomManager {
   }
 
   setMuted(val) { 
-    this.muted = !!val; 
-    return this.muted; 
+    this._data.muted = !!val; 
+    return this._data.muted; 
   }
   
-  getMuted() { return this.muted; }
+  getMuted() { return this._data.muted; }
   
   setNumber(n) { 
-    this.number = n || 1; 
+    this._data.number = n || 1; 
   }
-  getNumber() { return this.number; }
+  getNumber() { return this._data.number; }
 
   updatePoint(seat, x, y, fast) {
     if (!this.seats.has(seat)) return false;
@@ -134,21 +153,29 @@ class RoomManager {
 
 // ==================== CHAT SERVER ====================
 export class ChatServer {
-  constructor(state, env) {
-    this.state = state;
+  constructor(options) {
+    const { env, sharedState, isGlobal } = options || {};
+    
     this.env = env;
+    this.sharedState = sharedState || {
+      chatRooms: new Map(),
+      gameRooms: new Map(),
+      wsConnections: new Map(),
+      lastSync: Date.now()
+    };
+    this.isGlobal = isGlobal || false;
+    
     this.closing = false;
     this.isDestroyed = false;
     this._initialized = false;
     this._startTime = Date.now();
     
-    // WebSocket stores
+    // WebSocket stores - LOCAL untuk instance ini
     this.wsSet = new Set();
     this.userConnections = new Map();
     this.userSeat = new Map();
     this.userRoom = new Map();
     this.roomClients = new Map();
-    this.rooms = new Map();
     this.wsActiveMulti = new Map();
     
     // Processing
@@ -168,23 +195,22 @@ export class ChatServer {
     this._tikCounter = 0;
     this._alarmTimeout = null;
     
-    // Init rooms
+    // Init rooms dengan shared state
+    this.rooms = new Map();
     for (const room of ROOMS) {
-      this.rooms.set(room, new RoomManager(room));
+      this.rooms.set(room, new RoomManager(room, this.sharedState));
       this.roomClients.set(room, new Set());
     }
     
-    // Start intervals immediately
+    // Start intervals
     this._startIntervals();
-    
-    // Start alarm cycle
     this._scheduleAlarm();
   }
 
   _startIntervals() {
     if (this.closing || this.isDestroyed) return;
     
-    // Main tick - every 5 seconds (faster for real-time)
+    // Main tick - every 3 seconds (lebih cepat untuk real-time)
     this._mainInterval = setInterval(() => {
       if (this.closing || this.isDestroyed) {
         clearInterval(this._mainInterval);
@@ -192,11 +218,11 @@ export class ChatServer {
         return;
       }
       this._doTick();
-    }, 5000);
+    }, 3000);
     
     this._pendingTimeouts.add(this._mainInterval);
     
-    // Cleanup - every 30 seconds
+    // Cleanup - every 15 seconds
     this._cleanupInterval = setInterval(() => {
       if (this.closing || this.isDestroyed) {
         clearInterval(this._cleanupInterval);
@@ -204,7 +230,7 @@ export class ChatServer {
         return;
       }
       this._performCleanup();
-    }, 30000);
+    }, 15000);
     
     this._pendingTimeouts.add(this._cleanupInterval);
   }
@@ -261,6 +287,52 @@ export class ChatServer {
       this._cleanupDeadConnections();
       this._cleanupMemory();
       this._processEventQueue();
+      this._syncRoomUsers();
+    } catch(e) {}
+  }
+
+  // ========== SYNC ROOM USERS - IMPORTANT! ==========
+  _syncRoomUsers() {
+    try {
+      // Sync user yang benar-benar online
+      for (const [roomName, roomMan] of this.rooms) {
+        if (!roomMan) continue;
+        
+        const users = roomMan.users;
+        const toRemove = [];
+        
+        for (const username of users) {
+          // Cek apakah user masih punya koneksi
+          const connections = this.userConnections.get(username);
+          let hasActiveConnection = false;
+          
+          if (connections) {
+            for (const conn of connections) {
+              if (conn && conn.readyState === 1 && !conn._closing) {
+                hasActiveConnection = true;
+                break;
+              }
+            }
+          }
+          
+          if (!hasActiveConnection) {
+            // User tidak punya koneksi aktif, hapus dari room
+            for (const [seat, data] of roomMan.seats) {
+              if (data?.namauser === username) {
+                roomMan.removeSeat(seat);
+                this.broadcast(roomName, ["removeKursi", roomName, seat]);
+                this.updateRoomCount(roomName);
+                break;
+              }
+            }
+            toRemove.push(username);
+          }
+        }
+        
+        for (const username of toRemove) {
+          users.delete(username);
+        }
+      }
     } catch(e) {}
   }
 
@@ -273,6 +345,7 @@ export class ChatServer {
       this._cleanupStaleLocks();
       this._cleanupMemory();
       this._cleanupEventQueue();
+      this._syncRoomUsers();
     } catch(e) {} finally {
       this._cleanupInProgress = false;
     }
@@ -359,7 +432,7 @@ export class ChatServer {
       const startTime = Date.now();
       let processed = 0;
       
-      while (this._eventQueue.length > 0 && processed < 20) {
+      while (this._eventQueue.length > 0 && processed < 30) {
         if (Date.now() - startTime > C.MAX_PROCESS_TIME_MS) break;
         
         const item = this._eventQueue.shift();
@@ -463,6 +536,14 @@ export class ChatServer {
       if (!roomMan) return 0;
       const count = roomMan.getCount();
       this.broadcast(room, ["roomUserCount", room, count]);
+      
+      // Update shared state
+      const roomData = this.sharedState.chatRooms.get(room);
+      if (roomData) {
+        roomData.count = count;
+        roomData.lastUpdate = Date.now();
+      }
+      
       return count;
     } catch(e) {
       return 0;
@@ -490,27 +571,21 @@ export class ChatServer {
       
       this.safeSend(ws, ["roomUserCount", room, roomMan.getCount()]);
       
+      // Kirim semua seat ke client baru
       if (allSeats && Object.keys(allSeats).length > 0) {
-        if (excludeSelf && selfSeat && allSeats[selfSeat]) {
-          const filtered = { ...allSeats };
-          delete filtered[selfSeat];
-          if (Object.keys(filtered).length > 0) {
-            this.safeSend(ws, ["allUpdateKursiList", room, filtered]);
-          }
-        } else {
-          this.safeSend(ws, ["allUpdateKursiList", room, allSeats]);
-        }
+        this.safeSend(ws, ["allUpdateKursiList", room, allSeats]);
       }
       
       if (allPoints?.length > 0) {
-        let filteredPoints = allPoints;
-        if (excludeSelf && selfSeat) {
-          filteredPoints = allPoints.filter(p => p.seat !== selfSeat);
-        }
-        if (filteredPoints.length > 0) {
-          this.safeSend(ws, ["allPointsList", room, filteredPoints]);
-        }
+        this.safeSend(ws, ["allPointsList", room, allPoints]);
       }
+      
+      // Kirim juga daftar user online di room
+      const users = Array.from(roomMan.users || []);
+      if (users.length > 0) {
+        this.safeSend(ws, ["onlineUsers", room, users]);
+      }
+      
     } catch(e) {}
   }
 
@@ -591,6 +666,7 @@ export class ChatServer {
     }
   }
 
+  // ========== HANDLE MESSAGE ==========
   async handleMessage(ws, raw) {
     if (!ws) return;
     
@@ -640,6 +716,7 @@ export class ChatServer {
     }
   }
 
+  // ========== EVENT HANDLERS ==========
   _handleEventInternal(ws, data) {
     try {
       if (!ws || !data || !data[0]) return;
@@ -1049,6 +1126,7 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ========== HANDLE SET ID ==========
   _handleSetId(ws, username, isNewUser) {
     if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
       try { 
@@ -1224,6 +1302,7 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ========== HANDLE JOIN ==========
   _handleJoin(ws, roomName) {
     if (!ws || !ws.username || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) {
       return false;
@@ -1310,20 +1389,21 @@ export class ChatServer {
       
       this.updateRoomCount(roomName);
       
-      // Send state after join (with small delay for room consistency)
+      // Send state after join
       setTimeout(() => {
         try {
           if (ws && ws.readyState === 1 && !this.closing && !this.isDestroyed) {
-            this.sendAllStateTo(ws, roomName, true);
+            this.sendAllStateTo(ws, roomName, false); // Kirim semua state termasuk self
           }
         } catch(e) {}
-      }, 500);
+      }, 300);
       
     } catch(e) {}
     
     return true;
   }
 
+  // ========== FETCH ==========
   async fetch(req) {
     if (this.closing || this.isDestroyed) {
       return new Response("Shutting down", { status: 503 });
@@ -1355,13 +1435,13 @@ export class ChatServer {
         return new Response("WebSocket acceptance failed", { status: 500 }); 
       }
       
-      // Set up handlers directly
+      // Set up handlers
       server.username = null;
       server.room = null;
       server.roomname = null;
       server.idtarget = null;
       server._closing = false;
-      server._wsId = Date.now() + Math.random();
+      server._wsId = Date.now() + Math.random() + Math.random();
       
       // Message handler
       server.addEventListener("message", async (event) => {
@@ -1391,6 +1471,7 @@ export class ChatServer {
     }
   }
 
+  // ========== DESTROY ==========
   async destroy() {
     if (this.isDestroyed) return;
     this.closing = true;
