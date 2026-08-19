@@ -1,6 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 4.0.1 - PURE WORKER TANPA HIBERNATE
-// FIX: setInterval dipanggil di fetch handler
+// VERSION: 4.1.0 - FULL FIX WEBSOCKET CONNECT
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -171,117 +170,106 @@ class DiceGameSystem {
   clearCache() { this.userScores.clear(); this._isLoaded = false; }
 }
 
-// ==================== GAME SERVER - PURE WORKER ====================
+// ==================== GAME SERVER ====================
 export class GameServer {
   constructor(env) {
-    try {
-      // ========== MINIMAL SETUP - HANYA INISIALISASI ==========
-      // TIDAK ADA setInterval DI SINI!
-      this.env = env;
-      this.closing = false;
-      this.isDestroyed = false;
-      this._intervalsStarted = false;
-      this._startTime = Date.now();
-      this._wsIdCounter = 0;
-      this._lastActivity = Date.now();
-      
-      // ========== CORE MAPS ==========
-      this.activeGames = new Map();
-      this.wsMap = new Map();
-      this.wsClients = new Map();
-      this.clientRooms = new Map();
-      this.userConnections = new Map();
-      
-      // ========== DICE VARIABLES ==========
-      this.diceGameSystem = null;
-      this.currentDiceRoll = null;
-      this._diceLock = false;
-      this._tieActive = false;
-      this.diceAnswered = new Set();
-      this._playerAnswers = new Map();
-      this._isShowingDice = false;
-      this._diceTimeUpCooldown = false;
-      this._diceQuestionStartTime = null;
-      this._diceStartTime = null;
-      this._diceTimeout = null;
-      this._diceStartTimeout = null;
-      this._diceTimeUpCooldownTimer = null;
-      this._diceTimerInterval = null;
-      this.diceAutoEnabled = false;
-      this.diceHasWinner = false;
-      this.diceWinner = null;
-      this.diceEndNotified = false;
-      this._diceNotifiedFlags = { 20: false, 10: false, 5: false, timeup: false };
-      this._lastNotificationKey = "";
-      this._lastNotificationTime = 0;
-      this._lastSentRemaining = -1;
-      this._diceOutOfTimeShown = false;
-      this._diceTaskRunning = false;
-      this._canSubmitDiceAnswer = false;
-      this._diceRound = 0;
-      
-      // ========== TIE BREAKER ==========
-      this._tieBreakers = new Map();
-      this._tieRound = 0;
-      this._tiePlayers = [];
-      this._tieAnswers = new Map();
-      this._tieTimer = null;
-      this._tieInterval = null;
-      this._tieLock = false;
-      
-      // ========== QUEUE ==========
-      this._eventQueue = [];
-      this._isProcessingQueue = false;
-      this._allTimers = new Set();
-      this._gameLocks = new Map();
-      this._joinLocks = new Map();
-      this._cleanupTimers = new Map();
-      this._switchLocks = new Map();
-      this._switchRetries = new Map();
-      
-      // ========== CIRCUIT BREAKER ==========
-      this._requestCount = 0;
-      this._lastResetTime = Date.now();
-      this._circuitOpen = false;
-      this._errorCount = 0;
-      this._lastErrorReset = Date.now();
-      this._tickCount = 0;
-      
-      // ========== RECONNECT PROTECTION ==========
-      this._reconnectAttempts = new Map();
-      this._bannedUsers = new Map();
-      
-      // ========== CACHE ==========
-      this._cachedResetWeek = null;
-      this._cachedLastWeekWinner = null;
-      this._recordingEnabled = new Map();
-      this._kvCache = new KVCache();
-      this.DICE_ROOM = DICE_ROOM;
-      
-      // ========== DICE TIME TRACKING ==========
-      this._diceTimeLeftNotified = new Map();
-      this._nextDiceNotified = new Map();
-      this._diceJoinedNotified = new Map();
-      
-      // ========== INTERVAL ==========
-      this._mainInterval = null;
-      this._cleanupInterval = null;
-      
-      // ========== INIT DICE SYSTEM ==========
-      this.diceGameSystem = new DiceGameSystem(this.env);
-      
-      // ❌ JANGAN panggil _startIntervals() di sini!
-      // Akan dipanggil di fetch()
-      
-    } catch(e) {
-      console.error('GameServer constructor error:', e);
-    }
+    // ========== INISIALISASI ==========
+    this.env = env;
+    this.closing = false;
+    this.isDestroyed = false;
+    this._intervalsStarted = false;
+    this._startTime = Date.now();
+    this._wsIdCounter = 0;
+    this._lastActivity = Date.now();
+    
+    // ========== CORE MAPS ==========
+    this.activeGames = new Map();
+    this.wsMap = new Map();
+    this.wsClients = new Map();
+    this.clientRooms = new Map();
+    this.userConnections = new Map();
+    
+    // ========== DICE VARIABLES ==========
+    this.diceGameSystem = null;
+    this.currentDiceRoll = null;
+    this._diceLock = false;
+    this._tieActive = false;
+    this.diceAnswered = new Set();
+    this._playerAnswers = new Map();
+    this._isShowingDice = false;
+    this._diceTimeUpCooldown = false;
+    this._diceQuestionStartTime = null;
+    this._diceStartTime = null;
+    this._diceTimeout = null;
+    this._diceStartTimeout = null;
+    this._diceTimeUpCooldownTimer = null;
+    this._diceTimerInterval = null;
+    this.diceAutoEnabled = false;
+    this.diceHasWinner = false;
+    this.diceWinner = null;
+    this.diceEndNotified = false;
+    this._diceNotifiedFlags = { 20: false, 10: false, 5: false, timeup: false };
+    this._lastNotificationKey = "";
+    this._lastNotificationTime = 0;
+    this._lastSentRemaining = -1;
+    this._diceOutOfTimeShown = false;
+    this._diceTaskRunning = false;
+    this._canSubmitDiceAnswer = false;
+    this._diceRound = 0;
+    
+    // ========== TIE BREAKER ==========
+    this._tieBreakers = new Map();
+    this._tieRound = 0;
+    this._tiePlayers = [];
+    this._tieAnswers = new Map();
+    this._tieTimer = null;
+    this._tieInterval = null;
+    this._tieLock = false;
+    
+    // ========== QUEUE ==========
+    this._eventQueue = [];
+    this._isProcessingQueue = false;
+    this._allTimers = new Set();
+    this._gameLocks = new Map();
+    this._joinLocks = new Map();
+    this._cleanupTimers = new Map();
+    this._switchLocks = new Map();
+    this._switchRetries = new Map();
+    
+    // ========== CIRCUIT BREAKER ==========
+    this._requestCount = 0;
+    this._lastResetTime = Date.now();
+    this._circuitOpen = false;
+    this._errorCount = 0;
+    this._lastErrorReset = Date.now();
+    this._tickCount = 0;
+    
+    // ========== RECONNECT PROTECTION ==========
+    this._reconnectAttempts = new Map();
+    this._bannedUsers = new Map();
+    
+    // ========== CACHE ==========
+    this._cachedResetWeek = null;
+    this._cachedLastWeekWinner = null;
+    this._recordingEnabled = new Map();
+    this._kvCache = new KVCache();
+    this.DICE_ROOM = DICE_ROOM;
+    
+    // ========== DICE TIME TRACKING ==========
+    this._diceTimeLeftNotified = new Map();
+    this._nextDiceNotified = new Map();
+    this._diceJoinedNotified = new Map();
+    
+    // ========== INTERVAL ==========
+    this._mainInterval = null;
+    this._cleanupInterval = null;
+    
+    // ========== INIT DICE SYSTEM ==========
+    this.diceGameSystem = new DiceGameSystem(this.env);
   }
 
-  // ========== START INTERVALS ==========
-  // ✅ Dipanggil dari fetch handler, BUKAN dari constructor!
   _startIntervals() {
-    if (this.closing || this.isDestroyed || this._intervalsStarted) return;
+    if (this._intervalsStarted || this.closing || this.isDestroyed) return;
     this._intervalsStarted = true;
     
     this._mainInterval = setInterval(() => {
@@ -306,7 +294,6 @@ export class GameServer {
     this._allTimers.add(this._cleanupInterval);
   }
 
-  // ========== TICK ==========
   _doTick() {
     try {
       const tick = this._tickCount % 3;
@@ -325,7 +312,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== CHECK DICE ==========
   _checkDice() {
     try {
       if (this._tieActive || this._isShowingDice || this._diceTimeUpCooldown) return;
@@ -339,7 +325,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== IS DICE TIME ==========
   _isDiceTime() {
     try {
       const witaTime = this._getCurrentWITATime();
@@ -362,7 +347,6 @@ export class GameServer {
     } catch(e) { return { hours: 0, minutes: 0, totalMinutes: 0 }; }
   }
 
-  // ========== START DICE ==========
   _startDiceFast() {
     try {
       if (this._diceLock || this.currentDiceRoll || this._isShowingDice) return;
@@ -416,7 +400,6 @@ export class GameServer {
     }
   }
 
-  // ========== END DICE ROUND ==========
   async _endDiceRound() {
     try {
       if (this._diceTimerInterval) {
@@ -495,7 +478,6 @@ export class GameServer {
     }
   }
 
-  // ========== TIE BREAKER ==========
   async _startTieBreaker(room, players) {
     if (this._tieLock) return;
     this._tieLock = true;
@@ -765,7 +747,6 @@ export class GameServer {
     return null;
   }
 
-  // ========== SUBMIT DICE ANSWER ==========
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) return;
@@ -845,7 +826,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== GET DICE POINTS ==========
   async _getDicePoints() {
     try {
       if (!this.env?.QUESTIONS) return {};
@@ -877,32 +857,6 @@ export class GameServer {
     } catch(e) {
       return { hours: 0, minutes: 0, totalMs: 0, text: '0h 0m', isRunning: false };
     }
-  }
-
-  // ========== LOAD KV DATA ==========
-  async _loadKVData() {
-    try {
-      if (this.closing || this.isDestroyed || !this.env?.QUESTIONS) return;
-      
-      const currentWeek = this._generateCurrentWeek(new Date());
-      const existing = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_RESET_WEEK);
-      if (!existing) {
-        this._cachedResetWeek = currentWeek;
-        this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_RESET_WEEK, currentWeek).catch(() => {});
-      }
-      
-      await this.diceGameSystem.loadScores();
-      
-    } catch(e) {}
-  }
-
-  _generateCurrentWeek(date) {
-    const now = date || new Date();
-    const year = now.getUTCFullYear();
-    const startOfYear = new Date(Date.UTC(year, 0, 1));
-    const diff = now - startOfYear;
-    const week = Math.ceil((diff / 86400000 + startOfYear.getUTCDay() + 1) / 7);
-    return `${year}-W${String(week).padStart(2, '0')}`;
   }
 
   // ========== CLEANUP ==========
@@ -1009,7 +963,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== CHECK STUCK GAMES ==========
   _checkStuckGames() {
     try {
       const now = Date.now();
@@ -1057,187 +1010,148 @@ export class GameServer {
     promise.catch(() => {});
   }
 
-  // ========== FETCH ==========
-  // ========== FETCH ==========
-async fetch(req) {
-  // ✅ START INTERVALS DI SINI
-  this._startIntervals();
-  
-  try {
-    // === CIRCUIT BREAKER ===
-    if (this._circuitOpen) {
-      const now = Date.now();
-      if (now - this._lastResetTime > 60000) {
-        this._circuitOpen = false;
-        this._requestCount = 0;
-        this._lastResetTime = now;
-      } else {
-        return new Response("Service temporarily unavailable", { 
-          status: 503,
-          headers: { 'Retry-After': '30', 'Content-Type': 'text/plain' }
-        });
-      }
-    }
-    
-    // === RATE LIMIT ===
-    this._requestCount++;
-    if (this._requestCount > CONSTANTS.RATE_LIMIT_MAX) {
-      this._circuitOpen = true;
-      this._lastResetTime = Date.now();
-      return new Response("Rate limit exceeded", { 
-        status: 429,
-        headers: { 'Retry-After': '60', 'Content-Type': 'text/plain' }
-      });
-    }
-    
-    setTimeout(() => {
-      this._requestCount = Math.max(0, this._requestCount - 50);
-    }, CONSTANTS.RATE_LIMIT_WINDOW_MS);
-    
-    const url = new URL(req.url);
-    
-    // === HEALTH CHECK ===
-    if (url.pathname === "/game/health") {
-      return new Response(JSON.stringify({
-        status: "ok",
-        uptime: Date.now() - this._startTime,
-        connections: this.wsMap.size,
-        games: this.activeGames.size,
-        queue: this._eventQueue?.length || 0,
-        circuitOpen: this._circuitOpen,
-        errors: this._errorCount,
-        timestamp: Date.now()
-      }), {
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-    
-    // === METRICS ===
-    if (url.pathname === "/game/metrics") {
-      return new Response(JSON.stringify({
-        connections: this.wsMap.size,
-        games: this.activeGames.size,
-        queue: this._eventQueue?.length || 0,
-        errors: this._errorCount,
-        circuitOpen: this._circuitOpen,
-        uptime: Date.now() - this._startTime,
-        diceActive: !!this.currentDiceRoll,
-        diceRound: this._diceRound || 0,
-        tieActive: this._tieActive
-      }), {
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-    
-    // === WEBSOCKET ===
-    if (url.pathname === "/game/ws") {
-      const upgrade = req.headers.get("Upgrade");
-      
-      // CEK APAKAH WEBSOCKET
-      if (upgrade !== "websocket") {
+  // ==================== FETCH ====================
+  async fetch(req) {
+    // START INTERVALS
+    this._startIntervals();
+
+    try {
+      const url = new URL(req.url);
+
+      // ===== HEALTH =====
+      if (url.pathname === "/game/health") {
         return new Response(JSON.stringify({
-          status: "game-server",
-          message: "Use WebSocket connection",
-          path: "/game/ws"
+          status: "ok",
+          uptime: Date.now() - this._startTime,
+          connections: this.wsMap.size,
+          games: this.activeGames.size,
+          queue: this._eventQueue?.length || 0,
+          timestamp: Date.now()
         }), {
-          status: 200,
-          headers: { 
-            "Content-Type": "application/json",
-            "Cache-Control": "no-cache" 
-          }
+          headers: { "Content-Type": "application/json" }
         });
       }
-      
-      // CEK KAPASITAS
-      if (this.wsMap.size >= CONSTANTS.MAX_WS_CLIENTS) {
-        return new Response("Server at maximum capacity", { 
-          status: 503,
-          headers: { 'Retry-After': '10', 'Content-Type': 'text/plain' }
-        });
-      }
-      
-      if (this._eventQueue?.length > 500) {
-        return new Response("Server busy", { 
-          status: 503,
-          headers: { 'Retry-After': '5', 'Content-Type': 'text/plain' }
-        });
-      }
-      
-      // === BUAT WEBSOCKET PAIR ===
-      const pair = new WebSocketPair();
-      const [client, server] = [pair[0], pair[1]];
-      const wsId = ++this._wsIdCounter;
-      
-      server._wsId = wsId;
-      server._closing = false;
-      server.room = null;
-      server.roomname = null;
-      server.username = null;
-      server._createdAt = Date.now();
-      
-      // === ACCEPT WEBSOCKET ===
-      try {
-        server.accept();
-      } catch(e) {
-        console.error('Game WS accept failed:', e);
-        try { server.close(1008, "Accept failed"); } catch(err) {}
-        return new Response("WebSocket acceptance failed", { status: 500 });
-      }
-      
-      this.wsMap.set(wsId, server);
-      
-      // === KIRIM PESAN KONEKSI ===
-      try {
-        server.send(JSON.stringify(["connected", "Game server connected"]));
-      } catch(e) {}
-      
-      // === EVENT HANDLERS ===
-      server.addEventListener("message", async (event) => {
-        try {
-          if (server._closing || this.closing || this.isDestroyed) return;
-          const data = JSON.parse(event.data);
-          if (Array.isArray(data) && data.length > 0) {
-            await this._processWithTimeout(server, data);
-          }
-        } catch(e) {
-          console.error('Message error:', e);
+
+      // ===== WEBSOCKET =====
+      if (url.pathname === "/game/ws") {
+        const upgrade = req.headers.get("Upgrade");
+
+        // ===== BUKAN WEBSOCKET =====
+        if (upgrade !== "websocket") {
+          return new Response(JSON.stringify({
+            status: "game-server",
+            message: "WebSocket server running",
+            path: "/game/ws",
+            timestamp: Date.now()
+          }), {
+            status: 200,
+            headers: { 
+              "Content-Type": "application/json",
+              "Cache-Control": "no-cache" 
+            }
+          });
         }
+
+        // ===== CEK KAPASITAS =====
+        if (this.wsMap.size >= CONSTANTS.MAX_WS_CLIENTS) {
+          return new Response(JSON.stringify({
+            error: "Server full",
+            max: CONSTANTS.MAX_WS_CLIENTS,
+            current: this.wsMap.size
+          }), { 
+            status: 503,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+
+        // ===== BUAT WEBSOCKET PAIR =====
+        const pair = new WebSocketPair();
+        const [client, server] = [pair[0], pair[1]];
+        const wsId = ++this._wsIdCounter;
+
+        server._wsId = wsId;
+        server._closing = false;
+        server.room = null;
+        server.roomname = null;
+        server.username = null;
+        server._createdAt = Date.now();
+
+        // ===== ACCEPT WEBSOCKET =====
+        try {
+          server.accept();
+        } catch(e) {
+          console.error('Game WS accept failed:', e);
+          try { server.close(1008, "Accept failed"); } catch(err) {}
+          return new Response(JSON.stringify({
+            error: "WebSocket acceptance failed",
+            message: e.message
+          }), { 
+            status: 500,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+
+        this.wsMap.set(wsId, server);
+
+        // ===== SEND CONNECTION ACKNOWLEDGMENT =====
+        try {
+          server.send(JSON.stringify(["connected", "Game server connected", Date.now()]));
+        } catch(e) {}
+
+        // ===== EVENT HANDLERS =====
+        server.addEventListener("message", async (event) => {
+          try {
+            if (server._closing || this.closing || this.isDestroyed) return;
+            const data = JSON.parse(event.data);
+            
+            // Echo for testing
+            if (Array.isArray(data) && data[0] === "ping") {
+              server.send(JSON.stringify(["pong", Date.now()]));
+              return;
+            }
+            
+            if (Array.isArray(data) && data.length > 0) {
+              await this._processWithTimeout(server, data);
+            }
+          } catch(e) {
+            console.error('Game message error:', e);
+          }
+        });
+
+        server.addEventListener("close", () => { 
+          this.webSocketClose(server);
+        }, { once: true });
+
+        server.addEventListener("error", () => { 
+          this.webSocketError(server);
+        }, { once: true });
+
+        // ===== RETURN =====
+        return new Response(null, {
+          status: 101,
+          webSocket: client
+        });
+      }
+
+      return new Response(JSON.stringify({
+        status: "game-server",
+        paths: ["/game/ws", "/game/health"]
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
       });
-      
-      server.addEventListener("close", () => { 
-        this.webSocketClose(server);
-      }, { once: true });
-      
-      server.addEventListener("error", () => { 
-        this.webSocketError(server);
-      }, { once: true });
-      
-      // === RETURN RESPONSE ===
-      return new Response(null, { 
-        status: 101, 
-        webSocket: client 
+
+    } catch(e) {
+      console.error('Game fetch error:', e);
+      return new Response(JSON.stringify({
+        error: "Internal Server Error",
+        message: e.message || "Unknown error"
+      }), { 
+        status: 500,
+        headers: { "Content-Type": "application/json" }
       });
     }
-    
-    return new Response(JSON.stringify({
-      status: "game-server",
-      paths: ["/game/ws", "/game/health", "/game/metrics"]
-    }), { 
-      status: 200,
-      headers: { "Content-Type": "application/json" }
-    });
-    
-  } catch(e) {
-    this._handleError('fetch', e);
-    return new Response(JSON.stringify({
-      error: "Internal Server Error",
-      message: e.message || "Unknown error"
-    }), { 
-      status: 500,
-      headers: { 'Content-Type': 'application/json' }
-    });
   }
-}
 
   // ========== PROCESS WITH TIMEOUT ==========
   async _processWithTimeout(ws, data, timeoutMs = 500) {
@@ -1552,31 +1466,6 @@ async fetch(req) {
   // ========== WS HELPERS ==========
   _getWsId(ws) { return ws?._wsId || null; }
 
-  _ensureRoomConsistency(ws) {
-    try {
-      if (!ws) return null;
-      const wsId = this._getWsId(ws);
-      if (!wsId) return null;
-      let room = ws.room || ws.roomname || this.clientRooms.get(wsId) || null;
-      if (!room && ws.username) {
-        const conn = this.userConnections.get(ws.username);
-        if (conn) room = conn.room || null;
-      }
-      if (room) {
-        ws.room = room;
-        ws.roomname = room;
-        if (!this.wsClients.has(room)) this.wsClients.set(room, new Set());
-        if (!this.wsClients.get(room).has(wsId)) {
-          this.wsClients.get(room).add(wsId);
-          this.clientRooms.set(wsId, room);
-          this.wsMap.set(wsId, ws);
-        }
-        return room;
-      }
-      return null;
-    } catch(e) { return null; }
-  }
-
   _addClient(room, ws, username = null) {
     try {
       if (!ws) return;
@@ -1621,26 +1510,6 @@ async fetch(req) {
       if (!room || !wsId) return;
       const clients = this.wsClients.get(room);
       if (clients) { clients.delete(wsId); if (clients.size === 0) this.wsClients.delete(room); }
-    } catch(e) {}
-  }
-
-  _removeClient(room, ws) {
-    try {
-      if (!ws) return;
-      const wsId = this._getWsId(ws);
-      if (!wsId) return;
-      const username = ws.username;
-      this._removeClientFromRoom(room, wsId);
-      this.clientRooms.delete(wsId);
-      this.wsMap.delete(wsId);
-      if (username) {
-        const conn = this.userConnections.get(username);
-        if (conn?.wsId === wsId) this.userConnections.delete(username);
-      }
-      ws.room = null;
-      ws.roomname = null;
-      ws._wsId = null;
-      ws.username = null;
     } catch(e) {}
   }
 
@@ -1784,7 +1653,6 @@ async fetch(req) {
     } catch(e) {}
   }
 
-  // ========== SEND DICE NOTIFICATION ON SWITCH ==========
   _sendDiceNotificationOnSwitch(ws, wsId) {
     try {
       if (!ws || ws.readyState !== 1) return;
@@ -1932,8 +1800,7 @@ async fetch(req) {
     } catch(e) { return 0; }
   }
 
-  // ========== LOW CARD GAME - METHODS ==========
-
+  // ========== LOW CARD GAME ==========
   _isGameActuallyRunning(game) { 
     return game?._isActive === true && !game?._gameEnded; 
   }
