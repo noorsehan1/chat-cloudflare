@@ -1,4 +1,6 @@
 // ==================== INDEX.JS ====================
+// ==================== NON-DURABLE OBJECT VERSION ====================
+
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
 
@@ -16,8 +18,8 @@ export default {
       const url = new URL(request.url);
       const pathname = url.pathname;
 
-      // ==================== ROOT / CHAT (TAMBAHKAN UNTUK WEBSOCKET DI ROOT) ====================
-      // ✅ SEKARANG BISA PAKAI URL TANPA /ws
+      // ==================== CHAT SERVER ====================
+      // ✅ ROOT "/" untuk WebSocket
       if (pathname === "/" || pathname === "/ws" || pathname === "/chat") {
         if (!chatServerInstance) {
           chatServerInstance = new ChatServer(env);
@@ -31,7 +33,7 @@ export default {
         return chatServerInstance.fetch(request);
       }
 
-      // ==================== GAME ====================
+      // ==================== GAME SERVER ====================
       if (pathname === "/game" || pathname === "/game/ws") {
         if (!gameServerInstance) {
           gameServerInstance = new GameServer(env);
@@ -45,6 +47,8 @@ export default {
           status: "ok",
           chatServer: chatServerInstance ? "active" : "inactive",
           gameServer: gameServerInstance ? "active" : "inactive",
+          chatConnections: chatServerInstance?.wsSet?.size || 0,
+          gameConnections: gameServerInstance?.wsMap?.size || 0,
           timestamp: Date.now()
         }), {
           headers: { 
