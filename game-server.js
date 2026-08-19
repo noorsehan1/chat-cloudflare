@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 3.3.1 - ALARM ONLY AT SCHEDULE START/END
+// VERSION: 3.3.1 - ALARM ONLY AT SCHEDULE START/END - FIXED
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -261,6 +261,7 @@ export class GameServer {
       // ========== ALARM STATE ==========
       this._sessionActive = false;
       this._alarmScheduled = false;
+      this._diceLoopInterval = null;
       
       // ✅ SCHEDULE ALARM PERTAMA - CEK JADWAL (1 MENIT)
       this._scheduleAlarm(60000);
@@ -369,8 +370,6 @@ export class GameServer {
       
       // ===== SESSION DIMULAI =====
       if (inSession && !wasActive) {
-        this._sessionStarted = true;
-        this._sessionEnded = false;
         this._broadcastToRoom(DICE_ROOM, ["diceNotification", "🎲 Dice Game Session Started!"]);
         this.diceAutoEnabled = true;
         // Mulai dice pertama setelah 3 detik
@@ -385,8 +384,6 @@ export class GameServer {
       
       // ===== SESSION BERAKHIR =====
       if (!inSession && wasActive) {
-        this._sessionStarted = false;
-        this._sessionEnded = true;
         this._broadcastToRoom(DICE_ROOM, ["diceNotification", "⏰ Dice Game Session Ended!"]);
         this.diceAutoEnabled = false;
         // Matikan semua dice
@@ -2665,7 +2662,7 @@ export class GameServer {
       game.eliminated.add(username);
       game.numbers?.delete(username);
       game.tanda?.delete(username);
-      this._broadcastToRoom(room, ["gameLowCardError", `${username} has been eliminated"]);
+      this._broadcastToRoom(room, ["gameLowCardError", `${username} has been eliminated`]);
       const checkTimer = setTimeout(() => {
         try {
           const currentGame = this.activeGames.get(room);
