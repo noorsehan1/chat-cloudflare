@@ -1,57 +1,101 @@
 // ==================== INDEX.JS ====================
-// VERSION: 4.0.1
+// VERSION: 5.0.0 - OPTIMIZED FOR JAVA CLIENT
 
 import { ChatServer } from './chat-server.js';
 import { GameServer } from './game-server.js';
 
+// ============================================================
+// ✅ INSTANCE (SINGLETON)
+// ============================================================
+let chatServerInstance = null;
+let gameServerInstance = null;
+
+function getChatServer() {
+  if (!chatServerInstance) {
+    chatServerInstance = new ChatServer();
+  }
+  return chatServerInstance;
+}
+
+function getGameServer(env) {
+  if (!gameServerInstance) {
+    gameServerInstance = new GameServer(env);
+  }
+  return gameServerInstance;
+}
+
+// ============================================================
+// ✅ MAIN WORKER
+// ============================================================
 export default {
   async fetch(request, env, ctx) {
     try {
       const url = new URL(request.url);
       const pathname = url.pathname;
 
-      console.log('📨 Request:', pathname);
-
-      // ===== ROOT & HEALTH =====
+      // ============================================================
+      // ✅ ROOT / HEALTH
+      // ============================================================
       if (pathname === "/" || pathname === "/health") {
+        const chat = getChatServer();
+        const game = getGameServer(env);
+
         return new Response(JSON.stringify({
-          status: "ok",
+          status: "online",
           timestamp: Date.now(),
           service: "chat-game-server",
-          version: "4.0.1",
+          version: "5.0.0",
+          type: "websocket",
           endpoints: {
             chat: "/chat/ws",
             game: "/game/ws",
-            health: "/health",
-            "game-health": "/game/health"
+            health: "/health"
           },
-          test: {
-            chat: "new WebSocket('wss://your-worker.workers.dev/chat/ws')",
-            game: "new WebSocket('wss://your-worker.workers.dev/game/ws')"
+          chat: {
+            connections: chat?.wsSet?.size || 0,
+            rooms: chat?.rooms?.size || 0,
+            users: chat?.userSeat?.size || 0
+          },
+          game: {
+            connections: game?.wsMap?.size || 0,
+            games: game?.activeGames?.size || 0
           }
         }), {
-          headers: { 
+          headers: {
             "Content-Type": "application/json",
-            "Cache-Control": "no-cache" 
+            "Cache-Control": "no-cache"
           }
         });
       }
 
-      // ===== CHAT WEBSOCKET =====
-      if (pathname === "/chat/ws") {
-        console.log('🔗 Chat WebSocket request');
-        const chatServer = new ChatServer();
-        return await chatServer.fetch(request);
+      // ============================================================
+      // ✅ CHAT WEBSOCKET
+      // ============================================================
+      if (pathname === "/chat/ws" || pathname === "/ws" || pathname === "/chat") {
+        const chat = getChatServer();
+        chat.start();
+        return await chat.fetch(request);
       }
 
-      // ===== GAME WEBSOCKET =====
-      if (pathname === "/game/ws" || pathname === "/game/health") {
-        console.log('🎮 Game request:', pathname);
-        const gameServer = new GameServer(env);
-        return await gameServer.fetch(request);
+      // ============================================================
+      // ✅ GAME WEBSOCKET
+      // ============================================================
+      if (pathname === "/game/ws") {
+        const game = getGameServer(env);
+        return await game.fetch(request);
       }
 
-      // ===== 404 =====
+      // ============================================================
+      // ✅ GAME HEALTH
+      // ============================================================
+      if (pathname === "/game/health") {
+        const game = getGameServer(env);
+        return await game.fetch(request);
+      }
+
+      // ============================================================
+      // ✅ 404
+      // ============================================================
       return new Response(JSON.stringify({
         error: "Not Found",
         path: pathname,
@@ -63,14 +107,20 @@ export default {
 
     } catch (error) {
       console.error('❌ Error:', error);
+
       return new Response(JSON.stringify({
         error: "Internal Server Error",
         message: error.message || "Unknown error",
-        timestamp: Date.now(),
+        timestamp: Date.now()
       }), {
         status: 500,
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-cache"
+        }
       });
     }
-  },
+  }
 };
+
+export { ChatServer, GameServer };
