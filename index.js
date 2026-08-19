@@ -1,5 +1,5 @@
 // ==================== INDEX.JS ====================
-// ==================== FIXED VERSION ====================
+// ==================== NON-DURABLE OBJECT VERSION ====================
 
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
