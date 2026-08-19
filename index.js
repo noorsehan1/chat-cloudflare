@@ -1,6 +1,5 @@
 // ==================== INDEX.JS ====================
 // VERSION: 8.0.0 - PURE WORKER (NO DO)
-// ROUTER UNTUK CHAT SERVER & GAME SERVER
 
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
@@ -18,7 +17,6 @@ export default {
       // ✅ CHAT SERVER - PURE WORKER
       // ============================================================
       if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
-        // ✅ START INTERVAL SAAT PERTAMA KALI DIPANGGIL
         chatServer.start();
         return chatServer.fetch(request);
       }
