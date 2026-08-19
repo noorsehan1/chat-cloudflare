@@ -21,15 +21,25 @@ export default {
         gameServerInstance = new GameServer(env);
       }
       
-      if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
+      // SEMUA WEBSOCKET KONEKSI LEWAT ROOT PATH "/"
+      // Tidak peduli path apapun, semua WebSocket ditangani oleh ChatServer
+      const upgrade = request.headers.get("Upgrade");
+      if (upgrade === "websocket") {
+        // Cek apakah ini koneksi game (dari user agent atau header khusus)
+        const userAgent = request.headers.get("User-Agent") || "";
+        const isGameConnection = request.headers.get("X-Connection-Type") === "game" || 
+                                 pathname === "/game" ||
+                                 userAgent.includes("Game");
+        
+        if (isGameConnection) {
+          return gameServerInstance.fetch(request);
+        }
+        
+        // Default: ChatServer untuk semua koneksi WebSocket
         return chatServerInstance.fetch(request);
       }
       
-      if (pathname === "/game/ws" || pathname === "/game") {
-        return gameServerInstance.fetch(request);
-      }
-      
-      // Health check endpoint
+      // Health check
       if (pathname === "/health") {
         return new Response(JSON.stringify({
           status: "ok",
@@ -42,7 +52,12 @@ export default {
         });
       }
       
-      return new Response("Server running", { status: 200 });
+      return new Response("Server running - WebSocket endpoint: wss://your-worker.workers.dev/", { 
+        status: 200,
+        headers: {
+          "Content-Type": "text/plain"
+        }
+      });
       
     } catch(e) {
       return new Response("Error: " + e.message, { status: 500 });
