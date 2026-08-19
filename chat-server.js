@@ -1,6 +1,6 @@
-// ==================== CHAT SERVER - PURE WORKER ====================
+// ==================== CHAT-SERVER-FIXED.js ====================
 
- const C = {
+const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 500,
   MAX_MESSAGE_SIZE: 5000,
@@ -138,8 +138,8 @@ class RoomManager {
   }
 }
 
-// ==================== SINGLETON CHAT SERVER ====================
-class ChatServer {
+// ==================== CHAT SERVER (NON-DURABLE) ====================
+export class ChatServer {
   constructor(env) {
     this.env = env;
     this.closing = false;
@@ -166,6 +166,8 @@ class ChatServer {
     
     this.currentNumber = 1;
     this._tikCounter = 0;
+    this._numberInterval = null;
+    this._cleanupInterval = null;
     
     for (const room of ROOMS) {
       this.rooms.set(room, new RoomManager(room));
@@ -173,7 +175,7 @@ class ChatServer {
     }
     
     this._setupPeriodicCleanup();
-    this._startNumberUpdateLoop();
+    this._setupNumberUpdate();
   }
   
   _setupPeriodicCleanup() {
@@ -185,11 +187,9 @@ class ChatServer {
       this._cleanupStaleLocks();
       this._cleanupMemory();
     }, C.CLEANUP_INTERVAL);
-    
-    this._pendingTimeouts.add(this._cleanupInterval);
   }
   
-  _startNumberUpdateLoop() {
+  _setupNumberUpdate() {
     this._numberInterval = setInterval(() => {
       if (this.closing || this.isDestroyed) {
         clearInterval(this._numberInterval);
@@ -217,12 +217,7 @@ class ChatServer {
         
         this._tikCounter = 0;
       }
-      
-      this._doCleanup();
-      
     }, C.ALARM_10_DETIK);
-    
-    this._pendingTimeouts.add(this._numberInterval);
   }
   
   _cleanupStaleLocks() {
@@ -281,88 +276,6 @@ class ChatServer {
         }
       }
     } catch(e) {}
-  }
-  
-  _doCleanup() {
-    if (this._cleanupInProgress || this.closing || this.isDestroyed) return;
-    this._cleanupInProgress = true;
-    
-    try {
-      const toRemove = [];
-      for (const ws of this.wsSet) {
-        if (!ws || ws.readyState !== 1 || ws._closing || this._cleaningUp.has(ws)) {
-          toRemove.push(ws);
-        }
-      }
-      for (const ws of toRemove) {
-        this.cleanup(ws);
-      }
-      
-      const toRemoveUsers = [];
-      for (const [username, connections] of this.userConnections) {
-        const toRemoveConn = [];
-        for (const conn of connections) {
-          if (!conn || conn.readyState !== 1 || conn._closing || this._cleaningUp.has(conn)) {
-            toRemoveConn.push(conn);
-          }
-        }
-        for (const conn of toRemoveConn) {
-          connections.delete(conn);
-          this.wsSet.delete(conn);
-          this.wsActiveMulti.delete(conn);
-        }
-        if (connections.size === 0) {
-          toRemoveUsers.push(username);
-        }
-      }
-      
-      for (const username of toRemoveUsers) {
-        this._removeUserFromRooms(username);
-      }
-      
-      for (const [room, clients] of this.roomClients) {
-        const toRemoveClient = [];
-        for (const client of clients) {
-          if (!client || client.readyState !== 1 || client._closing || this._cleaningUp.has(client)) {
-            toRemoveClient.push(client);
-          }
-        }
-        for (const client of toRemoveClient) {
-          clients.delete(client);
-        }
-        
-        if (clients.size > C.MAX_ROOM_CLIENTS) {
-          const clientsArray = Array.from(clients);
-          const toRemoveExtra = clientsArray.slice(C.MAX_ROOM_CLIENTS);
-          for (const ws of toRemoveExtra) {
-            clients.delete(ws);
-            if (ws && ws.readyState === 1) {
-              try {
-                ws.close(1000, "Room overloaded");
-              } catch(e) {}
-            }
-            this.cleanup(ws);
-          }
-        }
-      }
-      
-      for (const [roomName, roomMan] of this.rooms) {
-        if (roomMan) {
-          const pointsToRemove = [];
-          for (const [seat] of roomMan.points) {
-            if (!roomMan.seats.has(seat)) {
-              pointsToRemove.push(seat);
-            }
-          }
-          for (const seat of pointsToRemove) {
-            roomMan.points.delete(seat);
-          }
-        }
-      }
-      
-    } catch(e) {} finally {
-      this._cleanupInProgress = false;
-    }
   }
   
   _removeUserFromRooms(username) {
@@ -1386,6 +1299,7 @@ class ChatServer {
       server._timeoutId = timeoutId;
       this._pendingTimeouts.add(timeoutId);
       
+      // Accept WebSocket (no Durable Object state needed)
       server.username = null;
       server.room = null;
       server.roomname = null;
@@ -1397,7 +1311,7 @@ class ChatServer {
         this.wsSet.add(server);
       }
       
-      // Handle WebSocket messages directly
+      // Setup message handlers directly
       server.addEventListener("message", async (event) => {
         try {
           await this.handleMessage(server, event.data);
@@ -1448,18 +1362,20 @@ class ChatServer {
     this._joinLocks.clear();
     this._kursiLocks.clear();
     
+    if (this._numberInterval) {
+      clearInterval(this._numberInterval);
+      this._numberInterval = null;
+    }
+    
+    if (this._cleanupInterval) {
+      clearInterval(this._cleanupInterval);
+      this._cleanupInterval = null;
+    }
+    
     for (const timeout of this._pendingTimeouts) {
       clearTimeout(timeout);
     }
     this._pendingTimeouts.clear();
-    
-    if (this._cleanupInterval) {
-      clearInterval(this._cleanupInterval);
-    }
-    
-    if (this._numberInterval) {
-      clearInterval(this._numberInterval);
-    }
     
     const wsCopy = Array.from(this.wsSet);
     for (const ws of wsCopy) {
@@ -1489,16 +1405,3 @@ class ChatServer {
     this._roomMessageReset.clear();
   }
 }
-
-// ==================== SINGLETON INSTANCE ====================
-let chatServerInstance = null;
-
-function getChatServer(env) {
-  if (!chatServerInstance) {
-    chatServerInstance = new ChatServer(env);
-  }
-  return chatServerInstance;
-}
-
-// ==================== EXPORT ====================
-export { ChatServer, getChatServer };
