@@ -1,13 +1,11 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 3.3.3 - ALARM 10 DETIK, CLEANUP 30 MENIT
+// VERSION: 3.3.6 - NO ALARM, NUMBER 15 MENIT VIA TIMER
 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 5000,
-  ALARM_INTERVAL_MS: 10000,              // 10 DETIK
-  CLEANUP_COUNTER_MAX: 180,              // 180 x 10 detik = 30 MENIT
-  NUMBER_UPDATE_TICK_COUNT: 90,          // 90 x 10 detik = 15 MENIT
+  NUMBER_INTERVAL_MS: 900000,            // 15 MENIT
   MAX_NUMBER: 6,
   BATCH_SIZE: 20,
   LOCK_TIMEOUT: 10000,
@@ -165,8 +163,8 @@ export class ChatServer {
     
     // ========== NUMBER & COUNTERS ==========
     this.currentNumber = 1;
-    this._tickCounter = 0;
-    this._cleanupCounter = 0;
+    this._numberTimer = null;
+    this._isNumberUpdating = false;
     
     // ========== INIT ROOMS ==========
     for (const room of ROOMS) {
@@ -174,8 +172,8 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
-    // ✅ ALARM PERTAMA - 10 DETIK
-    this._scheduleAlarm(C.ALARM_INTERVAL_MS);
+    // ✅ START NUMBER TIMER - 15 MENIT (TANPA ALARM)
+    this._startNumberTimer();
     
     // ✅ TUNDA INISIALISASI 2 DETIK
     setTimeout(() => {
@@ -185,67 +183,62 @@ export class ChatServer {
     }, 2000);
   }
 
-  // ========== SCHEDULE ALARM ==========
-  _scheduleAlarm(delayMs) {
+  // ========== START NUMBER TIMER ==========
+  _startNumberTimer() {
     if (this.closing || this.isDestroyed) return;
+    
+    // Bersihkan timer lama
+    if (this._numberTimer) {
+      clearTimeout(this._numberTimer);
+      this._numberTimer = null;
+    }
+    
+    // Schedule timer 15 menit
+    this._numberTimer = setTimeout(() => {
+      if (!this.closing && !this.isDestroyed) {
+        this._updateNumber();
+        // Jalankan lagi
+        this._startNumberTimer();
+      }
+    }, C.NUMBER_INTERVAL_MS);
+  }
+
+  // ========== UPDATE NUMBER ==========
+  _updateNumber() {
+    if (this._isNumberUpdating || this.closing || this.isDestroyed) return;
+    this._isNumberUpdating = true;
+    
     try {
-      this.state.storage.setAlarm(Date.now() + delayMs);
-    } catch(e) {}
+      // Update number
+      this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
+      
+      // Update semua room
+      for (const room of this.rooms.values()) {
+        if (room) {
+          room.setNumber(this.currentNumber);
+        }
+      }
+      
+      // Broadcast ke semua room
+      const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
+      
+      for (const [room, clients] of this.roomClients) {
+        if (clients && clients.size > 0) {
+          this._broadcastToRoom(room, numberMsg);
+        }
+      }
+      
+    } catch(e) {
+      // Silent error
+    } finally {
+      this._isNumberUpdating = false;
+    }
   }
 
   // ========== LAZY INIT ==========
   _initLazy() {
     if (this._initialized || this.closing || this.isDestroyed) return;
     this._initialized = true;
-  }
-
-  // ========== ALARM - 10 DETIK ==========
-  async alarm() {
-    if (this.closing || this.isDestroyed) return;
-    
-    try {
-      this._tickCounter++;
-      this._cleanupCounter++;
-      
-      // ✅ CLEANUP DEAD CONNECTIONS - SETIAP 10 DETIK
-      this._cleanupDeadConnections();
-      this._processEventQueue();
-      
-      // ✅ CLEANUP MEMORY - SETIAP 30 MENIT (180x alarm)
-      if (this._cleanupCounter >= C.CLEANUP_COUNTER_MAX) {
-        this._cleanupMemory();
-        this._cleanupStaleLocks();
-        this._cleanupEventQueue();
-        this._cleanupCounter = 0;
-      }
-      
-      // ✅ UPDATE NUMBER - SETIAP 15 MENIT (90x alarm)
-      if (this._tickCounter >= C.NUMBER_UPDATE_TICK_COUNT) {
-        this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
-        
-        for (const room of this.rooms.values()) {
-          if (room) {
-            room.setNumber(this.currentNumber);
-          }
-        }
-        
-        const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
-        
-        for (const [room, clients] of this.roomClients) {
-          if (clients && clients.size > 0) {
-            this._broadcastToRoom(room, numberMsg);
-          }
-        }
-        
-        this._tickCounter = 0;
-      }
-      
-    } catch(e) {
-      // Silent error
-    }
-    
-    // ✅ JADWALKAN ALARM BERIKUTNYA - 10 DETIK LAGI
-    this._scheduleAlarm(C.ALARM_INTERVAL_MS);
   }
 
   // ========== CLEANUP DEAD CONNECTIONS ==========
@@ -316,15 +309,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ========== CLEANUP EVENT QUEUE ==========
-  _cleanupEventQueue() {
-    try {
-      if (this._eventQueue && this._eventQueue.length > C.MAX_EVENT_QUEUE) {
-        this._eventQueue.splice(0, this._eventQueue.length - C.MAX_EVENT_QUEUE);
-      }
-    } catch(e) {}
-  }
-
   // ========== PROCESS EVENT QUEUE ==========
   _processEventQueue() {
     try {
@@ -334,7 +318,6 @@ export class ChatServer {
       const startTime = Date.now();
       let processed = 0;
       
-      // Proses lebih banyak event
       while (this._eventQueue.length > 0 && processed < 50) {
         if (Date.now() - startTime > C.MAX_PROCESS_TIME_MS) break;
         
@@ -629,6 +612,13 @@ export class ChatServer {
       const [evt, ...args] = data;
       
       switch(evt) {
+        // ✅ CLIENT REQUEST NUMBER
+        case "getCurrentNumber":
+          try { 
+            this.safeSend(ws, ["currentNumber", this.currentNumber]); 
+          } catch(e) {}
+          break;
+        
         case "setIdTarget2":
           this._handleSetId(ws, args[0], args[1]);
           break;
@@ -912,10 +902,6 @@ export class ChatServer {
           } catch(e) {}
           break;
         }
-        
-        case "getCurrentNumber":
-          try { this.safeSend(ws, ["currentNumber", this.currentNumber]); } catch(e) {}
-          break;
         
         case "isUserOnline": {
           try {
@@ -1384,6 +1370,12 @@ export class ChatServer {
     if (this.isDestroyed) return;
     this.closing = true;
     this.isDestroyed = true;
+    
+    // ✅ Bersihkan timer number
+    if (this._numberTimer) {
+      clearTimeout(this._numberTimer);
+      this._numberTimer = null;
+    }
     
     this._joinLocks.clear();
     this._kursiLocks.clear();
