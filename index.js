@@ -2,6 +2,9 @@ name = "chat-cloudflare"
 main = "index.js"
 compatibility_date = "2024-12-12"
 
+
+
+# ==================== KV STORAGE ====================
 [[kv_namespaces]]
 binding = "QUESTIONS"
 id = "5008422bd04045db98e4059f2e863784"
