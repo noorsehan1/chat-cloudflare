@@ -1,6 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
 // VERSION: 5.0.0 - MEMORY ONLY - REALTIME
-// 🔥 SEMUA USER DI 1 INSTANCE → SALING TERLIHAT!
 
 const CONSTANTS = {
   MAX_CLIENTS: 200,
@@ -14,38 +13,27 @@ const CONSTANTS = {
 // ============================================================
 export class ChatServer {
   constructor() {
-    // ========== 🔥 SEMUA DATA DI MEMORY ==========
-    // Semua user di 1 instance → SALING TERLIHAT!
-    
     this.wsSet = new Map();        // wsId → WebSocket
     this.rooms = new Map();        // room → Set(wsId)
     this.wsRoom = new Map();       // wsId → room
     
-    // User data
     this.userSeat = new Map();     // username → {room, seat, wsId, data}
     this.roomSeats = new Map();    // room → Map(seat → username)
     this.roomUsers = new Map();    // room → Map(username → userData)
     this.roomPoints = new Map();   // room → Map(seat → {x, y, fast})
     this.roomMutes = new Map();    // room → boolean
     
-    // Counter
     this.wsIdCounter = 0;
     this._started = false;
     this._startTime = Date.now();
-    
-    // Timers
     this._cleanupInterval = null;
     this._allTimers = new Set();
   }
 
-  // ============================================================
-  // ✅ START
-  // ============================================================
   start() {
     if (this._started) return;
     this._started = true;
     
-    // Cleanup interval
     this._cleanupInterval = setInterval(() => {
       this._cleanupDeadConnections();
       this._cleanupMemory();
@@ -53,12 +41,8 @@ export class ChatServer {
     this._allTimers.add(this._cleanupInterval);
     
     console.log('🟢 ChatServer started - Memory Only');
-    console.log(`📊 All users share 1 instance → REALTIME!`);
   }
 
-  // ============================================================
-  // ✅ CLEANUP
-  // ============================================================
   _cleanupDeadConnections() {
     try {
       const toRemove = [];
@@ -87,13 +71,9 @@ export class ChatServer {
 
   _cleanupMemory() {
     try {
-      // Cleanup empty rooms
       for (const [room, clients] of this.rooms) {
         if (clients.size === 0) this.rooms.delete(room);
       }
-      
-      // Cleanup old room data
-      const now = Date.now();
       for (const [room, users] of this.roomUsers) {
         if (users.size === 0) this.roomUsers.delete(room);
       }
@@ -107,14 +87,15 @@ export class ChatServer {
   }
 
   // ============================================================
-  // ✅ FETCH
+  // ✅ FETCH - SUPPORT ROOT PATH
   // ============================================================
   async fetch(request) {
     try {
       const url = new URL(request.url);
-      
-      // Health check
-      if (url.pathname === "/chat/health" || url.pathname === "/health") {
+      const pathname = url.pathname;
+
+      // 🔥 Health check
+      if (pathname === "/health" || pathname === "/") {
         return new Response(JSON.stringify({
           status: "ok",
           connections: this.wsSet.size,
@@ -128,8 +109,8 @@ export class ChatServer {
         });
       }
 
-      // WebSocket
-      if (url.pathname === "/chat/ws" || url.pathname === "/ws" || url.pathname === "/chat") {
+      // 🔥 WebSocket di root path atau /ws
+      if (pathname === "/" || pathname === "/ws" || pathname === "/chat" || pathname === "/chat/ws") {
         const upgrade = request.headers.get("Upgrade");
         if (upgrade !== "websocket") {
           return new Response("WebSocket only", { status: 400 });
@@ -146,7 +127,6 @@ export class ChatServer {
         const [client, server] = [pair[0], pair[1]];
         const wsId = ++this.wsIdCounter;
 
-        // Setup WebSocket
         server._wsId = wsId;
         server._closing = false;
         server.room = null;
@@ -168,7 +148,6 @@ export class ChatServer {
 
         this.wsSet.set(wsId, server);
 
-        // Message handler
         server.addEventListener("message", async (event) => {
           try {
             if (server._closing) return;
@@ -181,7 +160,6 @@ export class ChatServer {
           }
         });
 
-        // Close handler
         server.addEventListener("close", () => {
           this._handleClose(server);
         }, { once: true });
@@ -202,14 +180,13 @@ export class ChatServer {
   }
 
   // ============================================================
-  // ✅ HANDLE MESSAGE
+  // ✅ HANDLE MESSAGE (Lengkap)
   // ============================================================
   async _handleMessage(ws, data) {
     try {
       const evt = data[0];
 
       switch(evt) {
-        // ========== ROOM MANAGEMENT ==========
         case "joinRoom":
         case "setIdTarget": {
           const idTarget = data[1] || "";
@@ -233,7 +210,6 @@ export class ChatServer {
           break;
         }
 
-        // ========== CHAT ==========
         case "chat": {
           const room = data[1] || ws.room || "default";
           const noImage = data[2] || ws.noimageUrl || "";
@@ -242,26 +218,19 @@ export class ChatServer {
           const userColor = data[5] || ws.color || "#FFFFFF";
           const textColor = data[6] || "#000000";
           
-          // Clean message untuk Java
-          const cleanMsg = message
-            .replace(/"/g, '\\"')
-            .replace(/\n/g, ' ')
-            .replace(/\r/g, '');
+          const cleanMsg = message.replace(/"/g, '\\"').replace(/\n/g, ' ');
           
           this._broadcast(room, ["chat", room, noImage, username, cleanMsg, userColor, textColor]);
           break;
         }
 
-        // ========== PRIVATE ==========
         case "private": {
           const targetId = data[1] || "";
           const noImage = data[2] || ws.noimageUrl || "";
           const message = data[3] || "";
           const sender = data[4] || ws.username || "Unknown";
           
-          const cleanMsg = message
-            .replace(/"/g, '\\"')
-            .replace(/\n/g, ' ');
+          const cleanMsg = message.replace(/"/g, '\\"').replace(/\n/g, ' ');
           
           for (const [id, client] of this.wsSet) {
             if ((client.idTarget === targetId || client.username === targetId) && client.readyState === 1) {
@@ -272,7 +241,6 @@ export class ChatServer {
           break;
         }
 
-        // ========== NOTIFICATION ==========
         case "sendnotif": {
           const targetId = data[1] || "";
           const noImage = data[2] || ws.noimageUrl || "";
@@ -288,7 +256,6 @@ export class ChatServer {
           break;
         }
 
-        // ========== KURSI (SEAT) ==========
         case "updateKursi": {
           const room = data[1] || ws.room || "default";
           const seat = data[2] || 0;
@@ -309,7 +276,6 @@ export class ChatServer {
           ws.viptanda = viptanda;
           ws.seatNumber = seat;
 
-          // Save to memory
           if (!this.roomUsers.has(room)) this.roomUsers.set(room, new Map());
           this.roomUsers.get(room).set(ws.username, {
             wsId: ws._wsId,
@@ -325,13 +291,11 @@ export class ChatServer {
           if (!this.roomSeats.has(room)) this.roomSeats.set(room, new Map());
           this.roomSeats.get(room).set(seat, ws.username);
 
-          // Broadcast to room
           this._broadcast(room, ["kursiUpdated", room, seat, noImage, namauser, color, itembawah, itematas, vip, viptanda]);
           this._broadcast(room, ["updateKursi", room, seat, noImage, namauser, color, itembawah, itematas, vip, viptanda]);
           break;
         }
 
-        // ========== POINT ==========
         case "updatePoint": {
           const room = data[1] || ws.room || "default";
           const seat = data[2] || 0;
@@ -346,7 +310,6 @@ export class ChatServer {
           break;
         }
 
-        // ========== REMOVE KURSI ==========
         case "removeKursiAndPoint": {
           const room = data[1] || ws.room || "default";
           const seat = data[2] || 0;
@@ -366,7 +329,6 @@ export class ChatServer {
           break;
         }
 
-        // ========== RESET ROOM ==========
         case "resetRoom": {
           const room = data[1] || ws.room || "default";
           this.roomUsers.delete(room);
@@ -376,7 +338,6 @@ export class ChatServer {
           break;
         }
 
-        // ========== GET ONLINE USERS ==========
         case "getOnlineUsers": {
           const users = [];
           for (const [id, client] of this.wsSet) {
@@ -388,7 +349,6 @@ export class ChatServer {
           break;
         }
 
-        // ========== IS USER ONLINE ==========
         case "isUserOnline": {
           const userId = data[1] || "";
           const tanda = data[2] || "";
@@ -405,7 +365,6 @@ export class ChatServer {
           break;
         }
 
-        // ========== GET ALL ROOMS USER COUNT ==========
         case "getAllRoomsUserCount": {
           const rooms = [];
           for (const [room, clients] of this.rooms) {
@@ -415,13 +374,11 @@ export class ChatServer {
           break;
         }
 
-        // ========== GET CURRENT NUMBER ==========
         case "getCurrentNumber": {
           this._send(ws, ["currentNumber", 0]);
           break;
         }
 
-        // ========== GIFT ==========
         case "gift": {
           const room = data[1] || ws.room || "default";
           const sender = data[2] || ws.username || "Unknown";
@@ -432,14 +389,12 @@ export class ChatServer {
           break;
         }
 
-        // ========== MOD WARNING ==========
         case "modwarning": {
           const room = data[1] || ws.room || "default";
           this._broadcast(room, ["modwarning", room]);
           break;
         }
 
-        // ========== MUTE ==========
         case "setMuteType": {
           const isMuted = data[1] || false;
           const room = data[2] || ws.room || "default";
@@ -455,7 +410,6 @@ export class ChatServer {
           break;
         }
 
-        // ========== ROLL ANGKA ==========
         case "rollangak": {
           const room = data[1] || ws.room || "default";
           const username = data[2] || ws.username || "Unknown";
@@ -464,7 +418,6 @@ export class ChatServer {
           break;
         }
 
-        // ========== MULTI AKUN ==========
         case "multiJoin": {
           const username = data[1] || "";
           const room = data[2] || ws.room || "default";
@@ -474,14 +427,12 @@ export class ChatServer {
             break;
           }
           
-          // Get available seat
           let seat = 1;
           if (this.roomSeats.has(room)) {
             const usedSeats = new Set(this.roomSeats.get(room).keys());
             while (usedSeats.has(seat) && seat <= CONSTANTS.MAX_SEAT) seat++;
           }
           
-          // Save to memory
           if (!this.roomUsers.has(room)) this.roomUsers.set(room, new Map());
           this.roomUsers.get(room).set(username, {
             wsId: ws._wsId,
@@ -508,7 +459,6 @@ export class ChatServer {
             break;
           }
           
-          // Find user data
           for (const [room, users] of this.roomUsers) {
             if (users.has(username)) {
               const userData = users.get(username);
@@ -541,7 +491,6 @@ export class ChatServer {
           break;
         }
 
-        // ========== ON DESTROY ==========
         case "onDestroy": {
           this._handleClose(ws);
           break;
@@ -566,7 +515,6 @@ export class ChatServer {
 
       const currentRoom = ws.room || this.wsRoom.get(wsId);
 
-      // Leave current room
       if (currentRoom && currentRoom !== room) {
         const clients = this.rooms.get(currentRoom);
         if (clients) {
@@ -576,7 +524,6 @@ export class ChatServer {
         this._broadcast(currentRoom, ["userLeftRoom", ws.username || ws.idTarget, currentRoom]);
       }
 
-      // Join new room
       ws.room = room;
       this.wsRoom.set(wsId, room);
 
@@ -587,7 +534,6 @@ export class ChatServer {
       }
       clients.add(wsId);
 
-      // Get available seat
       let seat = 1;
       if (this.roomSeats.has(room)) {
         const usedSeats = new Set(this.roomSeats.get(room).keys());
@@ -595,7 +541,6 @@ export class ChatServer {
       }
       ws.seatNumber = seat;
 
-      // Save to memory
       if (!this.roomUsers.has(room)) this.roomUsers.set(room, new Map());
       this.roomUsers.get(room).set(ws.username || ws.idTarget || `user_${wsId}`, {
         wsId: wsId,
@@ -611,14 +556,10 @@ export class ChatServer {
       if (!this.roomSeats.has(room)) this.roomSeats.set(room, new Map());
       this.roomSeats.get(room).set(seat, ws.username || ws.idTarget);
 
-      // Send response
       this._send(ws, ["rooMasuk", seat, room]);
       this._send(ws, ["numberKursiSaya", seat]);
-
-      // Broadcast to room
       this._broadcast(room, ["userJoinedRoom", ws.username || ws.idTarget, room]);
 
-      // Send all kursi data to new user
       if (this.roomUsers.has(room)) {
         const allUsers = this.roomUsers.get(room);
         const kursiList = [];
@@ -640,7 +581,6 @@ export class ChatServer {
         }
       }
 
-      // Send all points data to new user
       if (this.roomPoints.has(room)) {
         const points = this.roomPoints.get(room);
         const pointList = [];
@@ -670,7 +610,6 @@ export class ChatServer {
       const username = ws.username || ws.idTarget;
 
       if (room) {
-        // Remove from memory
         if (this.roomUsers.has(room)) {
           this.roomUsers.get(room).delete(username);
           if (this.roomUsers.get(room).size === 0) this.roomUsers.delete(room);
@@ -686,7 +625,6 @@ export class ChatServer {
           if (this.roomPoints.get(room).size === 0) this.roomPoints.delete(room);
         }
 
-        // Remove from WebSocket clients
         const clients = this.rooms.get(room);
         if (clients) {
           clients.delete(wsId);
@@ -714,9 +652,8 @@ export class ChatServer {
   }
 
   // ============================================================
-  // ✅ UTILITY METHODS
+  // ✅ UTILITY
   // ============================================================
-  
   _send(ws, message) {
     try {
       if (!ws || ws.readyState !== 1) return false;
