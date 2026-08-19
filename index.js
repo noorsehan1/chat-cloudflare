@@ -1,8 +1,8 @@
 // ==================== INDEX.JS ====================
-// VERSION: 4.0.0 - ROUTER UTAMA
+// ROUTER - MEMISAHKAN CHAT DAN GAME (SEPERTI AWAL)
 
-import { ChatServer } from "./chat.js";
-import { GameServer } from "./game.js";
+import { ChatServer } from "./chat-server.js";
+import { GameServer } from "./game-server.js";
 
 // ==================== INSTANCE CACHE ====================
 let chatInstance = null;
@@ -24,7 +24,7 @@ export default {
     }
 
     // ============================================================
-    // GAME SERVER - /game, /game/ws
+    // GAME SERVER - /game, /game/ws, /game/health
     // ============================================================
     if (pathname === "/game" || pathname === "/game/ws" || pathname === "/game/health") {
       if (!gameInstance) {
@@ -34,9 +34,9 @@ export default {
     }
 
     // ============================================================
-    // STATUS
+    // HEALTH CHECK
     // ============================================================
-    if (pathname === "/status") {
+    if (pathname === "/health") {
       return new Response(JSON.stringify({
         status: "ok",
         chat: chatInstance ? "active" : "inactive",
@@ -50,3 +50,5 @@ export default {
     return new Response("Server running", { status: 200 });
   }
 };
+
+export { ChatServer, GameServer };
