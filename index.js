@@ -1,11 +1,9 @@
-// ==================== INDEX.JS - PURE WORKER SIMPLE ====================
+// ==================== INDEX.JS - PURE WORKER WITH CACHE ====================
 import { ChatServer } from "./chat-server.js";
-import { GameServer } from "./game-server.js";
 
-// ========== SINGLETON ==========
 let chatServer = null;
-let gameServer = null;
 let initialized = false;
+const CACHE_NAME = 'chat_persist';
 
 export default {
   async fetch(request, env) {
@@ -13,60 +11,46 @@ export default {
       const url = new URL(request.url);
       const pathname = url.pathname;
       
-      // ========== INIT ONCE ==========
+      // ========== INIT ==========
       if (!initialized) {
-        // Chat Server
+        const cache = await caches.open(CACHE_NAME);
+        
         chatServer = new ChatServer({
           env: env,
-          state: {
-            storage: {
-              get: async (key) => null,
-              put: async (key, value) => {},
-              delete: async (key) => {},
-              setAlarm: async (ms) => {}
-            }
-          },
-          ctx: {
-            acceptWebSocket: (ws) => {
-              try { ws.accept(); } catch(e) {}
-            }
-          }
-        });
-        
-        // Game Server
-        gameServer = new GameServer({
-          env: env,
-          state: {
-            storage: {
-              get: async (key) => null,
-              put: async (key, value) => {},
-              delete: async (key) => {}
-            }
-          }
+          cache: cache
         });
         
         initialized = true;
+        
+        // SAVE STATE SETIAP 2 DETIK
+        setInterval(async () => {
+          if (chatServer && !chatServer.closing) {
+            try {
+              await chatServer.saveToCache();
+            } catch(e) {}
+          }
+        }, 2000);
       }
       
       // ========== ROUTING ==========
-      // Chat WebSocket
       if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
         return chatServer.fetch(request);
       }
       
-      // Game WebSocket
-      if (pathname === "/game/ws" || pathname === "/game") {
-        return gameServer.fetch(request);
-      }
-      
-      // Health check
       if (pathname === "/health") {
+        const rooms = {};
+        for (const [name, room] of chatServer.rooms) {
+          rooms[name] = {
+            seats: room.seats.size,
+            users: Array.from(room.users || [])
+          };
+        }
+        
         return new Response(JSON.stringify({
           status: "running",
-          chatConnections: chatServer?.wsSet?.size || 0,
-          gameConnections: gameServer?.wsMap?.size || 0,
-          rooms: chatServer?.rooms?.size || 0,
-          games: gameServer?.activeGames?.size || 0,
+          connections: chatServer.wsSet.size,
+          rooms: rooms,
+          totalUsers: chatServer.userSeat.size,
           timestamp: Date.now()
         }), {
           headers: { 'Content-Type': 'application/json' }
@@ -76,9 +60,7 @@ export default {
       return new Response("Server running", { status: 200 });
       
     } catch(e) {
-      return new Response(JSON.stringify({
-        error: e.message || "Internal Server Error"
-      }), { 
+      return new Response(JSON.stringify({ error: e.message }), { 
         status: 500,
         headers: { 'Content-Type': 'application/json' }
       });
