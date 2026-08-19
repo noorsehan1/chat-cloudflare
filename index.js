@@ -1,9 +1,9 @@
 // ==================== INDEX.JS ====================
 // ==================== NON-DURABLE OBJECT VERSION ====================
 
-// UBAH NAMA FILE SESUAI YANG ADA
-import { ChatServer } from "./chat-server.js";  // ← GANTI NAMA
-import { GameServer } from "./game-server.js";  // ← GANTI NAMA
+// IMPORT FILE YANG BENAR (sesuai dengan nama file di repository)
+import { ChatServer } from "./chat-server.js";   // ← BUKAN chat-server-fixed.js
+import { GameServer } from "./game-server.js";   // ← BUKAN game-server-fixed.js
 
 // ==================== INSTANCE GLOBAL ====================
 let chatServerInstance = null;
@@ -30,7 +30,6 @@ export default {
         // INISIALISASI CHAT SERVER JIKA BELUM
         if (!chatServerInstance._initialized) {
           chatServerInstance._initialized = true;
-          // PANGGIL ALARM PERTAMA KALI
           chatServerInstance._onAlarm().catch(() => {});
         }
         
@@ -87,7 +86,9 @@ export default {
 
       // JALANKAN TASK UNTUK GAME SERVER
       if (gameServerInstance) {
-        await gameServerInstance._onScheduled();
+        if (typeof gameServerInstance._onScheduled === 'function') {
+          await gameServerInstance._onScheduled();
+        }
       }
     } catch(e) {
       console.error("Scheduled error:", e);
