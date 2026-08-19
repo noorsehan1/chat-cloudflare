@@ -2,35 +2,6 @@ name = "chat-cloudflare"
 main = "index.js"
 compatibility_date = "2024-12-12"
 
-# ✅ PURE WORKER - NO DURABLE OBJECTS
-# ✅ Semua state pakai Cache API + KV
-
-# ==================== KV STORAGE ====================
 [[kv_namespaces]]
 binding = "QUESTIONS"
 id = "5008422bd04045db98e4059f2e863784"
-
-# ==================== VARIABLES ====================
-[vars]
-ENVIRONMENT = "production"
-VERSION = "4.0.0"
-
-# ==================== OBSERVABILITY ====================
-[observability]
-enabled = true
-head_sampling_rate = 0.5
-
-# ==================== LOGGING ====================
-[logging]
-enable_logs = true
-
-# ==================== PERFORMANCE ====================
-[limits]
-cpu_ms = 50
-subrequests = 50
-
-# ==================== SCRIPT ====================
-[scripts]
-"index.js" = { path = "./index.js" }
-"chat-server.js" = { path = "./chat-server.js" }
-"game-server.js" = { path = "./game-server.js" }
