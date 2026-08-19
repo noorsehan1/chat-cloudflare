@@ -264,6 +264,9 @@ const STATE = {
   _diceTimeLeftNotified: new Map(),
   _nextDiceNotified: new Map(),
   _diceJoinedNotified: new Map(),
+  
+  // Env
+  env: null,
 };
 
 // ==================== INIT DICE SYSTEM ====================
@@ -1030,8 +1033,8 @@ function fireAndForget(promise) {
   promise.catch(() => {});
 }
 
-// ==================== MAIN HANDLER ====================
-export default {
+// ==================== GAME SERVER OBJECT ====================
+export const GameServer = {
   async fetch(request, env) {
     STATE.env = env;
     
