@@ -2,8 +2,8 @@
 // ==================== NON-DURABLE OBJECT VERSION ====================
 
 // IMPORT FILE YANG BENAR (sesuai dengan nama file di repository)
-import { ChatServer } from "./chat-server.js";   // ← BUKAN chat-server-fixed.js
-import { GameServer } from "./game-server.js";   // ← BUKAN game-server-fixed.js
+import { ChatServer } from "./chat-server.js";
+import { GameServer } from "./game-server.js";
 
 // ==================== INSTANCE GLOBAL ====================
 let chatServerInstance = null;
@@ -27,7 +27,6 @@ export default {
           chatServerInstance = new ChatServer(env);
         }
         
-        // INISIALISASI CHAT SERVER JIKA BELUM
         if (!chatServerInstance._initialized) {
           chatServerInstance._initialized = true;
           chatServerInstance._onAlarm().catch(() => {});
@@ -79,12 +78,10 @@ export default {
     if (isShuttingDown) return;
 
     try {
-      // JALANKAN ALARM UNTUK CHAT SERVER
       if (chatServerInstance) {
         await chatServerInstance._onAlarm();
       }
 
-      // JALANKAN TASK UNTUK GAME SERVER
       if (gameServerInstance) {
         if (typeof gameServerInstance._onScheduled === 'function') {
           await gameServerInstance._onScheduled();
