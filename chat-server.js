@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// ==================== NON-DURABLE OBJECT ====================
+// ==================== NON-DURABLE OBJECT - FIXED ====================
 
 const C = {
   MAX_SEATS: 45,
@@ -139,7 +139,7 @@ class RoomManager {
   }
 }
 
-// ==================== CHAT SERVER ====================
+// ==================== CHAT SERVER (NON-DURABLE) ====================
 export class ChatServer {
   constructor(env) {
     this.env = env;
@@ -1350,91 +1350,84 @@ export class ChatServer {
   }
   
   // ==================== FETCH ====================
-// ==================== CHAT-SERVER.JS - FETCH METHOD ====================
-
-async fetch(req) {
-  if (this.closing || this.isDestroyed) {
-    return new Response("Shutting down", { status: 503 });
-  }
-  
-  try {
-    const upgrade = req.headers.get("Upgrade");
-    
-    // ============ HANDLE WEBSOCKET DI ROOT (/) ============
-    // ✅ SEKARANG BISA PAKAI URL TANPA /ws
-    if (upgrade === "websocket") {
-      // CEK KONEKSI MAX
-      if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
-        return new Response("Server full", { status: 503 });
-      }
-      
-      try {
-        const pair = new WebSocketPair();
-        const [client, server] = [pair[0], pair[1]];
-        
-        // SETUP SERVER
-        server.username = null;
-        server.room = null;
-        server.roomname = null;
-        server.idtarget = null;
-        server._closing = false;
-        server._wsId = Date.now() + "_" + Math.random().toString(36).substring(2, 8);
-        
-        // TAMBAHKAN KE SET
-        this.wsSet.add(server);
-        
-        // ============ EVENT LISTENERS ============
-        server.addEventListener("message", async (event) => {
-          try {
-            await this.handleMessage(server, event.data);
-          } catch(e) {
-            console.error("Message error:", e);
-          }
-        });
-        
-        server.addEventListener("close", () => {
-          console.log("WebSocket closed");
-          this.cleanup(server);
-        });
-        
-        server.addEventListener("error", (e) => {
-          console.error("WebSocket error:", e);
-          this.cleanup(server);
-        });
-        
-        // ============ RESPONSE ============
-        return new Response(null, { 
-          status: 101, 
-          webSocket: client,
-          headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Upgrade"
-          }
-        });
-        
-      } catch(e) {
-        console.error("WebSocket creation error:", e);
-        return new Response("WebSocket error: " + e.message, { status: 500 });
-      }
+  async fetch(req) {
+    if (this.closing || this.isDestroyed) {
+      return new Response("Shutting down", { status: 503 });
     }
     
-    // ============ NON-WEBSOCKET ============
-    return new Response("Chat Server", { 
-      status: 200,
-      headers: {
-        "Content-Type": "text/plain",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Upgrade"
+    try {
+      const upgrade = req.headers.get("Upgrade");
+      
+      // ============ HANDLE WEBSOCKET ============
+      if (upgrade === "websocket") {
+        if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
+          return new Response("Server full", { status: 503 });
+        }
+        
+        try {
+          const pair = new WebSocketPair();
+          const [client, server] = [pair[0], pair[1]];
+          
+          server.username = null;
+          server.room = null;
+          server.roomname = null;
+          server.idtarget = null;
+          server._closing = false;
+          server._wsId = Date.now() + "_" + Math.random().toString(36).substring(2, 8);
+          
+          this.wsSet.add(server);
+          
+          // ============ EVENT LISTENERS ============
+          server.addEventListener("message", async (event) => {
+            try {
+              await this.handleMessage(server, event.data);
+            } catch(e) {
+              console.error("Message error:", e);
+            }
+          });
+          
+          server.addEventListener("close", () => {
+            console.log("WebSocket closed");
+            this.cleanup(server);
+          });
+          
+          server.addEventListener("error", (e) => {
+            console.error("WebSocket error:", e);
+            this.cleanup(server);
+          });
+          
+          return new Response(null, { 
+            status: 101, 
+            webSocket: client,
+            headers: {
+              "Access-Control-Allow-Origin": "*",
+              "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+              "Access-Control-Allow-Headers": "Content-Type, Upgrade"
+            }
+          });
+          
+        } catch(e) {
+          console.error("WebSocket creation error:", e);
+          return new Response("WebSocket error: " + e.message, { status: 500 });
+        }
       }
-    });
-    
-  } catch(e) {
-    console.error("Fetch error:", e);
-    return new Response("Server error: " + e.message, { status: 500 });
+      
+      // ============ NON-WEBSOCKET ============
+      return new Response("Chat Server", { 
+        status: 200,
+        headers: {
+          "Content-Type": "text/plain",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Upgrade"
+        }
+      });
+      
+    } catch(e) {
+      console.error("Fetch error:", e);
+      return new Response("Server error: " + e.message, { status: 500 });
+    }
   }
-}
   
   async webSocketMessage(ws, msg) { 
     if (!ws || ws._closing || this._cleaningUp.has(ws) || this.closing || this.isDestroyed) return;
