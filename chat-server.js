@@ -1,14 +1,17 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 3.1.1 - SINGLE ALARM SLOT (NO SETINTERVAL)
+// VERSION: 3.2.0 - ALARM 15 MENIT (NO SETINTERVAL)
 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 5000,
-  ALARM_INTERVAL_MS: 10000,        // 10 DETIK (TICK)
-  CLEANUP_COUNTER_MAX: 60,          // 60 × 10 detik = 10 menit
-  NUMBER_UPDATE_TICK_COUNT: 540,   // 540 × 10 detik = 90 menit
+  
+  // ===== ALARM 15 MENIT =====
+  ALARM_INTERVAL_MS: 900000,        // 15 MENIT
+  CLEANUP_COUNTER_MAX: 1,            // 1 × 15 MENIT = 15 MENIT
+  NUMBER_UPDATE_TICK_COUNT: 6,       // 6 × 15 MENIT = 90 MENIT
   MAX_NUMBER: 6,
+  
   BATCH_SIZE: 20,
   LOCK_TIMEOUT: 10000,
   MAX_EVENT_QUEUE: 100,
@@ -174,7 +177,7 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
-    // ✅ SET 1 ALARM PERTAMA - 10 DETIK
+    // ✅ SET ALARM PERTAMA - 15 MENIT
     this._scheduleAlarm(C.ALARM_INTERVAL_MS);
     
     // ✅ TUNDA INISIALISASI 2 DETIK
@@ -199,28 +202,28 @@ export class ChatServer {
     this._initialized = true;
   }
 
-  // ========== ALARM - 1 SLOT UNTUK SEMUA ==========
+  // ========== ALARM - 15 MENIT SEKALI ==========
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
     try {
+      // ===== 1. TICK COUNTER =====
       this._tickCounter++;
       this._cleanupCounter++;
       
-      // ===== 1. CLEANUP DEAD CONNECTIONS (SETIAP TICK) =====
+      // ===== 2. CLEANUP DEAD CONNECTIONS =====
       this._cleanupDeadConnections();
-      this._cleanupMemory();
       this._processEventQueue();
       
-      // ===== 2. CLEANUP STALE LOCKS (SETIAP 60 TICK = 10 MENIT) =====
+      // ===== 3. CLEANUP MEMORY (SETIAP 15 MENIT) =====
       if (this._cleanupCounter >= C.CLEANUP_COUNTER_MAX) {
+        this._cleanupMemory();
         this._cleanupStaleLocks();
         this._cleanupEventQueue();
-        this._performCleanup();
         this._cleanupCounter = 0;
       }
       
-      // ===== 3. UPDATE NUMBER (SETIAP 540 TICK = 90 MENIT) =====
+      // ===== 4. UPDATE NUMBER (SETIAP 6 × 15 MENIT = 90 MENIT) =====
       if (this._tickCounter >= C.NUMBER_UPDATE_TICK_COUNT) {
         this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
         
@@ -243,23 +246,8 @@ export class ChatServer {
       
     } catch(e) {}
     
-    // ✅ SCHEDULE ALARM BERIKUTNYA (10 DETIK)
+    // ✅ SCHEDULE ALARM BERIKUTNYA (15 MENIT)
     this._scheduleAlarm(C.ALARM_INTERVAL_MS);
-  }
-
-  // ========== PERFORM CLEANUP ==========
-  _performCleanup() {
-    if (this._cleanupInProgress || this.closing || this.isDestroyed) return;
-    this._cleanupInProgress = true;
-    
-    try {
-      this._cleanupDeadConnections();
-      this._cleanupStaleLocks();
-      this._cleanupMemory();
-      this._cleanupEventQueue();
-    } catch(e) {} finally {
-      this._cleanupInProgress = false;
-    }
   }
 
   // ========== CLEANUP DEAD CONNECTIONS ==========
