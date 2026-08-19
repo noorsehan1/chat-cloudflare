@@ -1,6 +1,6 @@
 // ==================== CHAT SERVER - PURE WORKER ====================
 
-const C = {
+ const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 500,
   MAX_MESSAGE_SIZE: 5000,
