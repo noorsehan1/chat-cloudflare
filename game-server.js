@@ -384,7 +384,7 @@ class DiceGameSystem {
 }
 
 // ==================== GAME SERVER CLASS - PURE WORKER ====================
-export class GameServer extends CPUProtection {
+class GameServer extends CPUProtection {
   constructor(env) {
     try {
       super();
@@ -514,7 +514,6 @@ export class GameServer extends CPUProtection {
 
       this.diceGameSystem = new DiceGameSystem(this);
 
-      // ==================== MAIN INTERVAL ====================
       this._mainInterval = setInterval(() => {
         try {
           if (this.closing || this.isDestroyed) {
@@ -534,7 +533,6 @@ export class GameServer extends CPUProtection {
         } catch(e) {}
       }, 10000);
 
-      // ==================== INIT ====================
       this._initAsync();
 
       setTimeout(async () => {
@@ -564,8 +562,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== CACHE UNTUK dice_last_reset_week ====================
-
   async _updateCachedResetWeek(week) {
     this._cachedResetWeek = week;
     this._cachedResetWeekTimestamp = Date.now();
@@ -591,8 +587,6 @@ export class GameServer extends CPUProtection {
       return null;
     }
   }
-
-  // ==================== CACHE UNTUK lowcard_recording_status_* ====================
 
   async _getRecordingStatusFromKV(roomName) {
     try {
@@ -1914,7 +1908,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== SUBMIT DICE ANSWER WITH TIE BREAKER ====================
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) return;
@@ -1929,7 +1922,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // ============ TIE BREAKER MODE ============
       if (this._tieActive) {
         if (!this._tiePlayers.includes(username)) {
           return;
@@ -1980,7 +1972,6 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // ============ DICE NORMAL MODE ============
       if (this.diceAnswered.has(username)) return;
       
       const diceValue = this.currentDiceRoll?.value;
@@ -2011,8 +2002,6 @@ export class GameServer extends CPUProtection {
       
     } catch(e) {}
   }
-
-  // ==================== TIE BREAKER METHODS ====================
 
   async _startTieBreaker(room, players) {
     if (!players || players.length < 2) return;
@@ -2176,7 +2165,6 @@ export class GameServer extends CPUProtection {
       return;
     }
     
-    // ============ CASE 1: HANYA 1 PEMENANG ============
     if (highestPlayers.length === 1) {
       const winner = highestPlayers[0];
       
@@ -2199,7 +2187,6 @@ export class GameServer extends CPUProtection {
       return;
     }
     
-    // ============ CASE 2: MASIH TIE -> LANGSUNG ROUND BERIKUTNYA ============
     if (highestPlayers.length > 1) {
       this._tiePlayers = highestPlayers;
       this._tieAnswers = new Map();
@@ -2377,8 +2364,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== CONTINUE WITH REMAINING METHODS ====================
-  
   async startDiceWithDelay(delayMs) {
     try {
       if (this._diceStartTimeout) return;
@@ -2715,8 +2700,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== LOW CARD GAME METHODS ====================
-
   _stopDiceTimerNotifications() {
     try {
       if (this._diceTimerTimeout) {
@@ -2742,8 +2725,6 @@ export class GameServer extends CPUProtection {
       };
     } catch(e) {}
   }
-
-  // ==================== WS HELPER METHODS ====================
 
   _getWsId(ws) { return ws?._wsId || null; }
 
@@ -3108,7 +3089,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== BROADCAST WITH CPU YIELD ====================
   async _broadcastToRoom(room, message) {
     try {
       if (this.closing || this.isDestroyed || !room || !message) return;
@@ -3146,8 +3126,6 @@ export class GameServer extends CPUProtection {
       return true;
     } catch(e) { return false; }
   }
-
-  // ==================== LOW CARD GAME CORE ====================
 
   _isGameActuallyRunning(game) { 
     try { 
@@ -3641,7 +3619,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== EVALUATE ROUND WITH CPU YIELD ====================
   async _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
@@ -3845,8 +3822,6 @@ export class GameServer extends CPUProtection {
       
     } catch(e) {}
   }
-
-  // ==================== GAME START METHODS ====================
 
   async startGame(ws, bet, username) {
     try {
@@ -4207,8 +4182,6 @@ export class GameServer extends CPUProtection {
       return arr;
     } catch(e) { return array || []; }
   }
-
-  // ==================== EVENT HANDLING ====================
 
   async handleEvent(ws, data) {
     try {
@@ -4625,8 +4598,6 @@ export class GameServer extends CPUProtection {
       this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
     }
   }
-
-  // ==================== STALE GAME CLEANUP ====================
 
   _checkStuckGames() {
     try {
@@ -5233,4 +5204,5 @@ function getGameServer(env) {
   return gameServerInstance;
 }
 
+// ==================== EXPORT ====================
 export { GameServer, getGameServer };
