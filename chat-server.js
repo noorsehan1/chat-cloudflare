@@ -11,15 +11,126 @@ const C = {
   MAX_NUMBER: 6,
   BATCH_SIZE: 20,
   LOCK_TIMEOUT: 10000,
-  MAX_EVENT_QUEUE: 200,              // DITINGKATKAN
-  MAX_PROCESS_TIME_MS: 100,          // DIPERKECIL
-  MAX_PROCESS_BATCH: 10,             // DITAMBAH
+  MAX_EVENT_QUEUE: 200,
+  MAX_PROCESS_TIME_MS: 100,
+  MAX_PROCESS_BATCH: 10,
 };
 
-// ... (ROOMS dan ROOMS_SET sama)
+const ROOMS = [
+  "LowCard", "Quiz", "Gacor", "General", "LOVE BIRDS", "Birthday Party",
+  "Sweet Memories", "Lounge Talk", "Noxxeliverothcifsa", "BESTIES",
+  "Happy Vibes", "The Chatter Room"
+];
 
-// ==================== ROOM MANAGER (SAMA) ====================
-// ... (class RoomManager sama persis)
+const ROOMS_SET = new Set(ROOMS);
+
+// ==================== ROOM MANAGER ====================
+class RoomManager {
+  constructor(name) {
+    this.name = name;
+    this.seats = new Map();
+    this.points = new Map();
+    this.muted = false;
+    this.number = 1;
+  }
+
+  getAvailableSeat() {
+    for (let seat = 1; seat <= C.MAX_SEATS; seat++) {
+      if (!this.seats.has(seat)) return seat;
+    }
+    return null;
+  }
+
+  addSeat(userId, noimageUrl, color, itembawah, itematas, vip, viptanda) {
+    if (!userId) return null;
+    
+    for (const [seat, data] of this.seats) {
+      if (data && data.namauser === userId) return seat;
+    }
+    
+    const seat = this.getAvailableSeat();
+    if (!seat) return null;
+    
+    this.seats.set(seat, {
+      noimageUrl: noimageUrl || "",
+      namauser: userId,
+      color: color || "",
+      itembawah: itembawah || 0,
+      itematas: itematas || 0,
+      vip: vip || 0,
+      viptanda: viptanda || 0,
+    });
+    return seat;
+  }
+
+  updateSeat(seat, data) {
+    if (!this.seats.has(seat) || !data) return false;
+    
+    this.seats.set(seat, {
+      noimageUrl: data.noimageUrl || "",
+      namauser: data.namauser || "",
+      color: data.color || "",
+      itembawah: data.itembawah || 0,
+      itematas: data.itematas || 0,
+      vip: data.vip || 0,
+      viptanda: data.viptanda || 0
+    });
+    return true;
+  }
+
+  removeSeat(seat) {
+    this.points.delete(seat);
+    return this.seats.delete(seat);
+  }
+  
+  getSeat(seat) { 
+    const data = this.seats.get(seat);
+    return data ? { ...data } : null;
+  }
+  
+  getCount() { return this.seats.size; }
+  
+  getAllSeats() {
+    const result = {};
+    for (const [seat, data] of this.seats) {
+      if (data) result[seat] = { ...data };
+    }
+    return result;
+  }
+
+  setMuted(val) { 
+    this.muted = !!val; 
+    return this.muted; 
+  }
+  
+  getMuted() { return this.muted; }
+  
+  setNumber(n) { 
+    this.number = n || 1; 
+  }
+  getNumber() { return this.number; }
+
+  updatePoint(seat, x, y, fast) {
+    if (!this.seats.has(seat)) return false;
+    this.points.set(seat, { x: x || 0, y: y || 0, fast: !!fast });
+    return true;
+  }
+
+  getPoint(seat) { 
+    const point = this.points.get(seat);
+    return point ? { ...point } : null;
+  }
+  
+  getAllPoints() {
+    const result = [];
+    for (const [seat, point] of this.points) {
+      if (this.seats.has(seat) && point) {
+        result.push({ seat, x: point.x, y: point.y, fast: point.fast ? 1 : 0 });
+      }
+    }
+    return result;
+  }
+}
 
 // ==================== CHAT SERVER ====================
 export class ChatServer {
@@ -50,7 +161,7 @@ export class ChatServer {
     // ========== EVENT QUEUE - FIX ==========
     this._eventQueue = [];
     this._isProcessingQueue = false;
-    this._queueScheduled = false;      // Cegah multiple schedule
+    this._queueScheduled = false;
     
     // ========== LOCKS ==========
     this._joinLocks = new Map();
@@ -67,10 +178,10 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
-    // ✅ SET ALARM PERTAMA - 15 MENIT
+    // SET ALARM PERTAMA - 15 MENIT
     this._scheduleAlarm(C.ALARM_INTERVAL_MS);
     
-    // ✅ TUNDA INISIALISASI 2 DETIK
+    // TUNDA INISIALISASI 2 DETIK
     setTimeout(() => {
       if (!this.closing && !this.isDestroyed) {
         this._initLazy();
@@ -219,18 +330,12 @@ export class ChatServer {
 
   // ========== SCHEDULE QUEUE PROCESSING ==========
   _scheduleQueueProcessing() {
-    // Jangan schedule jika queue kosong
     if (this._eventQueue.length === 0) return;
-    
-    // Jangan schedule jika sudah diproses
     if (this._isProcessingQueue) return;
-    
-    // Jangan double schedule
     if (this._queueScheduled) return;
     
     this._queueScheduled = true;
     
-    // Gunakan setImmediate untuk non-blocking
     setImmediate(() => {
       this._queueScheduled = false;
       this._processEventQueue();
@@ -239,7 +344,6 @@ export class ChatServer {
 
   // ========== PROCESS EVENT QUEUE - FIX ==========
   _processEventQueue() {
-    // Cek kondisi
     if (this._isProcessingQueue) return;
     if (this._eventQueue.length === 0) return;
     if (this.closing || this.isDestroyed) return;
@@ -250,9 +354,7 @@ export class ChatServer {
       const startTime = Date.now();
       let processed = 0;
       
-      // Proses dalam batch
       while (this._eventQueue.length > 0 && processed < C.MAX_PROCESS_BATCH) {
-        // Timeout check
         if (Date.now() - startTime > C.MAX_PROCESS_TIME_MS) {
           break;
         }
@@ -264,7 +366,6 @@ export class ChatServer {
           this._handleEventInternal(item.ws, item.data);
           processed++;
         } catch(e) {
-          // Error handling - lanjutkan
           processed++;
         }
       }
@@ -274,9 +375,7 @@ export class ChatServer {
     } finally {
       this._isProcessingQueue = false;
       
-      // Jika masih ada queue dan belum closing, proses lagi
       if (this._eventQueue.length > 0 && !this.closing && !this.isDestroyed) {
-        // Schedule lagi dengan delay minimal
         this._scheduleQueueProcessing();
       }
     }
@@ -517,7 +616,6 @@ export class ChatServer {
       return;
     }
     
-    // Cegah processing ganda
     if (this._processingMessages.has(ws)) return;
     this._processingMessages.add(ws);
     
@@ -535,20 +633,15 @@ export class ChatServer {
       
       const [evt, ...args] = data;
       
-      // Validasi room
       if (evt === "chat" || evt === "updatePoint" || evt === "gift" || evt === "rollangak") {
         const room = args[0];
         if (room && !ROOMS_SET.has(room)) return;
       }
       
-      // QUEUE EVENT
       if (this._eventQueue.length < C.MAX_EVENT_QUEUE) {
         this._eventQueue.push({ ws, data: [evt, ...args] });
-        
-        // Schedule queue processing (non-blocking)
         this._scheduleQueueProcessing();
       } else {
-        // Queue penuh - respon cepat
         this.safeSend(ws, ["queueFull", "Server busy"]);
       }
       
@@ -1234,7 +1327,6 @@ export class ChatServer {
       
       this.updateRoomCount(roomName);
       
-      // ✅ FIX: Gunakan setTimeout dengan cleanup
       const timeoutId = setTimeout(() => {
         this._pendingTimeouts.delete(timeoutId);
         try {
