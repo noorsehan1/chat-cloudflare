@@ -1,7 +1,8 @@
 // ==================== CHAT-SERVER.JS ====================
 // VERSION: 8.0.0 - PURE WORKER (NO DO, NO KV)
+// AUTO RESET MEMORY ON DEPLOY
 
- const C = {
+const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 300,
   MAX_MESSAGE_SIZE: 5000,
@@ -132,7 +133,11 @@ class RoomManager {
 
 // ==================== CHAT SERVER CLASS ====================
 export class ChatServer {
-  constructor() {
+  constructor(deployVersion) {
+    // ========== DEPLOY VERSION ==========
+    this._deployVersion = deployVersion || Date.now();
+    this._lastDeployVersion = null;
+    
     // ========== STATE ==========
     this.rooms = new Map();
     this.userSeat = new Map();
@@ -162,8 +167,65 @@ export class ChatServer {
     }
   }
 
+  // ==================== CHECK DEPLOY VERSION ====================
+  _checkDeployVersion() {
+    if (this._lastDeployVersion !== this._deployVersion) {
+      this._lastDeployVersion = this._deployVersion;
+      this._resetState();
+      return true;
+    }
+    return false;
+  }
+
+  // ==================== RESET STATE ====================
+  _resetState() {
+    // Hentikan semua interval
+    for (const interval of this._intervals) {
+      clearInterval(interval);
+    }
+    this._intervals = [];
+    this._started = false;
+    
+    // Tutup semua WS
+    for (const ws of this.wsSet) {
+      try {
+        if (ws.readyState === 1) {
+          ws.close(1000, "Server reset");
+        }
+      } catch(e) {}
+    }
+    
+    // Clear semua state
+    this.wsSet.clear();
+    this.rooms.clear();
+    this.userSeat.clear();
+    this.userRoom.clear();
+    this.userConnections.clear();
+    this.roomClients.clear();
+    this.wsActiveMulti.clear();
+    this.joinLocks.clear();
+    this.kursiLocks.clear();
+    this._eventQueue = [];
+    this._processingMessages.clear();
+    this._cleaningUp.clear();
+    this.wsIdCounter = 0;
+    this.currentNumber = 1;
+    this.tikCounter = 0;
+    this._startTime = Date.now();
+    this._stats.messages = 0;
+    
+    // Re-init rooms
+    for (const room of ROOMS) {
+      this.rooms.set(room, new RoomManager(room));
+      this.roomClients.set(room, new Set());
+    }
+  }
+
   // ==================== START BACKGROUND TASKS ====================
   start() {
+    // Cek deploy version
+    this._checkDeployVersion();
+    
     if (this._started) return;
     this._started = true;
     
@@ -233,6 +295,9 @@ export class ChatServer {
 
   // ==================== MAIN FETCH ====================
   async fetch(request) {
+    // Cek deploy version setiap request
+    this._checkDeployVersion();
+    
     // START INTERVAL SAAT PERTAMA KALI DIPANGGIL
     this.start();
     
@@ -253,6 +318,7 @@ export class ChatServer {
     if (pathname === "/health") {
       return new Response(JSON.stringify({
         status: "ok",
+        deployVersion: this._deployVersion,
         connections: this.wsSet.size,
         rooms: this.rooms.size,
         users: this.userSeat.size,
@@ -1261,6 +1327,7 @@ export class ChatServer {
       clearInterval(interval);
     }
     this._intervals = [];
+    this._started = false;
     
     for (const ws of this.wsSet) {
       try {
@@ -1280,5 +1347,7 @@ export class ChatServer {
     this.joinLocks.clear();
     this.kursiLocks.clear();
     this._eventQueue = [];
+    this._processingMessages.clear();
+    this._cleaningUp.clear();
   }
 }
