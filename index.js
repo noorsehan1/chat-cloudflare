@@ -1,6 +1,4 @@
-// ==================== INDEX.JS - PAKAI D1 ====================
-// VERSION: 5.0.0
-
+// ==================== INDEX.JS ====================
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
 
@@ -17,33 +15,24 @@ export default {
       const url = new URL(request.url);
       const pathname = url.pathname;
       
+      console.log(`[Index] Request: ${pathname}`);
+      
       if (!globalState.initialized) {
         if (!globalState.initPromise) {
           globalState.initPromise = (async () => {
             try {
-              // CHAT SERVER
-              globalState.chatServer = new ChatServer(env);
+              console.log('[Index] Initializing servers...');
+              console.log('[Index] DB available:', !!env.DB);
               
-              // GAME SERVER
+              globalState.chatServer = new ChatServer(env);
               globalState.gameServer = new GameServer(env);
               
               globalState.initialized = true;
-              
-              // Load state dari D1
-              await globalState.chatServer.loadState();
-              await globalState.gameServer.loadState();
-              
-              // Auto-save setiap 5 detik
-              setInterval(async () => {
-                try {
-                  await globalState.chatServer.saveState();
-                  await globalState.gameServer.saveState();
-                } catch(e) {}
-              }, 5000);
+              console.log('[Index] Servers initialized');
               
               return true;
             } catch(e) {
-              console.error('Init error:', e);
+              console.error('[Index] Init error:', e);
               globalState.initialized = false;
               globalState.initPromise = null;
               throw e;
@@ -53,12 +42,12 @@ export default {
         await globalState.initPromise;
       }
       
-      // ========== CHAT SERVER ==========
+      // CHAT SERVER
       if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
         return globalState.chatServer.fetch(request);
       }
       
-      // ========== GAME SERVER ==========
+      // GAME SERVER
       if (pathname === "/game/ws") {
         return globalState.gameServer.handleWebSocket(request);
       }
@@ -75,20 +64,45 @@ export default {
           chatConnections: globalState.chatServer?.wsSet?.size || 0,
           gameConnections: globalState.gameServer?.wsMap?.size || 0,
           games: globalState.gameServer?.activeGames?.size || 0,
-          timestamp: Date.now(),
-          db: "chat-db"
+          timestamp: Date.now()
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
       }
       
       if (pathname === "/status") {
+        // Cek DB connection
+        let dbStatus = "unknown";
+        try {
+          if (env.DB) {
+            const result = await env.DB.prepare("SELECT 1").first();
+            dbStatus = result ? "connected" : "no result";
+          } else {
+            dbStatus = "no DB binding";
+          }
+        } catch(e) {
+          dbStatus = "error: " + e.message;
+        }
+        
+        // Hitung total seats
+        let totalSeats = 0;
+        const roomSeats = {};
+        if (globalState.chatServer) {
+          for (const [room, data] of globalState.chatServer.rooms) {
+            roomSeats[room] = data.seats.size;
+            totalSeats += data.seats.size;
+          }
+        }
+        
         return new Response(JSON.stringify({
           status: "ok",
           initialized: globalState.initialized,
+          dbStatus: dbStatus,
           chatConnections: globalState.chatServer?.wsSet?.size || 0,
           gameConnections: globalState.gameServer?.wsMap?.size || 0,
           games: globalState.gameServer?.activeGames?.size || 0,
+          totalSeats: totalSeats,
+          roomSeats: roomSeats,
           timestamp: Date.now()
         }), {
           headers: { 'Content-Type': 'application/json' }
@@ -104,10 +118,7 @@ export default {
         message: e.message || "Unknown error"
       }), { 
         status: 500,
-        headers: { 
-          'Retry-After': '30',
-          'Content-Type': 'application/json'
-        }
+        headers: { 'Content-Type': 'application/json' }
       });
     }
   }
