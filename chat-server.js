@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 3.4.0 - IDLE EVENT LOOP (NO PING)
+// VERSION: 3.4.1 - FIXED CONNECTION (NO PING)
 
 const C = {
   MAX_SEATS: 45,
@@ -158,7 +158,7 @@ export class ChatServer {
     this._pendingTimeouts = new Set();
     this._cleanupInProgress = false;
     
-    // ========== EVENT QUEUE - FIX ==========
+    // ========== EVENT QUEUE ==========
     this._eventQueue = [];
     this._isProcessingQueue = false;
     this._queueScheduled = false;
@@ -211,13 +211,9 @@ export class ChatServer {
       this._tickCounter++;
       this._cleanupCounter++;
       
-      // Cleanup dead connections
       this._cleanupDeadConnections();
-      
-      // Process queue (jika ada)
       this._scheduleQueueProcessing();
       
-      // Cleanup memory (setiap 15 menit)
       if (this._cleanupCounter >= C.CLEANUP_COUNTER_MAX) {
         this._cleanupMemory();
         this._cleanupStaleLocks();
@@ -225,7 +221,6 @@ export class ChatServer {
         this._cleanupCounter = 0;
       }
       
-      // Update number (setiap 90 menit)
       if (this._tickCounter >= C.NUMBER_UPDATE_TICK_COUNT) {
         this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
         
@@ -342,7 +337,7 @@ export class ChatServer {
     });
   }
 
-  // ========== PROCESS EVENT QUEUE - FIX ==========
+  // ========== PROCESS EVENT QUEUE ==========
   _processEventQueue() {
     if (this._isProcessingQueue) return;
     if (this._eventQueue.length === 0) return;
@@ -604,7 +599,7 @@ export class ChatServer {
     }
   }
 
-  // ========== HANDLE MESSAGE - FIX ==========
+  // ========== HANDLE MESSAGE ==========
   async handleMessage(ws, raw) {
     if (!ws) return;
     
@@ -1342,36 +1337,53 @@ export class ChatServer {
     return true;
   }
 
-  // ========== FETCH ==========
+  // ========== FETCH - FIXED ==========
   async fetch(req) {
+    // Cek shutdown
     if (this.closing || this.isDestroyed) {
       return new Response("Shutting down", { status: 503 });
     }
     
     try {
+      const url = new URL(req.url);
       const upgrade = req.headers.get("Upgrade");
+      
+      // ===== NON-WEBSOCKET =====
       if (upgrade !== "websocket") {
-        return new Response("Chat Server", { 
+        // Response untuk health check
+        return new Response(JSON.stringify({
+          status: "online",
+          connections: this.wsSet.size,
+          rooms: ROOMS.length,
+          version: "3.4.1"
+        }), {
           status: 200,
           headers: {
+            "Content-Type": "application/json",
             "Cache-Control": "no-cache"
           }
         });
       }
       
+      // ===== WEBSOCKET =====
+      // Cek kapasitas
       if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
         return new Response("Server full", { status: 503 });
       }
       
+      // Buat WebSocket pair
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       
-      try { 
+      // ACCEPT WebSocket - HARUS dipanggil
+      try {
         this.ctx.acceptWebSocket(server);
-      } catch(e) { 
-        return new Response("WebSocket acceptance failed", { status: 500 }); 
+      } catch(e) {
+        console.error('Accept WebSocket failed:', e);
+        return new Response("WebSocket acceptance failed", { status: 500 });
       }
       
+      // Setup server WebSocket
       server.username = null;
       server.room = null;
       server.roomname = null;
@@ -1379,14 +1391,34 @@ export class ChatServer {
       server._closing = false;
       server._wsId = Date.now() + Math.random();
       
-      if (!this.wsSet.has(server)) {
-        this.wsSet.add(server);
+      // Tambahkan ke daftar koneksi
+      this.wsSet.add(server);
+      
+      // Kirim pesan selamat datang
+      try {
+        server.send(JSON.stringify(["connected", "Server ready", Date.now()]));
+      } catch(e) {
+        // Ignore
       }
       
-      return new Response(null, { status: 101, webSocket: client });
+      // Return response dengan WebSocket
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+        headers: {
+          "Upgrade": "websocket",
+          "Connection": "Upgrade"
+        }
+      });
       
     } catch(e) {
-      return new Response("Internal Server Error", { status: 500 });
+      console.error('Fetch error:', e);
+      return new Response("Internal Server Error", { 
+        status: 500,
+        headers: {
+          "Content-Type": "text/plain"
+        }
+      });
     }
   }
 
