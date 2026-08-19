@@ -10,31 +10,20 @@ export default {
     const url = new URL(request.url);
     const pathname = url.pathname;
 
-    // CHAT SERVER
-    if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
+    // ✅ CHAT SERVER
+    if (pathname === "/ws" || pathname === "/chat" || pathname === "/" || pathname === "/test" || pathname === "/status") {
       if (!chatInstance) {
         chatInstance = new ChatServer(env);
       }
       return chatInstance.fetch(request);
     }
 
-    // GAME SERVER
+    // ✅ GAME SERVER
     if (pathname === "/game" || pathname === "/game/ws" || pathname === "/game/health") {
       if (!gameInstance) {
         gameInstance = new GameServer(env);
       }
       return gameInstance.fetch(request);
-    }
-
-    if (pathname === "/health") {
-      return new Response(JSON.stringify({
-        status: "ok",
-        chat: chatInstance ? "active" : "inactive",
-        game: gameInstance ? "active" : "inactive",
-        timestamp: Date.now()
-      }), {
-        headers: { 'Content-Type': 'application/json' }
-      });
     }
 
     return new Response("Server running", { status: 200 });
