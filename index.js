@@ -1,19 +1,28 @@
 // ==================== INDEX.JS ====================
-// VERSION: 6.0.0 - GABUNGAN CHAT + GAME (1 INSTANCE)
-// 🔥 SEMUA USER DI 1 TEMPAT → REALTIME!
+// VERSION: 5.0.0 - OPTIMIZED FOR JAVA CLIENT
 
+import { ChatServer } from './chat-server.js';
 import { GameServer } from './game-server.js';
 
 // ============================================================
 // ✅ INSTANCE (SINGLETON) - 1 INSTANCE SAJA!
 // ============================================================
-let serverInstance = null;
+let chatServerInstance = null;
+let gameServerInstance = null;
 
-function getServer(env) {
-  if (!serverInstance) {
-    serverInstance = new GameServer(env);
+function getChatServer() {
+  if (!chatServerInstance) {
+    chatServerInstance = new ChatServer();
+    chatServerInstance.start();
   }
-  return serverInstance;
+  return chatServerInstance;
+}
+
+function getGameServer(env) {
+  if (!gameServerInstance) {
+    gameServerInstance = new GameServer(env);
+  }
+  return gameServerInstance;
 }
 
 // ============================================================
@@ -29,13 +38,14 @@ export default {
       // ✅ ROOT / HEALTH
       // ============================================================
       if (pathname === "/" || pathname === "/health") {
-        const server = getServer(env);
+        const chat = getChatServer();
+        const game = getGameServer(env);
 
         return new Response(JSON.stringify({
           status: "online",
           timestamp: Date.now(),
           service: "chat-game-server",
-          version: "6.0.0",
+          version: "5.0.0",
           type: "websocket",
           instance: "single",
           endpoints: {
@@ -43,13 +53,15 @@ export default {
             game: "/game/ws",
             health: "/health"
           },
-          connections: server?.wsMap?.size || 0,
-          games: server?.activeGames?.size || 0,
-          rooms: server?.wsClients?.size || 0,
-          chatUsers: server?.roomUsers?.size || 0,
-          diceActive: server?.currentDiceRoll ? true : false,
-          dicePoints: server?.dicePoints?.size || 0,
-          uptime: server ? Math.floor((Date.now() - server._startTime) / 1000) : 0
+          chat: {
+            connections: chat?.wsSet?.size || 0,
+            rooms: chat?.rooms?.size || 0,
+            users: chat?.roomUsers?.size || 0
+          },
+          game: {
+            connections: game?.wsMap?.size || 0,
+            games: game?.activeGames?.size || 0
+          }
         }), {
           headers: {
             "Content-Type": "application/json",
@@ -59,19 +71,19 @@ export default {
       }
 
       // ============================================================
-      // ✅ CHAT WEBSOCKET (Untuk App Inventor - Websocketvalf)
+      // ✅ CHAT WEBSOCKET
       // ============================================================
-      if (pathname === "/ws" || pathname === "/chat" || pathname === "/chat/ws") {
-        const server = getServer(env);
-        return server.handleChatWebSocket(request);
+      if (pathname === "/chat/ws" || pathname === "/ws" || pathname === "/chat") {
+        const chat = getChatServer();
+        return await chat.fetch(request);
       }
 
       // ============================================================
-      // ✅ GAME WEBSOCKET (Untuk Lowcard + Dice)
+      // ✅ GAME WEBSOCKET
       // ============================================================
       if (pathname === "/game/ws") {
-        const server = getServer(env);
-        return server.handleGameWebSocket(request);
+        const game = getGameServer(env);
+        return await game.fetch(request);
       }
 
       // ============================================================
@@ -104,4 +116,4 @@ export default {
   }
 };
 
-export { GameServer };
+export { ChatServer, GameServer };
