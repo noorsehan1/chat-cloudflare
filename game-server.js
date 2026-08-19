@@ -1,6 +1,7 @@
-// ==================== GAME-SERVER.JS - PURE WORKER ====================
+// ==================== GAME-SERVER-FIXED.js - FULL VERSION ====================
+// ==================== NON-DURABLE OBJECT ====================
 
- const CONSTANTS = {
+const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
   REGISTRATION_TIME_MS: 20000,
   DRAW_TIME_MS: 20000,
@@ -383,11 +384,13 @@ class DiceGameSystem {
   }
 }
 
-// ==================== GAME SERVER CLASS - PURE WORKER ====================
-class GameServer extends CPUProtection {
+// ==================== GAME SERVER CLASS (NON-DURABLE) ====================
+export class GameServer extends CPUProtection {
   constructor(env) {
     try {
       super();
+      // ============ HAPUS state ============
+      // this.state = state; // <-- HAPUS
       this.env = env;
       this.closing = false;
       this.isDestroyed = false;
@@ -514,6 +517,7 @@ class GameServer extends CPUProtection {
 
       this.diceGameSystem = new DiceGameSystem(this);
 
+      // ==================== 1 INTERVAL UNTUK SEMUA ====================
       this._mainInterval = setInterval(() => {
         try {
           if (this.closing || this.isDestroyed) {
@@ -530,26 +534,27 @@ class GameServer extends CPUProtection {
           this._cleanupDeadConnections();
           this._diceTimerTask();
           
-        } catch(e) {}
+        } catch(e) {
+          // DIAM SAJA
+        }
       }, 10000);
 
-      this._initAsync();
-
-      setTimeout(async () => {
-        try {
-          if (!this.closing && !this.isDestroyed) {
-            await this._initResetWeek();
-          }
-        } catch(e) {}
+      // ==================== TETAP JALANKAN INIT ====================
+      setTimeout(() => {
+        this._initAsync().catch(() => {});
       }, 1000);
 
-      setTimeout(async () => {
-        try {
-          if (!this.closing && !this.isDestroyed) {
-            await this.diceGameSystem.loadScores();
-          }
-        } catch(e) {}
-      }, 5000);
+      setTimeout(() => {
+        if (!this.closing && !this.isDestroyed) {
+          this._initResetWeek().catch(() => {});
+        }
+      }, 2000);
+
+      setTimeout(() => {
+        if (!this.closing && !this.isDestroyed) {
+          this.diceGameSystem.loadScores().catch(() => {});
+        }
+      }, 3000);
 
       setTimeout(() => {
         if (!this.closing && !this.isDestroyed && !this._isShowingDice) {
@@ -561,6 +566,8 @@ class GameServer extends CPUProtection {
 
     } catch(e) {}
   }
+
+  // ==================== CACHE UNTUK dice_last_reset_week ====================
 
   async _updateCachedResetWeek(week) {
     this._cachedResetWeek = week;
@@ -587,6 +594,8 @@ class GameServer extends CPUProtection {
       return null;
     }
   }
+
+  // ==================== CACHE UNTUK lowcard_recording_status_* ====================
 
   async _getRecordingStatusFromKV(roomName) {
     try {
@@ -852,7 +861,6 @@ class GameServer extends CPUProtection {
           this._diceAutoTask().catch(() => {});
         }
       }, 1000);
-      
     } catch(e) {}
   }
 
@@ -904,13 +912,12 @@ class GameServer extends CPUProtection {
       }
       const hours = Math.floor(minDiff / 60);
       const minutes = Math.floor(minDiff % 60);
-      const isRunning = this._isDiceTime();
       return { 
         hours, 
         minutes, 
         totalMs: minDiff * 60 * 1000,
         text: `${hours}h ${minutes}m`,
-        isRunning: isRunning
+        isRunning: this._isDiceTime()
       };
     } catch(e) {
       return { hours: 0, minutes: 0, totalMs: 0, text: '0h 0m', isRunning: false };
@@ -1908,6 +1915,7 @@ class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== SUBMIT DICE ANSWER WITH TIE BREAKER ====================
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) return;
@@ -1922,6 +1930,7 @@ class GameServer extends CPUProtection {
         return;
       }
       
+      // ============ TIE BREAKER MODE ============
       if (this._tieActive) {
         if (!this._tiePlayers.includes(username)) {
           return;
@@ -1972,6 +1981,7 @@ class GameServer extends CPUProtection {
         return;
       }
       
+      // ============ DICE NORMAL MODE ============
       if (this.diceAnswered.has(username)) return;
       
       const diceValue = this.currentDiceRoll?.value;
@@ -2002,6 +2012,8 @@ class GameServer extends CPUProtection {
       
     } catch(e) {}
   }
+
+  // ==================== TIE BREAKER METHODS ====================
 
   async _startTieBreaker(room, players) {
     if (!players || players.length < 2) return;
@@ -2165,6 +2177,7 @@ class GameServer extends CPUProtection {
       return;
     }
     
+    // ============ CASE 1: HANYA 1 PEMENANG ============
     if (highestPlayers.length === 1) {
       const winner = highestPlayers[0];
       
@@ -2187,6 +2200,7 @@ class GameServer extends CPUProtection {
       return;
     }
     
+    // ============ CASE 2: MASIH TIE -> LANGSUNG ROUND BERIKUTNYA ============
     if (highestPlayers.length > 1) {
       this._tiePlayers = highestPlayers;
       this._tieAnswers = new Map();
@@ -2364,6 +2378,8 @@ class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== CONTINUE WITH REMAINING METHODS ====================
+  
   async startDiceWithDelay(delayMs) {
     try {
       if (this._diceStartTimeout) return;
@@ -2700,6 +2716,8 @@ class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== LOW CARD GAME METHODS ====================
+
   _stopDiceTimerNotifications() {
     try {
       if (this._diceTimerTimeout) {
@@ -2725,6 +2743,8 @@ class GameServer extends CPUProtection {
       };
     } catch(e) {}
   }
+
+  // ==================== WS HELPER METHODS ====================
 
   _getWsId(ws) { return ws?._wsId || null; }
 
@@ -3089,6 +3109,7 @@ class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== BROADCAST WITH CPU YIELD ====================
   async _broadcastToRoom(room, message) {
     try {
       if (this.closing || this.isDestroyed || !room || !message) return;
@@ -3126,6 +3147,8 @@ class GameServer extends CPUProtection {
       return true;
     } catch(e) { return false; }
   }
+
+  // ==================== LOW CARD GAME CORE ====================
 
   _isGameActuallyRunning(game) { 
     try { 
@@ -3619,6 +3642,7 @@ class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== EVALUATE ROUND ====================
   async _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
@@ -3822,6 +3846,8 @@ class GameServer extends CPUProtection {
       
     } catch(e) {}
   }
+
+  // ==================== GAME START METHODS ====================
 
   async startGame(ws, bet, username) {
     try {
@@ -4182,6 +4208,8 @@ class GameServer extends CPUProtection {
       return arr;
     } catch(e) { return array || []; }
   }
+
+  // ==================== EVENT HANDLING ====================
 
   async handleEvent(ws, data) {
     try {
@@ -4599,6 +4627,8 @@ class GameServer extends CPUProtection {
     }
   }
 
+  // ==================== STALE GAME CLEANUP ====================
+
   _checkStuckGames() {
     try {
       const now = Date.now();
@@ -4981,6 +5011,7 @@ class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
+  // ==================== FETCH METHOD (NON-DURABLE) ====================
   async fetch(req) {
     try {
       if (this.closing || this.isDestroyed) {
@@ -5048,6 +5079,9 @@ class GameServer extends CPUProtection {
           server._cf = req.cf || {};
           server._country = req.cf?.country || 'US';
           server._language = 'en';
+          
+          // ============ HAPUS state.acceptWebSocket ============
+          // Tidak perlu acceptWebSocket untuk non-durable
           
           server.addEventListener("message", async (event) => {
             try {
@@ -5193,16 +5227,3 @@ class GameServer extends CPUProtection {
     }
   }
 }
-
-// ==================== SINGLETON ====================
-let gameServerInstance = null;
-
-function getGameServer(env) {
-  if (!gameServerInstance) {
-    gameServerInstance = new GameServer(env);
-  }
-  return gameServerInstance;
-}
-
-// ==================== EXPORT ====================
-export { GameServer, getGameServer };
