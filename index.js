@@ -2,7 +2,7 @@
 // VERSION: 8.0.0 - PURE WORKER (NO DO)
 // AUTO CLEAN MEMORY ON DEPLOY
 
-import { ChatServer } from "./chat-server.js";
+ import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
 
 // ============================================================
