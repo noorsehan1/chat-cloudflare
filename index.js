@@ -1,6 +1,11 @@
-// ==================== INDEX.JS - PURE WORKER ====================
-import { getGameServer } from "./game-server.js";
-import { getChatServer } from "./chat-server.js";
+// ==================== INDEX-FIXED.js ====================
+
+import { ChatServer } from "./chat-server-fixed.js";
+import { GameServer } from "./game-server-fixed.js";
+
+// Simpan instance server di global
+let chatServerInstance = null;
+let gameServerInstance = null;
 
 export default {
   async fetch(request, env) {
@@ -8,22 +13,43 @@ export default {
       const url = new URL(request.url);
       const pathname = url.pathname;
       
-      // CHAT SERVER - pure worker, semua user satu alam
+      // ==================== CHAT SERVER ====================
       if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
-        const chatServer = getChatServer(env);
-        return chatServer.fetch(request);
+        if (!chatServerInstance) {
+          chatServerInstance = new ChatServer(env);
+        }
+        return chatServerInstance.fetch(request);
       }
       
-      // GAME SERVER - pure worker
+      // ==================== GAME SERVER ====================
       if (pathname === "/game/ws" || pathname === "/game") {
-        const gameServer = getGameServer(env);
-        return gameServer.fetch(request);
+        if (!gameServerInstance) {
+          gameServerInstance = new GameServer(env);
+        }
+        return gameServerInstance.fetch(request);
       }
       
       return new Response("Server running", { status: 200 });
       
     } catch(e) {
+      console.error("Error:", e);
       return new Response("Error: " + e.message, { status: 500 });
+    }
+  },
+  
+  // ==================== CLEANUP PADA SHUTDOWN ====================
+  async shutdown() {
+    if (chatServerInstance) {
+      await chatServerInstance.destroy();
+      chatServerInstance = null;
+    }
+    
+    if (gameServerInstance) {
+      await gameServerInstance.destroy();
+      gameServerInstance = null;
     }
   }
 };
+
+// Ekspor kelas untuk kompatibilitas
+export { ChatServer, GameServer };
