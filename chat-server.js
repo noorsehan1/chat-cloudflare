@@ -1,6 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 10.1.0 - PURE WORKER TANPA HIBERNATE
-// FIX: setInterval di dalam fetch handler
+// VERSION: 10.3.0 - FULL FIX WEBSOCKET CONNECT
 
 const C = {
   MAX_SEATS: 45,
@@ -8,9 +7,8 @@ const C = {
   MAX_MESSAGE_SIZE: 5000,
   NUMBER_UPDATE_TIK: 6,
   MAX_NUMBER: 6,
-  TIK_INTERVAL_MS: 900000,  // 15 MENIT
-  CLEANUP_INTERVAL: 600000, // 10 MENIT
-  WS_PING_INTERVAL: 30000,  // 30 DETIK
+  TIK_INTERVAL_MS: 900000,
+  CLEANUP_INTERVAL: 600000,
 };
 
 const ROOMS = [
@@ -168,81 +166,57 @@ class RoomManager {
 // ==================== CHAT SERVER ====================
 export class ChatServer {
   constructor() {
-    // ✅ HANYA inisialisasi - TIDAK ADA setInterval
-    this._startTime = Date.now();
-    this.closing = false;
-    this.isDestroyed = false;
-    this._intervalsStarted = false;
-    
-    // WebSocket
+    // ========== INISIALISASI ==========
     this.wsSet = new Set();
     this.userConnections = new Map();
     this.userSeat = new Map();
     this.userRoom = new Map();
     this.roomClients = new Map();
     this.wsActiveMulti = new Map();
-    
-    // Rooms
     this.rooms = new Map();
     this.currentNumber = 1;
     this._tikCounter = 0;
-    
-    // Timers
-    this._cleanupInterval = null;
+    this._intervalsStarted = false;
     this._mainInterval = null;
+    this._cleanupInterval = null;
+    this.closing = false;
+    this.isDestroyed = false;
     
     // Init rooms
     for (const room of ROOMS) {
       this.rooms.set(room, new RoomManager(room));
       this.roomClients.set(room, new Set());
     }
-    
-    // ❌ JANGAN panggil _startIntervals() di sini!
-    // Akan dipanggil di fetch()
   }
 
-  // ✅ START INTERVALS - dipanggil dari fetch handler
   _startIntervals() {
-    if (this.closing || this.isDestroyed || this._intervalsStarted) return;
+    if (this._intervalsStarted || this.closing || this.isDestroyed) return;
     this._intervalsStarted = true;
     
-    // Main interval - 15 menit untuk update number
     this._mainInterval = setInterval(() => {
       if (this.closing || this.isDestroyed) {
         clearInterval(this._mainInterval);
-        this._mainInterval = null;
         return;
       }
-      this._doTick();
+      this._tikCounter++;
+      if (this._tikCounter >= C.NUMBER_UPDATE_TIK) {
+        this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
+        this._tikCounter = 0;
+        const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
+        for (const [, roomMan] of this.rooms) {
+          roomMan.setNumber(this.currentNumber);
+          roomMan.broadcast(numberMsg);
+        }
+      }
     }, C.TIK_INTERVAL_MS);
     
-    // Cleanup interval - 10 menit
     this._cleanupInterval = setInterval(() => {
       if (this.closing || this.isDestroyed) {
         clearInterval(this._cleanupInterval);
-        this._cleanupInterval = null;
         return;
       }
       this._performCleanup();
     }, C.CLEANUP_INTERVAL);
-  }
-
-  _doTick() {
-    this._tikCounter++;
-    
-    if (this._tikCounter >= C.NUMBER_UPDATE_TIK) {
-      this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
-      this._tikCounter = 0;
-      
-      const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
-      
-      for (const [room, roomMan] of this.rooms) {
-        roomMan.setNumber(this.currentNumber);
-        roomMan.broadcast(numberMsg);
-      }
-    }
-    
-    this._performCleanup();
   }
 
   _performCleanup() {
@@ -255,106 +229,112 @@ export class ChatServer {
     for (const ws of toRemove) {
       this.cleanup(ws);
     }
-    
-    for (const [roomName, roomMan] of this.rooms) {
-      const pointsToRemove = [];
-      for (const [seat] of roomMan.points) {
-        if (!roomMan.seats.has(seat)) {
-          pointsToRemove.push(seat);
-        }
-      }
-      for (const seat of pointsToRemove) {
-        roomMan.points.delete(seat);
-      }
-    }
   }
 
   // ==================== FETCH ====================
-  // ==================== FETCH ====================
-async fetch(request) {
-  // ✅ START INTERVALS DI SINI
-  this._startIntervals();
-  
-  if (this.closing || this.isDestroyed) {
-    return new Response("Shutting down", { status: 503 });
-  }
-  
-  try {
-    const upgrade = request.headers.get("Upgrade");
-    
-    // === CEK APAKAH WEBSOCKET ===
-    if (upgrade !== "websocket") {
-      // KALAU BUKAN WEBSOCKET, RETURN RESPONSE BIASA
+  async fetch(request) {
+    // START INTERVALS
+    this._startIntervals();
+
+    try {
+      const url = new URL(request.url);
+      const upgrade = request.headers.get("Upgrade");
+
+      // ===== BUKAN WEBSOCKET =====
+      if (upgrade !== "websocket") {
+        return new Response(JSON.stringify({
+          status: "chat-server",
+          message: "WebSocket server running",
+          path: "/chat/ws",
+          rooms: ROOMS,
+          timestamp: Date.now()
+        }), {
+          status: 200,
+          headers: { 
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache" 
+          }
+        });
+      }
+
+      // ===== CEK KAPASITAS =====
+      if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
+        return new Response(JSON.stringify({
+          error: "Server full",
+          max: C.MAX_GLOBAL_CONNECTIONS,
+          current: this.wsSet.size
+        }), { 
+          status: 503,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      // ===== BUAT WEBSOCKET PAIR =====
+      const pair = new WebSocketPair();
+      const [client, server] = [pair[0], pair[1]];
+
+      // ===== ACCEPT WEBSOCKET =====
+      try {
+        server.accept();
+      } catch(e) {
+        console.error('Chat WS accept failed:', e);
+        return new Response(JSON.stringify({
+          error: "WebSocket acceptance failed",
+          message: e.message
+        }), { 
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+
+      // ===== INIT CONNECTION =====
+      server.wsId = Date.now() + Math.random();
+      server.username = null;
+      server.room = null;
+      server.seat = null;
+      server.isMulti = false;
+      server._closing = false;
+
+      this.wsSet.add(server);
+
+      // ===== SEND CONNECTION ACKNOWLEDGMENT =====
+      try {
+        server.send(JSON.stringify(["connected", "Chat server connected", Date.now()]));
+      } catch(e) {
+        console.error('Send connected failed:', e);
+      }
+
+      // ===== EVENT HANDLERS =====
+      server.onmessage = async (event) => {
+        if (server._closing) return;
+        await this.handleMessage(server, event.data);
+      };
+
+      server.onclose = () => {
+        this.cleanup(server);
+      };
+
+      server.onerror = () => {
+        this.cleanup(server);
+      };
+
+      // ===== RETURN =====
+      return new Response(null, {
+        status: 101,
+        webSocket: client
+      });
+
+    } catch (e) {
+      console.error('Chat fetch error:', e);
       return new Response(JSON.stringify({
-        status: "chat-server",
-        message: "Use WebSocket connection",
-        path: "/chat/ws"
-      }), {
-        status: 200,
-        headers: { 
-          "Content-Type": "application/json",
-          "Cache-Control": "no-cache" 
-        }
+        error: "Internal Server Error",
+        message: e.message || "Unknown error"
+      }), { 
+        status: 500,
+        headers: { "Content-Type": "application/json" }
       });
     }
-    
-    // === CEK KAPASITAS ===
-    if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
-      return new Response("Server full", { status: 503 });
-    }
-    
-    // === BUAT WEBSOCKET PAIR ===
-    const pair = new WebSocketPair();
-    const [client, server] = [pair[0], pair[1]];
-    
-    // === ACCEPT WEBSOCKET ===
-    try {
-      server.accept();
-    } catch(e) {
-      console.error('Accept failed:', e);
-      return new Response("WebSocket acceptance failed", { status: 500 });
-    }
-    
-    // === INIT CONNECTION ===
-    server.wsId = Date.now() + Math.random();
-    server.username = null;
-    server.room = null;
-    server.seat = null;
-    server.isMulti = false;
-    server._closing = false;
-    
-    this.wsSet.add(server);
-    
-    // === EVENT HANDLERS ===
-    server.onmessage = async (event) => {
-      if (server._closing) return;
-      await this.handleMessage(server, event.data);
-    };
-    
-    server.onclose = () => {
-      this.cleanup(server);
-    };
-    
-    server.onerror = () => {
-      this.cleanup(server);
-    };
-    
-    // === KIRIM PESAN KONEKSI ===
-    try {
-      server.send(JSON.stringify(["connected", "Chat server connected"]));
-    } catch(e) {}
-    
-    // === RETURN RESPONSE ===
-    return new Response(null, { 
-      status: 101, 
-      webSocket: client 
-    });
-    
-  } catch (e) {
-    console.error('Fetch error:', e);
-    return new Response("Internal Server Error", { status: 500 });
   }
-}
 
   // ==================== HANDLE MESSAGE ====================
   async handleMessage(ws, raw) {
@@ -370,6 +350,12 @@ async fetch(request) {
       
       const [evt, ...args] = data;
       
+      // ===== ECHO FOR TESTING =====
+      if (evt === "ping") {
+        this._safeSend(ws, ["pong", Date.now()]);
+        return;
+      }
+
       switch(evt) {
         case "setIdTarget2":
           this._handleSetId(ws, args[0], args[1]);
