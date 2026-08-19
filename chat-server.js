@@ -1,19 +1,18 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 3.4.1 - FIXED CONNECTION (NO PING)
+// VERSION: 3.3.3 - ALARM 10 DETIK, CLEANUP 30 MENIT
 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 5000,
-  ALARM_INTERVAL_MS: 900000,        // 15 MENIT
-  CLEANUP_COUNTER_MAX: 1,
-  NUMBER_UPDATE_TICK_COUNT: 6,
+  ALARM_INTERVAL_MS: 10000,              // 10 DETIK
+  CLEANUP_COUNTER_MAX: 180,              // 180 x 10 detik = 30 MENIT
+  NUMBER_UPDATE_TICK_COUNT: 90,          // 90 x 10 detik = 15 MENIT
   MAX_NUMBER: 6,
   BATCH_SIZE: 20,
   LOCK_TIMEOUT: 10000,
-  MAX_EVENT_QUEUE: 200,
-  MAX_PROCESS_TIME_MS: 100,
-  MAX_PROCESS_BATCH: 10,
+  MAX_EVENT_QUEUE: 100,
+  MAX_PROCESS_TIME_MS: 500,
 };
 
 const ROOMS = [
@@ -157,11 +156,8 @@ export class ChatServer {
     this._cleaningUp = new Set();
     this._pendingTimeouts = new Set();
     this._cleanupInProgress = false;
-    
-    // ========== EVENT QUEUE ==========
     this._eventQueue = [];
     this._isProcessingQueue = false;
-    this._queueScheduled = false;
     
     // ========== LOCKS ==========
     this._joinLocks = new Map();
@@ -178,10 +174,10 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
-    // SET ALARM PERTAMA - 15 MENIT
+    // ✅ ALARM PERTAMA - 10 DETIK
     this._scheduleAlarm(C.ALARM_INTERVAL_MS);
     
-    // TUNDA INISIALISASI 2 DETIK
+    // ✅ TUNDA INISIALISASI 2 DETIK
     setTimeout(() => {
       if (!this.closing && !this.isDestroyed) {
         this._initLazy();
@@ -203,7 +199,7 @@ export class ChatServer {
     this._initialized = true;
   }
 
-  // ========== ALARM - 15 MENIT ==========
+  // ========== ALARM - 10 DETIK ==========
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
@@ -211,9 +207,11 @@ export class ChatServer {
       this._tickCounter++;
       this._cleanupCounter++;
       
+      // ✅ CLEANUP DEAD CONNECTIONS - SETIAP 10 DETIK
       this._cleanupDeadConnections();
-      this._scheduleQueueProcessing();
+      this._processEventQueue();
       
+      // ✅ CLEANUP MEMORY - SETIAP 30 MENIT (180x alarm)
       if (this._cleanupCounter >= C.CLEANUP_COUNTER_MAX) {
         this._cleanupMemory();
         this._cleanupStaleLocks();
@@ -221,6 +219,7 @@ export class ChatServer {
         this._cleanupCounter = 0;
       }
       
+      // ✅ UPDATE NUMBER - SETIAP 15 MENIT (90x alarm)
       if (this._tickCounter >= C.NUMBER_UPDATE_TICK_COUNT) {
         this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
         
@@ -241,8 +240,11 @@ export class ChatServer {
         this._tickCounter = 0;
       }
       
-    } catch(e) {}
+    } catch(e) {
+      // Silent error
+    }
     
+    // ✅ JADWALKAN ALARM BERIKUTNYA - 10 DETIK LAGI
     this._scheduleAlarm(C.ALARM_INTERVAL_MS);
   }
 
@@ -323,56 +325,29 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ========== SCHEDULE QUEUE PROCESSING ==========
-  _scheduleQueueProcessing() {
-    if (this._eventQueue.length === 0) return;
-    if (this._isProcessingQueue) return;
-    if (this._queueScheduled) return;
-    
-    this._queueScheduled = true;
-    
-    setImmediate(() => {
-      this._queueScheduled = false;
-      this._processEventQueue();
-    });
-  }
-
   // ========== PROCESS EVENT QUEUE ==========
   _processEventQueue() {
-    if (this._isProcessingQueue) return;
-    if (this._eventQueue.length === 0) return;
-    if (this.closing || this.isDestroyed) return;
-    
-    this._isProcessingQueue = true;
-    
     try {
+      if (this._isProcessingQueue || this._eventQueue.length === 0) return;
+      this._isProcessingQueue = true;
+      
       const startTime = Date.now();
       let processed = 0;
       
-      while (this._eventQueue.length > 0 && processed < C.MAX_PROCESS_BATCH) {
-        if (Date.now() - startTime > C.MAX_PROCESS_TIME_MS) {
-          break;
-        }
+      // Proses lebih banyak event
+      while (this._eventQueue.length > 0 && processed < 50) {
+        if (Date.now() - startTime > C.MAX_PROCESS_TIME_MS) break;
         
         const item = this._eventQueue.shift();
-        if (!item) continue;
-        
         try {
           this._handleEventInternal(item.ws, item.data);
-          processed++;
-        } catch(e) {
-          processed++;
-        }
+        } catch(e) {}
+        processed++;
       }
       
-    } catch(e) {
-      // Error handling
-    } finally {
       this._isProcessingQueue = false;
-      
-      if (this._eventQueue.length > 0 && !this.closing && !this.isDestroyed) {
-        this._scheduleQueueProcessing();
-      }
+    } catch(e) {
+      this._isProcessingQueue = false;
     }
   }
 
@@ -635,14 +610,12 @@ export class ChatServer {
       
       if (this._eventQueue.length < C.MAX_EVENT_QUEUE) {
         this._eventQueue.push({ ws, data: [evt, ...args] });
-        this._scheduleQueueProcessing();
-      } else {
-        this.safeSend(ws, ["queueFull", "Server busy"]);
+        if (!this._isProcessingQueue) {
+          this._processEventQueue();
+        }
       }
       
-    } catch(e) {
-      // Error handling
-    } finally {
+    } catch(e) {} finally {
       try {
         this._processingMessages.delete(ws);
       } catch(e) {}
@@ -1322,68 +1295,49 @@ export class ChatServer {
       
       this.updateRoomCount(roomName);
       
-      const timeoutId = setTimeout(() => {
-        this._pendingTimeouts.delete(timeoutId);
+      setTimeout(() => {
         try {
           if (ws && ws.readyState === 1 && !this.closing && !this.isDestroyed) {
             this.sendAllStateTo(ws, roomName, true);
           }
         } catch(e) {}
       }, 1000);
-      this._pendingTimeouts.add(timeoutId);
       
     } catch(e) {}
     
     return true;
   }
 
-  // ========== FETCH - FIXED ==========
+  // ========== FETCH ==========
   async fetch(req) {
-    // Cek shutdown
     if (this.closing || this.isDestroyed) {
       return new Response("Shutting down", { status: 503 });
     }
     
     try {
-      const url = new URL(req.url);
       const upgrade = req.headers.get("Upgrade");
-      
-      // ===== NON-WEBSOCKET =====
       if (upgrade !== "websocket") {
-        // Response untuk health check
-        return new Response(JSON.stringify({
-          status: "online",
-          connections: this.wsSet.size,
-          rooms: ROOMS.length,
-          version: "3.4.1"
-        }), {
+        return new Response("Chat Server", { 
           status: 200,
           headers: {
-            "Content-Type": "application/json",
             "Cache-Control": "no-cache"
           }
         });
       }
       
-      // ===== WEBSOCKET =====
-      // Cek kapasitas
       if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
         return new Response("Server full", { status: 503 });
       }
       
-      // Buat WebSocket pair
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       
-      // ACCEPT WebSocket - HARUS dipanggil
-      try {
+      try { 
         this.ctx.acceptWebSocket(server);
-      } catch(e) {
-        console.error('Accept WebSocket failed:', e);
-        return new Response("WebSocket acceptance failed", { status: 500 });
+      } catch(e) { 
+        return new Response("WebSocket acceptance failed", { status: 500 }); 
       }
       
-      // Setup server WebSocket
       server.username = null;
       server.room = null;
       server.roomname = null;
@@ -1391,38 +1345,19 @@ export class ChatServer {
       server._closing = false;
       server._wsId = Date.now() + Math.random();
       
-      // Tambahkan ke daftar koneksi
-      this.wsSet.add(server);
-      
-      // Kirim pesan selamat datang
-      try {
-        server.send(JSON.stringify(["connected", "Server ready", Date.now()]));
-      } catch(e) {
-        // Ignore
+      if (!this.wsSet.has(server)) {
+        this.wsSet.add(server);
       }
       
-      // Return response dengan WebSocket
-      return new Response(null, {
-        status: 101,
-        webSocket: client,
-        headers: {
-          "Upgrade": "websocket",
-          "Connection": "Upgrade"
-        }
-      });
+      return new Response(null, { status: 101, webSocket: client });
       
     } catch(e) {
-      console.error('Fetch error:', e);
-      return new Response("Internal Server Error", { 
-        status: 500,
-        headers: {
-          "Content-Type": "text/plain"
-        }
-      });
+      return new Response("Internal Server Error", { status: 500 });
     }
   }
 
   // ==================== WEBSOCKET HANDLERS ====================
+  
   async webSocketMessage(ws, msg) { 
     if (!ws || ws._closing || this._cleaningUp.has(ws) || this.closing || this.isDestroyed) return;
     try {
