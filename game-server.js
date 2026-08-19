@@ -1,5 +1,5 @@
-// ==================== GAME-SERVER.JS - FULL VERSION ====================
-// ==================== NON-DURABLE OBJECT ====================
+// ==================== GAME-SERVER.JS ====================
+// Game Server - Tanpa Durable Object, Real-time WebSocket
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -88,61 +88,6 @@ const QUIZ_SCHEDULE = {
 };
 
 const DICE_ROOM = "Quiz";
-
-// ==================== KV CACHE CLASS ====================
-class KVCache {
-  constructor() {
-    this.cache = new Map();
-    this.ttl = 30000;
-    this._cleanupInterval = null;
-  }
-
-  get(key) {
-    const entry = this.cache.get(key);
-    if (!entry) return null;
-    if (Date.now() - entry.timestamp > this.ttl) {
-      this.cache.delete(key);
-      return null;
-    }
-    return entry.value;
-  }
-
-  set(key, value, customTtl = null) {
-    const ttl = customTtl || this.ttl;
-    this.cache.set(key, {
-      value: value,
-      timestamp: Date.now(),
-      ttl: ttl
-    });
-  }
-
-  delete(key) {
-    this.cache.delete(key);
-  }
-
-  clear() {
-    this.cache.clear();
-  }
-
-  startCleanup() {
-    if (this._cleanupInterval) return;
-    this._cleanupInterval = setInterval(() => {
-      const now = Date.now();
-      for (const [key, entry] of this.cache) {
-        if (now - entry.timestamp > entry.ttl) {
-          this.cache.delete(key);
-        }
-      }
-    }, 60000);
-  }
-
-  stopCleanup() {
-    if (this._cleanupInterval) {
-      clearInterval(this._cleanupInterval);
-      this._cleanupInterval = null;
-    }
-  }
-}
 
 // ==================== CPU PROTECTION CLASS ====================
 class CPUProtection {
@@ -389,7 +334,6 @@ export class GameServer extends CPUProtection {
   constructor(env) {
     try {
       super();
-      // ============ HAPUS state ============
       this.env = env;
       this.closing = false;
       this.isDestroyed = false;
@@ -398,7 +342,6 @@ export class GameServer extends CPUProtection {
 
       this._restartCount = 0;
       this._lastRestartTime = 0;
-      this._healthCheckInterval = null;
       this._isRestarting = false;
       this._startTime = Date.now();
       this._lastHeartbeat = Date.now();
@@ -511,12 +454,9 @@ export class GameServer extends CPUProtection {
       this._cachedLastWeekWinner = null;
       this._cachedLastWeekWinnerTimestamp = 0;
 
-      this._kvCache = new KVCache();
-      this._kvCache.startCleanup();
-
       this.diceGameSystem = new DiceGameSystem(this);
 
-      // ==================== MAIN INTERVAL ====================
+      // Main interval untuk semua task
       this._mainInterval = setInterval(() => {
         try {
           if (this.closing || this.isDestroyed) {
@@ -536,22 +476,23 @@ export class GameServer extends CPUProtection {
         } catch(e) {}
       }, 10000);
 
-      // ==================== INIT ====================
-      setTimeout(() => {
-        this._initAsync().catch(() => {});
+      this._initAsync();
+
+      setTimeout(async () => {
+        try {
+          if (!this.closing && !this.isDestroyed) {
+            await this._initResetWeek();
+          }
+        } catch(e) {}
       }, 1000);
 
-      setTimeout(() => {
-        if (!this.closing && !this.isDestroyed) {
-          this._initResetWeek().catch(() => {});
-        }
-      }, 2000);
-
-      setTimeout(() => {
-        if (!this.closing && !this.isDestroyed) {
-          this.diceGameSystem.loadScores().catch(() => {});
-        }
-      }, 3000);
+      setTimeout(async () => {
+        try {
+          if (!this.closing && !this.isDestroyed) {
+            await this.diceGameSystem.loadScores();
+          }
+        } catch(e) {}
+      }, 5000);
 
       setTimeout(() => {
         if (!this.closing && !this.isDestroyed && !this._isShowingDice) {
@@ -907,12 +848,13 @@ export class GameServer extends CPUProtection {
       }
       const hours = Math.floor(minDiff / 60);
       const minutes = Math.floor(minDiff % 60);
+      const isRunning = this._isDiceTime();
       return { 
         hours, 
         minutes, 
         totalMs: minDiff * 60 * 1000,
         text: `${hours}h ${minutes}m`,
-        isRunning: this._isDiceTime()
+        isRunning: isRunning
       };
     } catch(e) {
       return { hours: 0, minutes: 0, totalMs: 0, text: '0h 0m', isRunning: false };
@@ -1543,10 +1485,7 @@ export class GameServer extends CPUProtection {
 
   async _showDiceQuestionSilent() {
     try {
-      if (this._tieActive) {
-        return;
-      }
-      
+      if (this._tieActive) return;
       if (this._isShowingDice) return;
       if (this._diceTimeUpCooldown) return;
       this._lastActivityTime = Date.now();
@@ -1727,10 +1666,7 @@ export class GameServer extends CPUProtection {
 
   async _showDiceQuestion() {
     try {
-      if (this._tieActive) {
-        return;
-      }
-      
+      if (this._tieActive) return;
       if (this._isShowingDice) return;
       if (this._diceTimeUpCooldown) return;
       this._lastActivityTime = Date.now();
@@ -1910,7 +1846,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== SUBMIT DICE ANSWER ====================
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) return;
@@ -1927,17 +1862,9 @@ export class GameServer extends CPUProtection {
       
       // TIE BREAKER MODE
       if (this._tieActive) {
-        if (!this._tiePlayers.includes(username)) {
-          return;
-        }
-        
-        if (this._tieAnswers.has(username)) {
-          return;
-        }
-        
-        if (!this._canSubmitDiceAnswer) {
-          return;
-        }
+        if (!this._tiePlayers.includes(username)) return;
+        if (this._tieAnswers.has(username)) return;
+        if (!this._canSubmitDiceAnswer) return;
         
         this._tieAnswers.set(username, guessValue);
         this.diceAnswered.add(username);
@@ -1976,7 +1903,7 @@ export class GameServer extends CPUProtection {
         return;
       }
       
-      // NORMAL MODE
+      // DICE NORMAL MODE
       if (this.diceAnswered.has(username)) return;
       
       const diceValue = this.currentDiceRoll?.value;
@@ -2310,10 +2237,6 @@ export class GameServer extends CPUProtection {
       if (this._diceBreakTimeout) clearTimeout(this._diceBreakTimeout);
       if (this._diceStartTimeout) clearTimeout(this._diceStartTimeout);
       if (this._diceKeepAliveInterval) clearInterval(this._diceKeepAliveInterval);
-      if (this._diceAutoCheckInterval) {
-        clearInterval(this._diceAutoCheckInterval);
-        this._diceAutoCheckInterval = null;
-      }
       
       if (this._diceTimeUpCooldownTimer) {
         clearTimeout(this._diceTimeUpCooldownTimer);
@@ -2707,8 +2630,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== LOW CARD GAME METHODS ====================
-
   _stopDiceTimerNotifications() {
     try {
       if (this._diceTimerTimeout) {
@@ -3100,7 +3021,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== BROADCAST ====================
   async _broadcastToRoom(room, message) {
     try {
       if (this.closing || this.isDestroyed || !room || !message) return;
@@ -3633,7 +3553,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== EVALUATE ROUND ====================
   async _evaluateRound(room, game) {
     try {
       if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
@@ -4883,10 +4802,6 @@ export class GameServer extends CPUProtection {
         clearInterval(this._diceKeepAliveInterval);
         this._diceKeepAliveInterval = null;
       }
-      if (this._diceAutoCheckInterval) {
-        clearInterval(this._diceAutoCheckInterval);
-        this._diceAutoCheckInterval = null;
-      }
       if (this._diceTimeUpCooldownTimer) {
         clearTimeout(this._diceTimeUpCooldownTimer);
         this._diceTimeUpCooldownTimer = null;
@@ -4923,43 +4838,6 @@ export class GameServer extends CPUProtection {
         clearInterval(this._diceKeepAliveInterval);
         this._diceKeepAliveInterval = null;
       }
-      if (this._healthCheckInterval) {
-        clearInterval(this._healthCheckInterval);
-        this._healthCheckInterval = null;
-      }
-      if (this._weeklyResetInterval) {
-        clearInterval(this._weeklyResetInterval);
-        this._weeklyResetInterval = null;
-      }
-      if (this._diceAutoInterval) {
-        clearInterval(this._diceAutoInterval);
-        this._diceAutoInterval = null;
-      }
-      if (this._diceTimerInterval2) {
-        clearInterval(this._diceTimerInterval2);
-        this._diceTimerInterval2 = null;
-      }
-      if (this._stuckGamesInterval) {
-        clearInterval(this._stuckGamesInterval);
-        this._stuckGamesInterval = null;
-      }
-      if (this._staleGamesInterval) {
-        clearInterval(this._staleGamesInterval);
-        this._staleGamesInterval = null;
-      }
-      if (this._deadConnectionsInterval) {
-        clearInterval(this._deadConnectionsInterval);
-        this._deadConnectionsInterval = null;
-      }
-      
-      if (this._diceAutoCheckInterval) {
-        clearInterval(this._diceAutoCheckInterval);
-        this._diceAutoCheckInterval = null;
-      }
-      if (this._diceTimerInterval) {
-        clearInterval(this._diceTimerInterval);
-        this._diceTimerInterval = null;
-      }
       if (this._diceTimeUpCooldownTimer) {
         clearTimeout(this._diceTimeUpCooldownTimer);
         this._diceTimeUpCooldownTimer = null;
@@ -4974,11 +4852,6 @@ export class GameServer extends CPUProtection {
       this._cachedLastWeekWinner = null;
       this._cachedLastWeekWinnerTimestamp = 0;
       this._recordingEnabled.clear();
-      
-      if (this._kvCache) {
-        this._kvCache.stopCleanup();
-        this._kvCache.clear();
-      }
       
       for (const [room, game] of this.activeGames) {
         await this._forceCleanupGame(room, game);
@@ -5002,7 +4875,6 @@ export class GameServer extends CPUProtection {
     } catch(e) {}
   }
 
-  // ==================== FETCH METHOD ====================
   async fetch(req) {
     try {
       if (this.closing || this.isDestroyed) {
@@ -5046,7 +4918,7 @@ export class GameServer extends CPUProtection {
         }
       }
       
-      if (url.pathname === "/game/ws" || url.pathname === "/game") {
+      if (url.pathname === "/game/ws") {
         const upgrade = req.headers.get("Upgrade");
         if (upgrade !== "websocket") {
           return new Response("WebSocket only", { status: 400 });
@@ -5067,11 +4939,6 @@ export class GameServer extends CPUProtection {
           server.roomname = null;
           server._createdAt = Date.now();
           server.username = null;
-          server._cf = req.cf || {};
-          server._country = req.cf?.country || 'US';
-          server._language = 'en';
-          
-          this.wsMap.set(wsId, server);
           
           server.addEventListener("message", async (event) => {
             try {
