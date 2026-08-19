@@ -8,7 +8,7 @@ export default {
       const url = new URL(request.url);
       const pathname = url.pathname;
       
-      // CHAT SERVER - pure worker
+      // CHAT SERVER - pure worker, semua user satu alam
       if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
         const chatServer = getChatServer(env);
         return chatServer.fetch(request);
