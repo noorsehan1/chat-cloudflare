@@ -270,67 +270,91 @@ export class ChatServer {
   }
 
   // ==================== FETCH ====================
-  async fetch(request) {
-    // ✅ START INTERVALS DI SINI (dalam handler)
-    this._startIntervals();
-    
-    if (this.closing || this.isDestroyed) {
-      return new Response("Shutting down", { status: 503 });
-    }
-    
-    try {
-      const upgrade = request.headers.get("Upgrade");
-      if (upgrade !== "websocket") {
-        return new Response("Chat Server", { 
-          status: 200,
-          headers: { "Cache-Control": "no-cache" }
-        });
-      }
-      
-      if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
-        return new Response("Server full", { status: 503 });
-      }
-      
-      const pair = new WebSocketPair();
-      const [client, server] = [pair[0], pair[1]];
-      
-      try {
-        server.accept();
-      } catch(e) {
-        return new Response("WebSocket acceptance failed", { status: 500 });
-      }
-      
-      // Init connection
-      server.wsId = Date.now() + Math.random();
-      server.username = null;
-      server.room = null;
-      server.seat = null;
-      server.isMulti = false;
-      server._closing = false;
-      server._lastPing = Date.now();
-      
-      this.wsSet.add(server);
-      
-      // Event handlers
-      server.onmessage = async (event) => {
-        if (server._closing) return;
-        await this.handleMessage(server, event.data);
-      };
-      
-      server.onclose = () => {
-        this.cleanup(server);
-      };
-      
-      server.onerror = () => {
-        this.cleanup(server);
-      };
-      
-      return new Response(null, { status: 101, webSocket: client });
-      
-    } catch (e) {
-      return new Response("Internal Server Error", { status: 500 });
-    }
+  // ==================== FETCH ====================
+async fetch(request) {
+  // ✅ START INTERVALS DI SINI
+  this._startIntervals();
+  
+  if (this.closing || this.isDestroyed) {
+    return new Response("Shutting down", { status: 503 });
   }
+  
+  try {
+    const upgrade = request.headers.get("Upgrade");
+    
+    // === CEK APAKAH WEBSOCKET ===
+    if (upgrade !== "websocket") {
+      // KALAU BUKAN WEBSOCKET, RETURN RESPONSE BIASA
+      return new Response(JSON.stringify({
+        status: "chat-server",
+        message: "Use WebSocket connection",
+        path: "/chat/ws"
+      }), {
+        status: 200,
+        headers: { 
+          "Content-Type": "application/json",
+          "Cache-Control": "no-cache" 
+        }
+      });
+    }
+    
+    // === CEK KAPASITAS ===
+    if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
+      return new Response("Server full", { status: 503 });
+    }
+    
+    // === BUAT WEBSOCKET PAIR ===
+    const pair = new WebSocketPair();
+    const [client, server] = [pair[0], pair[1]];
+    
+    // === ACCEPT WEBSOCKET ===
+    try {
+      server.accept();
+    } catch(e) {
+      console.error('Accept failed:', e);
+      return new Response("WebSocket acceptance failed", { status: 500 });
+    }
+    
+    // === INIT CONNECTION ===
+    server.wsId = Date.now() + Math.random();
+    server.username = null;
+    server.room = null;
+    server.seat = null;
+    server.isMulti = false;
+    server._closing = false;
+    
+    this.wsSet.add(server);
+    
+    // === EVENT HANDLERS ===
+    server.onmessage = async (event) => {
+      if (server._closing) return;
+      await this.handleMessage(server, event.data);
+    };
+    
+    server.onclose = () => {
+      this.cleanup(server);
+    };
+    
+    server.onerror = () => {
+      this.cleanup(server);
+    };
+    
+    // === KIRIM PESAN KONEKSI ===
+    try {
+      server.send(JSON.stringify(["connected", "Chat server connected"]));
+    } catch(e) {}
+    
+    // === RETURN RESPONSE ===
+    return new Response(null, { 
+      status: 101, 
+      webSocket: client 
+    });
+    
+  } catch (e) {
+    console.error('Fetch error:', e);
+    return new Response("Internal Server Error", { status: 500 });
+  }
+}
 
   // ==================== HANDLE MESSAGE ====================
   async handleMessage(ws, raw) {
