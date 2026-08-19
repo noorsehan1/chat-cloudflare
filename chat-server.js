@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// Chat Server - Tanpa Durable Object, Real-time WebSocket
+// Chat Server - WebSocket di root path "/"
 
 const C = {
   MAX_SEATS: 45,
@@ -495,7 +495,6 @@ export class ChatServer {
           if (!multiUsername || !multiRoomname) break;
           
           try {
-            // Remove existing seat
             let existingSeat = null, existingRoom = null;
             for (const [roomName, roomMan] of this.rooms) {
               if (!roomMan) continue;
@@ -1215,10 +1214,10 @@ export class ChatServer {
     try {
       const upgrade = req.headers.get("Upgrade");
       if (upgrade !== "websocket") {
-        return new Response("Chat Server", { 
+        return new Response("WebSocket Server - Connect using wss://your-worker.workers.dev/", { 
           status: 200,
           headers: {
-            "Cache-Control": "no-cache"
+            "Content-Type": "text/plain"
           }
         });
       }
