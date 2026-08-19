@@ -1,34 +1,18 @@
-// ==================== GAME-SERVER.JS - TANPA D1 ====================
+// ==================== CHAT-SERVER.JS - TANPA D1 ====================
 // VERSION: 6.0.0
 
-const CONSTANTS = {
-  MAX_LOWCARD_GAMES: 10,
-  REGISTRATION_TIME_MS: 20000,
-  DRAW_TIME_MS: 20000,
-  EVALUATION_DELAY_MS: 2000,
-  MAX_BOTS_PER_GAME: 4,
-  MAX_BET: 100000,
-  MAX_BOT_DRAWS_PER_ROUND: 4,
-  EVALUATION_TIMEOUT_MS: 30000,
-  MAX_PLAYERS_PER_GAME: 45,
-  GAME_CLEANUP_DELAY_MS: 5000,
-  MAX_WS_CLIENTS: 150,
-  MAX_EVENT_QUEUE_SIZE: 50,
-  DICE_ROOM: "Quiz",
-};
+const ROOMS = [
+  "LowCard", "Quiz", "Gacor", "General", "LOVE BIRDS", "Birthday Party",
+  "Sweet Memories", "Lounge Talk", "Noxxeliverothcifsa", "BESTIES",
+  "Happy Vibes", "The Chatter Room"
+];
 
-const QUIZ_SCHEDULE = {
-  SESSIONS: [
-    { start: 1, end: 2 },
-    { start: 14, end: 15 },
-    { start: 22, end: 23 }
-  ],
-  TIMEZONE_OFFSET: 8,
-};
+const ROOMS_SET = new Set(ROOMS);
+const MAX_SEATS = 45;
+const BATCH_SIZE = 20;
 
-const DICE_ROOM = "Quiz";
-
-export class GameServer {
+// ========== EXPORT CLASS ChatServer ==========
+export class ChatServer {
   constructor(env, savedState = null) {
     this.env = env;
     this.closing = false;
@@ -36,104 +20,74 @@ export class GameServer {
     this._startTime = Date.now();
     this._wsIdCounter = 0;
     
-    this.wsMap = new Map();
-    this.wsClients = new Map();
-    this.clientRooms = new Map();
+    // ========== WEBSOCKET CONNECTIONS ==========
+    this.wsSet = new Set();
+    this.roomClients = new Map();
     this.userConnections = new Map();
-    this.userRooms = new Map();
-    this.activeGames = new Map();
+    this.userSeat = new Map();
+    this.userRoom = new Map();
+    this.wsActiveMulti = new Map();
     
-    // Dice
-    this.currentDiceRoll = null;
-    this._diceLock = false;
-    this._tieActive = false;
-    this.diceAnswered = new Set();
-    this._playerAnswers = new Map();
-    this._isShowingDice = false;
-    this._diceTimeUpCooldown = false;
-    this._diceStartTime = null;
-    this._diceTimeout = null;
-    this._diceTimerInterval = null;
-    this.diceAutoEnabled = true;
-    this.diceHasWinner = false;
-    this.diceWinner = null;
-    this._canSubmitDiceAnswer = false;
-    this._diceRound = 0;
-    this._dicePoints = new Map();
+    // ========== ROOM DATA ==========
+    this.rooms = new Map();
+    for (const room of ROOMS) {
+      this.rooms.set(room, {
+        seats: new Map(),
+        points: new Map(),
+        muted: false,
+        number: 1
+      });
+      this.roomClients.set(room, new Set());
+    }
     
-    this._eventQueue = [];
-    this._isProcessingQueue = false;
-    this._gameLocks = new Map();
-    this._joinLocks = new Map();
-    this._cleanupTimers = new Map();
-    this._switchLocks = new Map();
-    this._allTimers = new Set();
-    
-    this.DICE_ROOM = DICE_ROOM;
-    
-    // Restore state
+    // ========== RESTORE STATE ==========
     if (savedState) {
       this.restoreState(savedState);
     }
     
-    // Intervals
-    this._mainInterval = setInterval(() => {
-      if (!this.closing && !this.isDestroyed) {
-        this._doTick();
-      }
-    }, 10000);
-    this._allTimers.add(this._mainInterval);
+    this.currentNumber = 1;
+    this._tikCounter = 0;
+    this._eventQueue = [];
+    this._isProcessingQueue = false;
+    this._pendingTimeouts = new Set();
     
+    // ========== CLEANUP INTERVAL ==========
     this._cleanupInterval = setInterval(() => {
       if (!this.closing && !this.isDestroyed) {
-        this._performCleanup();
+        this._cleanupDeadConnections();
       }
-    }, 60000);
-    this._allTimers.add(this._cleanupInterval);
+    }, 10000);
+    this._pendingTimeouts.add(this._cleanupInterval);
     
-    setTimeout(() => {
-      if (!this.closing && !this.isDestroyed) {
-        this._checkDice();
-      }
-    }, 5000);
+    console.log('[ChatServer] Initialized (Memory Only)');
   }
 
   // ========== GET STATE ==========
   getState() {
     const state = {
-      dicePoints: Object.fromEntries(this._dicePoints),
-      currentDiceRoll: this.currentDiceRoll,
-      _diceRound: this._diceRound,
-      activeGames: {},
+      rooms: {},
+      userSeat: {},
+      userRoom: {},
+      currentNumber: this.currentNumber,
+      _tikCounter: this._tikCounter,
       timestamp: Date.now()
     };
     
-    for (const [room, game] of this.activeGames) {
-      if (!game._isActive || game._gameEnded) continue;
-      state.activeGames[room] = {
-        room: game.room,
-        players: Object.fromEntries(game.players || new Map()),
-        botPlayers: Object.fromEntries(game.botPlayers || new Map()),
-        registrationOpen: game.registrationOpen,
-        round: game.round,
-        numbers: Object.fromEntries(game.numbers || new Map()),
-        tanda: Object.fromEntries(game.tanda || new Map()),
-        eliminated: Array.from(game.eliminated || new Set()),
-        betAmount: game.betAmount,
-        hostId: game.hostId,
-        hostName: game.hostName,
-        useBots: game.useBots,
-        evaluationLocked: game.evaluationLocked,
-        drawTimeExpired: game.drawTimeExpired,
-        _isActive: game._isActive,
-        _gameEnded: game._gameEnded,
-        _phase: game._phase,
-        _botsAdded: game._botsAdded,
-        _createdAt: game._createdAt,
-        playerWsId: Object.fromEntries(game.playerWsId || new Map()),
-        _startedByRecording: game._startedByRecording,
-        _startedBy: game._startedBy
+    for (const [roomName, room] of this.rooms) {
+      state.rooms[roomName] = {
+        seats: Object.fromEntries(room.seats || new Map()),
+        points: Object.fromEntries(room.points || new Map()),
+        muted: room.muted,
+        number: room.number
       };
+    }
+    
+    for (const [username, info] of this.userSeat) {
+      state.userSeat[username] = info;
+    }
+    
+    for (const [username, room] of this.userRoom) {
+      state.userRoom[username] = room;
     }
     
     return state;
@@ -144,1726 +98,558 @@ export class GameServer {
     try {
       if (!state) return;
       
-      if (state.dicePoints) {
-        this._dicePoints = new Map(Object.entries(state.dicePoints));
-      }
-      
-      if (state.currentDiceRoll) {
-        this.currentDiceRoll = state.currentDiceRoll;
-      }
-      
-      if (state._diceRound) {
-        this._diceRound = state._diceRound;
-      }
-      
-      if (state.activeGames) {
-        for (const [room, gameData] of Object.entries(state.activeGames)) {
-          const game = {
-            room: gameData.room,
-            players: new Map(Object.entries(gameData.players || {})),
-            botPlayers: new Map(Object.entries(gameData.botPlayers || {})),
-            registrationOpen: gameData.registrationOpen || false,
-            round: gameData.round || 1,
-            numbers: new Map(Object.entries(gameData.numbers || {})),
-            tanda: new Map(Object.entries(gameData.tanda || {})),
-            eliminated: new Set(gameData.eliminated || []),
-            betAmount: gameData.betAmount || 0,
-            hostId: gameData.hostId || '',
-            hostName: gameData.hostName || '',
-            useBots: gameData.useBots || false,
-            evaluationLocked: gameData.evaluationLocked || false,
-            drawTimeExpired: gameData.drawTimeExpired || false,
-            _isActive: gameData._isActive || false,
-            _gameEnded: gameData._gameEnded || false,
-            _phase: gameData._phase || 'registration',
-            _botTimeouts: new Set(),
-            _botsAdded: gameData._botsAdded || false,
-            _registrationTimer: null,
-            _drawTimer: null,
-            _evalTimer: null,
-            _safetyTimer: null,
-            _isEvaluating: false,
-            _createdAt: gameData._createdAt || Date.now(),
-            _drawPhaseStart: null,
-            _endTime: null,
-            playerWsId: new Map(Object.entries(gameData.playerWsId || {})),
-            _startedByRecording: gameData._startedByRecording || false,
-            _startedBy: gameData._startedBy || 'user'
-          };
-          this.activeGames.set(room, game);
+      if (state.rooms) {
+        for (const [roomName, roomData] of Object.entries(state.rooms)) {
+          const room = this.rooms.get(roomName);
+          if (room) {
+            room.seats = new Map(Object.entries(roomData.seats || {}));
+            room.points = new Map(Object.entries(roomData.points || {}));
+            room.muted = roomData.muted || false;
+            room.number = roomData.number || 1;
+          }
         }
       }
       
-      console.log('[GameServer] State restored');
+      if (state.userSeat) {
+        for (const [username, info] of Object.entries(state.userSeat)) {
+          this.userSeat.set(username, info);
+        }
+      }
+      
+      if (state.userRoom) {
+        for (const [username, room] of Object.entries(state.userRoom)) {
+          this.userRoom.set(username, room);
+        }
+      }
+      
+      if (state.currentNumber) {
+        this.currentNumber = state.currentNumber;
+      }
+      
+      if (state._tikCounter) {
+        this._tikCounter = state._tikCounter;
+      }
+      
+      console.log('[ChatServer] State restored');
     } catch(e) {
-      console.error('[GameServer] Restore error:', e);
+      console.error('[ChatServer] Restore error:', e);
     }
   }
 
-  // ========== DO TICK ==========
-  _doTick() {
+  // ========== FETCH ==========
+  async fetch(req) {
     try {
-      this._cleanupDeadConnections();
-      this._checkDice();
-      this._checkStuckGames();
-      this._cleanupMemory();
-    } catch(e) {}
-  }
-
-  // ========== HANDLE WEBSOCKET ==========
-  async handleWebSocket(request) {
-    try {
-      const url = new URL(request.url);
-      const room = url.searchParams.get("room") || "default";
+      const url = new URL(req.url);
+      const pathname = url.pathname;
       
-      const upgrade = request.headers.get("Upgrade");
-      if (upgrade !== "websocket") {
-        return new Response("WebSocket only", { status: 400 });
-      }
-      
-      if (this.wsMap.size >= CONSTANTS.MAX_WS_CLIENTS) {
-        return new Response("Server full", { status: 503 });
-      }
-      
-      const pair = new WebSocketPair();
-      const [client, server] = [pair[0], pair[1]];
-      const wsId = ++this._wsIdCounter;
-      
-      server._wsId = wsId;
-      server._closing = false;
-      server.room = room;
-      server.roomname = room;
-      server.username = null;
-      
-      server.accept();
-      
-      this.wsMap.set(wsId, server);
-      
-      let clients = this.wsClients.get(room);
-      if (!clients) {
-        clients = new Set();
-        this.wsClients.set(room, clients);
-      }
-      clients.add(wsId);
-      this.clientRooms.set(wsId, room);
-      
-      // ========== MESSAGE HANDLER ==========
-      server.addEventListener("message", async (event) => {
+      const upgrade = req.headers.get("Upgrade");
+      if (upgrade === "websocket") {
+        if (this.wsSet.size >= 150) {
+          return new Response("Server full", { status: 503 });
+        }
+        
         try {
-          if (server._closing || this.closing || this.isDestroyed) return;
-          let data;
-          try { data = JSON.parse(event.data); } catch(e) { return; }
-          if (Array.isArray(data) && data.length > 0) {
-            if (data[0] === "joinGame" || data[0] === "startGame" || data[0] === "switchRoom") {
-              const username = data[data.length - 1];
-              if (username && typeof username === 'string') {
-                server.username = username;
-                this.userRooms.set(username, room);
+          const pair = new WebSocketPair();
+          const [client, server] = [pair[0], pair[1]];
+          
+          server.accept();
+          
+          const wsId = ++this._wsIdCounter;
+          server._wsId = wsId;
+          server.username = null;
+          server.room = null;
+          server._closing = false;
+          
+          // ========== EVENT HANDLERS ==========
+          server.addEventListener("message", (event) => {
+            try {
+              if (server._closing || this.closing || this.isDestroyed) return;
+              let data;
+              try { data = JSON.parse(event.data); } catch(e) { return; }
+              if (Array.isArray(data) && data.length > 0) {
+                this._handleEventInternal(server, data);
               }
-            }
-            await this._handleEvent(server, data);
-          }
-        } catch(e) {}
-      });
-      
-      server.addEventListener("close", () => {
-        this.webSocketClose(server);
-      });
-      
-      server.addEventListener("error", () => {
-        this.webSocketError(server);
-      });
-      
-      // Send initial state
-      this._safeSend(server, ["switchRoomSuccess", room]);
-      this._safeSend(server, ["gameState", { room, hasGame: false, gameType: 'lowcard' }]);
-      
-      if (room === DICE_ROOM) {
-        this._safeSend(server, ["diceStatus", !!this.currentDiceRoll && this._canSubmitDiceAnswer, this._diceRound || 1]);
-      }
-      
-      return new Response(null, { status: 101, webSocket: client });
-      
-    } catch(e) {
-      console.error('[GameServer] handleWebSocket error:', e);
-      return new Response("Error", { status: 500 });
-    }
-  }
-
-  // ========== HANDLE HEALTH ==========
-  handleHealth() {
-    return new Response(JSON.stringify({
-      status: "ok",
-      uptime: Date.now() - this._startTime,
-      connections: this.wsMap.size,
-      games: this.activeGames.size,
-      queue: this._eventQueue?.length || 0,
-      timestamp: Date.now()
-    }), {
-      headers: { 'Content-Type': 'application/json' }
-    });
-  }
-
-  // ========== BROADCAST ==========
-  _broadcastToRoom(room, message) {
-    try {
-      if (this.closing || this.isDestroyed || !room || !message) return;
-      const wsIds = this.wsClients.get(room);
-      if (!wsIds?.size) return;
-      
-      const msgStr = JSON.stringify(message);
-      const wsIdArray = Array.from(wsIds);
-      
-      for (let i = 0; i < wsIdArray.length; i += 10) {
-        const batch = wsIdArray.slice(i, i + 10);
-        for (const wsId of batch) {
-          const ws = this.wsMap.get(wsId);
-          if (ws && ws.readyState === 1 && !ws._closing) {
-            try { ws.send(msgStr); } catch(e) {}
-          }
+            } catch(e) {}
+          });
+          
+          server.addEventListener("close", () => {
+            this.cleanup(server);
+          });
+          
+          server.addEventListener("error", () => {
+            this.cleanup(server);
+          });
+          
+          this.wsSet.add(server);
+          
+          try {
+            server.send(JSON.stringify(["connected", "Welcome to Chat Server"]));
+          } catch(e) {}
+          
+          return new Response(null, { 
+            status: 101, 
+            webSocket: client 
+          });
+          
+        } catch(e) {
+          console.error('[ChatServer] WebSocket error:', e);
+          return new Response("WebSocket failed", { status: 500 });
         }
       }
-    } catch(e) {}
-  }
-
-  // ========== SAFE SEND ==========
-  _safeSend(ws, message) {
-    try {
-      if (!ws || ws.readyState !== 1) return false;
-      ws.send(JSON.stringify(message));
-      return true;
-    } catch(e) { return false; }
-  }
-
-  // ========== GET WS ID ==========
-  _getWsId(ws) {
-    return ws?._wsId || null;
-  }
-
-  // ========== REMOVE CLIENT ==========
-  _removeClientFromRoom(room, wsId) {
-    try {
-      if (!room || !wsId) return;
-      const clients = this.wsClients.get(room);
-      if (clients) { 
-        clients.delete(wsId); 
-        if (clients.size === 0) this.wsClients.delete(room);
-      }
-    } catch(e) {}
+      
+      return new Response("Chat Server Running", { 
+        status: 200,
+        headers: { 'Content-Type': 'text/plain' }
+      });
+      
+    } catch(e) {
+      console.error('[ChatServer] Fetch error:', e);
+      return new Response("Internal Server Error", { status: 500 });
+    }
   }
 
   // ========== HANDLE EVENT ==========
-  async _handleEvent(ws, data) {
-    try {
-      if (this.isDestroyed || !ws || !data || !data[0]) return;
-      const evt = data[0];
-      
-      if (evt === "switchRoom") {
-        await this.switchRoom(ws, data[1], data[2]);
-        return;
-      }
-      
-      if (evt === "submitDiceAnswer") {
-        await this.submitDiceAnswer(ws, data[1], data[2]);
-        return;
-      }
-      
-      if (evt === "getDiceLeaderboard") {
-        try {
-          const sorted = Array.from(this._dicePoints.entries())
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, 10);
-          this._safeSend(ws, ["diceLeaderboard", sorted.map(([u, s]) => `${u}|${s}`)]);
-        } catch(e) { this._safeSend(ws, ["diceLeaderboard", []]); }
-        return;
-      }
-      
-      if (evt === "getDiceStatus") {
-        this._safeSend(ws, ["diceStatus", !!this.currentDiceRoll && this._canSubmitDiceAnswer, this._diceRound || 1]);
-        return;
-      }
-      
-      const room = ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
-      if (!room) {
-        this._safeSend(ws, ["gameError", "Please switch to a room first"]);
-        return;
-      }
-      if (room === DICE_ROOM) {
-        this._safeSend(ws, ["gameError", "Cannot start game in Quiz room"]);
-        return;
-      }
-      
-      switch (evt) {
-        case "gameLowCardStart": await this.startGame(ws, data[1], data[2]); break;
-        case "gameLowCardJoin": await this.joinGame(ws, data[1]); break;
-        case "gameLowCardNumber": await this.submitNumber(ws, data[1], data[2] || "", data[3]); break;
-        case "gameLowCardLeave": await this.leaveGame(ws, data[1]); break;
-        case "checkGameRunning": await this.checkGameRunning(ws, data[1]); break;
-        case "getGameState": this._sendGameState(ws, data[1] || room); break;
-        default: break;
-      }
-    } catch(e) {}
-  }
-
-  // ========== SWITCH ROOM ==========
-  async switchRoom(ws, room, username = null) {
-    try {
-      if (this.isDestroyed) {
-        this._safeSend(ws, ["gameError", "Server is shutting down"]);
-        return;
-      }
-      if (!room || room.trim() === "") {
-        this._safeSend(ws, ["gameError", "Invalid room name"]);
-        return;
-      }
-      
-      const roomName = room.trim();
-      const wsId = this._getWsId(ws);
-      if (!wsId) {
-        this._safeSend(ws, ["gameError", "Connection error"]);
-        return;
-      }
-      
-      const currentRoom = ws.room || ws.roomname || this.clientRooms.get(wsId);
-      if (currentRoom === roomName) {
-        this._safeSend(ws, ["switchRoomSuccess", roomName]);
-        this._sendGameState(ws, roomName);
-        return;
-      }
-      
-      if (this._switchLocks.has(`switch_${wsId}`)) {
-        this._safeSend(ws, ["switchRoomSuccess", currentRoom || roomName]);
-        return;
-      }
-      
-      this._switchLocks.set(`switch_${wsId}`, Date.now());
-      
-      try {
-        if (currentRoom) this._removeClientFromRoom(currentRoom, wsId);
-        
-        let clients = this.wsClients.get(roomName);
-        if (!clients) {
-          clients = new Set();
-          this.wsClients.set(roomName, clients);
-        }
-        clients.add(wsId);
-        this.clientRooms.set(wsId, roomName);
-        ws.room = roomName;
-        ws.roomname = roomName;
-        if (username) ws.username = username;
-        
-        if (username) {
-          this.userRooms.set(username, roomName);
-        }
-        
-        this._safeSend(ws, ["switchRoomSuccess", roomName]);
-        this._sendGameState(ws, roomName);
-        
-        const usersInRoom = [];
-        for (const [id, w] of this.wsMap) {
-          if (this.clientRooms.get(id) === roomName && w.username) {
-            usersInRoom.push(w.username);
-          }
-        }
-        this._broadcastToRoom(roomName, ["roomUsers", usersInRoom]);
-        
-      } finally {
-        setTimeout(() => {
-          this._switchLocks.delete(`switch_${wsId}`);
-        }, 2000);
-      }
-    } catch(e) {}
-  }
-
-  // ========== DICE METHODS ==========
-  _getCurrentWITATime() {
-    try {
-      const now = new Date();
-      const hours = (now.getUTCHours() + QUIZ_SCHEDULE.TIMEZONE_OFFSET) % 24;
-      const minutes = now.getUTCMinutes();
-      return { hours, minutes, totalMinutes: (hours * 60) + minutes };
-    } catch(e) { return { hours: 0, minutes: 0, totalMinutes: 0 }; }
-  }
-
-  _isDiceTime() {
-    try {
-      const witaTime = this._getCurrentWITATime();
-      const currentTotal = witaTime.totalMinutes;
-      for (const session of QUIZ_SCHEDULE.SESSIONS) {
-        const startTotal = session.start * 60;
-        const endTotal = session.end * 60;
-        if (currentTotal >= startTotal && currentTotal < endTotal) return true;
-      }
-      return false;
-    } catch(e) { return false; }
-  }
-
-  _checkDice() {
-    try {
-      if (this._tieActive || this._isShowingDice || this._diceTimeUpCooldown) return;
-      if (!this._isDiceTime()) return;
-      if (this.currentDiceRoll || this._diceTimeout || this._diceLock) return;
-      
-      const clients = this.wsClients?.get(DICE_ROOM);
-      if (clients?.size > 0) {
-        this._startDiceFast();
-      }
-    } catch(e) {}
-  }
-
-  _startDiceFast() {
-    try {
-      if (this._diceLock || this.currentDiceRoll || this._isShowingDice) return;
-      this._diceLock = true;
-      this._isShowingDice = true;
-      
-      const value = Math.floor(Math.random() * 6) + 1;
-      this._diceRound = (this._diceRound || 0) + 1;
-      this.currentDiceRoll = { value, timestamp: Date.now(), round: this._diceRound };
-      this._diceStartTime = Date.now();
-      this._canSubmitDiceAnswer = true;
-      this.diceAnswered = new Set();
-      this._playerAnswers = new Map();
-      this.diceHasWinner = false;
-      this.diceWinner = null;
-      
-      this._broadcastToRoom(DICE_ROOM, ["diceRoll", { 
-        value, 
-        timestamp: Date.now(),
-        answerTime: 20,
-        canAnswerNow: true,
-        round: this._diceRound
-      }]);
-      
-      this._broadcastToRoom(DICE_ROOM, ["diceNotification", "♡ clik draw ♡"]);
-      
-      let timeLeft = 20;
-      const timerInterval = setInterval(() => {
-        timeLeft--;
-        if (timeLeft === 15 || timeLeft === 10 || timeLeft === 5) {
-          this._broadcastToRoom(DICE_ROOM, ["diceNotification", `${timeLeft}s remaining`]);
-        }
-        if (timeLeft <= 0) {
-          clearInterval(timerInterval);
-          this._endDiceRound();
-        }
-      }, 1000);
-      
-      this._diceTimerInterval = timerInterval;
-      this._allTimers.add(timerInterval);
-      
-      this._diceTimeout = setTimeout(() => {
-        this._endDiceRound();
-      }, 20000);
-      this._allTimers.add(this._diceTimeout);
-      
-    } catch(e) {
-      this._diceLock = false;
-      this._isShowingDice = false;
-    }
-  }
-
-  async _endDiceRound() {
-    try {
-      if (this._diceTimerInterval) {
-        clearInterval(this._diceTimerInterval);
-        this._diceTimerInterval = null;
-      }
-      if (this._diceTimeout) {
-        clearTimeout(this._diceTimeout);
-        this._diceTimeout = null;
-      }
-      
-      this._canSubmitDiceAnswer = false;
-      this._isShowingDice = false;
-      
-      const diceValue = this.currentDiceRoll?.value;
-      const roundNumber = this._diceRound || 1;
-      
-      const correctPlayers = [];
-      for (const player of this.diceAnswered) {
-        if (this._playerAnswers.get(player) === diceValue) {
-          correctPlayers.push(player);
-        }
-      }
-      
-      if (correctPlayers.length === 0) {
-        this._broadcastToRoom(DICE_ROOM, ["diceNoWinner", {
-          message: "No winner",
-          value: diceValue,
-          round: roundNumber
-        }]);
-      } else if (correctPlayers.length === 1) {
-        const winner = correctPlayers[0];
-        const points = this._dicePoints.get(winner) || 0;
-        this._dicePoints.set(winner, points + 1);
-        
-        this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
-          username: winner,
-          totalPoints: points + 1,
-          diceValue: diceValue,
-          round: roundNumber
-        }]);
-      } else if (correctPlayers.length > 1 && !this._tieActive) {
-        this.currentDiceRoll = null;
-        this._diceLock = false;
-        this._isShowingDice = false;
-        await this._startTieBreaker(DICE_ROOM, correctPlayers);
-        return;
-      }
-      
-      this.currentDiceRoll = null;
-      this._diceLock = false;
-      this._diceTimeUpCooldown = true;
-      
-      setTimeout(() => {
-        this._diceTimeUpCooldown = false;
-        this._checkDice();
-      }, 15000);
-      
-    } catch(e) {
-      this._diceLock = false;
-      this._isShowingDice = false;
-    }
-  }
-
-  async _startTieBreaker(room, players) {
-    if (this._tieLock) return;
-    this._tieLock = true;
+  _handleEventInternal(ws, data) {
+    if (!ws || !data || !data[0]) return;
+    const [evt, ...args] = data;
     
-    try {
-      if (!players || players.length < 2 || this._tieActive) return;
-      
-      this._tieActive = true;
-      this._tieRound = 0;
-      this._tiePlayers = [...players];
-      this._tieAnswers = new Map();
-      
-      const id = `tie_${Date.now()}`;
-      this._tieBreakers.set(id, { players, round: 0, winner: null, status: 'waiting' });
-      
-      this._tieRound++;
-      this._tiePlayers = [...players];
-      this._tieAnswers = new Map();
-      
-      this._canSubmitDiceAnswer = true;
-      this.diceAnswered = new Set();
-      this._playerAnswers = new Map();
-      this._isShowingDice = true;
-      
-      this._broadcastToRoom(DICE_ROOM, ["diceNotification", 
-        `♡ Tie Round ${this._tieRound}: ${players.join(', ')}`
-      ]);
-      
-      let timeLeft = 20;
-      this._tieInterval = setInterval(() => {
-        timeLeft--;
-        if (timeLeft === 10 || timeLeft === 5) {
-          this._broadcastToRoom(DICE_ROOM, ["diceNotification", `${timeLeft}s remaining`]);
+    switch(evt) {
+      case "setIdTarget2":
+        this._handleSetId(ws, args[0], args[1]);
+        break;
+        
+      case "joinRoom":
+        this._handleJoin(ws, args[0]);
+        break;
+        
+      case "chat": {
+        const [room, noimg, user, msg, color, textColor] = args;
+        if (room && ROOMS_SET.has(room) && msg) {
+          this.broadcast(room, ["chat", room, noimg, user, msg, color, textColor]);
         }
-        if (timeLeft <= 0) {
-          clearInterval(this._tieInterval);
-          this._tieInterval = null;
-          this._canSubmitDiceAnswer = false;
-          this._isShowingDice = false;
-          this._broadcastToRoom(DICE_ROOM, ["diceNotification", "TIME UP"]);
-          
-          // Process tie results
-          let highest = 0, highestPlayers = [];
-          for (const player of players) {
-            const answer = this._tieAnswers.get(player);
-            if (answer !== undefined && answer >= 1 && answer <= 6) {
-              if (answer > highest) { highest = answer; highestPlayers = [player]; }
-              else if (answer === highest) { highestPlayers.push(player); }
+        break;
+      }
+      
+      case "updateKursi": {
+        const [room, seat, noimg, name, color, bawah, atas, vip, vt] = args;
+        const roomData = this.rooms.get(room);
+        if (roomData && roomData.seats.has(seat)) {
+          const data = roomData.seats.get(seat);
+          if (noimg !== undefined) data.noimageUrl = noimg;
+          if (name !== undefined) data.namauser = name;
+          if (color !== undefined) data.color = color;
+          if (bawah !== undefined) data.itembawah = bawah;
+          if (atas !== undefined) data.itematas = atas;
+          if (vip !== undefined) data.vip = vip;
+          if (vt !== undefined) data.viptanda = vt;
+          this.broadcast(room, ["kursiBatchUpdate", room, [[seat, data]]]);
+        }
+        break;
+      }
+      
+      case "updatePoint": {
+        const [room, seat, x, y, fast] = args;
+        const roomData = this.rooms.get(room);
+        if (roomData && roomData.seats.has(seat)) {
+          roomData.points.set(seat, { x: x || 0, y: y || 0, fast: fast || 0 });
+          this.broadcast(room, ["pointUpdated", room, seat, x, y, fast]);
+        }
+        break;
+      }
+      
+      case "removeKursiAndPoint": {
+        const [room, seat] = args;
+        const roomData = this.rooms.get(room);
+        if (roomData) {
+          for (const [username, info] of this.userSeat) {
+            if (info.seat === seat && info.room === room) {
+              this.userSeat.delete(username);
+              this.userRoom.delete(username);
+              break;
             }
           }
-          
-          if (highestPlayers.length === 1) {
-            const winner = highestPlayers[0];
-            const points = this._dicePoints.get(winner) || 0;
-            this._dicePoints.set(winner, points + 1);
-            this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
-              username: winner,
-              totalPoints: points + 1,
-              diceValue: highest,
-              round: this._diceRound || 1,
-              isTieBreaker: true,
-              tieBreakerRound: this._tieRound,
-              finalWinner: true
-            }]);
-          } else {
-            this._broadcastToRoom(DICE_ROOM, ["diceNotification", "Tie breaker - no winner"]);
-          }
-          
-          this._resetTieBreaker();
-          this._startCooldownAfterTieBreaker();
+          roomData.seats.delete(seat);
+          roomData.points.delete(seat);
+          this.broadcast(room, ["removeKursi", room, seat]);
+          this.broadcast(room, ["roomUserCount", room, roomData.seats.size]);
         }
-      }, 1000);
-      this._allTimers.add(this._tieInterval);
+        break;
+      }
       
-    } finally {
-      setTimeout(() => { this._tieLock = false; }, 2000);
+      case "private": {
+        const [target, noimg, msg, sender] = args;
+        if (target && msg) {
+          const targetConns = this.userConnections.get(target);
+          if (targetConns) {
+            for (const targetWs of targetConns) {
+              if (targetWs?.readyState === 1) {
+                this.safeSend(targetWs, ["private", target, noimg, msg, Date.now(), sender]);
+                break;
+              }
+            }
+          }
+          this.safeSend(ws, ["private", target, noimg, msg, Date.now(), sender]);
+        }
+        break;
+      }
+      
+      case "gift": {
+        const [room, sender, receiver, giftName] = args;
+        if (room && ROOMS_SET.has(room)) {
+          this.broadcast(room, ["gift", room, sender, receiver, giftName, Date.now()]);
+        }
+        break;
+      }
+      
+      case "rollangak": {
+        const [room, user, angka] = args;
+        if (room && ROOMS_SET.has(room)) {
+          this.broadcast(room, ["rollangakBroadcast", room, user, angka]);
+        }
+        break;
+      }
+      
+      case "sendnotif": {
+        const [target, noimg, user, msg] = args;
+        if (target && msg) {
+          const targetConns = this.userConnections.get(target);
+          if (targetConns) {
+            for (const c of targetConns) {
+              if (c?.readyState === 1) {
+                this.safeSend(c, ["notif", noimg, user, msg, Date.now()]);
+                break;
+              }
+            }
+          }
+        }
+        break;
+      }
+      
+      case "getRoomUserCount": {
+        const room = args[0];
+        if (room && ROOMS_SET.has(room)) {
+          const roomData = this.rooms.get(room);
+          this.safeSend(ws, ["roomUserCount", room, roomData?.seats?.size || 0]);
+        }
+        break;
+      }
+      
+      case "getAllRoomsUserCount": {
+        const counts = {};
+        for (const room of ROOMS) {
+          const roomData = this.rooms.get(room);
+          counts[room] = roomData?.seats?.size || 0;
+        }
+        this.safeSend(ws, ["allRoomsUserCount", Object.entries(counts)]);
+        break;
+      }
+      
+      case "getOnlineUsers": {
+        const users = [];
+        for (const [username, info] of this.userSeat) {
+          if (info.seat) {
+            const conns = this.userConnections.get(username);
+            if (conns) {
+              for (const conn of conns) {
+                if (conn?.readyState === 1) { users.push(username); break; }
+              }
+            }
+          }
+        }
+        this.safeSend(ws, ["allOnlineUsers", users]);
+        break;
+      }
+      
+      case "isUserOnline": {
+        const [target, callback] = args;
+        let isOnline = false;
+        const info = this.userSeat.get(target);
+        if (info?.seat) {
+          const conns = this.userConnections.get(target);
+          if (conns) {
+            for (const conn of conns) {
+              if (conn?.readyState === 1) { isOnline = true; break; }
+            }
+          }
+        }
+        this.safeSend(ws, ["userOnlineStatus", target, isOnline, callback || ""]);
+        break;
+      }
+      
+      case "setMuteType": {
+        const [muteVal, room] = args;
+        const roomData = this.rooms.get(room);
+        if (roomData) {
+          roomData.muted = !!muteVal;
+          this.broadcast(room, ["muteStatusChanged", !!muteVal, room]);
+          this.safeSend(ws, ["muteTypeSet", !!muteVal, true, room]);
+        }
+        break;
+      }
+      
+      case "getMuteType": {
+        const room = args[0];
+        if (room && ROOMS_SET.has(room)) {
+          const roomData = this.rooms.get(room);
+          this.safeSend(ws, ["muteTypeResponse", roomData?.muted || false, room]);
+        }
+        break;
+      }
+      
+      case "modwarning": {
+        const room = args[0];
+        if (room && ROOMS_SET.has(room)) {
+          this.broadcast(room, ["modwarning", room]);
+        }
+        break;
+      }
+      
+      case "getCurrentNumber":
+        this.safeSend(ws, ["currentNumber", this.currentNumber]);
+        break;
+      
+      case "onDestroy":
+        this.cleanup(ws);
+        break;
+        
+      default:
+        break;
     }
   }
 
-  _resetTieBreaker() {
-    this._tieActive = false;
-    this._tiePlayers = [];
-    this._tieAnswers = new Map();
-    this._tieRound = 0;
-    this._canSubmitDiceAnswer = false;
-    this._isShowingDice = false;
-    this.currentDiceRoll = null;
-    this.diceAnswered = new Set();
-    this._playerAnswers = new Map();
-    if (this._tieInterval) { clearInterval(this._tieInterval); this._tieInterval = null; }
-    if (this._tieTimer) { clearTimeout(this._tieTimer); this._tieTimer = null; }
-  }
-
-  _startCooldownAfterTieBreaker() {
-    this._broadcastToRoom(DICE_ROOM, ["diceNotification", "wait 15s"]);
-    this._diceTimeUpCooldown = true;
-    setTimeout(() => {
-      this._diceTimeUpCooldown = false;
-      this._checkDice();
-    }, 15000);
-  }
-
-  async submitDiceAnswer(ws, username, guess) {
-    try {
-      if (!ws || !username) return;
-      if (!this._canSubmitDiceAnswer) return;
-      if (this.diceAnswered.has(username)) return;
-      
-      const guessValue = parseInt(guess, 10);
-      if (isNaN(guessValue) || guessValue < 1 || guessValue > 6) {
-        this._safeSend(ws, ["diceError", "invalid guess 1-6"]);
-        return;
-      }
-      
-      if (this._tieActive) {
-        if (!this._tiePlayers.includes(username)) {
-          this._safeSend(ws, ["diceError", "You are not in tie breaker"]);
-          return;
-        }
-        if (this._tieAnswers.has(username)) {
-          this._safeSend(ws, ["diceError", "You already answered"]);
-          return;
-        }
-        
-        this._tieAnswers.set(username, guessValue);
-        this.diceAnswered.add(username);
-        
-        this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
-          username,
-          guess: guessValue,
-          isTieBreaker: true,
-          tieRound: this._tieRound
-        }]);
-        return;
-      }
-      
-      if (!this.currentDiceRoll) return;
-      
-      const diceValue = this.currentDiceRoll.value;
-      
-      this._playerAnswers.set(username, guessValue);
-      this.diceAnswered.add(username);
-      
-      this._broadcastToRoom(DICE_ROOM, ["diceAnswer", {
-        username,
-        guess: guessValue,
-        round: this._diceRound || 1
-      }]);
-      
-      if (guessValue === diceValue && !this.diceHasWinner) {
-        this.diceHasWinner = true;
-        this.diceWinner = username;
-      }
-      
-    } catch(e) {}
-  }
-
-  // ========== GAME METHODS ==========
-  _sendGameState(ws, room) {
-    try {
-      if (!ws || ws.readyState !== 1 || !room) return;
-      const game = this.activeGames.get(room);
-      if (!game || !game._isActive || game._gameEnded) {
-        this._safeSend(ws, ["gameState", { room, hasGame: false, gameType: 'lowcard' }]);
-        return;
-      }
-      
-      const activePlayers = this._getActivePlayers(game);
-      const allPlayers = Array.from(game.players.values()).map(p => p.name);
-      const eliminated = Array.from(game.eliminated || []);
-      const submitted = Array.from(game.numbers?.keys() || []);
-      
-      this._safeSend(ws, ["gameState", {
-        room, hasGame: true, gameType: 'lowcard',
-        isActive: game._isActive, phase: game._phase || 'registration',
-        round: game.round || 1, bet: game.betAmount || 0,
-        host: game.hostName || 'Unknown',
-        registrationOpen: game.registrationOpen || false,
-        players: allPlayers, activePlayers: activePlayers.map(p => p.name),
-        eliminated, submitted, playerCount: game.players.size,
-        activeCount: activePlayers.length,
-        isEvaluating: game._isEvaluating || false,
-        evaluationLocked: game.evaluationLocked || false,
-        drawTimeExpired: game.drawTimeExpired || false
-      }]);
-    } catch(e) {}
-  }
-
-  _getActivePlayers(game) {
-    try {
-      if (!game?._isActive || game?._gameEnded || !game?.players) return [];
-      return Array.from(game.players.entries())
-        .filter(([id]) => !game.eliminated?.has(id))
-        .map(([, p]) => p);
-    } catch(e) { return []; }
-  }
-
-  _getActivePlayerIds(game) {
-    try {
-      if (!game?._isActive || game._gameEnded || !game?.players) return [];
-      return Array.from(game.players.keys()).filter(id => !game.eliminated?.has(id));
-    } catch(e) { return []; }
-  }
-
-  _isGameActuallyRunning(game) { 
-    return game?._isActive === true && !game?._gameEnded; 
-  }
-
-  // ========== START GAME ==========
-  async startGame(ws, bet, username) {
-    try {
-      if (this.isDestroyed) {
-        this._safeSend(ws, ["gameError", "Server is shutting down"]);
-        return;
-      }
-      if (!username?.trim()) {
-        this._safeSend(ws, ["gameError", "Username is required"]);
-        return;
-      }
-      
-      const usernameClean = username.trim();
-      const wsId = ws._wsId;
-      const room = ws.room || ws.roomname || this.clientRooms.get(wsId);
-      if (!room) {
-        this._safeSend(ws, ["gameError", "Please switch to a room first"]);
-        return;
-      }
-      if (room === DICE_ROOM) {
-        this._safeSend(ws, ["gameError", "Cannot start game in Quiz room"]);
-        return;
-      }
-
-      const lockKey = `game_start_${room}`;
-      if (this._gameLocks.has(lockKey)) {
-        this._safeSend(ws, ["gameError", "Game is starting, please wait"]);
-        return;
-      }
-      
-      this._gameLocks.set(lockKey, Date.now());
-
-      try {
-        const existingGame = this.activeGames.get(room);
-        if (existingGame?._isActive && !existingGame._gameEnded) {
-          this._safeSend(ws, ["gameError", "Game is already running"]);
-          return;
-        }
-        if (existingGame) await this._forceCleanupGame(room, existingGame);
-        
-        const betAmount = parseInt(bet, 10) || 0;
-        if (betAmount < 0 || (betAmount !== 0 && betAmount < 100) || betAmount > CONSTANTS.MAX_BET) {
-          this._safeSend(ws, ["gameError", `Invalid bet (0 or 100-${CONSTANTS.MAX_BET})`]);
-          return;
-        }
-        
-        if (this.activeGames.size >= CONSTANTS.MAX_LOWCARD_GAMES) {
-          this._safeSend(ws, ["gameError", "Server is busy"]);
-          return;
-        }
-        
-        const game = {
-          room, players: new Map(), botPlayers: new Map(), registrationOpen: true,
-          round: 1, numbers: new Map(), tanda: new Map(), eliminated: new Set(),
-          betAmount, hostId: usernameClean, hostName: usernameClean, useBots: false,
-          evaluationLocked: false, drawTimeExpired: false,
-          _isActive: true, _gameEnded: false, _phase: 'registration',
-          _botTimeouts: new Set(), _botsAdded: false,
-          _registrationTimer: null, _drawTimer: null, _evalTimer: null, _safetyTimer: null,
-          _isEvaluating: false, _createdAt: Date.now(), _drawPhaseStart: null, _endTime: null,
-          playerWsId: new Map(),
-          _startedByRecording: false, _startedBy: 'user'
-        };
-        
-        game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
-        game.playerWsId.set(usernameClean, wsId);
-        this.activeGames.set(room, game);
-        this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
-        this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
-        this._startRegistration(room, game);
-        
-      } finally {
-        setTimeout(() => {
-          this._gameLocks.delete(lockKey);
-        }, 3000);
-      }
-    } catch(e) {}
-  }
-
-  // ========== REGISTRATION ==========
-  _startRegistration(room, game) {
-    try {
-      if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
-      if (game._registrationTimer) { clearInterval(game._registrationTimer); game._registrationTimer = null; }
-      
-      let timeLeft = 20;
-      const timer = setInterval(() => {
-        try {
-          if (!this._isGameActuallyRunning(game) || !game.registrationOpen || timeLeft < 0) {
-            clearInterval(timer);
-            if (game._registrationTimer === timer) game._registrationTimer = null;
-            return;
-          }
-          if (timeLeft === 15 || timeLeft === 10 || timeLeft === 5) {
-            this._broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
-          }
-          if (timeLeft === 0) {
-            clearInterval(timer);
-            game._registrationTimer = null;
-            this._broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP"]);
-            this._closeRegistration(room, game);
-          }
-          timeLeft--;
-        } catch(e) { clearInterval(timer); if (game._registrationTimer === timer) game._registrationTimer = null; }
-      }, 1000);
-      game._registrationTimer = timer;
-      this._allTimers.add(timer);
-    } catch(e) {}
-  }
-
-  _closeRegistration(room, game) {
-    try {
-      if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
-      game.registrationOpen = false;
-      if (game._registrationTimer) { clearInterval(game._registrationTimer); game._registrationTimer = null; }
-      
-      const humanPlayers = Array.from(game.players.keys()).filter(id => !id.startsWith('BOT_'));
-      const humanCount = humanPlayers.length;
-      
-      if (!game._botsAdded) {
-        if (humanCount === 1 || humanCount === 0) {
-          this._addBots(room, 4);
-          game._botsAdded = true;
-        } else if (game.players.size < 2) {
-          const needed = Math.min(4 - game.players.size, CONSTANTS.MAX_BOTS_PER_GAME);
-          if (needed > 0) { this._addBots(room, needed); game._botsAdded = true; }
+  // ========== HANDLE SET ID ==========
+  _handleSetId(ws, username, isNewUser) {
+    if (!ws || !username || this.closing || this.isDestroyed) return;
+    if (ws.readyState !== 1) { this.cleanup(ws); return; }
+    
+    // Clean existing connections
+    const oldConns = this.userConnections.get(username);
+    if (oldConns) {
+      const toRemove = [];
+      for (const conn of oldConns) {
+        if (!conn || conn.readyState !== 1 || conn._closing) {
+          toRemove.push(conn);
         }
       }
-      
-      if (this._isGameActuallyRunning(game) && game.players.size >= 2) {
-        this._startDrawPhase(room, game);
-      } else {
-        game._gameEnded = true;
-        game._isActive = false;
-        this._broadcastToRoom(room, ["gameError", "Not enough players"]);
-        this._scheduleGameCleanup(room, game);
+      for (const conn of toRemove) {
+        oldConns.delete(conn);
+        this.wsSet.delete(conn);
+        this.wsActiveMulti.delete(conn);
       }
-    } catch(e) {}
+      if (oldConns.size === 0) this.userConnections.delete(username);
+    }
+    
+    // Set user
+    ws.username = username;
+    ws.idtarget = username;
+    ws._closing = false;
+    
+    let connections = this.userConnections.get(username);
+    if (!connections) {
+      connections = new Set();
+      this.userConnections.set(username, connections);
+    }
+    connections.add(ws);
+    
+    if (!this.wsSet.has(ws)) this.wsSet.add(ws);
+    
+    // Send response
+    if (isNewUser) {
+      this.safeSend(ws, ["joinroomawal"]);
+    } else {
+      this.safeSend(ws, ["needJoinRoom"]);
+    }
   }
 
-  _addBots(room, count) {
-    try {
-      const game = this.activeGames.get(room);
-      if (!this._isGameActuallyRunning(game)) return;
-      const botNames = ["moz1", "moz2", "moz3", "moz4"];
-      const existingBots = Array.from(game.players.keys()).filter(id => id.startsWith('BOT_'));
-      const existingBotCount = existingBots.length;
-      const maxBotsToAdd = Math.min(count, CONSTANTS.MAX_BOTS_PER_GAME - existingBotCount);
-      if (maxBotsToAdd <= 0) return;
-      for (let i = 0; i < maxBotsToAdd; i++) {
-        const botId = `BOT_${room}_${i}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-        const botName = botNames[(existingBotCount + i) % botNames.length];
-        if (!game.players.has(botId)) {
-          game.players.set(botId, { id: botId, name: botName });
-          if (!game.botPlayers) game.botPlayers = new Map();
-          game.botPlayers.set(botId, botName);
+  // ========== HANDLE JOIN ==========
+  _handleJoin(ws, roomName) {
+    if (!ws || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) return;
+    
+    const username = ws.username;
+    if (!username) return;
+    
+    const roomData = this.rooms.get(roomName);
+    if (!roomData) return;
+    
+    // Remove from old room
+    const oldRoom = ws.room;
+    if (oldRoom && oldRoom !== roomName) {
+      const oldRoomData = this.rooms.get(oldRoom);
+      if (oldRoomData) {
+        let oldSeat = null;
+        for (const [s, data] of oldRoomData.seats) {
+          if (data.namauser === username) { oldSeat = s; break; }
+        }
+        if (oldSeat) {
+          oldRoomData.seats.delete(oldSeat);
+          oldRoomData.points.delete(oldSeat);
+          this.broadcast(oldRoom, ["removeKursi", oldRoom, oldSeat]);
+          this.broadcast(oldRoom, ["roomUserCount", oldRoom, oldRoomData.seats.size]);
         }
       }
-      game._botsAdded = true;
-      game.useBots = true;
-    } catch(e) {}
+      const oldClients = this.roomClients.get(oldRoom);
+      if (oldClients) oldClients.delete(ws);
+      this.userSeat.delete(username);
+      this.userRoom.delete(username);
+      ws.room = null;
+    }
+    
+    // Check existing seat
+    let seat = null;
+    for (const [s, data] of roomData.seats) {
+      if (data.namauser === username) { seat = s; break; }
+    }
+    
+    // Find available seat
+    if (!seat) {
+      if (roomData.seats.size >= MAX_SEATS) {
+        this.safeSend(ws, ["roomFull", roomName]);
+        return;
+      }
+      for (let s = 1; s <= MAX_SEATS; s++) {
+        if (!roomData.seats.has(s)) { seat = s; break; }
+      }
+    }
+    
+    if (!seat) {
+      this.safeSend(ws, ["roomFull", roomName]);
+      return;
+    }
+    
+    // Add seat
+    roomData.seats.set(seat, {
+      namauser: username,
+      noimageUrl: '',
+      color: '',
+      itembawah: 0,
+      itematas: 0,
+      vip: 0,
+      viptanda: 0
+    });
+    
+    // Update state
+    this.userSeat.set(username, { room: roomName, seat, isMulti: false });
+    this.userRoom.set(username, roomName);
+    ws.room = roomName;
+    ws.idtarget = username;
+    
+    const clients = this.roomClients.get(roomName);
+    if (clients && !clients.has(ws)) clients.add(ws);
+    
+    // Send all seats
+    const allSeats = {};
+    for (const [s, data] of roomData.seats) {
+      allSeats[s] = data;
+    }
+    
+    // Send responses
+    this.safeSend(ws, ["rooMasuk", seat, roomName]);
+    this.safeSend(ws, ["numberKursiSaya", seat]);
+    this.safeSend(ws, ["muteTypeResponse", roomData.muted, roomName]);
+    this.safeSend(ws, ["roomUserCount", roomName, roomData.seats.size]);
+    this.safeSend(ws, ["allUpdateKursiList", roomName, allSeats]);
+    
+    // Send points
+    const allPoints = [];
+    for (const [s, point] of roomData.points) {
+      allPoints.push({ seat: s, x: point.x, y: point.y, fast: point.fast ? 1 : 0 });
+    }
+    if (allPoints.length > 0) {
+      this.safeSend(ws, ["allPointsList", roomName, allPoints]);
+    }
+    
+    // Broadcast
+    this.broadcast(roomName, ["roomUserCount", roomName, roomData.seats.size]);
   }
 
-  // ========== DRAW PHASE ==========
-  _startDrawPhase(room, game) {
-    try {
-      if (!this._isGameActuallyRunning(game)) return;
-      if (game._drawTimer) { clearInterval(game._drawTimer); game._drawTimer = null; }
-      if (game._evalTimer) { clearTimeout(game._evalTimer); game._evalTimer = null; }
-      if (game._botTimeouts) {
-        for (const id of game._botTimeouts) clearTimeout(id);
-        game._botTimeouts.clear();
-      }
-      
-      const activePlayers = this._getActivePlayers(game);
-      if (activePlayers.length < 2) {
-        if (!game._botsAdded) {
-          const needed = Math.min(4 - activePlayers.length, CONSTANTS.MAX_BOTS_PER_GAME);
-          if (needed > 0) { this._addBots(room, needed); game._botsAdded = true; }
+  // ========== BROADCAST ==========
+  _broadcastToRoom(room, msgStr) {
+    const clients = this.roomClients.get(room);
+    if (!clients || clients.size === 0) return;
+    
+    const clientArray = Array.from(clients);
+    for (let i = 0; i < clientArray.length; i += BATCH_SIZE) {
+      const batch = clientArray.slice(i, i + BATCH_SIZE);
+      for (const ws of batch) {
+        if (ws && ws.readyState === 1 && !ws._closing) {
+          try { ws.send(msgStr); } catch(e) {}
         }
-        const newActive = this._getActivePlayers(game);
-        if (newActive.length < 2) {
-          if (newActive.length === 1 && !game._gameEnded) {
-            const winner = newActive[0]?.name || "Unknown";
-            const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
-            game._gameEnded = true;
-            game._isActive = false;
-            this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
-            this._scheduleGameCleanup(room, game);
-          } else {
-            game._gameEnded = true;
-            game._isActive = false;
-            this._broadcastToRoom(room, ["gameError", "Not enough players"]);
-            this._scheduleGameCleanup(room, game);
-          }
-          return;
-        }
       }
-      
-      game._phase = 'draw';
-      game.drawTimeExpired = false;
-      game.evaluationLocked = false;
-      game._drawPhaseStart = Date.now();
-      if (!game._botTimeouts) game._botTimeouts = new Set();
-      
-      const playersList = this._getActivePlayers(game).map(p => p.name);
-      this._broadcastToRoom(room, ["gameLowCardClosed", playersList]);
-      this._broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
-      this._startDrawCountdown(room, game);
-      if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) {
-        this._startBotDraws(room, game);
+    }
+  }
+
+  broadcast(room, msg) {
+    if (!room || !msg || this.closing || this.isDestroyed) return;
+    try { this._broadcastToRoom(room, JSON.stringify(msg)); } catch(e) {}
+  }
+
+  safeSend(ws, msg) {
+    if (!ws) return false;
+    try {
+      if (ws.readyState === 1 && !ws._closing) {
+        ws.send(JSON.stringify(msg));
+        return true;
       }
     } catch(e) {}
-  }
-
-  _startDrawCountdown(room, game) {
-    try {
-      if (!this._isGameActuallyRunning(game)) return;
-      if (game._drawTimer) { clearInterval(game._drawTimer); game._drawTimer = null; }
-      
-      let timeLeft = 20;
-      const timer = setInterval(() => {
-        try {
-          if (!this._isGameActuallyRunning(game) || game.drawTimeExpired || timeLeft < 0) {
-            clearInterval(timer);
-            if (game._drawTimer === timer) game._drawTimer = null;
-            return;
-          }
-          if (timeLeft === 15 || timeLeft === 10 || timeLeft === 5) {
-            this._broadcastToRoom(room, ["gameLowCardTimeLeft", `${timeLeft}s`]);
-          }
-          if (timeLeft === 0) {
-            clearInterval(timer);
-            game._drawTimer = null;
-            this._broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP"]);
-            this._closeDrawPhase(room, game);
-          }
-          timeLeft--;
-        } catch(e) { clearInterval(timer); if (game._drawTimer === timer) game._drawTimer = null; }
-      }, 1000);
-      game._drawTimer = timer;
-      this._allTimers.add(timer);
-    } catch(e) {}
-  }
-
-  async _closeDrawPhase(room, game) {
-    try {
-      if (!this._isGameActuallyRunning(game) || game.drawTimeExpired || game.evaluationLocked) return;
-      game.drawTimeExpired = true;
-      game.evaluationLocked = true;
-      if (game._drawTimer) { clearInterval(game._drawTimer); game._drawTimer = null; }
-      
-      if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) {
-        const activeBotIds = Array.from(game.botPlayers.keys())
-          .filter(id => !game.eliminated?.has(id) && !game.numbers?.has(id));
-        for (const botId of activeBotIds) this._forceBotDraw(room, botId, game);
-      }
-      
-      const activeIds = this._getActivePlayerIds(game);
-      const submittedIds = new Set(game.numbers?.keys() || []);
-      const notSubmitted = activeIds.filter(id => !submittedIds.has(id) && !game.eliminated?.has(id));
-      
-      if (notSubmitted.length > 0 && submittedIds.size === 0) {
-        this._broadcastToRoom(room, ["gameError", "No one submitted numbers"]);
-        game._gameEnded = true;
-        game._isActive = false;
-        this._scheduleGameCleanup(room, game);
-        return;
-      }
-      
-      for (const id of notSubmitted) {
-        if (!game.eliminated) game.eliminated = new Set();
-        game.eliminated.add(id);
-        game.numbers?.delete(id);
-        game.tanda?.delete(id);
-      }
-      
-      const remaining = Array.from(game.players.keys()).filter(id => !game.eliminated?.has(id));
-      
-      if (remaining.length === 1 && !game._gameEnded) {
-        const winnerId = remaining[0];
-        const winnerName = game.players.get(winnerId)?.name || winnerId;
-        const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
-        game._gameEnded = true;
-        game._isActive = false;
-        this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
-        this._scheduleGameCleanup(room, game);
-        return;
-      }
-      
-      if (remaining.length === 0) {
-        this._broadcastToRoom(room, ["gameError", "All players eliminated"]);
-        game._gameEnded = true;
-        game._isActive = false;
-        this._scheduleGameCleanup(room, game);
-        return;
-      }
-      
-      this._broadcastToRoom(room, ["gameLowCardWait", "wait results"]);
-      if (game._evalTimer) { clearTimeout(game._evalTimer); game._evalTimer = null; }
-      const evalTimer = setTimeout(() => {
-        try {
-          const currentGame = this.activeGames.get(room);
-          if (currentGame && currentGame === game && currentGame._isActive && !currentGame._gameEnded) {
-            this._evaluateRound(room, game);
-          }
-        } catch(e) {}
-      }, CONSTANTS.EVALUATION_DELAY_MS);
-      game._evalTimer = evalTimer;
-      this._allTimers.add(evalTimer);
-      
-    } catch(e) {}
-  }
-
-  // ========== EVALUATE ROUND ==========
-  async _evaluateRound(room, game) {
-    try {
-      if (this.isDestroyed || !game?._isActive || game._gameEnded || game._isEvaluating || !game.players) return;
-      
-      game._isEvaluating = true;
-      if (game._evalTimer) { clearTimeout(game._evalTimer); game._evalTimer = null; }
-      if (game._botTimeouts) {
-        for (const id of game._botTimeouts) clearTimeout(id);
-        game._botTimeouts.clear();
-      }
-      
-      const numbers = game.numbers || new Map();
-      const players = game.players || new Map();
-      const eliminated = game.eliminated || new Set();
-      const entries = Array.from(numbers.entries());
-      const submittedIds = new Set(numbers.keys());
-      const activeIds = this._getActivePlayerIds(game);
-      
-      for (const id of activeIds) {
-        if (!submittedIds.has(id)) eliminated.add(id);
-      }
-      
-      if (entries.length === 0) {
-        game._isEvaluating = false;
-        const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
-        
-        if (remaining.length === 1) {
-          const winnerId = remaining[0];
-          const winnerName = players.get(winnerId)?.name || winnerId;
-          const totalCoin = (game.betAmount || 0) * players.size;
-          game._gameEnded = true;
-          game._isActive = false;
-          game._isEvaluating = false;
-          this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
-          this._scheduleGameCleanup(room, game);
-          return;
-        }
-        
-        this._broadcastToRoom(room, ["gameError", "No numbers drawn this round"]);
-        game._gameEnded = true;
-        game._isActive = false;
-        game._isEvaluating = false;
-        this._scheduleGameCleanup(room, game);
-        return;
-      }
-      
-      const values = entries.map(([, n]) => n);
-      const allSame = values.every(v => v === values[0]);
-      let losers = [];
-      
-      if (!allSame && values.length > 0) {
-        const lowest = Math.min(...values);
-        losers = entries.filter(([, n]) => n === lowest).map(([id]) => id);
-        for (const id of losers) eliminated.add(id);
-      }
-      
-      const remaining = Array.from(players.keys()).filter(id => !eliminated.has(id));
-      
-      if (allSame && remaining.length >= 2) {
-        game._isEvaluating = false;
-        numbers.clear();
-        game.round++;
-        game.evaluationLocked = false;
-        game.drawTimeExpired = false;
-        game._phase = 'draw';
-        game.numbers = new Map();
-        game._botTimeouts = new Set();
-        
-        const remainingNames = remaining.map(id => players.get(id)?.name || id);
-        this._broadcastToRoom(room, ["gameLowCardRoundResult", game.round - 1,
-          entries.map(([id, n]) => `${players.get(id)?.name || id}:${n}`),
-          [], remainingNames, true
-        ]);
-        if (this._isGameActuallyRunning(game) && !game._gameEnded) {
-          this._startDrawPhase(room, game);
-        }
-        return;
-      }
-      
-      if (remaining.length === 1 && !game._gameEnded) {
-        const winnerId = remaining[0];
-        const winnerName = players.get(winnerId)?.name || winnerId;
-        const totalCoin = (game.betAmount || 0) * players.size;
-        game._gameEnded = true;
-        game._isActive = false;
-        game._isEvaluating = false;
-        this._broadcastToRoom(room, ["gameLowCardWinner", winnerName, totalCoin]);
-        this._scheduleGameCleanup(room, game);
-        return;
-      }
-      
-      if (remaining.length === 0) {
-        game._isEvaluating = false;
-        game._gameEnded = true;
-        game._isActive = false;
-        this._broadcastToRoom(room, ["gameError", "All players eliminated"]);
-        this._scheduleGameCleanup(room, game);
-        return;
-      }
-      
-      const numbersArr = entries.map(([id, n]) => `${players.get(id)?.name || id}:${n}`);
-      const loserNames = [...losers].map(id => players.get(id)?.name || id);
-      const remainingNames = remaining.map(id => players.get(id)?.name || id);
-      
-      this._broadcastToRoom(room, ["gameLowCardRoundResult", game.round, numbersArr, loserNames, remainingNames]);
-      
-      numbers.clear();
-      game.round++;
-      game.evaluationLocked = false;
-      game.drawTimeExpired = false;
-      game._phase = 'draw';
-      game.numbers = new Map();
-      game._botTimeouts = new Set();
-      game._isEvaluating = false;
-      
-      if (this._isGameActuallyRunning(game) && !game._gameEnded) {
-        this._startDrawPhase(room, game);
-      }
-      
-    } catch(e) {}
-  }
-
-  // ========== BOT METHODS ==========
-  _getRandomCardTanda() { return ["C1", "C2", "C3", "C4"][Math.floor(Math.random() * 4)]; }
-  _getRandomDrawDelay() { return (Math.floor(Math.random() * 14) + 2) * 1000; }
-  _getBotNumberByRound(round) {
-    if (round <= 2) return Math.floor(Math.random() * 12) + 1;
-    return Math.random() < 0.6 ?
-      [8, 9, 10, 11, 12][Math.floor(Math.random() * 5)] :
-      [1, 2, 3, 4, 5, 6, 7][Math.floor(Math.random() * 7)];
-  }
-
-  _startBotDraws(room, game) {
-    try {
-      if (!this._isGameActuallyRunning(game) || !game.botPlayers) return;
-      if (!game._botTimeouts) game._botTimeouts = new Set();
-      
-      if (game._botTimeouts.size >= CONSTANTS.MAX_BOT_TIMEOUTS) return;
-      
-      const notDrawn = Array.from(game.botPlayers.keys())
-        .filter(id => !game.eliminated?.has(id) && !game.numbers?.has(id))
-        .slice(0, Math.min(CONSTANTS.MAX_BOT_DRAWS_PER_ROUND, CONSTANTS.MAX_BOT_TIMEOUTS - game._botTimeouts.size));
-      
-      for (const botId of notDrawn) {
-        const delay = this._getRandomDrawDelay();
-        const timeout = setTimeout(() => {
-          const currentGame = this.activeGames.get(room);
-          if (this._isGameActuallyRunning(currentGame) && !currentGame.drawTimeExpired &&
-              !currentGame.evaluationLocked && !currentGame.numbers?.has(botId) && 
-              !currentGame.eliminated?.has(botId)) {
-            this._handleBotDraw(room, botId, currentGame);
-          }
-          currentGame?._botTimeouts?.delete(timeout);
-        }, delay);
-        game._botTimeouts.add(timeout);
-        this._allTimers.add(timeout);
-      }
-    } catch(e) {}
-  }
-
-  _handleBotDraw(room, botId, game) {
-    try {
-      if (!this._isGameActuallyRunning(game) || game.numbers?.has(botId) || game.drawTimeExpired || game.evaluationLocked) return;
-      if (game.eliminated?.has(botId)) return;
-      const number = this._getBotNumberByRound(game.round);
-      const tanda = this._getRandomCardTanda();
-      game.numbers.set(botId, number);
-      game.tanda.set(botId, tanda);
-      const botName = game.players.get(botId)?.name || botId;
-      this._broadcastToRoom(room, ["gameLowCardPlayerDraw", botName, number, tanda]);
-      const activeIds = this._getActivePlayerIds(game);
-      if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired && this._isGameActuallyRunning(game)) {
-        game.evaluationLocked = true;
-        this._broadcastToRoom(room, ["gameLowCardWait", "wait results"]);
-        const evalTimer = setTimeout(() => {
-          try { this._evaluateRound(room, game); } catch(e) {}
-        }, CONSTANTS.EVALUATION_DELAY_MS);
-        game._evalTimer = evalTimer;
-        this._allTimers.add(evalTimer);
-      }
-    } catch(e) {}
-  }
-
-  _forceBotDraw(room, botId, game) {
-    try {
-      if (!this._isGameActuallyRunning(game) || game.numbers?.has(botId)) return;
-      if (game.eliminated?.has(botId)) return;
-      const number = this._getBotNumberByRound(game.round);
-      const tanda = this._getRandomCardTanda();
-      game.numbers.set(botId, number);
-      game.tanda.set(botId, tanda);
-      const botName = game.players.get(botId)?.name || botId;
-      this._broadcastToRoom(room, ["gameLowCardPlayerDraw", botName, number, tanda]);
-    } catch(e) {}
-  }
-
-  // ========== JOIN GAME ==========
-  async joinGame(ws, username) {
-    try {
-      if (this.isDestroyed) {
-        this._safeSend(ws, ["gameError", "Server is shutting down"]);
-        return;
-      }
-      if (!username?.trim()) {
-        this._safeSend(ws, ["gameError", "Username is required"]);
-        return;
-      }
-      
-      const usernameClean = username.trim();
-      const wsId = ws._wsId;
-      const room = ws.room || ws.roomname || this.clientRooms.get(wsId);
-      if (!room) {
-        this._safeSend(ws, ["gameError", "Please switch to a room first"]);
-        return;
-      }
-      
-      const lockKey = `join_${room}_${usernameClean}`;
-      if (this._joinLocks.has(lockKey)) {
-        this._safeSend(ws, ["gameError", "Please wait"]);
-        return;
-      }
-      
-      this._joinLocks.set(lockKey, Date.now());
-      
-      try {
-        const game = this.activeGames.get(room);
-        if (!game?._isActive || game._gameEnded || !game.players) {
-          this._safeSend(ws, ["gameError", "No active game in this room"]);
-          return;
-        }
-        if (game.players.has(usernameClean)) {
-          if (game.eliminated?.has(usernameClean)) {
-            this._safeSend(ws, ["gameError", "You have been eliminated"]);
-            return;
-          }
-          if (game.numbers.has(usernameClean)) {
-            this._safeSend(ws, ["gameLowCardPlayerDraw", usernameClean, game.numbers.get(usernameClean), game.tanda.get(usernameClean) || ""]);
-          }
-          this._sendGameState(ws, room);
-          return;
-        }
-        if (!game.registrationOpen) {
-          this._safeSend(ws, ["gameLowCardNoJoin", usernameClean, game.betAmount]);
-          this._safeSend(ws, ["gameError", "Registration is closed"]);
-          return;
-        }
-        if (game.players.size >= CONSTANTS.MAX_PLAYERS_PER_GAME) {
-          this._safeSend(ws, ["gameError", "Game is full"]);
-          return;
-        }
-        game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
-        game.playerWsId.set(usernameClean, wsId);
-        this._broadcastToRoom(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
-      } finally {
-        setTimeout(() => {
-          this._joinLocks.delete(lockKey);
-        }, 2000);
-      }
-    } catch(e) {}
-  }
-
-  // ========== SUBMIT NUMBER ==========
-  async submitNumber(ws, number, tanda, username) {
-    try {
-      if (this.isDestroyed) {
-        this._safeSend(ws, ["gameError", "Server is shutting down"]);
-        return;
-      }
-      if (!username?.trim()) {
-        this._safeSend(ws, ["gameError", "Username is required"]);
-        return;
-      }
-      
-      const usernameClean = username.trim();
-      const wsId = ws._wsId;
-      const room = ws.room || ws.roomname || this.clientRooms.get(wsId);
-      if (!room) {
-        this._safeSend(ws, ["gameError", "Please switch to a room first"]);
-        return;
-      }
-      
-      const game = this.activeGames.get(room);
-      if (!game?._isActive || game._gameEnded || !game.players) {
-        this._safeSend(ws, ["gameError", "No active game"]);
-        return;
-      }
-      if (game.players.has(usernameClean) && game.eliminated?.has(usernameClean)) {
-        this._safeSend(ws, ["gameError", "You have been eliminated"]);
-        return;
-      }
-      if (game.registrationOpen || game.evaluationLocked || game.drawTimeExpired || game._phase !== 'draw') {
-        this._safeSend(ws, ["gameError", "Cannot submit now"]);
-        return;
-      }
-      if (!game.players.has(usernameClean)) {
-        this._safeSend(ws, ["gameError", "You are not in this game"]);
-        return;
-      }
-      if (game.numbers.has(usernameClean)) {
-        this._safeSend(ws, ["gameError", "You have already submitted"]);
-        return;
-      }
-      
-      const n = parseInt(number, 10);
-      if (isNaN(n) || n < 1 || n > 12) {
-        this._safeSend(ws, ["gameError", "Invalid number (1-12)"]);
-        return;
-      }
-      const validTandas = ["C1", "C2", "C3", "C4", ""];
-      if (!validTandas.includes(tanda)) tanda = "";
-      
-      game.numbers.set(usernameClean, n);
-      game.tanda.set(usernameClean, tanda);
-      this._broadcastToRoom(room, ["gameLowCardPlayerDraw", usernameClean, n, tanda]);
-      
-      const activeIds = this._getActivePlayerIds(game);
-      if (game.numbers.size === activeIds.length && !game.evaluationLocked && !game.drawTimeExpired &&
-          this._isGameActuallyRunning(game) && game._isActive && !game._gameEnded) {
-        game.evaluationLocked = true;
-        if (game._evalTimer) { clearTimeout(game._evalTimer); game._evalTimer = null; }
-        this._broadcastToRoom(room, ["gameLowCardWait", "wait results"]);
-        const evalTimer = setTimeout(() => {
-          try {
-            const currentGame = this.activeGames.get(room);
-            if (currentGame && currentGame === game && currentGame._isActive && !currentGame._gameEnded) {
-              this._evaluateRound(room, game);
-            }
-          } catch(e) {}
-        }, CONSTANTS.EVALUATION_DELAY_MS);
-        game._evalTimer = evalTimer;
-        this._allTimers.add(evalTimer);
-      }
-    } catch(e) {}
-  }
-
-  // ========== LEAVE GAME ==========
-  async leaveGame(ws, username) {
-    try {
-      if (this.isDestroyed) {
-        this._safeSend(ws, ["gameError", "Server is shutting down"]);
-        return;
-      }
-      if (!username?.trim()) {
-        this._safeSend(ws, ["gameError", "Username is required"]);
-        return;
-      }
-      
-      const usernameClean = username.trim();
-      const room = ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
-      if (!room) {
-        this._safeSend(ws, ["gameError", "Please switch to a room first"]);
-        return;
-      }
-      
-      const game = this.activeGames.get(room);
-      if (!game?._isActive || game._gameEnded || !game.players) {
-        this._safeSend(ws, ["gameError", "No active game in this room"]);
-        return;
-      }
-      if (!game.players.has(usernameClean)) {
-        this._safeSend(ws, ["gameError", "You are not in this game"]);
-        return;
-      }
-      this._removePlayerFromGame(usernameClean, room);
-    } catch(e) {}
-  }
-
-  _removePlayerFromGame(username, room) {
-    try {
-      const game = this.activeGames.get(room);
-      if (!game || !game.players?.has(username) || !game._isActive || game._gameEnded || game._isEvaluating || game.evaluationLocked) return false;
-      if (!game.eliminated) game.eliminated = new Set();
-      game.eliminated.add(username);
-      game.numbers?.delete(username);
-      game.tanda?.delete(username);
-      this._broadcastToRoom(room, ["gameError", `${username} has been eliminated`]);
-      const checkTimer = setTimeout(() => {
-        try {
-          const currentGame = this.activeGames.get(room);
-          if (currentGame && currentGame === game && !game._gameEnded) this._checkGameCanContinue(room, game);
-        } catch(e) {}
-      }, 1000);
-      this._allTimers.add(checkTimer);
-      return true;
-    } catch(e) { return false; }
-  }
-
-  async _checkGameCanContinue(room, game) {
-    try {
-      if (!game?._isActive || game._gameEnded || !game.players || game._isEvaluating || game.evaluationLocked || game.registrationOpen) return;
-      const activePlayers = this._getActivePlayers(game);
-      if (activePlayers.length === 0) {
-        const allPlayers = Array.from(game.players.keys());
-        const submitted = Array.from(game.numbers?.keys() || []);
-        const notSubmitted = allPlayers.filter(id => !submitted.includes(id) && !game.eliminated?.has(id));
-        if (notSubmitted.length > 0) return;
-        game._gameEnded = true;
-        game._isActive = false;
-        this._broadcastToRoom(room, ["gameEnd", []]);
-        this._scheduleGameCleanup(room, game);
-        return;
-      }
-      if (activePlayers.length === 1 && !game._gameEnded) {
-        const activeIds = this._getActivePlayerIds(game);
-        const submittedIds = Array.from(game.numbers?.keys() || []);
-        const notSubmitted = activeIds.filter(id => !submittedIds.includes(id));
-        if (notSubmitted.length > 0) {
-          this._broadcastToRoom(room, ["gameLowCardTimeLeft", `Waiting for ${notSubmitted.length} player(s)`]);
-          return;
-        }
-        const winner = activePlayers[0]?.name || "Unknown";
-        const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
-        game._gameEnded = true;
-        game._isActive = false;
-        this._broadcastToRoom(room, ["gameLowCardWinner", winner, totalCoin]);
-        this._scheduleGameCleanup(room, game);
-      }
-    } catch(e) {}
-  }
-
-  // ========== CHECK GAME RUNNING ==========
-  async checkGameRunning(ws, roomname) {
-    try {
-      if (this.isDestroyed) {
-        this._safeSend(ws, ["gameStatus", "false"]);
-        return;
-      }
-      let room = roomname || ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
-      if (!room) {
-        this._safeSend(ws, ["gameStatus", "false"]);
-        return;
-      }
-      const game = this.activeGames.get(room);
-      const isRunning = game?._isActive && !game._gameEnded && game.players?.size > 0;
-      this._safeSend(ws, ["gameStatus", isRunning ? "true" : "false"]);
-      if (isRunning) this._sendGameState(ws, room);
-    } catch(e) {}
+    return false;
   }
 
   // ========== CLEANUP ==========
-  _scheduleGameCleanup(room, game) {
-    try {
-      if (!room || !game) return;
-      if (this._cleanupTimers.has(room)) {
-        clearTimeout(this._cleanupTimers.get(room));
-        this._cleanupTimers.delete(room);
-      }
-      if (!game._gameEnded) return;
-      const timer = setTimeout(() => {
-        const currentGame = this.activeGames.get(room);
-        if (currentGame?._isActive && !currentGame._gameEnded) {
-          this._cleanupTimers.delete(room);
-          return;
+  cleanup(ws) {
+    if (!ws || ws._cleaning) return;
+    ws._cleaning = true;
+    ws._closing = true;
+    
+    const username = ws.username;
+    const room = ws.room;
+    
+    if (room) {
+      const clients = this.roomClients.get(room);
+      if (clients) clients.delete(ws);
+      
+      const roomData = this.rooms.get(room);
+      if (roomData && username) {
+        let seatToRemove = null;
+        for (const [s, data] of roomData.seats) {
+          if (data.namauser === username) { seatToRemove = s; break; }
         }
-        this._cleanupTimers.delete(room);
-        const gameToDelete = this.activeGames.get(room);
-        if (gameToDelete) this._deleteGame(room, gameToDelete);
-      }, CONSTANTS.GAME_CLEANUP_DELAY_MS);
-      this._cleanupTimers.set(room, timer);
-      this._allTimers.add(timer);
-    } catch(e) {}
-  }
-
-  _deleteGame(room, game) {
-    try {
-      if (!room || !game) return;
-      if (game?._isActive && !game._gameEnded) return;
-      if (this._cleanupTimers.has(room)) {
-        clearTimeout(this._cleanupTimers.get(room));
-        this._cleanupTimers.delete(room);
+        if (seatToRemove) {
+          roomData.seats.delete(seatToRemove);
+          roomData.points.delete(seatToRemove);
+          this.broadcast(room, ["removeKursi", room, seatToRemove]);
+          this.broadcast(room, ["roomUserCount", room, roomData.seats.size]);
+        }
       }
-      if (game) {
-        game._gameEnded = true;
-        game._isActive = false;
-        game.playerWsId = null;
-        this._cleanupGame(game);
+    }
+    
+    if (username) {
+      const conns = this.userConnections.get(username);
+      if (conns) {
+        conns.delete(ws);
+        if (conns.size === 0) {
+          this.userConnections.delete(username);
+          this.userSeat.delete(username);
+          this.userRoom.delete(username);
+        }
       }
-      this.activeGames.delete(room);
-      this._gameLocks.delete(room);
-      this._joinLocks.delete(room);
-      this._broadcastToRoom(room, ["gameEnd", []]);
-    } catch(e) {}
-  }
-
-  _cleanupGame(game) {
-    try {
-      if (!game) return;
-      if (game._isActive && !game._gameEnded) return;
-      const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
-      for (const key of timers) {
-        if (game[key]) { clearInterval(game[key]); clearTimeout(game[key]); game[key] = null; }
-      }
-      if (game._botTimeouts) {
-        for (const id of game._botTimeouts) clearTimeout(id);
-        game._botTimeouts.clear();
-        game._botTimeouts = null;
-      }
-      game.players = null;
-      game.botPlayers = null;
-      game.numbers = null;
-      game.tanda = null;
-      game.eliminated = null;
-      game.playerWsId = null;
-      game._isActive = false;
-      game._gameEnded = true;
-      game._isEvaluating = false;
-    } catch(e) {}
-  }
-
-  async _forceCleanupGame(room, game) {
-    try {
-      if (!game) return;
-      const timers = ['_registrationTimer', '_drawTimer', '_evalTimer', '_safetyTimer'];
-      for (const key of timers) {
-        if (game[key]) { clearInterval(game[key]); clearTimeout(game[key]); game[key] = null; }
-      }
-      if (game._botTimeouts) {
-        for (const id of game._botTimeouts) clearTimeout(id);
-        game._botTimeouts.clear();
-      }
-      game._gameEnded = true;
-      game._isActive = false;
-      game._endTime = Date.now();
-      this._broadcastToRoom(room, ["gameEnd", []]);
-      this.activeGames.delete(room);
-      if (this._cleanupTimers.has(room)) {
-        clearTimeout(this._cleanupTimers.get(room));
-        this._cleanupTimers.delete(room);
-      }
-      this._gameLocks.delete(room);
-      this._joinLocks.delete(room);
-    } catch(e) {}
-  }
-
-  // ========== PERFORM CLEANUP ==========
-  _performCleanup() {
-    try {
-      this._cleanupDeadConnections();
-      this._cleanupMemory();
-      this._checkStuckGames();
-    } catch(e) {}
+      this.wsActiveMulti.delete(ws);
+    }
+    
+    this.wsSet.delete(ws);
+    ws._cleaning = false;
+    
+    try { ws.close(1000); } catch(e) {}
   }
 
   _cleanupDeadConnections() {
-    try {
-      const toRemove = [];
-      for (const [wsId, ws] of this.wsMap) {
-        if (!ws || ws.readyState !== 1 || ws._closing) {
-          toRemove.push(wsId);
-        }
+    const toRemove = [];
+    for (const ws of this.wsSet) {
+      if (!ws || ws.readyState !== 1 || ws._closing) {
+        toRemove.push(ws);
       }
-      for (const wsId of toRemove) {
-        const ws = this.wsMap.get(wsId);
-        if (ws) {
-          const room = this.clientRooms.get(wsId);
-          if (room) this._removeClientFromRoom(room, wsId);
-          this.clientRooms.delete(wsId);
-          this.wsMap.delete(wsId);
-        }
-      }
-    } catch(e) {}
-  }
-
-  _cleanupMemory() {
-    try {
-      if (this._eventQueue && this._eventQueue.length > 50) {
-        this._eventQueue.splice(0, this._eventQueue.length - 50);
-      }
-      
-      const now = Date.now();
-      for (const [key, time] of this._gameLocks) {
-        if (now - time > 30000) this._gameLocks.delete(key);
-      }
-      for (const [key, time] of this._joinLocks) {
-        if (now - time > 30000) this._joinLocks.delete(key);
-      }
-    } catch(e) {}
-  }
-
-  _checkStuckGames() {
-    try {
-      const now = Date.now();
-      for (const [room, game] of this.activeGames) {
-        if (!game?._isActive || game._gameEnded) continue;
-        
-        if (game._phase === 'draw' && game._drawPhaseStart &&
-            (now - game._drawPhaseStart) > CONSTANTS.STUCK_DRAW_TIMEOUT_MS) {
-          this._closeDrawPhase(room, game);
-        }
-        
-        if (game._phase === 'registration' && game.registrationOpen &&
-            game._createdAt && (now - game._createdAt) > CONSTANTS.STUCK_REGISTRATION_TIMEOUT_MS) {
-          this._closeRegistration(room, game);
-        }
-      }
-    } catch(e) {}
-  }
-
-  // ========== WEBSOCKET CLOSE ==========
-  webSocketClose(ws) {
-    try {
-      if (!ws) return;
-      ws._closing = true;
-      
-      const wsId = ws._wsId;
-      const username = ws.username;
-      const room = ws.room || ws.roomname || this.clientRooms.get(wsId);
-      
-      if (room) this._removeClientFromRoom(room, wsId);
-      if (wsId) {
-        this.clientRooms.delete(wsId);
-        this.wsMap.delete(wsId);
-      }
-      if (username) {
-        this.userRooms.delete(username);
-        this.userConnections.delete(username);
-        if (room) {
-          this._broadcastToRoom(room, ["userLeftRoom", username, room]);
-        }
-      }
-      
-      ws.room = null;
-      ws.roomname = null;
-      ws._wsId = null;
-      ws.username = null;
-      ws._closing = true;
-    } catch(e) {}
-  }
-
-  webSocketError(ws) {
-    try {
-      if (!ws) return;
-      ws._closing = true;
-      
-      const wsId = ws._wsId;
-      const username = ws.username;
-      const room = ws.room || ws.roomname || this.clientRooms.get(wsId);
-      
-      if (room) this._removeClientFromRoom(room, wsId);
-      if (wsId) {
-        this.clientRooms.delete(wsId);
-        this.wsMap.delete(wsId);
-      }
-      if (username) {
-        this.userRooms.delete(username);
-        this.userConnections.delete(username);
-      }
-      
-      ws.room = null;
-      ws.roomname = null;
-      ws._wsId = null;
-      ws.username = null;
-      ws._closing = true;
-    } catch(e) {}
-  }
-
-  // ========== DESTROY ==========
-  async destroy() {
-    try {
-      if (this.isDestroyed) return;
-      this.isDestroyed = true;
-      this.closing = true;
-      
-      for (const timer of this._allTimers) {
-        try { clearTimeout(timer); clearInterval(timer); } catch(e) {}
-      }
-      this._allTimers.clear();
-      
-      if (this._mainInterval) { clearInterval(this._mainInterval); this._mainInterval = null; }
-      if (this._cleanupInterval) { clearInterval(this._cleanupInterval); this._cleanupInterval = null; }
-      
-      if (this._diceTimerInterval) {
-        clearInterval(this._diceTimerInterval);
-        this._diceTimerInterval = null;
-      }
-      
-      clearTimeout(this._diceTimeout);
-      clearTimeout(this._diceStartTimeout);
-      
-      this._eventQueue = [];
-      this._isProcessingQueue = false;
-      
-      for (const [room, game] of this.activeGames) {
-        await this._forceCleanupGame(room, game);
-      }
-      this.activeGames.clear();
-      
-      for (const [room, timer] of this._cleanupTimers) {
-        clearTimeout(timer);
-      }
-      this._cleanupTimers.clear();
-      
-      this.userConnections.clear();
-      this.userRooms.clear();
-      this._tieBreakers.clear();
-      this._reconnectAttempts.clear();
-      this._bannedUsers.clear();
-      this._gameLocks.clear();
-      this._joinLocks.clear();
-      this._switchLocks.clear();
-      this._dicePoints.clear();
-      
-      for (const [wsId, ws] of this.wsMap) {
-        try { 
-          if (ws && ws.readyState === 1) {
-            ws.removeAllListeners();
-            ws.close(1000, "Server shutting down"); 
-          }
-        } catch(e) {}
-      }
-      this.wsMap.clear();
-      this.wsClients.clear();
-      this.clientRooms.clear();
-      
-    } catch(e) {}
+    }
+    for (const ws of toRemove) {
+      this.cleanup(ws);
+    }
   }
 }
