@@ -725,8 +725,11 @@ export class ChatServer {
         ws.roomname = roomName;
         ws.idtarget = username;
         
+        // ✅ PASTIKAN USER MASUK KE roomClients
         const roomClients = this.roomClients.get(roomName);
-        if (roomClients && !roomClients.has(ws)) roomClients.add(ws);
+        if (roomClients && !roomClients.has(ws)) {
+          roomClients.add(ws);
+        }
         
         this._safeSend(ws, ["rooMasuk", seat, roomName]);
         this._safeSend(ws, ["numberKursiSaya", seat]);
@@ -740,13 +743,14 @@ export class ChatServer {
           "userJoinedRoom", username, roomName
         ]));
         
+        // 🔥 SEND ALL STATE KE USER BARU
         setTimeout(() => {
           try {
             if (ws && ws.readyState === 1) {
               this._sendAllState(ws, roomName, true);
             }
           } catch(e) {}
-        }, 1000);
+        }, 500);
         
       } catch(e) {}
       return true;
@@ -928,7 +932,6 @@ export class ChatServer {
         
         if (updated) {
           const updatedSeat = roomMan.getSeat(kursiSeat);
-          // 🔥 BROADCAST UPDATE KURSI KE SEMUA USER DI ROOM
           this._broadcastToRoom(kursiRoom, JSON.stringify(["kursiBatchUpdate", kursiRoom, [[kursiSeat, updatedSeat]]]));
         }
       } finally {
@@ -944,11 +947,15 @@ export class ChatServer {
       
       if (!chatMsg || !chatRoom || !ROOMS_SET.has(chatRoom)) return;
       
+      // 🔥 CEK APAKAH ADA USER DI ROOM
       const clients = this.roomClients.get(chatRoom);
       if (!clients || clients.size === 0) return;
       
       // 🔥 BROADCAST CHAT KE SEMUA USER DI ROOM
-      this._broadcastToRoom(chatRoom, JSON.stringify(["chat", chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor]));
+      this._broadcastToRoom(chatRoom, JSON.stringify([
+        "chat", chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor
+      ]));
+      
     } catch(e) {}
   }
 
@@ -961,7 +968,6 @@ export class ChatServer {
         const roomMan = this.rooms.get(pointRoom);
         if (roomMan && roomMan.seats.has(pointSeat)) {
           if (roomMan.updatePoint(pointSeat, pointX, pointY, pointFast === 1)) {
-            // 🔥 BROADCAST POINT KE SEMUA USER DI ROOM
             this._broadcastToRoom(pointRoom, JSON.stringify(["pointUpdated", pointRoom, pointSeat, pointX, pointY, pointFast]));
           }
         }
@@ -977,8 +983,6 @@ export class ChatServer {
       if (giftRoom && ROOMS_SET.has(giftRoom)) {
         const clients = this.roomClients.get(giftRoom);
         if (!clients || clients.size === 0) return;
-        
-        // 🔥 BROADCAST GIFT KE SEMUA USER DI ROOM
         this._broadcastToRoom(giftRoom, JSON.stringify(["gift", giftRoom, giftSender, giftReceiver, giftGiftName, Date.now()]));
       }
     } catch(e) {}
@@ -992,8 +996,6 @@ export class ChatServer {
       if (rollRoom && ROOMS_SET.has(rollRoom)) {
         const clients = this.roomClients.get(rollRoom);
         if (!clients || clients.size === 0) return;
-        
-        // 🔥 BROADCAST ROLL ANGAK KE SEMUA USER DI ROOM
         this._broadcastToRoom(rollRoom, JSON.stringify(["rollangakBroadcast", rollRoom, rollUser, rollAngka]));
       }
     } catch(e) {}
@@ -1047,12 +1049,9 @@ export class ChatServer {
       }
       
       roomMan.removeSeat(removeSeat);
-      
-      // 🔥 BROADCAST REMOVE KURSI KE SEMUA USER DI ROOM
       this._broadcastToRoom(removeRoom, JSON.stringify(["removeKursi", removeRoom, removeSeat]));
       this._updateRoomCount(removeRoom);
       
-      // 🔥 BROADCAST USER LEFT
       this._broadcastToRoom(removeRoom, JSON.stringify([
         "userLeftRoom", "Unknown", removeRoom
       ]));
@@ -1070,8 +1069,6 @@ export class ChatServer {
       if (!rm) return;
       
       rm.setMuted(muteVal);
-      
-      // 🔥 BROADCAST MUTE STATUS KE SEMUA USER DI ROOM
       this._broadcastToRoom(muteRoom, JSON.stringify(["muteStatusChanged", !!muteVal, muteRoom]));
       this._safeSend(ws, ["muteTypeSet", !!muteVal, true, muteRoom]);
     } catch(e) {}
@@ -1092,7 +1089,6 @@ export class ChatServer {
     try {
       const modRoom = args[0];
       if (modRoom && ROOMS_SET.has(modRoom)) {
-        // 🔥 BROADCAST MOD WARNING KE SEMUA USER DI ROOM
         this._broadcastToRoom(modRoom, JSON.stringify(["modwarning", modRoom]));
       }
     } catch(e) {}
@@ -1201,7 +1197,6 @@ export class ChatServer {
             
             if (!isMulti && (!connections.ws || connections.ws.readyState !== 1)) {
               this.userConnections.delete(username);
-              
               if (seatInfo?.room) {
                 const roomMan = this.rooms.get(seatInfo.room);
                 if (roomMan) {
@@ -1209,12 +1204,8 @@ export class ChatServer {
                     const seatData = roomMan.getSeat(seatInfo.seat);
                     if (seatData?.namauser === username) {
                       roomMan.removeSeat(seatInfo.seat);
-                      
-                      // 🔥 BROADCAST REMOVE KURSI KE SEMUA USER DI ROOM
                       this._broadcastToRoom(seatInfo.room, JSON.stringify(["removeKursi", seatInfo.room, seatInfo.seat]));
                       this._updateRoomCount(seatInfo.room);
-                      
-                      // 🔥 BROADCAST USER LEFT
                       this._broadcastToRoom(seatInfo.room, JSON.stringify([
                         "userLeftRoom", username, seatInfo.room
                       ]));
@@ -1222,7 +1213,6 @@ export class ChatServer {
                   } catch(e) {}
                 }
               }
-              
               this.userSeat.delete(username);
               this.userRoom.delete(username);
             }
