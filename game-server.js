@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 3.1.0 - OPTIMIZED CACHE SYSTEM
+// VERSION: 3.1.0 - OPTIMIZED CACHE SYSTEM (NO BATCH)
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -171,7 +171,7 @@ class CacheManager {
 
   // ========== WINNERS ==========
   
-  // GET - ONLY FROM CACHE
+  // GET - ONLY FROM CACHE (NO KV)
   getWinners(room) {
     if (!room) return {};
     
@@ -188,7 +188,7 @@ class CacheManager {
     return {};
   }
 
-  // ADD WINNER - UPDATE CACHE + KV
+  // ADD SINGLE WINNER - UPDATE CACHE + KV
   async addWinner(room, username, env) {
     if (!room || !username || room === DICE_ROOM) return false;
     
@@ -207,7 +207,7 @@ class CacheManager {
       // 1. AMBIL DATA TERBARU DARI CACHE
       let roomWinners = this.getWinners(room);
       
-      // 2. UPDATE DI MEMORY (CACHE)
+      // 2. UPDATE 1 WINNER DI MEMORY (CACHE)
       let count = 0;
       if (roomWinners[username]) {
         count = parseInt(String(roomWinners[username]).replace("x", "").replace("X", "")) || 0;
@@ -220,7 +220,7 @@ class CacheManager {
         timestamp: Date.now()
       });
       
-      // 4. UPDATE KV (async, tidak blocking)
+      // 4. UPDATE KV (1x PUT saja)
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       await env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       
@@ -228,53 +228,6 @@ class CacheManager {
       
     } catch(e) {
       // Jika gagal, reload dari KV untuk sync
-      await this._reloadWinnersFromKV(room, env);
-      return false;
-    } finally {
-      this._updateLocks.delete(lockKey);
-    }
-  }
-
-  // BATCH ADD WINNERS - UPDATE CACHE + KV (1x operasi)
-  async addWinnersBatch(room, usernames, env) {
-    if (!room || !usernames?.length || room === DICE_ROOM) return false;
-    
-    if (!this.getRecordingStatus(room)) return false;
-    if (!env?.QUESTIONS) return false;
-    
-    const lockKey = `winner_batch_${room}`;
-    if (this._updateLocks.has(lockKey)) {
-      return false;
-    }
-    
-    this._updateLocks.set(lockKey, Date.now());
-    
-    try {
-      // 1. AMBIL DATA TERBARU DARI CACHE
-      let roomWinners = this.getWinners(room);
-      
-      // 2. UPDATE SEMUA WINNER DI CACHE
-      for (const username of usernames) {
-        let count = 0;
-        if (roomWinners[username]) {
-          count = parseInt(String(roomWinners[username]).replace("x", "").replace("X", "")) || 0;
-        }
-        roomWinners[username] = (count + 1) + "x";
-      }
-      
-      // 3. UPDATE CACHE
-      this.winnersCache.set(room, {
-        winners: roomWinners,
-        timestamp: Date.now()
-      });
-      
-      // 4. UPDATE KV SEKALI (1 operasi untuk semua)
-      const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
-      await env.QUESTIONS.put(key, JSON.stringify(roomWinners));
-      
-      return true;
-      
-    } catch(e) {
       await this._reloadWinnersFromKV(room, env);
       return false;
     } finally {
@@ -341,11 +294,7 @@ class CacheManager {
   async loadInitialData(env) {
     try {
       if (!env?.QUESTIONS) return;
-      
-      // Load recording status untuk semua room
-      // Ini bisa dilakukan dengan scanning prefix
-      // Atau hanya load saat dibutuhkan
-      
+      // Load data jika diperlukan
     } catch(e) {}
   }
 
@@ -357,6 +306,208 @@ class CacheManager {
   }
 }
 
+// ==================== DICE POINTS CACHE ====================
+class DicePointsCache {
+  constructor() {
+    // Cache untuk poin
+    this.pointsCache = new Map(); // { 'points': { data: {}, timestamp: number } }
+    this.cacheTTL = 30000; // 30 detik
+    
+    // Cache untuk leaderboard (pre-computed)
+    this.leaderboardCache = new Map(); // { 'leaderboard': { data: [], timestamp: number } }
+    this.leaderboardTTL = 60000; // 60 detik
+    
+    // Lock untuk mencegah race condition
+    this._updateLocks = new Map();
+  }
+
+  // ========== GET POINTS - ONLY FROM CACHE ==========
+  getPoints() {
+    const cached = this.pointsCache.get('points');
+    if (cached) {
+      // Jika cache masih fresh
+      if (Date.now() - cached.timestamp < this.cacheTTL) {
+        return cached.data;
+      }
+      // Cache expired, tapi return data lama dulu
+      return cached.data;
+    }
+    return null; // Cache miss
+  }
+
+  // ========== SET POINTS - UPDATE CACHE + KV ==========
+  async setPoints(points, env) {
+    if (!env?.QUESTIONS) return false;
+    
+    const lockKey = 'dice_points_update';
+    if (this._updateLocks.has(lockKey)) {
+      return false;
+    }
+    
+    this._updateLocks.set(lockKey, Date.now());
+    
+    try {
+      // 1. UPDATE CACHE DULU (optimistic)
+      this.pointsCache.set('points', {
+        data: points,
+        timestamp: Date.now()
+      });
+      
+      // Invalidate leaderboard cache
+      this.leaderboardCache.delete('leaderboard');
+      
+      // 2. UPDATE KV
+      await env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify(points));
+      
+      return true;
+      
+    } catch(e) {
+      // Rollback cache jika gagal
+      this.pointsCache.delete('points');
+      return false;
+    } finally {
+      this._updateLocks.delete(lockKey);
+    }
+  }
+
+  // ========== ADD POINT TO USER - UPDATE CACHE + KV ==========
+  async addPointToUser(username, env) {
+    if (!username || !env?.QUESTIONS) return false;
+    
+    const lockKey = `dice_point_${username}`;
+    if (this._updateLocks.has(lockKey)) {
+      return false;
+    }
+    
+    this._updateLocks.set(lockKey, Date.now());
+    
+    try {
+      // 1. AMBIL DARI CACHE
+      let points = this.getPoints();
+      
+      // Jika cache miss, ambil dari KV
+      if (!points) {
+        points = await env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
+      }
+      
+      // 2. UPDATE DI MEMORY
+      points[username] = (points[username] || 0) + 1;
+      
+      // 3. UPDATE CACHE
+      this.pointsCache.set('points', {
+        data: points,
+        timestamp: Date.now()
+      });
+      
+      // Invalidate leaderboard cache
+      this.leaderboardCache.delete('leaderboard');
+      
+      // 4. UPDATE KV
+      await env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify(points));
+      
+      return points[username];
+      
+    } catch(e) {
+      // Reload dari KV jika gagal
+      await this._reloadFromKV(env);
+      return false;
+    } finally {
+      this._updateLocks.delete(lockKey);
+    }
+  }
+
+  // ========== GET LEADERBOARD - ONLY FROM CACHE ==========
+  getLeaderboard(limit = 10) {
+    const cached = this.leaderboardCache.get('leaderboard');
+    if (cached) {
+      // Jika cache masih fresh
+      if (Date.now() - cached.timestamp < this.leaderboardTTL) {
+        return cached.data.slice(0, limit);
+      }
+      // Cache expired, return data lama
+      return cached.data.slice(0, limit);
+    }
+    
+    // Cache miss, build dari points cache
+    const points = this.getPoints();
+    if (points) {
+      const sorted = Object.entries(points)
+        .sort((a, b) => b[1] - a[1]);
+      
+      this.leaderboardCache.set('leaderboard', {
+        data: sorted,
+        timestamp: Date.now()
+      });
+      
+      return sorted.slice(0, limit);
+    }
+    
+    return [];
+  }
+
+  // ========== RESET ALL POINTS - UPDATE CACHE + KV ==========
+  async resetPoints(env) {
+    if (!env?.QUESTIONS) return false;
+    
+    const lockKey = 'dice_points_reset';
+    if (this._updateLocks.has(lockKey)) {
+      return false;
+    }
+    
+    this._updateLocks.set(lockKey, Date.now());
+    
+    try {
+      // 1. RESET CACHE
+      this.pointsCache.delete('points');
+      this.leaderboardCache.delete('leaderboard');
+      
+      // 2. RESET KV
+      await env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify({}));
+      
+      return true;
+      
+    } catch(e) {
+      return false;
+    } finally {
+      this._updateLocks.delete(lockKey);
+    }
+  }
+
+  // ========== BACKGROUND REFRESH ==========
+  async _reloadFromKV(env) {
+    try {
+      if (!env?.QUESTIONS) return;
+      const points = await env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
+      this.pointsCache.set('points', {
+        data: points,
+        timestamp: Date.now()
+      });
+    } catch(e) {}
+  }
+
+  // ========== CLEANUP ==========
+  cleanup() {
+    const now = Date.now();
+    // Hapus cache yang sudah expired (2x TTL)
+    for (const [key, data] of this.pointsCache) {
+      if (now - data.timestamp > this.cacheTTL * 2) {
+        this.pointsCache.delete(key);
+      }
+    }
+    for (const [key, data] of this.leaderboardCache) {
+      if (now - data.timestamp > this.leaderboardTTL * 2) {
+        this.leaderboardCache.delete(key);
+      }
+    }
+  }
+
+  clear() {
+    this.pointsCache.clear();
+    this.leaderboardCache.clear();
+    this._updateLocks.clear();
+  }
+}
+
 // ==================== DICE GAME SYSTEM ====================
 class DiceGameSystem {
   constructor(gameServer) {
@@ -364,43 +515,104 @@ class DiceGameSystem {
     this.env = gameServer.env;
     this.userScores = new Map();
     this._isLoaded = false;
+    
+    // Cache manager untuk poin
+    this.pointsCache = new DicePointsCache();
   }
 
+  // ========== GET POINTS - ONLY FROM CACHE ==========
+  async getPoints() {
+    try {
+      // 1. CEK CACHE DULU
+      let points = this.pointsCache.getPoints();
+      
+      if (points) {
+        // Update userScores untuk kompatibilitas
+        this.userScores.clear();
+        for (const [username, score] of Object.entries(points)) {
+          this.userScores.set(username, score);
+        }
+        return points;
+      }
+      
+      // 2. CACHE MISS - AMBIL DARI KV
+      if (!this.env?.QUESTIONS) return {};
+      points = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
+      
+      // 3. SIMPAN KE CACHE
+      await this.pointsCache.setPoints(points, this.env);
+      
+      // Update userScores
+      this.userScores.clear();
+      for (const [username, score] of Object.entries(points)) {
+        this.userScores.set(username, score);
+      }
+      
+      return points;
+      
+    } catch(e) { return {}; }
+  }
+
+  // ========== SET POINTS - UPDATE CACHE + KV ==========
+  async setPoints(points) {
+    try {
+      if (!this.env?.QUESTIONS) return false;
+      
+      // UPDATE CACHE + KV
+      const success = await this.pointsCache.setPoints(points, this.env);
+      
+      if (success) {
+        // Update userScores
+        this.userScores.clear();
+        for (const [username, score] of Object.entries(points)) {
+          this.userScores.set(username, score);
+        }
+      }
+      
+      return success;
+      
+    } catch(e) { return false; }
+  }
+
+  // ========== ADD POINT - UPDATE CACHE + KV ==========
+  async addPoint(username) {
+    try {
+      if (!this.env?.QUESTIONS) return false;
+      
+      const newScore = await this.pointsCache.addPointToUser(username, this.env);
+      
+      if (newScore !== false) {
+        // Update userScores
+        this.userScores.set(username, newScore);
+        return true;
+      }
+      
+      return false;
+      
+    } catch(e) { return false; }
+  }
+
+  // ========== GET LEADERBOARD - ONLY FROM CACHE ==========
+  getLeaderboard(limit = 10) {
+    return this.pointsCache.getLeaderboard(limit);
+  }
+
+  // ========== RESET POINTS ==========
+  async resetPoints() {
+    try {
+      if (!this.env?.QUESTIONS) return false;
+      return await this.pointsCache.resetPoints(this.env);
+    } catch(e) { return false; }
+  }
+
+  // ========== LOAD SCORES ==========
   async loadScores() {
     try {
       if (this._isLoaded) return true;
       if (!this.env?.QUESTIONS) return false;
       
-      const points = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
-      this.userScores.clear();
-      for (const [username, score] of Object.entries(points)) {
-        this.userScores.set(username, score);
-      }
+      const points = await this.getPoints();
       this._isLoaded = true;
-      return true;
-    } catch(e) { return false; }
-  }
-
-  async getPoints() {
-    try {
-      if (!this.env?.QUESTIONS) return {};
-      const points = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
-      this.userScores.clear();
-      for (const [username, score] of Object.entries(points)) {
-        this.userScores.set(username, score);
-      }
-      return points;
-    } catch(e) { return {}; }
-  }
-
-  async setPoints(points) {
-    try {
-      if (!this.env?.QUESTIONS) return false;
-      await this.env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify(points));
-      this.userScores.clear();
-      for (const [username, score] of Object.entries(points)) {
-        this.userScores.set(username, score);
-      }
       return true;
     } catch(e) { return false; }
   }
@@ -427,7 +639,21 @@ class DiceGameSystem {
   }
 
   rollDice() { return Math.floor(Math.random() * 6) + 1; }
-  clearCache() { this.userScores.clear(); this._isLoaded = false; }
+  
+  // ========== CLEANUP ==========
+  cleanup() {
+    if (this.pointsCache) {
+      this.pointsCache.cleanup();
+    }
+  }
+  
+  clearCache() {
+    this.userScores.clear();
+    this._isLoaded = false;
+    if (this.pointsCache) {
+      this.pointsCache.clear();
+    }
+  }
 }
 
 // ==================== GAME SERVER FULL CLASS ====================
@@ -616,6 +842,9 @@ export class GameServer {
           // Cleanup cache manager
           if (this.cacheManager) {
             this.cacheManager.cleanup();
+          }
+          if (this.diceGameSystem) {
+            this.diceGameSystem.cleanup();
           }
           break;
       }
@@ -811,16 +1040,27 @@ export class GameServer {
         const winner = correctPlayers[0];
         
         try {
-          const points = await this._getDicePoints();
-          points[winner] = (points[winner] || 0) + 1;
-          await this.diceGameSystem.setPoints(points);
+          // USE CACHE - UPDATE CACHE + KV
+          const success = await this.diceGameSystem.addPoint(winner);
           
-          this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
-            username: winner,
-            totalPoints: points[winner] || 0,
-            diceValue: diceValue,
-            round: roundNumber
-          }]);
+          if (success) {
+            // Get updated points dari cache (NO KV)
+            const points = this.diceGameSystem.pointsCache.getPoints() || {};
+            
+            this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
+              username: winner,
+              totalPoints: points[winner] || 0,
+              diceValue: diceValue,
+              round: roundNumber
+            }]);
+          } else {
+            this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
+              username: winner,
+              totalPoints: 0,
+              diceValue: diceValue,
+              round: roundNumber
+            }]);
+          }
         } catch(e) {
           this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
             username: winner,
@@ -999,19 +1239,32 @@ export class GameServer {
       const winner = highestPlayers[0];
       
       try {
-        const points = await this._getDicePoints();
-        points[winner] = (points[winner] || 0) + 1;
-        await this.diceGameSystem.setPoints(points);
+        // USE CACHE - UPDATE CACHE + KV
+        const success = await this.diceGameSystem.addPoint(winner);
         
-        this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
-          username: winner,
-          totalPoints: points[winner] || 0,
-          diceValue: highest,
-          round: this._diceRound || 1,
-          isTieBreaker: true,
-          tieBreakerRound: this._tieRound,
-          finalWinner: true
-        }]);
+        if (success) {
+          const points = this.diceGameSystem.pointsCache.getPoints() || {};
+          
+          this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
+            username: winner,
+            totalPoints: points[winner] || 0,
+            diceValue: highest,
+            round: this._diceRound || 1,
+            isTieBreaker: true,
+            tieBreakerRound: this._tieRound,
+            finalWinner: true
+          }]);
+        } else {
+          this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
+            username: winner,
+            totalPoints: 0,
+            diceValue: highest,
+            round: this._diceRound || 1,
+            isTieBreaker: true,
+            tieBreakerRound: this._tieRound,
+            finalWinner: true
+          }]);
+        }
       } catch(e) {
         this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
           username: winner,
@@ -1053,19 +1306,32 @@ export class GameServer {
 
   async _processSingleWinner(room, id, winner) {
     try {
-      const points = await this._getDicePoints();
-      points[winner] = (points[winner] || 0) + 1;
-      await this.diceGameSystem.setPoints(points);
+      // USE CACHE - UPDATE CACHE + KV
+      const success = await this.diceGameSystem.addPoint(winner);
       
-      this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
-        username: winner,
-        totalPoints: points[winner] || 0,
-        diceValue: 'auto',
-        round: this._diceRound || 1,
-        isTieBreaker: true,
-        tieBreakerRound: this._tieRound,
-        finalWinner: true
-      }]);
+      if (success) {
+        const points = this.diceGameSystem.pointsCache.getPoints() || {};
+        
+        this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
+          username: winner,
+          totalPoints: points[winner] || 0,
+          diceValue: 'auto',
+          round: this._diceRound || 1,
+          isTieBreaker: true,
+          tieBreakerRound: this._tieRound,
+          finalWinner: true
+        }]);
+      } else {
+        this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
+          username: winner,
+          totalPoints: 0,
+          diceValue: 'auto',
+          round: this._diceRound || 1,
+          isTieBreaker: true,
+          tieBreakerRound: this._tieRound,
+          finalWinner: true
+        }]);
+      }
     } catch(e) {
       this._broadcastToRoom(DICE_ROOM, ["diceWinner", {
         username: winner,
@@ -1209,7 +1475,8 @@ export class GameServer {
   async _getDicePoints() {
     try {
       if (!this.env?.QUESTIONS) return {};
-      return await this._withTimeout(this.diceGameSystem.getPoints(), 1500);
+      // GET FROM CACHE (NO KV)
+      return await this.diceGameSystem.getPoints();
     } catch(e) { return {}; }
   }
 
@@ -1320,6 +1587,9 @@ export class GameServer {
       // Cleanup cache manager
       if (this.cacheManager) {
         this.cacheManager.cleanup();
+      }
+      if (this.diceGameSystem) {
+        this.diceGameSystem.cleanup();
       }
       
       if (Date.now() - this._lastErrorReset > CONSTANTS.ERROR_RESET_INTERVAL_MS) {
@@ -1506,7 +1776,8 @@ export class GameServer {
           diceActive: !!this.currentDiceRoll,
           diceRound: this._diceRound || 0,
           tieActive: this._tieActive,
-          cacheSize: this.cacheManager?.winnersCache?.size || 0
+          cacheSize: this.cacheManager?.winnersCache?.size || 0,
+          pointsCacheSize: this.diceGameSystem?.pointsCache?.pointsCache?.size || 0
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -1697,13 +1968,25 @@ export class GameServer {
       if (evt === "getDiceLeaderboard") {
         try {
           let limit = data.length > 1 && typeof data[1] === 'number' ? Math.min(data[1], 30) : 10;
-          const points = await this._withTimeout(
-            this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json'),
-            1500
-          ) || {};
-          const sorted = Object.entries(points).sort((a, b) => b[1] - a[1]).slice(0, limit);
-          this._safeSend(ws, ["diceLeaderboard", sorted.map(([u, s]) => `${u}|${s}`)]);
-        } catch(e) { this._safeSend(ws, ["diceLeaderboard", []]); }
+          
+          // ONLY FROM CACHE - NO KV CALL!
+          const leaderboard = this.diceGameSystem.getLeaderboard(limit);
+          this._safeSend(ws, ["diceLeaderboard", leaderboard.map(([u, s]) => `${u}|${s}`)]);
+          
+        } catch(e) { 
+          this._safeSend(ws, ["diceLeaderboard", []]); 
+        }
+        return;
+      }
+
+      if (evt === "getDicePoints") {
+        try {
+          // ONLY FROM CACHE - NO KV CALL!
+          const points = this.diceGameSystem.pointsCache.getPoints() || {};
+          this._safeSend(ws, ["dicePoints", points]);
+        } catch(e) {
+          this._safeSend(ws, ["dicePoints", {}]);
+        }
         return;
       }
 
@@ -1864,14 +2147,9 @@ export class GameServer {
     return this.cacheManager.getWinners(room);
   }
 
-  // ADD WINNER - UPDATE CACHE + KV
+  // ADD SINGLE WINNER - UPDATE CACHE + KV (TANPA BATCH)
   async _addLowCardWinner(room, username) {
     return await this.cacheManager.addWinner(room, username, this.env);
-  }
-
-  // BATCH ADD WINNERS - UPDATE CACHE + KV (1x operasi)
-  async _addLowCardWinnersBatch(room, usernames) {
-    return await this.cacheManager.addWinnersBatch(room, usernames, this.env);
   }
 
   // BROADCAST WINNERS - ONLY FROM CACHE
@@ -2230,7 +2508,8 @@ export class GameServer {
       const currentWeek = this._generateCurrentWeek(new Date());
       const lastResetWeek = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_RESET_WEEK);
       
-      const points = await this._withTimeout(this.diceGameSystem.getPoints(), 1500);
+      // GET POINTS DARI CACHE (NO KV)
+      const points = this.diceGameSystem.pointsCache.getPoints() || {};
       
       let winner = null, highestScore = 0;
       for (const [username, score] of Object.entries(points)) {
@@ -2258,10 +2537,8 @@ export class GameServer {
         this._cachedLastWeekWinner = null;
       }
       
-      await this._withTimeout(
-        this.env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify({})),
-        1500
-      );
+      // RESET POINTS - UPDATE CACHE + KV
+      await this.diceGameSystem.resetPoints();
       this.diceGameSystem.clearCache();
       
       this._cachedResetWeek = currentWeek;
@@ -2676,6 +2953,7 @@ export class GameServer {
             const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
             
             if (game._startedByRecording) {
+              // ✅ ADD SINGLE WINNER (TANPA BATCH)
               await this._addLowCardWinner(room, winner);
               await this._broadcastLowCardWinners(room);
             }
@@ -2810,6 +3088,7 @@ export class GameServer {
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
         
         if (game._startedByRecording) {
+          // ✅ ADD SINGLE WINNER (TANPA BATCH)
           await this._addLowCardWinner(room, winnerName);
           await this._broadcastLowCardWinners(room);
         }
@@ -2937,6 +3216,7 @@ export class GameServer {
           const totalCoin = (game.betAmount || 0) * players.size;
           
           if (game._startedByRecording) {
+            // ✅ ADD SINGLE WINNER (TANPA BATCH)
             await this._addLowCardWinner(room, winnerName);
             await this._broadcastLowCardWinners(room);
           }
@@ -3015,6 +3295,7 @@ export class GameServer {
         const totalCoin = (game.betAmount || 0) * players.size;
         
         if (game._startedByRecording) {
+          // ✅ ADD SINGLE WINNER (TANPA BATCH)
           await this._addLowCardWinner(room, winnerName);
           await this._broadcastLowCardWinners(room);
         }
@@ -3401,6 +3682,7 @@ export class GameServer {
         const winner = activePlayers[0]?.name || "Unknown";
         const totalCoin = (game.betAmount || 0) * (game.players?.size || 0);
         if (game._startedByRecording) {
+          // ✅ ADD SINGLE WINNER (TANPA BATCH)
           await this._addLowCardWinner(room, winner);
           await this._broadcastLowCardWinners(room);
         }
@@ -3614,6 +3896,9 @@ export class GameServer {
       // Clear cache manager
       if (this.cacheManager) {
         this.cacheManager.clear();
+      }
+      if (this.diceGameSystem) {
+        this.diceGameSystem.clearCache();
       }
       
       this._eventQueue = [];
