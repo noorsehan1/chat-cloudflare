@@ -1,4 +1,4 @@
-// ==================== CHAT-SERVER-FIXED.js ====================
+// ==================== CHAT-SERVER.JS ====================
 // ==================== NON-DURABLE OBJECT ====================
 
 const C = {
@@ -139,7 +139,7 @@ class RoomManager {
   }
 }
 
-// ==================== CHAT SERVER (NON-DURABLE) ====================
+// ==================== CHAT SERVER ====================
 export class ChatServer {
   constructor(env) {
     this.env = env;
@@ -175,7 +175,6 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
-    // GUNAKAN setInterval UNTUK CLEANUP
     this._cleanupInterval = setInterval(() => {
       if (this.closing || this.isDestroyed) {
         clearInterval(this._cleanupInterval);
@@ -187,7 +186,7 @@ export class ChatServer {
     }, C.CLEANUP_INTERVAL);
   }
 
-  // ==================== ALARM (DIPANGGIL DARI SCHEDULED) ====================
+  // ==================== ALARM ====================
   async _onAlarm() {
     if (this.closing || this.isDestroyed) return;
     
@@ -1358,13 +1357,19 @@ export class ChatServer {
     
     try {
       const upgrade = req.headers.get("Upgrade");
+      
       if (upgrade !== "websocket") {
         return new Response("Chat Server", { 
           status: 200,
           headers: {
-            "Cache-Control": "no-cache"
+            "Content-Type": "text/plain",
+            "Access-Control-Allow-Origin": "*"
           }
         });
+      }
+      
+      if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
+        return new Response("Server full", { status: 503 });
       }
       
       const pair = new WebSocketPair();
@@ -1375,18 +1380,16 @@ export class ChatServer {
       server.roomname = null;
       server.idtarget = null;
       server._closing = false;
-      server._wsId = Date.now() + Math.random();
+      server._wsId = Date.now() + "_" + Math.random().toString(36).substring(2, 8);
       
-      if (!this.wsSet.has(server)) {
-        this.wsSet.add(server);
-      }
-      
-      // ============ HAPUS state.acceptWebSocket ============
+      this.wsSet.add(server);
       
       server.addEventListener("message", async (event) => {
         try {
           await this.handleMessage(server, event.data);
-        } catch(e) {}
+        } catch(e) {
+          console.error("Message error:", e);
+        }
       });
       
       server.addEventListener("close", () => {
@@ -1400,6 +1403,7 @@ export class ChatServer {
       return new Response(null, { status: 101, webSocket: client });
       
     } catch(e) {
+      console.error("Fetch error:", e);
       return new Response("Internal Server Error", { status: 500 });
     }
   }
