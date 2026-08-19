@@ -1,5 +1,5 @@
 // ==================== INDEX.JS ====================
-// VERSION: 4.0.0 - D1 DATABASE VERSION
+// VERSION: 4.0.0 - D1 + KV DATABASE VERSION
 
 import { ChatHandler } from "./chat-handler.js";
 import { GameHandler } from "./game-handler.js";
@@ -31,7 +31,7 @@ export default {
         return new Response(JSON.stringify({
           status: "running",
           version: "4.0.0",
-          type: "D1 Database",
+          type: "D1 + KV Database",
           timestamp: Date.now(),
           endpoints: {
             websocket: "/game/ws?room={room_name}",
