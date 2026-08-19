@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 3.3.1 - ALARM ONLY AT SCHEDULE START/END - FIXED
+// VERSION: 3.3.2 - HYBRID: ALARM + HIBERNATION API
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -50,6 +50,10 @@ const CONSTANTS = {
   BAN_DURATION_MS: 180000,
   MAX_RECONNECT_ATTEMPTS: 5,
   RECONNECT_WINDOW_MS: 30000,
+  
+  // ===== ALARM CONFIG =====
+  ALARM_CHECK_INTERVAL_MS: 60000,   // 1 MENIT (CEK JADWAL AWAL)
+  DICE_LOOP_INTERVAL_MS: 20000,     // 20 DETIK (SAAT SESSION AKTIF)
 };
 
 const QUIZ_SCHEDULE = {
@@ -263,8 +267,8 @@ export class GameServer {
       this._alarmScheduled = false;
       this._diceLoopInterval = null;
       
-      // ✅ SCHEDULE ALARM PERTAMA - CEK JADWAL (1 MENIT)
-      this._scheduleAlarm(60000);
+      // ✅ ALARM PERTAMA - CEK JADWAL (1 MENIT)
+      this._scheduleAlarm(CONSTANTS.ALARM_CHECK_INTERVAL_MS);
       
       setTimeout(() => {
         if (!this.closing && !this.isDestroyed) {
@@ -294,7 +298,7 @@ export class GameServer {
         this.diceGameSystem = new DiceGameSystem(this);
       }
       this._loadKVData().catch(() => {});
-      this._checkAndSchedule(); // Cek jadwal dan schedule alarm
+      this._checkAndSchedule();
     } catch(e) {
       setTimeout(() => {
         if (!this.closing && !this.isDestroyed) {
@@ -305,18 +309,23 @@ export class GameServer {
     }
   }
 
-  // ========== ALARM - HANYA UNTUK MULAI DAN BERHENTI ==========
+  // ========== ALARM ==========
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
     try {
-      // ===== CEK JADWAL DAN SCHEDULE ALARM BERIKUTNYA =====
       this._checkAndSchedule();
+      
+      // ===== JIKA SESSION AKTIF =====
+      if (this._sessionActive) {
+        // Dice loop sudah berjalan via setInterval
+        // Tidak perlu apa-apa di sini
+      }
       
     } catch(e) {}
   }
 
-  // ========== CEK JADWAL DAN SCHEDULE ==========
+  // ========== CEK JADWAL ==========
   _checkAndSchedule() {
     try {
       const witaTime = this._getCurrentWITATime();
@@ -327,44 +336,38 @@ export class GameServer {
       let nextEnd = null;
       let nextEventTime = null;
       
-      // Cek semua session
       for (const session of QUIZ_SCHEDULE.SESSIONS) {
         const startTotal = session.start * 60;
         const endTotal = session.end * 60;
         
-        // Current time dalam session
         if (currentTotal >= startTotal && currentTotal < endTotal) {
           inSession = true;
           nextEnd = endTotal;
-          // Schedule alarm untuk end session
           const endMinutes = endTotal - currentTotal;
-          nextEventTime = endMinutes * 60 * 1000; // konversi ke ms
+          nextEventTime = endMinutes * 60 * 1000;
           break;
         }
         
-        // Cari session berikutnya
         if (currentTotal < startTotal) {
           if (nextStart === null || startTotal < nextStart) {
             nextStart = startTotal;
             nextEnd = endTotal;
-            // Schedule alarm untuk start session
             const startMinutes = startTotal - currentTotal;
             nextEventTime = startMinutes * 60 * 1000;
           }
         }
       }
       
-      // Jika tidak ada session hari ini, cari besok
       if (!inSession && nextStart === null) {
         const firstSession = QUIZ_SCHEDULE.SESSIONS[0];
-        const startTotal = firstSession.start * 60 + 1440; // +24 jam
+        const startTotal = firstSession.start * 60 + 1440;
         const startMinutes = startTotal - currentTotal;
         nextEventTime = startMinutes * 60 * 1000;
         nextStart = startTotal;
         nextEnd = firstSession.end * 60 + 1440;
       }
       
-      // ===== UPDATE SESSION STATE =====
+      // ===== UPDATE SESSION =====
       const wasActive = this._sessionActive;
       this._sessionActive = inSession;
       
@@ -372,11 +375,11 @@ export class GameServer {
       if (inSession && !wasActive) {
         this._broadcastToRoom(DICE_ROOM, ["diceNotification", "🎲 Dice Game Session Started!"]);
         this.diceAutoEnabled = true;
-        // Mulai dice pertama setelah 3 detik
+        
+        // ✅ START DICE LOOP (setInterval)
         setTimeout(() => {
           if (!this.closing && !this.isDestroyed && this._sessionActive) {
             this._startDiceFast();
-            // Jalankan dice setiap 20 detik selama session aktif
             this._startDiceLoop();
           }
         }, 3000);
@@ -386,20 +389,17 @@ export class GameServer {
       if (!inSession && wasActive) {
         this._broadcastToRoom(DICE_ROOM, ["diceNotification", "⏰ Dice Game Session Ended!"]);
         this.diceAutoEnabled = false;
-        // Matikan semua dice
+        
+        // ✅ STOP DICE LOOP
         this._endAllDice();
-        // Hentikan dice loop
         this._stopDiceLoop();
       }
       
       // ===== SCHEDULE ALARM BERIKUTNYA =====
       if (nextEventTime && nextEventTime > 0) {
-        // Tambahkan buffer 5 detik untuk safety
         const scheduleDelay = Math.max(nextEventTime + 5000, 60000);
         this._scheduleAlarm(scheduleDelay);
-        this._alarmScheduled = true;
       } else {
-        // Fallback: cek lagi 1 menit
         this._scheduleAlarm(60000);
       }
       
@@ -416,14 +416,14 @@ export class GameServer {
         return;
       }
       
-      // Cek apakah bisa start dice baru
+      // Cek bisa start dice baru
       if (!this._tieActive && !this._isShowingDice && !this._diceTimeUpCooldown) {
         const clients = this.wsClients?.get(DICE_ROOM);
         if (clients?.size > 0 && !this.currentDiceRoll && !this._diceLock) {
           this._startDiceFast();
         }
       }
-    }, 20000); // 20 detik
+    }, CONSTANTS.DICE_LOOP_INTERVAL_MS); // 20 DETIK
   }
 
   _stopDiceLoop() {
@@ -461,11 +461,6 @@ export class GameServer {
       const minutes = now.getUTCMinutes();
       return { hours, minutes, totalMinutes: (hours * 60) + minutes };
     } catch(e) { return { hours: 0, minutes: 0, totalMinutes: 0 }; }
-  }
-
-  // ========== IS DICE TIME ==========
-  _isDiceTime() {
-    return this._sessionActive;
   }
 
   // ========== START DICE FAST ==========
@@ -989,27 +984,6 @@ export class GameServer {
     return `${year}-W${String(week).padStart(2, '0')}`;
   }
 
-  // ========== CLEANUP DEAD CONNECTIONS ==========
-  _cleanupDeadConnections() {
-    try {
-      const toRemove = [];
-      for (const [wsId, ws] of this.wsMap) {
-        if (!ws || ws.readyState !== 1 || ws._closing) {
-          toRemove.push(wsId);
-        }
-      }
-      for (const wsId of toRemove) {
-        const ws = this.wsMap.get(wsId);
-        if (ws) {
-          const room = this.clientRooms.get(wsId);
-          if (room) this._removeClientFromRoom(room, wsId);
-          this.clientRooms.delete(wsId);
-          this.wsMap.delete(wsId);
-        }
-      }
-    } catch(e) {}
-  }
-
   // ========== TIMER MANAGEMENT ==========
   _trackTimer(timer) {
     if (timer) this._allTimers.add(timer);
@@ -1217,6 +1191,7 @@ export class GameServer {
         server.username = null;
         server._createdAt = Date.now();
         
+        // ✅ HIBERNATION API - acceptWebSocket
         try {
           server.accept();
         } catch(e) {
@@ -1226,6 +1201,8 @@ export class GameServer {
         
         this.wsMap.set(wsId, server);
         
+        // ✅ Tanpa addEventListener? 
+        // Untuk hibernation, pakai addEventListener lebih reliable
         server.addEventListener("message", async (event) => {
           try {
             if (server._closing || this.closing || this.isDestroyed) return;
