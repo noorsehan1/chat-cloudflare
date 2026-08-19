@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 4.0.1 - FULLY OPTIMIZED
+// VERSION: 4.0.2 - FULLY FIXED
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -2223,12 +2223,16 @@ export class GameServer {
   _startRegistration(room, game) {
     try {
       if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
-      if (game._registrationTimer) { this._clearTimer(game._registrationTimer); game._registrationTimer = null; }
+      if (game._registrationTimer) { 
+        this._clearTimer(game._registrationTimer); 
+        game._registrationTimer = null; 
+      }
+      
+      this._broadcastToRoom(room, ["gameLowCardNotification", "Registration started! 20s to join"]);
+      this._broadcastToRoom(room, ["gameLowCardTimeLeft", "20s"]);
       
       let timeLeft = 20;
       let isClosed = false;
-      
-      this._broadcastToRoom(room, ["gameLowCardTimeLeft", "20s"]);
       
       const timer = this._trackTimer(setInterval(() => {
         try {
@@ -2245,6 +2249,7 @@ export class GameServer {
             this._clearTimer(timer);
             game._registrationTimer = null;
             this._broadcastToRoom(room, ["gameLowCardTimeLeft", "TIME UP"]);
+            this._broadcastToRoom(room, ["gameLowCardNotification", "Registration closed!"]);
             
             (async () => {
               try {
@@ -2268,6 +2273,7 @@ export class GameServer {
         }
       }, 1000));
       game._registrationTimer = timer;
+      
     } catch(e) {
       game._gameEnded = true;
       game._isActive = false;
@@ -2280,24 +2286,29 @@ export class GameServer {
     try {
       if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
       game.registrationOpen = false;
-      if (game._registrationTimer) { this._clearTimer(game._registrationTimer); game._registrationTimer = null; }
+      if (game._registrationTimer) { 
+        this._clearTimer(game._registrationTimer); 
+        game._registrationTimer = null; 
+      }
       
       const humanPlayers = Array.from(game.players.keys()).filter(id => !id.startsWith('BOT_'));
       const humanCount = humanPlayers.length;
       
       if (!game._botsAdded) {
+        let botsToAdd = 0;
         if (humanCount === 0) {
-          this._addBots(room, 4);
-          game._botsAdded = true;
+          botsToAdd = 4;
         } else if (humanCount === 1) {
-          this._addBots(room, 3);
+          botsToAdd = 3;
+        } else if (humanCount === 2) {
+          botsToAdd = 2;
+        } else if (humanCount === 3) {
+          botsToAdd = 1;
+        }
+        
+        if (botsToAdd > 0) {
+          this._addBots(room, botsToAdd);
           game._botsAdded = true;
-        } else if (game.players.size < 2) {
-          const needed = Math.min(4 - game.players.size, CONSTANTS.MAX_BOTS_PER_GAME);
-          if (needed > 0) { 
-            this._addBots(room, needed); 
-            game._botsAdded = true; 
-          }
         }
       }
       
@@ -2378,6 +2389,7 @@ export class GameServer {
       const playersList = this._getActivePlayers(game).map(p => p.name);
       this._broadcastToRoom(room, ["gameLowCardClosed", playersList]);
       this._broadcastToRoom(room, ["gameLowCardNextRound", game.round]);
+      this._broadcastToRoom(room, ["gameLowCardNotification", "Draw phase started! Submit your number (1-12)"]);
       
       this._startDrawCountdown(room, game);
       if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) {
@@ -2394,12 +2406,15 @@ export class GameServer {
   _startDrawCountdown(room, game) {
     try {
       if (!this._isGameActuallyRunning(game)) return;
-      if (game._drawTimer) { this._clearTimer(game._drawTimer); game._drawTimer = null; }
+      if (game._drawTimer) { 
+        this._clearTimer(game._drawTimer); 
+        game._drawTimer = null; 
+      }
+      
+      this._broadcastToRoom(room, ["gameLowCardTimeLeft", "20s"]);
       
       let timeLeft = 20;
       let isClosed = false;
-      
-      this._broadcastToRoom(room, ["gameLowCardTimeLeft", "20s"]);
       
       const timer = this._trackTimer(setInterval(() => {
         try {
@@ -2799,6 +2814,7 @@ export class GameServer {
         this._addClient(room, ws, usernameClean);
         this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
         this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
+        this._broadcastToRoom(room, ["gameLowCardNotification", "Game started! Registration open for 20s"]);
         this._startRegistration(room, game);
         
       } finally {
@@ -2965,16 +2981,16 @@ export class GameServer {
         this._safeSend(ws, ["gameLowCardError", "No active game"]);
         return;
       }
-      if (game.players.has(usernameClean) && game.eliminated?.has(usernameClean)) {
+      if (!game.players.has(usernameClean)) {
+        this._safeSend(ws, ["gameLowCardError", "You are not in this game"]);
+        return;
+      }
+      if (game.eliminated?.has(usernameClean)) {
         this._safeSend(ws, ["gameLowCardError", "You have been eliminated"]);
         return;
       }
       if (game.registrationOpen || game.evaluationLocked || game.drawTimeExpired || game._phase !== 'draw') {
         this._safeSend(ws, ["gameLowCardError", "Cannot submit now"]);
-        return;
-      }
-      if (!game.players.has(usernameClean)) {
-        this._safeSend(ws, ["gameLowCardError", "You are not in this game"]);
         return;
       }
       if (game.numbers.has(usernameClean)) {
