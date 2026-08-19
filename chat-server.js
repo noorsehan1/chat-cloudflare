@@ -1,13 +1,13 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 3.1.1 - SINGLE ALARM SLOT
+// VERSION: 3.1.1 - SINGLE ALARM SLOT (NO SETINTERVAL)
 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 5000,
   ALARM_INTERVAL_MS: 10000,        // 10 DETIK (TICK)
-  CLEANUP_INTERVAL_MS: 600000,     // 10 MENIT (60 × 10 detik)
-  NUMBER_UPDATE_TICK_COUNT: 540,   // 90 MENIT (540 × 10 detik)
+  CLEANUP_COUNTER_MAX: 60,          // 60 × 10 detik = 10 menit
+  NUMBER_UPDATE_TICK_COUNT: 540,   // 540 × 10 detik = 90 menit
   MAX_NUMBER: 6,
   BATCH_SIZE: 20,
   LOCK_TIMEOUT: 10000,
@@ -163,7 +163,7 @@ export class ChatServer {
     this._joinLocks = new Map();
     this._kursiLocks = new Map();
     
-    // ========== NUMBER ==========
+    // ========== NUMBER & COUNTERS ==========
     this.currentNumber = 1;
     this._tickCounter = 0;
     this._cleanupCounter = 0;
@@ -204,24 +204,23 @@ export class ChatServer {
     if (this.closing || this.isDestroyed) return;
     
     try {
-      // ===== 1. TICK =====
       this._tickCounter++;
+      this._cleanupCounter++;
       
-      // ===== 2. CLEANUP DEAD CONNECTIONS (SETIAP TICK) =====
+      // ===== 1. CLEANUP DEAD CONNECTIONS (SETIAP TICK) =====
       this._cleanupDeadConnections();
       this._cleanupMemory();
       this._processEventQueue();
       
-      // ===== 3. CLEANUP LOCK (SETIAP 60 TICK = 10 MENIT) =====
-      this._cleanupCounter++;
-      if (this._cleanupCounter >= 60) {
+      // ===== 2. CLEANUP STALE LOCKS (SETIAP 60 TICK = 10 MENIT) =====
+      if (this._cleanupCounter >= C.CLEANUP_COUNTER_MAX) {
         this._cleanupStaleLocks();
         this._cleanupEventQueue();
         this._performCleanup();
         this._cleanupCounter = 0;
       }
       
-      // ===== 4. UPDATE NUMBER (SETIAP 540 TICK = 90 MENIT) =====
+      // ===== 3. UPDATE NUMBER (SETIAP 540 TICK = 90 MENIT) =====
       if (this._tickCounter >= C.NUMBER_UPDATE_TICK_COUNT) {
         this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
         
