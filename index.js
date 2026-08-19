@@ -1,15 +1,23 @@
-// ==================== INDEX.JS - PURE WORKER WITH MEMORY STATE ====================
+// ==================== INDEX.JS - WITH GLOBAL STATE ====================
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
 
-// ========== GLOBAL STATE (Shared across all requests) ==========
+// ========== GLOBAL STATE - SHARED ACROSS ALL REQUESTS ==========
+// Ini akan di-share di semua instance worker karena menggunakan Cache API
 const globalState = {
   chatServer: null,
   gameServer: null,
   initialized: false,
   initPromise: null,
-  stateCache: new Map(),
-  lastSave: null,
+  _startTime: Date.now(),
+};
+
+// Cache untuk state persistence antar request
+const STATE_CACHE = {
+  chatRooms: new Map(),
+  gameRooms: new Map(),
+  wsConnections: new Map(),
+  lastSync: Date.now()
 };
 
 export default {
@@ -18,71 +26,68 @@ export default {
       const url = new URL(request.url);
       const pathname = url.pathname;
       
-      // ========== INIT SERVER (ONCE) ==========
+      // ========== SINGLETON INIT ==========
       if (!globalState.initialized) {
         if (!globalState.initPromise) {
           globalState.initPromise = (async () => {
             try {
-              // Init Chat Server - Pure Memory State
+              // Coba load state dari Cache API
+              const cache = await caches.open('game_state');
+              const cachedResponse = await cache.match('/state');
+              let savedState = null;
+              
+              if (cachedResponse) {
+                try {
+                  savedState = await cachedResponse.json();
+                } catch(e) {}
+              }
+              
+              // INIT CHAT SERVER dengan shared state
               globalState.chatServer = new ChatServer({
-                storage: {
-                  get: async (key) => globalState.stateCache.get(key) || null,
-                  put: async (key, value) => {
-                    globalState.stateCache.set(key, value);
-                  },
-                  delete: async (key) => {
-                    globalState.stateCache.delete(key);
-                  },
-                  setAlarm: async (ms) => {
-                    // No-op untuk pure worker - pakai setTimeout
-                    if (ms) {
-                      setTimeout(async () => {
-                        if (globalState.chatServer && !globalState.chatServer.closing) {
-                          await globalState.chatServer.alarm?.();
-                        }
-                      }, Math.min(ms - Date.now(), 900000));
-                    }
-                  }
-                },
                 env: env,
-                ctx: {
-                  acceptWebSocket: (ws) => {
-                    try { ws.accept(); } catch(e) {}
-                  }
-                }
+                sharedState: STATE_CACHE,
+                isGlobal: true
               });
               
-              // Init Game Server - Pure Memory State
+              // INIT GAME SERVER dengan shared state
               globalState.gameServer = new GameServer({
                 env: env,
-                state: {
-                  storage: {
-                    get: async (key) => globalState.stateCache.get(key) || null,
-                    put: async (key, value) => {
-                      globalState.stateCache.set(key, value);
-                    },
-                    delete: async (key) => {
-                      globalState.stateCache.delete(key);
-                    }
+                sharedState: STATE_CACHE,
+                isGlobal: true
+              });
+              
+              // Restore state jika ada
+              if (savedState) {
+                if (savedState.chatRooms) {
+                  for (const [key, value] of Object.entries(savedState.chatRooms)) {
+                    STATE_CACHE.chatRooms.set(key, value);
                   }
                 }
-              });
+                if (savedState.gameRooms) {
+                  for (const [key, value] of Object.entries(savedState.gameRooms)) {
+                    STATE_CACHE.gameRooms.set(key, value);
+                  }
+                }
+              }
               
               globalState.initialized = true;
               
-              // Health check setiap 30 detik
+              // SAVE STATE setiap 10 detik ke Cache API
               setInterval(async () => {
                 try {
-                  if (globalState.chatServer) {
-                    globalState.chatServer._cleanupDeadConnections?.();
-                    globalState.chatServer._cleanupMemory?.();
-                  }
-                  if (globalState.gameServer) {
-                    globalState.gameServer._cleanupDeadConnections?.();
-                    globalState.gameServer._cleanupMemory?.();
-                  }
+                  const stateToSave = {
+                    chatRooms: Object.fromEntries(STATE_CACHE.chatRooms),
+                    gameRooms: Object.fromEntries(STATE_CACHE.gameRooms),
+                    timestamp: Date.now()
+                  };
+                  
+                  const cache = await caches.open('game_state');
+                  const response = new Response(JSON.stringify(stateToSave), {
+                    headers: { 'Content-Type': 'application/json' }
+                  });
+                  await cache.put('/state', response);
                 } catch(e) {}
-              }, 30000);
+              }, 10000);
               
               return true;
             } catch(e) {
@@ -96,31 +101,53 @@ export default {
       }
       
       // ========== ROUTING ==========
-      // Chat Server endpoints
+      // Chat Server
       if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
         return globalState.chatServer.fetch(request);
       }
       
-      // Game Server endpoints
+      // Game Server
       if (pathname === "/game/ws" || pathname === "/game") {
         return globalState.gameServer.fetch(request);
       }
       
-      // Health check semua server
+      // Health Check
       if (pathname === "/health") {
+        const chatConnections = globalState.chatServer?.wsSet?.size || 0;
+        const gameConnections = globalState.gameServer?.wsMap?.size || 0;
+        
         return new Response(JSON.stringify({
           status: "running",
-          version: "5.0.0-pure",
-          mode: "pure-worker-memory",
-          chatConnections: globalState.chatServer?.wsSet?.size || 0,
-          gameConnections: globalState.gameServer?.wsMap?.size || 0,
-          games: globalState.gameServer?.activeGames?.size || 0,
-          chatRooms: globalState.chatServer?.rooms?.size || 0,
-          memoryCache: globalState.stateCache.size,
-          uptime: Date.now() - (globalState._startTime || Date.now()),
+          version: "5.0.0-global",
+          mode: "global-shared-state",
+          chatConnections,
+          gameConnections,
+          totalConnections: chatConnections + gameConnections,
+          chatRooms: STATE_CACHE.chatRooms.size,
+          gameRooms: STATE_CACHE.gameRooms.size,
+          uptime: Date.now() - globalState._startTime,
           timestamp: Date.now()
         }), {
           status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      
+      // Debug - lihat semua user di room
+      if (pathname === "/debug/rooms") {
+        const chatRooms = {};
+        for (const [room, data] of STATE_CACHE.chatRooms) {
+          chatRooms[room] = {
+            users: data.users ? Array.from(data.users) : [],
+            count: data.users?.size || 0
+          };
+        }
+        
+        return new Response(JSON.stringify({
+          chatRooms,
+          gameRooms: Array.from(STATE_CACHE.gameRooms.keys()),
+          timestamp: Date.now()
+        }), {
           headers: { 'Content-Type': 'application/json' }
         });
       }
