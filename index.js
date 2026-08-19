@@ -1,27 +1,19 @@
 // ==================== INDEX.JS ====================
-// VERSION: 5.0.0 - OPTIMIZED FOR JAVA CLIENT
+// VERSION: 6.0.0 - GABUNGAN CHAT + GAME (1 INSTANCE)
+// 🔥 SEMUA USER DI 1 TEMPAT → REALTIME!
 
-import { ChatServer } from './chat-server.js';
 import { GameServer } from './game-server.js';
 
 // ============================================================
-// ✅ INSTANCE (SINGLETON)
+// ✅ INSTANCE (SINGLETON) - 1 INSTANCE SAJA!
 // ============================================================
-let chatServerInstance = null;
-let gameServerInstance = null;
+let serverInstance = null;
 
-function getChatServer() {
-  if (!chatServerInstance) {
-    chatServerInstance = new ChatServer();
+function getServer(env) {
+  if (!serverInstance) {
+    serverInstance = new GameServer(env);
   }
-  return chatServerInstance;
-}
-
-function getGameServer(env) {
-  if (!gameServerInstance) {
-    gameServerInstance = new GameServer(env);
-  }
-  return gameServerInstance;
+  return serverInstance;
 }
 
 // ============================================================
@@ -37,29 +29,27 @@ export default {
       // ✅ ROOT / HEALTH
       // ============================================================
       if (pathname === "/" || pathname === "/health") {
-        const chat = getChatServer();
-        const game = getGameServer(env);
+        const server = getServer(env);
 
         return new Response(JSON.stringify({
           status: "online",
           timestamp: Date.now(),
           service: "chat-game-server",
-          version: "5.0.0",
+          version: "6.0.0",
           type: "websocket",
+          instance: "single",
           endpoints: {
-            chat: "/chat/ws",
+            chat: "/ws",
             game: "/game/ws",
             health: "/health"
           },
-          chat: {
-            connections: chat?.wsSet?.size || 0,
-            rooms: chat?.rooms?.size || 0,
-            users: chat?.userSeat?.size || 0
-          },
-          game: {
-            connections: game?.wsMap?.size || 0,
-            games: game?.activeGames?.size || 0
-          }
+          connections: server?.wsMap?.size || 0,
+          games: server?.activeGames?.size || 0,
+          rooms: server?.wsClients?.size || 0,
+          chatUsers: server?.roomUsers?.size || 0,
+          diceActive: server?.currentDiceRoll ? true : false,
+          dicePoints: server?.dicePoints?.size || 0,
+          uptime: server ? Math.floor((Date.now() - server._startTime) / 1000) : 0
         }), {
           headers: {
             "Content-Type": "application/json",
@@ -69,28 +59,19 @@ export default {
       }
 
       // ============================================================
-      // ✅ CHAT WEBSOCKET
+      // ✅ CHAT WEBSOCKET (Untuk App Inventor - Websocketvalf)
       // ============================================================
-      if (pathname === "/chat/ws" || pathname === "/ws" || pathname === "/chat") {
-        const chat = getChatServer();
-        chat.start();
-        return await chat.fetch(request);
+      if (pathname === "/ws" || pathname === "/chat" || pathname === "/chat/ws") {
+        const server = getServer(env);
+        return server.handleChatWebSocket(request);
       }
 
       // ============================================================
-      // ✅ GAME WEBSOCKET
+      // ✅ GAME WEBSOCKET (Untuk Lowcard + Dice)
       // ============================================================
       if (pathname === "/game/ws") {
-        const game = getGameServer(env);
-        return await game.fetch(request);
-      }
-
-      // ============================================================
-      // ✅ GAME HEALTH
-      // ============================================================
-      if (pathname === "/game/health") {
-        const game = getGameServer(env);
-        return await game.fetch(request);
+        const server = getServer(env);
+        return server.handleGameWebSocket(request);
       }
 
       // ============================================================
@@ -99,7 +80,7 @@ export default {
       return new Response(JSON.stringify({
         error: "Not Found",
         path: pathname,
-        available: ["/", "/health", "/chat/ws", "/game/ws", "/game/health"]
+        available: ["/", "/health", "/ws", "/game/ws"]
       }), {
         status: 404,
         headers: { "Content-Type": "application/json" }
@@ -123,4 +104,4 @@ export default {
   }
 };
 
-export { ChatServer, GameServer };
+export { GameServer };
