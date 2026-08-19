@@ -1,5 +1,5 @@
-// ==================== INDEX.JS - PURE WORKER + D1 ====================
-// VERSION: 4.0.0 - TANPA DURABLE OBJECTS!
+// ==================== CHAT.JS ====================
+// VERSION: 4.0.0 - FULL CLASS CHAT SERVER
 
 const C = {
   MAX_SEATS: 45,
@@ -17,13 +17,14 @@ const ROOMS = [
 
 const ROOMS_SET = new Set(ROOMS);
 
-// ==================== WEBSOCKET STORAGE (MEMORY) ====================
-const wsConnections = new Map(); // wsId → { ws, username, room }
-const userConnections = new Map(); // username → Set(ws)
-const userSeat = new Map(); // username → { room, seat, isMulti }
-const roomClients = new Map(); // room → Set(ws)
+// ==================== WEBSOCKET STORAGE (GLOBAL) ====================
+const wsConnections = new Map();
+const userConnections = new Map();
+const userSeat = new Map();
+const roomClients = new Map();
+const roomsCache = new Map();
 
-// ==================== ROOM MANAGER (IN-MEMORY CACHE) ====================
+// ==================== ROOM MANAGER CLASS ====================
 class RoomManager {
   constructor(name) {
     this.name = name;
@@ -39,7 +40,6 @@ class RoomManager {
     this.loaded = true;
 
     try {
-      // Load seats
       const seats = await env.DB.prepare(
         "SELECT seat_number, username, noimageUrl, color, itembawah, itematas, vip, viptanda FROM seats WHERE room = ?"
       ).bind(this.name).all();
@@ -56,7 +56,6 @@ class RoomManager {
         });
       }
 
-      // Load points
       const points = await env.DB.prepare(
         "SELECT seat_number, x, y, fast FROM points WHERE room = ?"
       ).bind(this.name).all();
@@ -69,7 +68,6 @@ class RoomManager {
         });
       }
 
-      // Load settings
       const settings = await env.DB.prepare(
         "SELECT muted, current_number FROM room_settings WHERE room = ?"
       ).bind(this.name).first();
@@ -85,7 +83,6 @@ class RoomManager {
 
   async save(env) {
     try {
-      // Save seats
       for (const [seat, data] of this.seats) {
         await env.DB.prepare(
           `INSERT OR REPLACE INTO seats 
@@ -98,7 +95,6 @@ class RoomManager {
         ).run();
       }
 
-      // Save points
       for (const [seat, data] of this.points) {
         await env.DB.prepare(
           `INSERT OR REPLACE INTO points 
@@ -107,7 +103,6 @@ class RoomManager {
         ).bind(this.name, seat, data.x || 0, data.y || 0, data.fast || 0).run();
       }
 
-      // Save settings
       await env.DB.prepare(
         `INSERT OR REPLACE INTO room_settings 
           (room, muted, current_number) 
@@ -206,32 +201,48 @@ class RoomManager {
   }
 }
 
-// ==================== ROOMS CACHE ====================
-const roomsCache = new Map();
+// ==================== CHAT SERVER CLASS ====================
+export class ChatServer {
+  constructor(env) {
+    this.env = env;
+    this.closing = false;
+    this.isDestroyed = false;
+    this._startTime = Date.now();
+    this._eventQueue = [];
+    this._isProcessingQueue = false;
+    this._joinLocks = new Map();
+    this._kursiLocks = new Map();
+    this._processingMessages = new Set();
+    this._cleaningUp = new Set();
+    this._cleanupInProgress = false;
 
-async function getRoomManager(roomName, env) {
-  if (!roomsCache.has(roomName)) {
-    const rm = new RoomManager(roomName);
-    await rm.load(env);
-    roomsCache.set(roomName, rm);
+    // Init room clients
+    for (const room of ROOMS) {
+      if (!roomClients.has(room)) {
+        roomClients.set(room, new Set());
+      }
+    }
+
+    // Start cleanup interval
+    this._cleanupInterval = setInterval(() => {
+      this._performCleanup();
+    }, 60000);
   }
-  return roomsCache.get(roomName);
-}
 
-// ==================== MAIN WORKER ====================
-export default {
-  async fetch(request, env) {
+  // ========== FETCH ==========
+  async fetch(request) {
+    if (this.closing || this.isDestroyed) {
+      return new Response("Shutting down", { status: 503 });
+    }
+
     const url = new URL(request.url);
     const pathname = url.pathname;
 
-    // ============================================================
-    // WEBSOCKET
-    // ============================================================
     if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
       const upgrade = request.headers.get("Upgrade");
 
       if (upgrade !== "websocket") {
-        return new Response(getTestHTML(), {
+        return new Response(this.getTestHTML(), {
           status: 200,
           headers: { "Content-Type": "text/html", "Cache-Control": "no-cache" }
         });
@@ -268,6 +279,7 @@ export default {
 
       // ✅ SIMPAN KE D1
       try {
+        const env = this.env;
         const existing = await env.DB.prepare(
           "SELECT username FROM users WHERE username = ?"
         ).bind(username).first();
@@ -299,7 +311,14 @@ export default {
           if (!Array.isArray(data) || !data.length) return;
 
           const [evt, ...args] = data;
-          await handleEvent(server, evt, args, env);
+
+          // Queue event
+          if (this._eventQueue.length < 100) {
+            this._eventQueue.push({ ws: server, evt, args });
+            if (!this._isProcessingQueue) {
+              this._processEventQueue();
+            }
+          }
         } catch(e) {
           console.error("Message error:", e);
         }
@@ -307,316 +326,381 @@ export default {
 
       // ✅ WEBSOCKET CLOSE
       server.addEventListener("close", async () => {
-        const conn = wsConnections.get(wsId);
-        if (conn) {
-          const { username, room } = conn;
-
-          try {
-            await env.DB.prepare(
-              "DELETE FROM seats WHERE room = ? AND username = ?"
-            ).bind(room, username).run();
-
-            await env.DB.prepare(
-              "UPDATE users SET active = 0, last_active = ? WHERE ws_id = ?"
-            ).bind(Date.now(), wsId).run();
-          } catch(e) {}
-
-          const rm = await getRoomManager(room, env);
-          const seat = getSeatNumberFromMap(username, rm);
-          if (seat) {
-            rm.removeSeat(seat);
-            await broadcastToRoom(room, ["removeKursi", room, seat], env);
-            await broadcastToRoom(room, ["roomUserCount", room, rm.getCount()], env);
-          }
-          await rm.save(env);
-        }
-        wsConnections.delete(wsId);
+        await this._handleClose(wsId);
       });
 
       server.addEventListener("error", async () => {
-        wsConnections.delete(wsId);
-        try {
-          await env.DB.prepare(
-            "UPDATE users SET active = 0, last_active = ? WHERE ws_id = ?"
-          ).bind(Date.now(), wsId).run();
-        } catch(e) {}
+        await this._handleClose(wsId);
       });
 
       return new Response(null, { status: 101, webSocket: client });
     }
 
-    // ============================================================
-    // STATUS
-    // ============================================================
-    if (pathname === "/status") {
-      return new Response(JSON.stringify({
-        status: "ok",
-        connections: wsConnections.size,
-        rooms: ROOMS,
-        timestamp: Date.now()
-      }), {
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-
-    return new Response("Chat Server Running", { status: 200 });
+    return new Response("Chat Server", { status: 200 });
   }
-};
 
-// ============================================================
-// HANDLE EVENT
-// ============================================================
-async function handleEvent(ws, evt, args, env) {
-  switch(evt) {
+  // ========== PROCESS EVENT QUEUE ==========
+  async _processEventQueue() {
+    if (this._isProcessingQueue || this._eventQueue.length === 0) return;
+    this._isProcessingQueue = true;
 
-    case "setIdTarget2": {
-      const [username, isNewUser] = args;
-      if (!username) return;
-      ws.username = username;
-      ws.send(JSON.stringify(isNewUser ? ["joinroomawal"] : ["needJoinRoom"]));
-      break;
+    try {
+      const startTime = Date.now();
+      let processed = 0;
+
+      while (this._eventQueue.length > 0 && processed < 5) {
+        if (Date.now() - startTime > 500) break;
+
+        const item = this._eventQueue.shift();
+        await this._handleEvent(item.ws, item.evt, item.args);
+        processed++;
+      }
+    } catch(e) {
+      console.error("Queue error:", e);
+    } finally {
+      this._isProcessingQueue = false;
+      if (this._eventQueue.length > 0) {
+        setTimeout(() => this._processEventQueue(), 10);
+      }
     }
+  }
 
-    case "joinRoom": {
-      const [roomName] = args;
-      if (!roomName || !ROOMS_SET.has(roomName)) {
-        ws.send(JSON.stringify(["error", "Invalid room"]));
-        return;
+  // ========== HANDLE EVENT ==========
+  async _handleEvent(ws, evt, args) {
+    const env = this.env;
+
+    switch(evt) {
+
+      case "setIdTarget2": {
+        const [username, isNewUser] = args;
+        if (!username) return;
+        ws.username = username;
+        ws.send(JSON.stringify(isNewUser ? ["joinroomawal"] : ["needJoinRoom"]));
+        break;
       }
 
-      const username = ws.username || "Anonymous";
-      ws.room = roomName;
+      case "joinRoom": {
+        const [roomName] = args;
+        if (!roomName || !ROOMS_SET.has(roomName)) {
+          ws.send(JSON.stringify(["error", "Invalid room"]));
+          return;
+        }
 
-      try {
-        await env.DB.prepare(
-          "UPDATE users SET room = ?, last_active = ? WHERE username = ?"
-        ).bind(roomName, Date.now(), username).run();
-      } catch(e) {}
+        const username = ws.username || "Anonymous";
+        ws.room = roomName;
 
-      const rm = await getRoomManager(roomName, env);
+        try {
+          await env.DB.prepare(
+            "UPDATE users SET room = ?, last_active = ? WHERE username = ?"
+          ).bind(roomName, Date.now(), username).run();
+        } catch(e) {}
 
-      let seat = getSeatNumberFromMap(username, rm);
-      if (!seat) {
-        seat = rm.getAvailableSeat();
+        const rm = await this._getRoomManager(roomName);
+
+        let seat = this._getSeatNumber(username, rm);
+        if (!seat) {
+          seat = rm.getAvailableSeat();
+          if (seat) {
+            rm.addSeat(username, "", "", 0, 0, 0, 0);
+          }
+        }
+
         if (seat) {
-          rm.addSeat(username, "", "", 0, 0, 0, 0);
-        }
-      }
+          ws.send(JSON.stringify(["rooMasuk", seat, roomName]));
+          ws.send(JSON.stringify(["numberKursiSaya", seat]));
 
-      if (seat) {
-        ws.send(JSON.stringify(["rooMasuk", seat, roomName]));
-        ws.send(JSON.stringify(["numberKursiSaya", seat]));
+          if (!roomClients.has(roomName)) {
+            roomClients.set(roomName, new Set());
+          }
+          roomClients.get(roomName).add(ws);
 
-        // Add to room clients
-        if (!roomClients.has(roomName)) {
-          roomClients.set(roomName, new Set());
-        }
-        roomClients.get(roomName).add(ws);
-
-        await broadcastToRoom(roomName, ["roomUserCount", roomName, rm.getCount()], env);
-        await broadcastAllSeats(roomName, env);
-        await broadcastAllPoints(roomName, env);
-        await rm.save(env);
-      }
-      break;
-    }
-
-    case "chat": {
-      const [chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor] = args;
-      if (!chatMsg || !ROOMS_SET.has(chatRoom)) break;
-
-      try {
-        await env.DB.prepare(
-          "INSERT INTO messages (room, username, message, timestamp) VALUES (?, ?, ?, ?)"
-        ).bind(chatRoom, chatUser, chatMsg, Date.now()).run();
-      } catch(e) {}
-
-      await broadcastToRoom(chatRoom, ["chat", chatRoom, chatNoimg, chatUser, chatMsg, chatColor || "", chatTextColor || ""], env);
-      break;
-    }
-
-    case "updatePoint": {
-      const [pointRoom, pointSeat, pointX, pointY, pointFast] = args;
-      if (pointRoom && typeof pointSeat === 'number' && pointSeat >= 1 && pointSeat <= C.MAX_SEATS) {
-        const rm = await getRoomManager(pointRoom, env);
-        if (rm && rm.seats.has(pointSeat)) {
-          rm.updatePoint(pointSeat, pointX, pointY, pointFast === 1);
-          await broadcastToRoom(pointRoom, ["pointUpdated", pointRoom, pointSeat, pointX, pointY, pointFast], env);
+          await this._broadcastToRoom(roomName, ["roomUserCount", roomName, rm.getCount()]);
+          await this._broadcastAllSeats(roomName);
+          await this._broadcastAllPoints(roomName);
           await rm.save(env);
         }
+        break;
       }
-      break;
-    }
 
-    case "updateKursi": {
-      const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
-      if (!kursiRoom || !kursiSeat) break;
+      case "chat": {
+        const [chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor] = args;
+        if (!chatMsg || !ROOMS_SET.has(chatRoom)) break;
 
-      const rm = await getRoomManager(kursiRoom, env);
-      if (!rm) break;
-
-      rm.updateSeat(kursiSeat, {
-        noimageUrl: kursiNoimg || "",
-        namauser: kursiName || "",
-        color: kursiColor || "",
-        itembawah: kursiBawah || 0,
-        itematas: kursiAtas || 0,
-        vip: kursiVip || 0,
-        viptanda: kursiVt || 0
-      });
-
-      const updated = rm.getSeat(kursiSeat);
-      if (updated) {
-        await broadcastToRoom(kursiRoom, ["kursiBatchUpdate", kursiRoom, [[kursiSeat, updated]]], env);
-        await rm.save(env);
-      }
-      break;
-    }
-
-    case "removeKursiAndPoint": {
-      const [removeRoom, removeSeat] = args;
-      const rm = await getRoomManager(removeRoom, env);
-      if (rm && rm.seats.has(removeSeat)) {
-        rm.removeSeat(removeSeat);
-        await broadcastToRoom(removeRoom, ["removeKursi", removeRoom, removeSeat], env);
-        await broadcastToRoom(removeRoom, ["roomUserCount", removeRoom, rm.getCount()], env);
-        await rm.save(env);
-      }
-      break;
-    }
-
-    case "private": {
-      const [privTarget, privNoimg, privMsg, privSender] = args;
-      if (privTarget && privMsg) {
         try {
-          const targetUser = await env.DB.prepare(
-            "SELECT ws_id FROM users WHERE username = ? AND active = 1"
-          ).bind(privTarget).first();
-
-          if (targetUser) {
-            const conn = wsConnections.get(targetUser.ws_id);
-            if (conn && conn.ws && conn.ws.readyState === 1) {
-              conn.ws.send(JSON.stringify(["private", privTarget, privNoimg, privMsg, Date.now(), privSender]));
-            }
-          }
+          await env.DB.prepare(
+            "INSERT INTO messages (room, username, message, timestamp) VALUES (?, ?, ?, ?)"
+          ).bind(chatRoom, chatUser, chatMsg, Date.now()).run();
         } catch(e) {}
-        ws.send(JSON.stringify(["private", privTarget, privNoimg, privMsg, Date.now(), privSender]));
-      }
-      break;
-    }
 
-    case "getOnlineUsers": {
+        await this._broadcastToRoom(chatRoom, ["chat", chatRoom, chatNoimg, chatUser, chatMsg, chatColor || "", chatTextColor || ""]);
+        break;
+      }
+
+      case "updatePoint": {
+        const [pointRoom, pointSeat, pointX, pointY, pointFast] = args;
+        if (pointRoom && typeof pointSeat === 'number' && pointSeat >= 1 && pointSeat <= C.MAX_SEATS) {
+          const rm = await this._getRoomManager(pointRoom);
+          if (rm && rm.seats.has(pointSeat)) {
+            rm.updatePoint(pointSeat, pointX, pointY, pointFast === 1);
+            await this._broadcastToRoom(pointRoom, ["pointUpdated", pointRoom, pointSeat, pointX, pointY, pointFast]);
+            await rm.save(env);
+          }
+        }
+        break;
+      }
+
+      case "updateKursi": {
+        const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
+        if (!kursiRoom || !kursiSeat) break;
+
+        const rm = await this._getRoomManager(kursiRoom);
+        if (!rm) break;
+
+        rm.updateSeat(kursiSeat, {
+          noimageUrl: kursiNoimg || "",
+          namauser: kursiName || "",
+          color: kursiColor || "",
+          itembawah: kursiBawah || 0,
+          itematas: kursiAtas || 0,
+          vip: kursiVip || 0,
+          viptanda: kursiVt || 0
+        });
+
+        const updated = rm.getSeat(kursiSeat);
+        if (updated) {
+          await this._broadcastToRoom(kursiRoom, ["kursiBatchUpdate", kursiRoom, [[kursiSeat, updated]]]);
+          await rm.save(env);
+        }
+        break;
+      }
+
+      case "removeKursiAndPoint": {
+        const [removeRoom, removeSeat] = args;
+        const rm = await this._getRoomManager(removeRoom);
+        if (rm && rm.seats.has(removeSeat)) {
+          rm.removeSeat(removeSeat);
+          await this._broadcastToRoom(removeRoom, ["removeKursi", removeRoom, removeSeat]);
+          await this._broadcastToRoom(removeRoom, ["roomUserCount", removeRoom, rm.getCount()]);
+          await rm.save(env);
+        }
+        break;
+      }
+
+      case "private": {
+        const [privTarget, privNoimg, privMsg, privSender] = args;
+        if (privTarget && privMsg) {
+          try {
+            const targetUser = await env.DB.prepare(
+              "SELECT ws_id FROM users WHERE username = ? AND active = 1"
+            ).bind(privTarget).first();
+
+            if (targetUser) {
+              const conn = wsConnections.get(targetUser.ws_id);
+              if (conn && conn.ws && conn.ws.readyState === 1) {
+                conn.ws.send(JSON.stringify(["private", privTarget, privNoimg, privMsg, Date.now(), privSender]));
+              }
+            }
+          } catch(e) {}
+          ws.send(JSON.stringify(["private", privTarget, privNoimg, privMsg, Date.now(), privSender]));
+        }
+        break;
+      }
+
+      case "getOnlineUsers": {
+        try {
+          const users = await env.DB.prepare(
+            "SELECT username FROM users WHERE active = 1"
+          ).all();
+          const userList = (users.results || []).map(u => u.username);
+          ws.send(JSON.stringify(["allOnlineUsers", userList]));
+        } catch(e) {}
+        break;
+      }
+
+      case "getAllRoomsUserCount": {
+        const counts = {};
+        for (const room of ROOMS) {
+          const rm = await this._getRoomManager(room);
+          counts[room] = rm?.getCount() || 0;
+        }
+        ws.send(JSON.stringify(["allRoomsUserCount", Object.entries(counts)]));
+        break;
+      }
+
+      case "getRoomUserCount": {
+        const [roomName] = args;
+        if (roomName && ROOMS_SET.has(roomName)) {
+          const rm = await this._getRoomManager(roomName);
+          ws.send(JSON.stringify(["roomUserCount", roomName, rm?.getCount() || 0]));
+        }
+        break;
+      }
+
+      case "setMuteType": {
+        const [muteVal, muteRoom] = args;
+        if (muteRoom && ROOMS_SET.has(muteRoom)) {
+          const rm = await this._getRoomManager(muteRoom);
+          rm.setMuted(muteVal);
+          await this._broadcastToRoom(muteRoom, ["muteStatusChanged", !!muteVal, muteRoom]);
+          ws.send(JSON.stringify(["muteTypeSet", !!muteVal, true, muteRoom]));
+          await rm.save(env);
+        }
+        break;
+      }
+
+      case "getMuteType": {
+        const [muteRoom] = args;
+        if (muteRoom && ROOMS_SET.has(muteRoom)) {
+          const rm = await this._getRoomManager(muteRoom);
+          ws.send(JSON.stringify(["muteTypeResponse", rm?.getMuted() || false, muteRoom]));
+        }
+        break;
+      }
+
+      case "getCurrentNumber": {
+        const rm = await this._getRoomManager("General");
+        ws.send(JSON.stringify(["currentNumber", rm?.getNumber() || 1]));
+        break;
+      }
+
+      default:
+        ws.send(JSON.stringify(["error", `Unknown event: ${evt}`]));
+        break;
+    }
+  }
+
+  // ========== HANDLE CLOSE ==========
+  async _handleClose(wsId) {
+    const conn = wsConnections.get(wsId);
+    if (conn) {
+      const { username, room } = conn;
+
       try {
-        const users = await env.DB.prepare(
-          "SELECT username FROM users WHERE active = 1"
-        ).all();
-        const userList = (users.results || []).map(u => u.username);
-        ws.send(JSON.stringify(["allOnlineUsers", userList]));
+        const env = this.env;
+        await env.DB.prepare(
+          "DELETE FROM seats WHERE room = ? AND username = ?"
+        ).bind(room, username).run();
+
+        await env.DB.prepare(
+          "UPDATE users SET active = 0, last_active = ? WHERE ws_id = ?"
+        ).bind(Date.now(), wsId).run();
       } catch(e) {}
-      break;
-    }
 
-    case "getAllRoomsUserCount": {
-      const counts = {};
-      for (const room of ROOMS) {
-        const rm = await getRoomManager(room, env);
-        counts[room] = rm?.getCount() || 0;
+      const rm = await this._getRoomManager(room);
+      const seat = this._getSeatNumber(username, rm);
+      if (seat) {
+        rm.removeSeat(seat);
+        await this._broadcastToRoom(room, ["removeKursi", room, seat]);
+        await this._broadcastToRoom(room, ["roomUserCount", room, rm.getCount()]);
       }
-      ws.send(JSON.stringify(["allRoomsUserCount", Object.entries(counts)]));
-      break;
-    }
+      await rm.save(this.env);
 
-    case "getRoomUserCount": {
-      const [roomName] = args;
-      if (roomName && ROOMS_SET.has(roomName)) {
-        const rm = await getRoomManager(roomName, env);
-        ws.send(JSON.stringify(["roomUserCount", roomName, rm?.getCount() || 0]));
+      const clients = roomClients.get(room);
+      if (clients) {
+        clients.delete(conn.ws);
       }
-      break;
     }
+    wsConnections.delete(wsId);
+  }
 
-    case "setMuteType": {
-      const [muteVal, muteRoom] = args;
-      if (muteRoom && ROOMS_SET.has(muteRoom)) {
-        const rm = await getRoomManager(muteRoom, env);
-        rm.setMuted(muteVal);
-        await broadcastToRoom(muteRoom, ["muteStatusChanged", !!muteVal, muteRoom], env);
-        ws.send(JSON.stringify(["muteTypeSet", !!muteVal, true, muteRoom]));
-        await rm.save(env);
+  // ========== ROOM MANAGER ==========
+  async _getRoomManager(roomName) {
+    if (!roomsCache.has(roomName)) {
+      const rm = new RoomManager(roomName);
+      await rm.load(this.env);
+      roomsCache.set(roomName, rm);
+    }
+    return roomsCache.get(roomName);
+  }
+
+  // ========== HELPER ==========
+  _getSeatNumber(username, rm) {
+    for (const [seat, data] of rm.seats) {
+      if (data && data.namauser === username) return seat;
+    }
+    return null;
+  }
+
+  // ========== BROADCAST ==========
+  async _broadcastToRoom(room, message) {
+    const msgStr = JSON.stringify(message);
+    const clients = roomClients.get(room);
+    if (!clients || clients.size === 0) return;
+
+    for (const ws of clients) {
+      if (ws && ws.readyState === 1) {
+        try { ws.send(msgStr); } catch(e) {}
       }
-      break;
     }
+  }
 
-    case "getMuteType": {
-      const [muteRoom] = args;
-      if (muteRoom && ROOMS_SET.has(muteRoom)) {
-        const rm = await getRoomManager(muteRoom, env);
-        ws.send(JSON.stringify(["muteTypeResponse", rm?.getMuted() || false, muteRoom]));
+  async _broadcastAllSeats(room) {
+    const rm = await this._getRoomManager(room);
+    const allSeats = rm.getAllSeats();
+    if (Object.keys(allSeats).length > 0) {
+      await this._broadcastToRoom(room, ["allUpdateKursiList", room, allSeats]);
+    }
+  }
+
+  async _broadcastAllPoints(room) {
+    const rm = await this._getRoomManager(room);
+    const allPoints = rm.getAllPoints();
+    if (allPoints.length > 0) {
+      await this._broadcastToRoom(room, ["allPointsList", room, allPoints]);
+    }
+  }
+
+  // ========== CLEANUP ==========
+  _performCleanup() {
+    if (this._cleanupInProgress || this.closing || this.isDestroyed) return;
+    this._cleanupInProgress = true;
+
+    try {
+      const toRemove = [];
+      for (const [wsId, conn] of wsConnections) {
+        if (!conn.ws || conn.ws.readyState !== 1) {
+          toRemove.push(wsId);
+        }
       }
-      break;
-    }
-
-    case "getCurrentNumber": {
-      const rm = await getRoomManager("General", env);
-      ws.send(JSON.stringify(["currentNumber", rm?.getNumber() || 1]));
-      break;
-    }
-
-    default:
-      ws.send(JSON.stringify(["error", `Unknown event: ${evt}`]));
-      break;
-  }
-}
-
-// ============================================================
-// HELPER FUNCTIONS
-// ============================================================
-
-function getSeatNumberFromMap(username, rm) {
-  for (const [seat, data] of rm.seats) {
-    if (data && data.namauser === username) return seat;
-  }
-  return null;
-}
-
-async function broadcastToRoom(room, message, env) {
-  const msgStr = JSON.stringify(message);
-  const clients = roomClients.get(room);
-  if (!clients || clients.size === 0) return;
-
-  for (const ws of clients) {
-    if (ws && ws.readyState === 1) {
-      try { ws.send(msgStr); } catch(e) {}
+      for (const wsId of toRemove) {
+        this._handleClose(wsId);
+      }
+    } catch(e) {} finally {
+      this._cleanupInProgress = false;
     }
   }
-}
 
-async function broadcastAllSeats(room, env) {
-  const rm = await getRoomManager(room, env);
-  const allSeats = rm.getAllSeats();
-  if (Object.keys(allSeats).length > 0) {
-    await broadcastToRoom(room, ["allUpdateKursiList", room, allSeats], env);
+  // ========== DESTROY ==========
+  async destroy() {
+    if (this.isDestroyed) return;
+    this.closing = true;
+    this.isDestroyed = true;
+
+    if (this._cleanupInterval) {
+      clearInterval(this._cleanupInterval);
+    }
+
+    for (const [wsId, conn] of wsConnections) {
+      if (conn.ws && conn.ws.readyState === 1) {
+        try { conn.ws.close(1000, "Shutdown"); } catch(e) {}
+      }
+    }
+
+    wsConnections.clear();
+    userConnections.clear();
+    userSeat.clear();
+    roomClients.clear();
+    roomsCache.clear();
+    this._eventQueue = [];
   }
-}
 
-async function broadcastAllPoints(room, env) {
-  const rm = await getRoomManager(room, env);
-  const allPoints = rm.getAllPoints();
-  if (allPoints.length > 0) {
-    await broadcastToRoom(room, ["allPointsList", room, allPoints], env);
-  }
-}
-
-// ============================================================
-// HTML TEST PAGE
-// ============================================================
-function getTestHTML() {
-  return `
+  // ========== HTML TEST ==========
+  getTestHTML() {
+    return `
 <!DOCTYPE html>
 <html>
 <head>
   <title>Chat D1</title>
-  <meta charset="UTF-8">
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:Arial; background:#0d1117; color:#e6edf3; display:flex; justify-content:center; align-items:center; height:100vh; }
@@ -731,5 +815,6 @@ function getTestHTML() {
   </script>
 </body>
 </html>
-  `;
+    `;
+  }
 }
