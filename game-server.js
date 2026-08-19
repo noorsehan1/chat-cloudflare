@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 3.1.2 - SINGLE ALARM SLOT (NO SETINTERVAL)
+// VERSION: 3.3.1 - ALARM ONLY AT SCHEDULE START/END
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -40,7 +40,6 @@ const CONSTANTS = {
   MAX_PROCESS_TIME_MS: 500,
   EVENT_BATCH_SIZE: 1,
   MAX_QUEUE_SIZE: 50,
-  CLEANUP_INTERVAL_MS: 60000,
   HAND_SHAKE_TIMEOUT_MS: 3000,
   RATE_LIMIT_MAX: 100,
   RATE_LIMIT_WINDOW_MS: 60000,
@@ -51,19 +50,13 @@ const CONSTANTS = {
   BAN_DURATION_MS: 180000,
   MAX_RECONNECT_ATTEMPTS: 5,
   RECONNECT_WINDOW_MS: 30000,
-  
-  // ===== ALARM CONFIG (1 SLOT) =====
-  ALARM_INTERVAL_MS: 10000,        // 10 DETIK (TICK)
-  CLEANUP_COUNTER_MAX: 6,          // 6 × 10 detik = 60 detik (1 menit)
-  STUCK_GAME_COUNTER_MAX: 6,       // 6 × 10 detik = 60 detik
-  DICE_CHECK_COUNTER_MAX: 1,       // 1 × 10 detik = 10 detik
 };
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-    { start: 1, end: 2 },
-    { start: 14, end: 15 },
-    { start: 22, end: 23 }
+    { start: 1, end: 2 },     // 01:00 - 02:00 WITA
+    { start: 14, end: 15 },   // 14:00 - 15:00 WITA
+    { start: 22, end: 23 }    // 22:00 - 23:00 WITA
   ],
   TIMEZONE_OFFSET: 8,
 };
@@ -183,7 +176,6 @@ class DiceGameSystem {
 export class GameServer {
   constructor(state, env) {
     try {
-      // ========== MINIMAL SETUP ==========
       this.state = state;
       this.env = env;
       this.closing = false;
@@ -266,15 +258,13 @@ export class GameServer {
       this._kvCache = new KVCache();
       this.DICE_ROOM = DICE_ROOM;
       
-      // ========== COUNTERS (1 SLOT ALARM) ==========
-      this._cleanupCounter = 0;
-      this._stuckGameCounter = 0;
-      this._diceCheckCounter = 0;
+      // ========== ALARM STATE ==========
+      this._sessionActive = false;
+      this._alarmScheduled = false;
       
-      // ✅ SET 1 ALARM PERTAMA - 10 DETIK
-      this._scheduleAlarm(CONSTANTS.ALARM_INTERVAL_MS);
+      // ✅ SCHEDULE ALARM PERTAMA - CEK JADWAL (1 MENIT)
+      this._scheduleAlarm(60000);
       
-      // TUNDA INISIALISASI - 2 DETIK
       setTimeout(() => {
         if (!this.closing && !this.isDestroyed) {
           this._initLazy();
@@ -284,11 +274,12 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== SCHEDULE ALARM (1 SLOT) ==========
+  // ========== SCHEDULE ALARM ==========
   _scheduleAlarm(delayMs) {
     if (this.closing || this.isDestroyed) return;
     try {
       this.state.storage.setAlarm(Date.now() + delayMs);
+      this._alarmScheduled = true;
     } catch(e) {}
   }
 
@@ -301,9 +292,8 @@ export class GameServer {
       if (!this.diceGameSystem) {
         this.diceGameSystem = new DiceGameSystem(this);
       }
-      
       this._loadKVData().catch(() => {});
-      
+      this._checkAndSchedule(); // Cek jadwal dan schedule alarm
     } catch(e) {
       setTimeout(() => {
         if (!this.closing && !this.isDestroyed) {
@@ -314,72 +304,159 @@ export class GameServer {
     }
   }
 
-  // ========== ALARM - 1 SLOT UNTUK SEMUA ==========
+  // ========== ALARM - HANYA UNTUK MULAI DAN BERHENTI ==========
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
     try {
-      this._tickCount++;
+      // ===== CEK JADWAL DAN SCHEDULE ALARM BERIKUTNYA =====
+      this._checkAndSchedule();
       
-      // ===== 1. CLEANUP DEAD CONNECTIONS (SETIAP TICK) =====
-      this._cleanupDeadConnections();
-      this._processEventQueue();
-      
-      // ===== 2. CLEANUP (SETIAP 6 TICK = 60 DETIK) =====
-      this._cleanupCounter++;
-      if (this._cleanupCounter >= CONSTANTS.CLEANUP_COUNTER_MAX) {
-        this._performCleanup();
-        this._cleanupCounter = 0;
-      }
-      
-      // ===== 3. CHECK STUCK GAMES (SETIAP 6 TICK = 60 DETIK) =====
-      this._stuckGameCounter++;
-      if (this._stuckGameCounter >= CONSTANTS.STUCK_GAME_COUNTER_MAX) {
-        this._checkStuckGames();
-        this._stuckGameCounter = 0;
-      }
-      
-      // ===== 4. CHECK DICE (SETIAP 1 TICK = 10 DETIK) =====
-      this._diceCheckCounter++;
-      if (this._diceCheckCounter >= CONSTANTS.DICE_CHECK_COUNTER_MAX) {
-        this._checkDice();
-        this._diceCheckCounter = 0;
-      }
-      
-    } catch(e) {}
-    
-    // ✅ SCHEDULE ALARM BERIKUTNYA (10 DETIK)
-    this._scheduleAlarm(CONSTANTS.ALARM_INTERVAL_MS);
-  }
-
-  // ========== CHECK DICE ==========
-  _checkDice() {
-    try {
-      if (this._tieActive || this._isShowingDice || this._diceTimeUpCooldown) return;
-      if (!this._isDiceTime()) return;
-      if (this.currentDiceRoll || this._diceTimeout || this._diceLock) return;
-      
-      const clients = this.wsClients?.get(DICE_ROOM);
-      if (clients?.size > 0) {
-        this._startDiceFast();
-      }
     } catch(e) {}
   }
 
-  // ========== IS DICE TIME ==========
-  _isDiceTime() {
+  // ========== CEK JADWAL DAN SCHEDULE ==========
+  _checkAndSchedule() {
     try {
       const witaTime = this._getCurrentWITATime();
       const currentTotal = witaTime.totalMinutes;
+      
+      let inSession = false;
+      let nextStart = null;
+      let nextEnd = null;
+      let nextEventTime = null;
+      
+      // Cek semua session
       for (const session of QUIZ_SCHEDULE.SESSIONS) {
         const startTotal = session.start * 60;
         const endTotal = session.end * 60;
-        if (currentTotal >= startTotal && currentTotal < endTotal) return true;
+        
+        // Current time dalam session
+        if (currentTotal >= startTotal && currentTotal < endTotal) {
+          inSession = true;
+          nextEnd = endTotal;
+          // Schedule alarm untuk end session
+          const endMinutes = endTotal - currentTotal;
+          nextEventTime = endMinutes * 60 * 1000; // konversi ke ms
+          break;
+        }
+        
+        // Cari session berikutnya
+        if (currentTotal < startTotal) {
+          if (nextStart === null || startTotal < nextStart) {
+            nextStart = startTotal;
+            nextEnd = endTotal;
+            // Schedule alarm untuk start session
+            const startMinutes = startTotal - currentTotal;
+            nextEventTime = startMinutes * 60 * 1000;
+          }
+        }
       }
-      return false;
-    } catch(e) { return false; }
+      
+      // Jika tidak ada session hari ini, cari besok
+      if (!inSession && nextStart === null) {
+        const firstSession = QUIZ_SCHEDULE.SESSIONS[0];
+        const startTotal = firstSession.start * 60 + 1440; // +24 jam
+        const startMinutes = startTotal - currentTotal;
+        nextEventTime = startMinutes * 60 * 1000;
+        nextStart = startTotal;
+        nextEnd = firstSession.end * 60 + 1440;
+      }
+      
+      // ===== UPDATE SESSION STATE =====
+      const wasActive = this._sessionActive;
+      this._sessionActive = inSession;
+      
+      // ===== SESSION DIMULAI =====
+      if (inSession && !wasActive) {
+        this._sessionStarted = true;
+        this._sessionEnded = false;
+        this._broadcastToRoom(DICE_ROOM, ["diceNotification", "🎲 Dice Game Session Started!"]);
+        this.diceAutoEnabled = true;
+        // Mulai dice pertama setelah 3 detik
+        setTimeout(() => {
+          if (!this.closing && !this.isDestroyed && this._sessionActive) {
+            this._startDiceFast();
+            // Jalankan dice setiap 20 detik selama session aktif
+            this._startDiceLoop();
+          }
+        }, 3000);
+      }
+      
+      // ===== SESSION BERAKHIR =====
+      if (!inSession && wasActive) {
+        this._sessionStarted = false;
+        this._sessionEnded = true;
+        this._broadcastToRoom(DICE_ROOM, ["diceNotification", "⏰ Dice Game Session Ended!"]);
+        this.diceAutoEnabled = false;
+        // Matikan semua dice
+        this._endAllDice();
+        // Hentikan dice loop
+        this._stopDiceLoop();
+      }
+      
+      // ===== SCHEDULE ALARM BERIKUTNYA =====
+      if (nextEventTime && nextEventTime > 0) {
+        // Tambahkan buffer 5 detik untuk safety
+        const scheduleDelay = Math.max(nextEventTime + 5000, 60000);
+        this._scheduleAlarm(scheduleDelay);
+        this._alarmScheduled = true;
+      } else {
+        // Fallback: cek lagi 1 menit
+        this._scheduleAlarm(60000);
+      }
+      
+    } catch(e) {}
   }
 
+  // ========== DICE LOOP ==========
+  _startDiceLoop() {
+    if (this._diceLoopInterval) return;
+    
+    this._diceLoopInterval = setInterval(() => {
+      if (!this._sessionActive || this.closing || this.isDestroyed) {
+        this._stopDiceLoop();
+        return;
+      }
+      
+      // Cek apakah bisa start dice baru
+      if (!this._tieActive && !this._isShowingDice && !this._diceTimeUpCooldown) {
+        const clients = this.wsClients?.get(DICE_ROOM);
+        if (clients?.size > 0 && !this.currentDiceRoll && !this._diceLock) {
+          this._startDiceFast();
+        }
+      }
+    }, 20000); // 20 detik
+  }
+
+  _stopDiceLoop() {
+    if (this._diceLoopInterval) {
+      clearInterval(this._diceLoopInterval);
+      this._diceLoopInterval = null;
+    }
+  }
+
+  // ========== END ALL DICE ==========
+  _endAllDice() {
+    try {
+      if (this._diceTimerInterval) {
+        clearInterval(this._diceTimerInterval);
+        this._diceTimerInterval = null;
+      }
+      if (this._diceTimeout) {
+        clearTimeout(this._diceTimeout);
+        this._diceTimeout = null;
+      }
+      this._isShowingDice = false;
+      this._diceLock = false;
+      this.currentDiceRoll = null;
+      this._canSubmitDiceAnswer = false;
+      
+      this._broadcastToRoom(DICE_ROOM, ["diceEnd", { message: "Session ended" }]);
+    } catch(e) {}
+  }
+
+  // ========== GET WITA TIME ==========
   _getCurrentWITATime() {
     try {
       const now = new Date();
@@ -389,10 +466,17 @@ export class GameServer {
     } catch(e) { return { hours: 0, minutes: 0, totalMinutes: 0 }; }
   }
 
+  // ========== IS DICE TIME ==========
+  _isDiceTime() {
+    return this._sessionActive;
+  }
+
   // ========== START DICE FAST ==========
   _startDiceFast() {
     try {
       if (this._diceLock || this.currentDiceRoll || this._isShowingDice) return;
+      if (!this._sessionActive) return;
+      
       this._diceLock = true;
       this._isShowingDice = true;
       
@@ -879,29 +963,7 @@ export class GameServer {
   }
 
   _getTimeLeftUntilNextDice() {
-    try {
-      const witaTime = this._getCurrentWITATime();
-      const currentTotal = witaTime.totalMinutes;
-      let minDiff = Infinity;
-      for (const session of QUIZ_SCHEDULE.SESSIONS) {
-        let startTotal = session.start * 60;
-        let diff = startTotal - currentTotal;
-        if (diff < 0) diff += 24 * 60;
-        if (diff < minDiff) minDiff = diff;
-      }
-      const hours = Math.floor(minDiff / 60);
-      const minutes = Math.floor(minDiff % 60);
-      const isRunning = this._isDiceTime();
-      return { 
-        hours, 
-        minutes, 
-        totalMs: minDiff * 60 * 1000,
-        text: `${hours}h ${minutes}m`,
-        isRunning: isRunning
-      };
-    } catch(e) {
-      return { hours: 0, minutes: 0, totalMs: 0, text: '0h 0m', isRunning: false };
-    }
+    return { text: "Session active", isRunning: this._sessionActive };
   }
 
   // ========== LOAD KV DATA ==========
@@ -930,21 +992,6 @@ export class GameServer {
     return `${year}-W${String(week).padStart(2, '0')}`;
   }
 
-  // ========== PERFORM CLEANUP ==========
-  _performCleanup() {
-    try {
-      this._cleanupDeadConnections();
-      this._cleanupUserConnections();
-      this._cleanupReconnectAttempts();
-      this._cleanupBannedUsers();
-      
-      if (Date.now() - this._lastErrorReset > CONSTANTS.ERROR_RESET_INTERVAL_MS) {
-        this._errorCount = 0;
-        this._lastErrorReset = Date.now();
-      }
-    } catch(e) {}
-  }
-
   // ========== CLEANUP DEAD CONNECTIONS ==========
   _cleanupDeadConnections() {
     try {
@@ -961,99 +1008,6 @@ export class GameServer {
           if (room) this._removeClientFromRoom(room, wsId);
           this.clientRooms.delete(wsId);
           this.wsMap.delete(wsId);
-        }
-      }
-    } catch(e) {}
-  }
-
-  // ========== CLEANUP USER CONNECTIONS ==========
-  _cleanupUserConnections() {
-    try {
-      let cleaned = 0;
-      for (const [username, conn] of this.userConnections) {
-        if (cleaned > 20) break;
-        if (!conn?.ws || conn.ws.readyState !== 1) {
-          this.userConnections.delete(username);
-          cleaned++;
-        }
-      }
-    } catch(e) {}
-  }
-
-  // ========== CLEANUP RECONNECT ATTEMPTS ==========
-  _cleanupReconnectAttempts() {
-    try {
-      const now = Date.now();
-      let cleaned = 0;
-      for (const [username, data] of this._reconnectAttempts) {
-        if (cleaned > 10) break;
-        if (now - (data.lastAttempt || 0) > 300000) {
-          this._reconnectAttempts.delete(username);
-          cleaned++;
-        }
-      }
-    } catch(e) {}
-  }
-
-  // ========== CLEANUP BANNED USERS ==========
-  _cleanupBannedUsers() {
-    try {
-      const now = Date.now();
-      let cleaned = 0;
-      for (const [username, banUntil] of this._bannedUsers) {
-        if (cleaned > 10) break;
-        if (now > banUntil) {
-          this._bannedUsers.delete(username);
-          cleaned++;
-        }
-      }
-    } catch(e) {}
-  }
-
-  // ========== CLEANUP MEMORY ==========
-  _cleanupMemory() {
-    try {
-      if (this.wsMap) {
-        const toRemove = [];
-        for (const [id, ws] of this.wsMap) {
-          if (!ws || ws.readyState !== 1 || ws._closing) {
-            toRemove.push(id);
-          }
-        }
-        for (const id of toRemove) {
-          this.wsMap.delete(id);
-        }
-      }
-      
-      if (this._eventQueue && this._eventQueue.length > 50) {
-        this._eventQueue.splice(0, this._eventQueue.length - 50);
-      }
-      
-      const now = Date.now();
-      for (const [key, time] of this._gameLocks) {
-        if (now - time > 30000) this._gameLocks.delete(key);
-      }
-      for (const [key, time] of this._joinLocks) {
-        if (now - time > 30000) this._joinLocks.delete(key);
-      }
-    } catch(e) {}
-  }
-
-  // ========== CHECK STUCK GAMES ==========
-  _checkStuckGames() {
-    try {
-      const now = Date.now();
-      for (const [room, game] of this.activeGames) {
-        if (!game?._isActive || game._gameEnded) continue;
-        
-        if (game._phase === 'draw' && game._drawPhaseStart &&
-            (now - game._drawPhaseStart) > CONSTANTS.STUCK_DRAW_TIMEOUT_MS) {
-          this._closeDrawPhase(room, game);
-        }
-        
-        if (game._phase === 'registration' && game.registrationOpen &&
-            game._createdAt && (now - game._createdAt) > CONSTANTS.STUCK_REGISTRATION_TIMEOUT_MS) {
-          this._closeRegistration(room, game);
         }
       }
     } catch(e) {}
@@ -1089,31 +1043,6 @@ export class GameServer {
 
   // ========== WS HELPERS ==========
   _getWsId(ws) { return ws?._wsId || null; }
-
-  _ensureRoomConsistency(ws) {
-    try {
-      if (!ws) return null;
-      const wsId = this._getWsId(ws);
-      if (!wsId) return null;
-      let room = ws.room || ws.roomname || this.clientRooms.get(wsId) || null;
-      if (!room && ws.username) {
-        const conn = this.userConnections.get(ws.username);
-        if (conn) room = conn.room || null;
-      }
-      if (room) {
-        ws.room = room;
-        ws.roomname = room;
-        if (!this.wsClients.has(room)) this.wsClients.set(room, new Set());
-        if (!this.wsClients.get(room).has(wsId)) {
-          this.wsClients.get(room).add(wsId);
-          this.clientRooms.set(wsId, room);
-          this.wsMap.set(wsId, ws);
-        }
-        return room;
-      }
-      return null;
-    } catch(e) { return null; }
-  }
 
   _addClient(room, ws, username = null) {
     try {
@@ -1159,26 +1088,6 @@ export class GameServer {
       if (!room || !wsId) return;
       const clients = this.wsClients.get(room);
       if (clients) { clients.delete(wsId); if (clients.size === 0) this.wsClients.delete(room); }
-    } catch(e) {}
-  }
-
-  _removeClient(room, ws) {
-    try {
-      if (!ws) return;
-      const wsId = this._getWsId(ws);
-      if (!wsId) return;
-      const username = ws.username;
-      this._removeClientFromRoom(room, wsId);
-      this.clientRooms.delete(wsId);
-      this.wsMap.delete(wsId);
-      if (username) {
-        const conn = this.userConnections.get(username);
-        if (conn?.wsId === wsId) this.userConnections.delete(username);
-      }
-      ws.room = null;
-      ws.roomname = null;
-      ws._wsId = null;
-      ws.username = null;
     } catch(e) {}
   }
 
@@ -1255,7 +1164,8 @@ export class GameServer {
           circuitOpen: this._circuitOpen,
           initialized: this._initialized,
           errors: this._errorCount,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          sessionActive: this._sessionActive
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -1271,7 +1181,8 @@ export class GameServer {
           uptime: Date.now() - this._startTime,
           diceActive: !!this.currentDiceRoll,
           diceRound: this._diceRound || 0,
-          tieActive: this._tieActive
+          tieActive: this._tieActive,
+          sessionActive: this._sessionActive
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -1778,54 +1689,11 @@ export class GameServer {
     try {
       if (!ws || ws.readyState !== 1) return;
       
-      this._diceTimeLeftNotified?.delete(wsId);
-      this._nextDiceNotified?.delete(wsId);
-      this._diceJoinedNotified?.delete(wsId);
-      
-      const isGameActive = this.currentDiceRoll && this._canSubmitDiceAnswer;
-      
-      if (isGameActive) {
-        const elapsed = (Date.now() - this._diceStartTime) / 1000;
-        const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
-        const remaining = Math.max(0, totalTime - elapsed);
-        const remainingInt = Math.floor(remaining);
-        
-        if (remainingInt > 0) {
-          this._safeSend(ws, ["diceNotification", `${remainingInt}s remaining`]);
-        }
-        return;
+      if (this._sessionActive) {
+        this._safeSend(ws, ["diceNotification", "🎲 Dice session is active!"]);
+      } else {
+        this._safeSend(ws, ["diceNotification", "⏳ Dice session not active"]);
       }
-      
-      const timeLeft = this._getTimeLeftUntilNextDice();
-      const isDiceTime = this._isDiceTime();
-      
-      if (!isDiceTime || !this.diceAutoEnabled) {
-        setTimeout(() => {
-          if (!this.closing && !this.isDestroyed && ws && ws.readyState === 1) {
-            this._safeSend(ws, ["diceNotification", `Next dice game in: ${timeLeft.text}`]);
-          }
-        }, 5000);
-        
-        const waitTime = timeLeft.totalMs + 5000;
-        setTimeout(() => {
-          if (!this.closing && !this.isDestroyed && !this.currentDiceRoll && !this._isShowingDice) {
-            if (this._isDiceTime()) {
-              this.forceStartDice();
-            }
-          }
-        }, waitTime);
-        
-        return;
-      }
-      
-      if (isDiceTime && !this.currentDiceRoll && this.diceAutoEnabled) {
-        setTimeout(() => {
-          if (!this.closing && !this.isDestroyed && !this.currentDiceRoll && !this._isShowingDice) {
-            this.forceStartDice();
-          }
-        }, 5000);
-      }
-      
     } catch(e) {}
   }
 
@@ -2797,7 +2665,7 @@ export class GameServer {
       game.eliminated.add(username);
       game.numbers?.delete(username);
       game.tanda?.delete(username);
-      this._broadcastToRoom(room, ["gameLowCardError", `${username} has been eliminated`]);
+      this._broadcastToRoom(room, ["gameLowCardError", `${username} has been eliminated"]);
       const checkTimer = setTimeout(() => {
         try {
           const currentGame = this.activeGames.get(room);
@@ -2986,7 +2854,7 @@ export class GameServer {
       if (this._tieActive) return false;
       if (this._isShowingDice) return false;
       if (this._diceTimeUpCooldown) return false;
-      if (!this._isDiceTime() || this.currentDiceRoll || this._diceTimeout || this._diceStartTimeout) {
+      if (!this._sessionActive || this.currentDiceRoll || this._diceTimeout || this._diceStartTimeout) {
         return false;
       }
       this.diceAutoEnabled = true;
@@ -3018,6 +2886,8 @@ export class GameServer {
       if (this.isDestroyed) return;
       this.isDestroyed = true;
       this.closing = true;
+      
+      this._stopDiceLoop();
       
       for (const timer of this._allTimers) {
         try { clearTimeout(timer); clearInterval(timer); } catch(e) {}
