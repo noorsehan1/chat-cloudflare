@@ -1,13 +1,20 @@
-// ==================== INDEX.JS ====================
+// ==================== INDEX.JS - TANPA D1 ====================
+// VERSION: 6.0.0 - PURE WORKER WITH CACHE
+
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
 
+// ========== GLOBAL STATE ==========
 const globalState = {
   chatServer: null,
   gameServer: null,
   initialized: false,
   initPromise: null,
+  instanceId: null,
 };
+
+// ========== CACHE KEY ==========
+const CACHE_KEY = 'chat_global_state';
 
 export default {
   async fetch(request, env) {
@@ -15,21 +22,57 @@ export default {
       const url = new URL(request.url);
       const pathname = url.pathname;
       
-      console.log(`[Index] Request: ${pathname}`);
-      
+      // ========== INIT ==========
       if (!globalState.initialized) {
         if (!globalState.initPromise) {
           globalState.initPromise = (async () => {
             try {
               console.log('[Index] Initializing servers...');
-              console.log('[Index] DB available:', !!env.DB);
               
-              globalState.chatServer = new ChatServer(env);
-              globalState.gameServer = new GameServer(env);
+              // Generate unique instance ID
+              globalState.instanceId = `instance_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+              console.log(`[Index] Instance ID: ${globalState.instanceId}`);
+              
+              // ========== LOAD STATE FROM CACHE ==========
+              let savedState = null;
+              try {
+                const cache = await caches.open('app_cache');
+                const cached = await cache.match(CACHE_KEY);
+                if (cached) {
+                  savedState = await cached.json();
+                  console.log('[Index] Loaded state from cache');
+                }
+              } catch(e) {
+                console.log('[Index] No cached state found');
+              }
+              
+              // ========== CREATE CHAT SERVER ==========
+              globalState.chatServer = new ChatServer(env, savedState?.chat || null);
+              
+              // ========== CREATE GAME SERVER ==========
+              globalState.gameServer = new GameServer(env, savedState?.game || null);
               
               globalState.initialized = true;
-              console.log('[Index] Servers initialized');
               
+              // ========== AUTO SAVE EVERY 2 SECONDS ==========
+              setInterval(async () => {
+                try {
+                  const state = {
+                    chat: globalState.chatServer.getState(),
+                    game: globalState.gameServer.getState(),
+                    timestamp: Date.now(),
+                    instanceId: globalState.instanceId
+                  };
+                  
+                  const cache = await caches.open('app_cache');
+                  const response = new Response(JSON.stringify(state), {
+                    headers: { 'Content-Type': 'application/json' }
+                  });
+                  await cache.put(CACHE_KEY, response);
+                } catch(e) {}
+              }, 2000);
+              
+              console.log('[Index] Servers initialized');
               return true;
             } catch(e) {
               console.error('[Index] Init error:', e);
@@ -42,12 +85,13 @@ export default {
         await globalState.initPromise;
       }
       
-      // CHAT SERVER
+      // ========== ROUTES ==========
+      // Chat
       if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
         return globalState.chatServer.fetch(request);
       }
       
-      // GAME SERVER
+      // Game
       if (pathname === "/game/ws") {
         return globalState.gameServer.handleWebSocket(request);
       }
@@ -59,8 +103,9 @@ export default {
       if (pathname === "/game") {
         return new Response(JSON.stringify({
           status: "running",
-          version: "5.0.0-d1",
-          mode: "d1",
+          version: "6.0.0-pure",
+          mode: "cache-shared",
+          instanceId: globalState.instanceId,
           chatConnections: globalState.chatServer?.wsSet?.size || 0,
           gameConnections: globalState.gameServer?.wsMap?.size || 0,
           games: globalState.gameServer?.activeGames?.size || 0,
@@ -71,38 +116,12 @@ export default {
       }
       
       if (pathname === "/status") {
-        // Cek DB connection
-        let dbStatus = "unknown";
-        try {
-          if (env.DB) {
-            const result = await env.DB.prepare("SELECT 1").first();
-            dbStatus = result ? "connected" : "no result";
-          } else {
-            dbStatus = "no DB binding";
-          }
-        } catch(e) {
-          dbStatus = "error: " + e.message;
-        }
-        
-        // Hitung total seats
-        let totalSeats = 0;
-        const roomSeats = {};
-        if (globalState.chatServer) {
-          for (const [room, data] of globalState.chatServer.rooms) {
-            roomSeats[room] = data.seats.size;
-            totalSeats += data.seats.size;
-          }
-        }
-        
         return new Response(JSON.stringify({
           status: "ok",
-          initialized: globalState.initialized,
-          dbStatus: dbStatus,
+          instanceId: globalState.instanceId,
           chatConnections: globalState.chatServer?.wsSet?.size || 0,
           gameConnections: globalState.gameServer?.wsMap?.size || 0,
           games: globalState.gameServer?.activeGames?.size || 0,
-          totalSeats: totalSeats,
-          roomSeats: roomSeats,
           timestamp: Date.now()
         }), {
           headers: { 'Content-Type': 'application/json' }
