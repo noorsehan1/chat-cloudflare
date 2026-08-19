@@ -1058,147 +1058,186 @@ export class GameServer {
   }
 
   // ========== FETCH ==========
-  async fetch(req) {
-    // ✅ START INTERVALS DI SINI (dalam handler)
-    this._startIntervals();
+  // ========== FETCH ==========
+async fetch(req) {
+  // ✅ START INTERVALS DI SINI
+  this._startIntervals();
+  
+  try {
+    // === CIRCUIT BREAKER ===
+    if (this._circuitOpen) {
+      const now = Date.now();
+      if (now - this._lastResetTime > 60000) {
+        this._circuitOpen = false;
+        this._requestCount = 0;
+        this._lastResetTime = now;
+      } else {
+        return new Response("Service temporarily unavailable", { 
+          status: 503,
+          headers: { 'Retry-After': '30', 'Content-Type': 'text/plain' }
+        });
+      }
+    }
     
-    try {
-      if (this._circuitOpen) {
-        const now = Date.now();
-        if (now - this._lastResetTime > 60000) {
-          this._circuitOpen = false;
-          this._requestCount = 0;
-          this._lastResetTime = now;
-        } else {
-          return new Response("Service temporarily unavailable", { 
-            status: 503,
-            headers: { 'Retry-After': '30', 'Content-Type': 'text/plain' }
-          });
-        }
-      }
-      
-      this._requestCount++;
-      if (this._requestCount > CONSTANTS.RATE_LIMIT_MAX) {
-        this._circuitOpen = true;
-        this._lastResetTime = Date.now();
-        return new Response("Rate limit exceeded", { 
-          status: 429,
-          headers: { 'Retry-After': '60', 'Content-Type': 'text/plain' }
-        });
-      }
-      
-      setTimeout(() => {
-        this._requestCount = Math.max(0, this._requestCount - 50);
-      }, CONSTANTS.RATE_LIMIT_WINDOW_MS);
-      
-      const url = new URL(req.url);
-      
-      if (url.pathname === "/health") {
-        return new Response(JSON.stringify({
-          status: "ok",
-          uptime: Date.now() - this._startTime,
-          connections: this.wsMap.size,
-          games: this.activeGames.size,
-          queue: this._eventQueue?.length || 0,
-          circuitOpen: this._circuitOpen,
-          errors: this._errorCount,
-          timestamp: Date.now()
-        }), {
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-      
-      if (url.pathname === "/metrics") {
-        return new Response(JSON.stringify({
-          connections: this.wsMap.size,
-          games: this.activeGames.size,
-          queue: this._eventQueue?.length || 0,
-          errors: this._errorCount,
-          circuitOpen: this._circuitOpen,
-          uptime: Date.now() - this._startTime,
-          diceActive: !!this.currentDiceRoll,
-          diceRound: this._diceRound || 0,
-          tieActive: this._tieActive
-        }), {
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-      
-      // ========== WEBSOCKET ==========
-      if (url.pathname === "/game/ws") {
-        const upgrade = req.headers.get("Upgrade");
-        if (upgrade !== "websocket") {
-          return new Response("WebSocket only", { status: 400 });
-        }
-        
-        if (this.wsMap.size >= CONSTANTS.MAX_WS_CLIENTS) {
-          return new Response("Server at maximum capacity", { 
-            status: 503,
-            headers: { 'Retry-After': '10', 'Content-Type': 'text/plain' }
-          });
-        }
-        
-        if (this._eventQueue?.length > 500) {
-          return new Response("Server busy", { 
-            status: 503,
-            headers: { 'Retry-After': '5', 'Content-Type': 'text/plain' }
-          });
-        }
-        
-        const pair = new WebSocketPair();
-        const [client, server] = [pair[0], pair[1]];
-        const wsId = ++this._wsIdCounter;
-        
-        server._wsId = wsId;
-        server._closing = false;
-        server.room = null;
-        server.roomname = null;
-        server.username = null;
-        server._createdAt = Date.now();
-        
-        try {
-          server.accept();
-        } catch(e) {
-          try { server.close(1008, "Accept failed"); } catch(err) {}
-          return new Response("WebSocket acceptance failed", { status: 500 });
-        }
-        
-        this.wsMap.set(wsId, server);
-        
-        server.addEventListener("message", async (event) => {
-          try {
-            if (server._closing || this.closing || this.isDestroyed) return;
-            const data = JSON.parse(event.data);
-            if (Array.isArray(data) && data.length > 0) {
-              await this._processWithTimeout(server, data);
-            }
-          } catch(e) {}
-        });
-        
-        server.addEventListener("close", () => { 
-          this.webSocketClose(server);
-        }, { once: true });
-        
-        server.addEventListener("error", () => { 
-          this.webSocketError(server);
-        }, { once: true });
-        
-        return new Response(null, { status: 101, webSocket: client });
-      }
-      
-      return new Response("Game Server", { status: 200 });
-      
-    } catch(e) {
-      this._handleError('fetch', e);
+    // === RATE LIMIT ===
+    this._requestCount++;
+    if (this._requestCount > CONSTANTS.RATE_LIMIT_MAX) {
+      this._circuitOpen = true;
+      this._lastResetTime = Date.now();
+      return new Response("Rate limit exceeded", { 
+        status: 429,
+        headers: { 'Retry-After': '60', 'Content-Type': 'text/plain' }
+      });
+    }
+    
+    setTimeout(() => {
+      this._requestCount = Math.max(0, this._requestCount - 50);
+    }, CONSTANTS.RATE_LIMIT_WINDOW_MS);
+    
+    const url = new URL(req.url);
+    
+    // === HEALTH CHECK ===
+    if (url.pathname === "/game/health") {
       return new Response(JSON.stringify({
-        error: "Internal Server Error",
-        message: e.message || "Unknown error"
-      }), { 
-        status: 500,
+        status: "ok",
+        uptime: Date.now() - this._startTime,
+        connections: this.wsMap.size,
+        games: this.activeGames.size,
+        queue: this._eventQueue?.length || 0,
+        circuitOpen: this._circuitOpen,
+        errors: this._errorCount,
+        timestamp: Date.now()
+      }), {
         headers: { 'Content-Type': 'application/json' }
       });
     }
+    
+    // === METRICS ===
+    if (url.pathname === "/game/metrics") {
+      return new Response(JSON.stringify({
+        connections: this.wsMap.size,
+        games: this.activeGames.size,
+        queue: this._eventQueue?.length || 0,
+        errors: this._errorCount,
+        circuitOpen: this._circuitOpen,
+        uptime: Date.now() - this._startTime,
+        diceActive: !!this.currentDiceRoll,
+        diceRound: this._diceRound || 0,
+        tieActive: this._tieActive
+      }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // === WEBSOCKET ===
+    if (url.pathname === "/game/ws") {
+      const upgrade = req.headers.get("Upgrade");
+      
+      // CEK APAKAH WEBSOCKET
+      if (upgrade !== "websocket") {
+        return new Response(JSON.stringify({
+          status: "game-server",
+          message: "Use WebSocket connection",
+          path: "/game/ws"
+        }), {
+          status: 200,
+          headers: { 
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache" 
+          }
+        });
+      }
+      
+      // CEK KAPASITAS
+      if (this.wsMap.size >= CONSTANTS.MAX_WS_CLIENTS) {
+        return new Response("Server at maximum capacity", { 
+          status: 503,
+          headers: { 'Retry-After': '10', 'Content-Type': 'text/plain' }
+        });
+      }
+      
+      if (this._eventQueue?.length > 500) {
+        return new Response("Server busy", { 
+          status: 503,
+          headers: { 'Retry-After': '5', 'Content-Type': 'text/plain' }
+        });
+      }
+      
+      // === BUAT WEBSOCKET PAIR ===
+      const pair = new WebSocketPair();
+      const [client, server] = [pair[0], pair[1]];
+      const wsId = ++this._wsIdCounter;
+      
+      server._wsId = wsId;
+      server._closing = false;
+      server.room = null;
+      server.roomname = null;
+      server.username = null;
+      server._createdAt = Date.now();
+      
+      // === ACCEPT WEBSOCKET ===
+      try {
+        server.accept();
+      } catch(e) {
+        console.error('Game WS accept failed:', e);
+        try { server.close(1008, "Accept failed"); } catch(err) {}
+        return new Response("WebSocket acceptance failed", { status: 500 });
+      }
+      
+      this.wsMap.set(wsId, server);
+      
+      // === KIRIM PESAN KONEKSI ===
+      try {
+        server.send(JSON.stringify(["connected", "Game server connected"]));
+      } catch(e) {}
+      
+      // === EVENT HANDLERS ===
+      server.addEventListener("message", async (event) => {
+        try {
+          if (server._closing || this.closing || this.isDestroyed) return;
+          const data = JSON.parse(event.data);
+          if (Array.isArray(data) && data.length > 0) {
+            await this._processWithTimeout(server, data);
+          }
+        } catch(e) {
+          console.error('Message error:', e);
+        }
+      });
+      
+      server.addEventListener("close", () => { 
+        this.webSocketClose(server);
+      }, { once: true });
+      
+      server.addEventListener("error", () => { 
+        this.webSocketError(server);
+      }, { once: true });
+      
+      // === RETURN RESPONSE ===
+      return new Response(null, { 
+        status: 101, 
+        webSocket: client 
+      });
+    }
+    
+    return new Response(JSON.stringify({
+      status: "game-server",
+      paths: ["/game/ws", "/game/health", "/game/metrics"]
+    }), { 
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+    
+  } catch(e) {
+    this._handleError('fetch', e);
+    return new Response(JSON.stringify({
+      error: "Internal Server Error",
+      message: e.message || "Unknown error"
+    }), { 
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
+}
 
   // ========== PROCESS WITH TIMEOUT ==========
   async _processWithTimeout(ws, data, timeoutMs = 500) {
