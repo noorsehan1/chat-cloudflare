@@ -1,8 +1,9 @@
 // ==================== INDEX.JS ====================
 // ==================== NON-DURABLE OBJECT VERSION ====================
 
-import { ChatServer } from "./chat-server-fixed.js";
-import { GameServer } from "./game-server-fixed.js";
+// UBAH NAMA FILE SESUAI YANG ADA
+import { ChatServer } from "./chat-server.js";  // ← GANTI NAMA
+import { GameServer } from "./game-server.js";  // ← GANTI NAMA
 
 // ==================== INSTANCE GLOBAL ====================
 let chatServerInstance = null;
