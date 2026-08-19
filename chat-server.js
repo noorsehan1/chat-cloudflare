@@ -1,21 +1,18 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 3.1.0 - USING ALARM SYSTEM (NO SETINTERVAL)
+// VERSION: 3.1.1 - SINGLE ALARM SLOT
 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 5000,
-  ALARM_INTERVAL_MS: 10000,     // 10 DETIK (TICK)
-  CLEANUP_ALARM_MS: 600000,     // 10 MENIT
-  NUMBER_UPDATE_TIK: 6,         // 6 × 10 detik = 60 detik? 
-  // ✓ FIX: Update number setiap 90 menit (540 tick × 10 detik)
-  NUMBER_UPDATE_TICK_COUNT: 540, // 90 MENIT (540 × 10 detik)
+  ALARM_INTERVAL_MS: 10000,        // 10 DETIK (TICK)
+  CLEANUP_INTERVAL_MS: 600000,     // 10 MENIT (60 × 10 detik)
+  NUMBER_UPDATE_TICK_COUNT: 540,   // 90 MENIT (540 × 10 detik)
   MAX_NUMBER: 6,
   BATCH_SIZE: 20,
   LOCK_TIMEOUT: 10000,
   MAX_EVENT_QUEUE: 100,
   MAX_PROCESS_TIME_MS: 500,
-  CPU_YIELD_MS: 1,
 };
 
 const ROOMS = [
@@ -137,7 +134,6 @@ class RoomManager {
 // ==================== CHAT SERVER ====================
 export class ChatServer {
   constructor(state, env) {
-    // ========== MINIMAL SETUP ==========
     this.state = state;
     this.env = env;
     this.ctx = state;
@@ -170,6 +166,7 @@ export class ChatServer {
     // ========== NUMBER ==========
     this.currentNumber = 1;
     this._tickCounter = 0;
+    this._cleanupCounter = 0;
     
     // ========== INIT ROOMS ==========
     for (const room of ROOMS) {
@@ -177,9 +174,8 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
-    // ✅ SET ALARM PERTAMA - 10 DETIK
+    // ✅ SET 1 ALARM PERTAMA - 10 DETIK
     this._scheduleAlarm(C.ALARM_INTERVAL_MS);
-    this._scheduleCleanupAlarm(C.CLEANUP_ALARM_MS);
     
     // ✅ TUNDA INISIALISASI 2 DETIK
     setTimeout(() => {
@@ -189,15 +185,8 @@ export class ChatServer {
     }, 2000);
   }
 
-  // ========== SCHEDULE ALARM ==========
+  // ========== SCHEDULE ALARM (1 SLOT) ==========
   _scheduleAlarm(delayMs) {
-    if (this.closing || this.isDestroyed) return;
-    try {
-      this.state.storage.setAlarm(Date.now() + delayMs);
-    } catch(e) {}
-  }
-
-  _scheduleCleanupAlarm(delayMs) {
     if (this.closing || this.isDestroyed) return;
     try {
       this.state.storage.setAlarm(Date.now() + delayMs);
@@ -208,33 +197,31 @@ export class ChatServer {
   _initLazy() {
     if (this._initialized || this.closing || this.isDestroyed) return;
     this._initialized = true;
-    
-    try {
-      // Tidak ada setInterval lagi!
-    } catch(e) {
-      setTimeout(() => {
-        if (!this.closing && !this.isDestroyed) {
-          this._initialized = false;
-          this._initLazy();
-        }
-      }, 30000);
-    }
   }
 
-  // ========== ALARM - TICK 10 DETIK ==========
+  // ========== ALARM - 1 SLOT UNTUK SEMUA ==========
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
     try {
-      // TICK
+      // ===== 1. TICK =====
       this._tickCounter++;
       
-      // ✅ Cleanup dead connections setiap tick
+      // ===== 2. CLEANUP DEAD CONNECTIONS (SETIAP TICK) =====
       this._cleanupDeadConnections();
       this._cleanupMemory();
       this._processEventQueue();
       
-      // ✅ Update number setiap 90 menit (540 tick × 10 detik)
+      // ===== 3. CLEANUP LOCK (SETIAP 60 TICK = 10 MENIT) =====
+      this._cleanupCounter++;
+      if (this._cleanupCounter >= 60) {
+        this._cleanupStaleLocks();
+        this._cleanupEventQueue();
+        this._performCleanup();
+        this._cleanupCounter = 0;
+      }
+      
+      // ===== 4. UPDATE NUMBER (SETIAP 540 TICK = 90 MENIT) =====
       if (this._tickCounter >= C.NUMBER_UPDATE_TICK_COUNT) {
         this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
         
@@ -257,20 +244,8 @@ export class ChatServer {
       
     } catch(e) {}
     
-    // ✅ Schedule alarm berikutnya (10 DETIK)
+    // ✅ SCHEDULE ALARM BERIKUTNYA (10 DETIK)
     this._scheduleAlarm(C.ALARM_INTERVAL_MS);
-  }
-
-  // ========== CLEANUP ALARM - 10 MENIT ==========
-  async _cleanupAlarm() {
-    if (this.closing || this.isDestroyed) return;
-    
-    try {
-      this._performCleanup();
-    } catch(e) {}
-    
-    // Schedule cleanup berikutnya (10 MENIT)
-    this._scheduleCleanupAlarm(C.CLEANUP_ALARM_MS);
   }
 
   // ========== PERFORM CLEANUP ==========
@@ -642,13 +617,11 @@ export class ChatServer {
       
       const [evt, ...args] = data;
       
-      // ✅ VALIDASI ROOM
       if (evt === "chat" || evt === "updatePoint" || evt === "gift" || evt === "rollangak") {
         const room = args[0];
         if (room && !ROOMS_SET.has(room)) return;
       }
       
-      // ✅ QUEUE EVENT - BATCH
       if (this._eventQueue.length < C.MAX_EVENT_QUEUE) {
         this._eventQueue.push({ ws, data: [evt, ...args] });
         if (!this._isProcessingQueue) {
@@ -1349,7 +1322,7 @@ export class ChatServer {
     return true;
   }
 
-  // ========== FETCH - DENGAN HIBERNATION ==========
+  // ========== FETCH ==========
   async fetch(req) {
     if (this.closing || this.isDestroyed) {
       return new Response("Shutting down", { status: 503 });
@@ -1366,7 +1339,6 @@ export class ChatServer {
         });
       }
       
-      // ✅ CEK BATAS KONEKSI GLOBAL
       if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
         return new Response("Server full", { status: 503 });
       }
@@ -1374,18 +1346,11 @@ export class ChatServer {
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       
-      // ✅ HIBERNATION API - pakai ctx.acceptWebSocket()
       try { 
         this.ctx.acceptWebSocket(server);
       } catch(e) { 
         return new Response("WebSocket acceptance failed", { status: 500 }); 
       }
-      
-      // ✅ TANPA addEventListener!
-      // Cloudflare otomatis panggil:
-      // - webSocketMessage()
-      // - webSocketClose()
-      // - webSocketError()
       
       server.username = null;
       server.room = null;
