@@ -1,21 +1,12 @@
-# ==================== WRANGLER.TOML ====================
-# VERSION: 8.0.0 - PURE WORKER (NO DO)
-
 name = "chat-cloudflare"
 main = "index.js"
 compatibility_date = "2024-12-12"
 
-# ============================================================
 # ✅ TIDAK ADA DURABLE OBJECTS
-# ✅ TIDAK ADA BINDINGS
+# ✅ TIDAK ADA BINDINGS DO
 # ✅ TIDAK ADA MIGRATIONS
-# ============================================================
 
 # ==================== KV STORAGE ====================
 [[kv_namespaces]]
 binding = "QUESTIONS"
 id = "5008422bd04045db98e4059f2e863784"
-
-# ==================== ENV VARIABLES ====================
-[vars]
-ENVIRONMENT = "production"

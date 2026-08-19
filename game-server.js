@@ -272,16 +272,6 @@ const STATE = {
 // ==================== INIT DICE SYSTEM ====================
 STATE.diceGameSystem = new DiceGameSystem(STATE);
 
-// ==================== BACKGROUND TASKS ====================
-setInterval(() => {
-  STATE._tickCount++;
-  doTick();
-}, 10000);
-
-setInterval(() => {
-  performCleanup();
-}, 60000);
-
 // ==================== DO TICK ====================
 function doTick() {
   try {
@@ -1038,10 +1028,24 @@ export const GameServer = {
   async fetch(request, env) {
     STATE.env = env;
     
-    // ✅ LOAD KV DATA ON STARTUP
+    // ✅ LOAD KV DATA ON STARTUP & START INTERVALS
     if (!STATE._initialized) {
       STATE._initialized = true;
       await loadKVData();
+      
+      // ✅ START INTERVAL DI DALAM HANDLER (BUKAN GLOBAL SCOPE)
+      if (!STATE._mainInterval) {
+        STATE._mainInterval = setInterval(() => {
+          STATE._tickCount++;
+          doTick();
+        }, 10000);
+      }
+      
+      if (!STATE._cleanupInterval) {
+        STATE._cleanupInterval = setInterval(() => {
+          performCleanup();
+        }, 60000);
+      }
     }
     
     try {
