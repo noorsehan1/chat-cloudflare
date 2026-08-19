@@ -1,10 +1,18 @@
 // ==================== INDEX.JS ====================
 // VERSION: 8.0.0 - PURE WORKER (NO DO)
+// AUTO CLEAN MEMORY ON DEPLOY
 
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
 
-// ✅ INSTANCE SINGLETON CHAT SERVER
+// ============================================================
+// ✅ VERSION TIMESTAMP - AKAN BERUBAH SETIAP DEPLOY
+// ============================================================
+const DEPLOY_VERSION = Date.now(); // ← AKAN BERUBAH SETIAP DEPLOY!
+
+// ============================================================
+// ✅ CHAT SERVER INSTANCE (BARU SETIAP DEPLOY)
+// ============================================================
 const chatServer = new ChatServer();
 
 export default {
@@ -14,7 +22,7 @@ export default {
       const pathname = url.pathname;
       
       // ============================================================
-      // ✅ CHAT SERVER - PURE WORKER
+      // ✅ CHAT SERVER
       // ============================================================
       if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
         chatServer.start();
@@ -22,14 +30,15 @@ export default {
       }
       
       // ============================================================
-      // ✅ GAME SERVER - PURE WORKER
+      // ✅ GAME SERVER (BARU SETIAP DEPLOY)
       // ============================================================
       if (pathname === "/game/ws") {
-        return GameServer.fetch(request, env);
+        // ✅ KIRIM DEPLOY_VERSION KE GAME SERVER
+        return GameServer.fetch(request, env, DEPLOY_VERSION);
       }
       
       if (pathname === "/game/health") {
-        return GameServer.fetch(request, env);
+        return GameServer.fetch(request, env, DEPLOY_VERSION);
       }
       
       // ============================================================
@@ -38,11 +47,25 @@ export default {
       if (pathname === "/health") {
         return new Response(JSON.stringify({
           status: "ok",
+          deployVersion: DEPLOY_VERSION,
           connections: chatServer.wsSet?.size || 0,
           rooms: chatServer.rooms?.size || 0,
           users: chatServer.userSeat?.size || 0,
           timestamp: Date.now(),
           uptime: Math.floor((Date.now() - chatServer._startTime) / 1000)
+        }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      
+      // ============================================================
+      // ✅ VERSION INFO
+      // ============================================================
+      if (pathname === "/version") {
+        return new Response(JSON.stringify({
+          deployVersion: DEPLOY_VERSION,
+          timestamp: new Date(DEPLOY_VERSION).toISOString(),
+          type: "pure-worker"
         }), {
           headers: { "Content-Type": "application/json" }
         });
@@ -55,6 +78,7 @@ export default {
         return new Response(JSON.stringify({
           status: "running",
           version: "8.0.0",
+          deployVersion: DEPLOY_VERSION,
           type: "pure-worker",
           maxConnections: 300,
           timestamp: Date.now(),
@@ -63,7 +87,7 @@ export default {
             game: "/game/ws?room={room_name}",
             health: "/health",
             stats: "/stats",
-            gameHealth: "/game/health"
+            version: "/version"
           }
         }), {
           status: 200,
@@ -81,6 +105,7 @@ export default {
         }
         
         return new Response(JSON.stringify({
+          deployVersion: DEPLOY_VERSION,
           connections: chatServer.wsSet?.size || 0,
           rooms: chatServer.rooms?.size || 0,
           roomStats: roomStats,
@@ -93,12 +118,31 @@ export default {
       }
       
       // ============================================================
+      // ✅ RESET (ADMIN) - FORCE CLEAN
+      // ============================================================
+      if (pathname === "/admin/reset") {
+        // Reset chat server
+        chatServer.destroy();
+        // Re-init
+        const newChatServer = new ChatServer();
+        // Replace instance
+        Object.assign(chatServer, newChatServer);
+        
+        return new Response(JSON.stringify({
+          status: "reset",
+          deployVersion: DEPLOY_VERSION,
+          timestamp: Date.now()
+        }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      
+      // ============================================================
       // ✅ DEFAULT
       // ============================================================
       return new Response("Server running", { status: 200 });
       
     } catch(e) {
-      console.error("Fetch error:", e);
       return new Response(JSON.stringify({
         error: "Internal Server Error",
         message: e.message || "Unknown error"
@@ -112,5 +156,4 @@ export default {
   }
 };
 
-// ✅ EXPORT UNTUK COMPATIBILITY
 export { ChatServer, GameServer };
