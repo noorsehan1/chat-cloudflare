@@ -11,33 +11,46 @@ export default {
       const pathname = url.pathname;
 
       // ========== HEALTH CHECK ==========
-      if (pathname === "/health") {
+      if (pathname === "/health" || pathname === "/") {
         return new Response(JSON.stringify({
           status: "ok",
           timestamp: Date.now(),
           service: "chat-game-server",
-          version: "4.0.0",
+          version: "4.0.1",
+          paths: {
+            chat: "/chat/ws",
+            game: "/game/ws"
+          }
         }), {
-          headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+          headers: { 
+            "Content-Type": "application/json", 
+            "Cache-Control": "no-cache" 
+          },
         });
       }
 
       // ========== CHAT WEBSOCKET ==========
       if (pathname === "/chat/ws") {
         const chatServer = new ChatServer();
-        return await chatServer.fetch(request);
+        const response = await chatServer.fetch(request);
+        return response;
       }
 
       // ========== GAME WEBSOCKET ==========
       if (pathname === "/game/ws") {
         const gameServer = new GameServer(env);
-        return await gameServer.fetch(request);
+        const response = await gameServer.fetch(request);
+        return response;
       }
 
-      // ========== ROOT ==========
-      return new Response("Chat & Game Server Running", {
-        status: 200,
-        headers: { "Content-Type": "text/plain", "Cache-Control": "no-cache" },
+      // ========== 404 ==========
+      return new Response(JSON.stringify({
+        error: "Not Found",
+        path: pathname,
+        available: ["/", "/health", "/chat/ws", "/game/ws"]
+      }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" }
       });
 
     } catch (error) {
@@ -47,7 +60,7 @@ export default {
         timestamp: Date.now(),
       }), {
         status: 500,
-        headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+        headers: { "Content-Type": "application/json" },
       });
     }
   },
