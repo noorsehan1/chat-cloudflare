@@ -1,6 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.0.0 - WEBSOCKET + D1 (TANPA DO)
-// OUTPUT PERSIS SEPERTI CHAT-SERVER.JS ASLI
+// VERSION: 4.0.1 - FIXED CONNECTION
 
 const C = {
   MAX_SEATS: 45,
@@ -37,33 +36,45 @@ export class ChatServer {
     const url = new URL(request.url);
     const pathname = url.pathname;
 
+    // ✅ CHAT WEBSOCKET
     if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
       const upgrade = request.headers.get("Upgrade");
+      
+      // ✅ JIKA BUKAN WEBSOCKET, TAMPILKAN HTML TEST
       if (upgrade !== "websocket") {
-        return new Response("Chat Server", {
+        return new Response(this.getTestHTML(), {
           status: 200,
-          headers: { "Cache-Control": "no-cache" }
+          headers: { 
+            "Content-Type": "text/html",
+            "Cache-Control": "no-cache"
+          }
         });
       }
 
-      const username = url.searchParams.get("username") || "Anonymous";
+      // ✅ AMBIL PARAMETER
+      const username = url.searchParams.get("username") || "User_" + Math.floor(Math.random() * 1000);
       const room = url.searchParams.get("room") || "General";
 
+      // ✅ CEK LIMIT
       if (wsConnections.size >= C.MAX_GLOBAL_CONNECTIONS) {
         return new Response("Server full", { status: 503 });
       }
 
+      // ✅ BUAT WEBSOCKET PAIR
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
 
       try {
+        // ✅ ACCEPT WEBSOCKET
         server.accept();
+        console.log(`✅ WebSocket connected: ${username} in ${room}`);
       } catch(e) {
+        console.error("❌ Accept failed:", e);
         return new Response("WebSocket acceptance failed", { status: 500 });
       }
 
+      // ✅ SIMPAN CONNECTION
       const wsId = crypto.randomUUID();
-
       wsConnections.set(wsId, {
         ws: server,
         username: username,
@@ -71,26 +82,42 @@ export class ChatServer {
         connectedAt: Date.now()
       });
 
-      const env = this.env;
-      const existing = await env.DB.prepare(
-        "SELECT username FROM users WHERE username = ?"
-      ).bind(username).first();
+      // ✅ SET VARIABLE DI WS
+      server.wsId = wsId;
+      server.username = username;
+      server.room = room;
 
-      if (existing) {
-        await env.DB.prepare(
-          "UPDATE users SET ws_id = ?, room = ?, active = 1, last_active = ? WHERE username = ?"
-        ).bind(wsId, room, Date.now(), username).run();
-      } else {
-        await env.DB.prepare(
-          "INSERT INTO users (username, ws_id, room, active, last_active) VALUES (?, ?, ?, 1, ?)"
-        ).bind(username, wsId, room, Date.now()).run();
+      // ✅ SIMPAN KE D1 (TAPI TIDAK BLOKIR)
+      try {
+        const env = this.env;
+        const existing = await env.DB.prepare(
+          "SELECT username FROM users WHERE username = ?"
+        ).bind(username).first();
+
+        if (existing) {
+          await env.DB.prepare(
+            "UPDATE users SET ws_id = ?, room = ?, active = 1, last_active = ? WHERE username = ?"
+          ).bind(wsId, room, Date.now(), username).run();
+        } else {
+          await env.DB.prepare(
+            "INSERT INTO users (username, ws_id, room, active, last_active) VALUES (?, ?, ?, 1, ?)"
+          ).bind(username, wsId, room, Date.now()).run();
+        }
+      } catch(e) {
+        console.error("❌ D1 error:", e);
       }
 
-      // ✅ BROADCAST USER JOIN
-      await this.broadcastToRoom(room, ["roomUserCount", room, await this.getRoomCount(room)], env);
-      await this.broadcastUserList(room, env);
+      // ✅ KIRIM CONFIRMATION KE CLIENT
+      try {
+        server.send(JSON.stringify(["connection", "success", wsId]));
+        server.send(JSON.stringify(["joinroomawal"]));
+      } catch(e) {
+        console.error("❌ Send error:", e);
+      }
 
+      // ============================================================
       // ✅ WEBSOCKET MESSAGE HANDLER
+      // ============================================================
       server.addEventListener("message", async (event) => {
         try {
           let data;
@@ -102,61 +129,245 @@ export class ChatServer {
           if (!Array.isArray(data) || !data.length) return;
 
           const [evt, ...args] = data;
-
-          if (evt === "chat" || evt === "updatePoint" || evt === "gift" || evt === "rollangak") {
-            const room = args[0];
-            if (room && !ROOMS_SET.has(room)) return;
-          }
-
-          await this.handleEvent(server, evt, args, env);
+          console.log(`📩 Event: ${evt} from ${username}`);
+          
+          await this.handleEvent(server, evt, args, this.env);
         } catch(e) {
-          console.error("Message error:", e);
+          console.error("❌ Message error:", e);
         }
       });
 
+      // ============================================================
       // ✅ WEBSOCKET CLOSE
+      // ============================================================
       server.addEventListener("close", async () => {
+        console.log(`🔌 WebSocket closed: ${username}`);
         const conn = wsConnections.get(wsId);
         if (conn) {
-          const { username, room } = conn;
+          wsConnections.delete(wsId);
+          try {
+            await this.env.DB.prepare(
+              "UPDATE users SET active = 0, last_active = ? WHERE ws_id = ?"
+            ).bind(Date.now(), wsId).run();
+          } catch(e) {}
+        }
+      });
 
-          await env.DB.prepare(
-            "DELETE FROM seats WHERE room = ? AND username = ?"
-          ).bind(room, username).run();
-
-          await env.DB.prepare(
-            "DELETE FROM points WHERE room = ? AND seat_number IN (SELECT seat_number FROM seats WHERE room = ? AND username = ?)"
-          ).bind(room, room, username).run();
-
-          await env.DB.prepare(
+      // ============================================================
+      // ✅ WEBSOCKET ERROR
+      // ============================================================
+      server.addEventListener("error", async () => {
+        console.log(`❌ WebSocket error: ${username}`);
+        wsConnections.delete(wsId);
+        try {
+          await this.env.DB.prepare(
             "UPDATE users SET active = 0, last_active = ? WHERE ws_id = ?"
           ).bind(Date.now(), wsId).run();
-
-          const seat = await this.getSeatNumber(username, room, env);
-          if (seat) {
-            await this.broadcastToRoom(room, ["removeKursi", room, seat], env);
-          }
-          await this.broadcastToRoom(room, ["roomUserCount", room, await this.getRoomCount(room)], env);
-          await this.broadcastUserList(room, env);
-        }
-        wsConnections.delete(wsId);
+        } catch(e) {}
       });
 
-      server.addEventListener("error", async () => {
-        wsConnections.delete(wsId);
-        await env.DB.prepare(
-          "UPDATE users SET active = 0, last_active = ? WHERE ws_id = ?"
-        ).bind(Date.now(), wsId).run();
+      // ✅ RETURN RESPONSE
+      return new Response(null, { 
+        status: 101, 
+        webSocket: client 
       });
-
-      return new Response(null, { status: 101, webSocket: client });
     }
 
-    return new Response("Chat Server", { status: 200 });
+    // ============================================================
+    // ✅ TEST PAGE
+    // ============================================================
+    if (pathname === "/test") {
+      return new Response(this.getTestHTML(), {
+        status: 200,
+        headers: { "Content-Type": "text/html" }
+      });
+    }
+
+    // ============================================================
+    // ✅ STATUS
+    // ============================================================
+    if (pathname === "/status") {
+      return new Response(JSON.stringify({
+        status: "ok",
+        connections: wsConnections.size,
+        maxConnections: C.MAX_GLOBAL_CONNECTIONS,
+        rooms: ROOMS,
+        timestamp: Date.now()
+      }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    return new Response("Chat Server Running", { status: 200 });
   }
 
-  // ========== HANDLE EVENT ==========
+  // ============================================================
+  // ✅ GET TEST HTML
+  // ============================================================
+  getTestHTML() {
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Chat Test</title>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Arial; background: #0d1117; color: #e6edf3; display: flex; justify-content: center; align-items: center; height: 100vh; }
+    .container { width: 500px; max-width: 90%; background: #161b22; padding: 20px; border-radius: 12px; }
+    h2 { margin-bottom: 15px; color: #58a6ff; }
+    input, button { width: 100%; padding: 10px; margin: 5px 0; border-radius: 6px; border: 1px solid #30363d; background: #0d1117; color: #e6edf3; }
+    button { background: #238636; border: none; cursor: pointer; font-weight: bold; }
+    button:hover { background: #2ea043; }
+    #status { padding: 10px; border-radius: 6px; margin: 10px 0; text-align: center; }
+    #status.connected { background: #0d4426; color: #3fb950; }
+    #status.disconnected { background: #44260d; color: #f0883e; }
+    #messages { height: 300px; overflow-y: auto; border: 1px solid #30363d; border-radius: 6px; padding: 10px; margin: 10px 0; }
+    .msg { margin: 5px 0; padding: 5px 10px; background: #0d1117; border-radius: 4px; }
+    .msg .name { color: #58a6ff; }
+    .msg .time { color: #8b949e; font-size: 11px; margin-left: 10px; }
+    .input-row { display: flex; gap: 10px; }
+    .input-row input { flex: 1; }
+    .input-row button { width: auto; padding: 10px 20px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>💬 Chat Test</h2>
+    <div id="status" class="disconnected">⏳ Connecting...</div>
+    <div class="input-row">
+      <input id="username" placeholder="Username" value="User_${Math.floor(Math.random() * 1000)}" />
+      <button onclick="connect()">Connect</button>
+    </div>
+    <div id="messages"></div>
+    <div class="input-row">
+      <input id="msgInput" placeholder="Type message..." disabled />
+      <button id="sendBtn" disabled>Send</button>
+    </div>
+  </div>
+
+  <script>
+    let ws = null;
+    let username = '';
+
+    function connect() {
+      username = document.getElementById('username').value.trim() || 'User_' + Math.floor(Math.random() * 1000);
+      const status = document.getElementById('status');
+      
+      try {
+        const wsUrl = \`wss://\${window.location.host}/ws?username=\${encodeURIComponent(username)}&room=General\`;
+        console.log('Connecting to:', wsUrl);
+        
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+          status.className = 'connected';
+          status.textContent = '✅ Connected as ' + username;
+          document.getElementById('msgInput').disabled = false;
+          document.getElementById('sendBtn').disabled = false;
+          console.log('✅ WebSocket connected');
+          
+          // Kirim setIdTarget2
+          ws.send(JSON.stringify(["setIdTarget2", username, true]));
+        };
+
+        ws.onmessage = (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            console.log('📩 Received:', data);
+            
+            if (data[0] === 'chat') {
+              addMessage(data[2], data[3]);
+            } else if (data[0] === 'joinroomawal') {
+              // Join room
+              ws.send(JSON.stringify(["joinRoom", "General"]));
+              addSystemMessage('📢 Joined General room');
+            } else if (data[0] === 'rooMasuk') {
+              addSystemMessage('📢 Seat: ' + data[1]);
+            } else if (data[0] === 'connection') {
+              addSystemMessage('📢 Connection: ' + data[2]);
+            } else if (data[0] === 'roomUserCount') {
+              addSystemMessage('👥 Users: ' + data[2]);
+            } else if (data[0] === 'userList') {
+              addSystemMessage('👥 Online: ' + (data[1] || []).join(', '));
+            }
+          } catch(e) {
+            console.error('Parse error:', e);
+          }
+        };
+
+        ws.onclose = () => {
+          status.className = 'disconnected';
+          status.textContent = '❌ Disconnected - Reconnecting...';
+          document.getElementById('msgInput').disabled = true;
+          document.getElementById('sendBtn').disabled = true;
+          console.log('❌ WebSocket closed');
+          
+          setTimeout(connect, 3000);
+        };
+
+        ws.onerror = (e) => {
+          console.error('❌ WebSocket error:', e);
+        };
+
+      } catch(e) {
+        console.error('❌ Connection error:', e);
+        status.className = 'disconnected';
+        status.textContent = '❌ Error: ' + e.message;
+      }
+    }
+
+    function sendMessage() {
+      const input = document.getElementById('msgInput');
+      const msg = input.value.trim();
+      if (!msg || !ws || ws.readyState !== 1) return;
+      
+      ws.send(JSON.stringify(["chat", "General", "", username, msg, "", ""]));
+      input.value = '';
+    }
+
+    function addMessage(name, msg) {
+      const container = document.getElementById('messages');
+      const div = document.createElement('div');
+      div.className = 'msg';
+      const time = new Date().toLocaleTimeString();
+      div.innerHTML = \`<span class="name">\${name}</span><span class="time">\${time}</span><div>\${msg}</div>\`;
+      container.appendChild(div);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function addSystemMessage(msg) {
+      const container = document.getElementById('messages');
+      const div = document.createElement('div');
+      div.className = 'msg';
+      div.style.textAlign = 'center';
+      div.style.color = '#8b949e';
+      div.style.background = 'none';
+      div.textContent = msg;
+      container.appendChild(div);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    // Event listeners
+    document.getElementById('sendBtn').onclick = sendMessage;
+    document.getElementById('msgInput').onkeydown = (e) => {
+      if (e.key === 'Enter') sendMessage();
+    };
+
+    // Auto connect
+    connect();
+  </script>
+</body>
+</html>
+    `;
+  }
+
+  // ============================================================
+  // ✅ HANDLE EVENT
+  // ============================================================
   async handleEvent(ws, evt, args, env) {
+    console.log(`📩 Event: ${evt}, Args:`, args);
+
     switch(evt) {
 
       // ============================================================
@@ -164,7 +375,10 @@ export class ChatServer {
       // ============================================================
       case "setIdTarget2": {
         const [username, isNewUser] = args;
-        await this.handleSetId(ws, username, isNewUser, env);
+        if (!username) return;
+        
+        ws.username = username;
+        ws.send(JSON.stringify(isNewUser ? ["joinroomawal"] : ["needJoinRoom"]));
         break;
       }
 
@@ -173,43 +387,41 @@ export class ChatServer {
       // ============================================================
       case "joinRoom": {
         const [roomName] = args;
-        await this.handleJoin(ws, roomName, env);
-        break;
-      }
+        if (!roomName || !ROOMS_SET.has(roomName)) {
+          ws.send(JSON.stringify(["error", "Invalid room"]));
+          return;
+        }
 
-      // ============================================================
-      // MULTI JOIN
-      // ============================================================
-      case "multiJoin": {
-        const [multiUsername, multiRoomname] = args;
-        await this.handleMultiJoin(ws, multiUsername, multiRoomname, env);
-        break;
-      }
+        const username = ws.username || "Anonymous";
+        ws.room = roomName;
 
-      // ============================================================
-      // EXIT MULTI
-      // ============================================================
-      case "exitMulti": {
-        const [targetUsername] = args;
-        await this.handleExitMulti(ws, targetUsername, env);
-        break;
-      }
+        // Update di DB
+        try {
+          await env.DB.prepare(
+            "UPDATE users SET room = ?, last_active = ? WHERE username = ?"
+          ).bind(roomName, Date.now(), username).run();
+        } catch(e) {}
 
-      // ============================================================
-      // SET ACTIVE MULTI
-      // ============================================================
-      case "setActiveMulti": {
-        const [targetUsername] = args;
-        await this.handleSetActiveMulti(ws, targetUsername, env);
-        break;
-      }
+        // Dapatkan seat
+        let seat = await this.getSeatNumber(username, roomName, env);
+        if (!seat) {
+          seat = await this.getAvailableSeat(roomName, env);
+          if (seat) {
+            try {
+              await env.DB.prepare(
+                "INSERT INTO seats (room, seat_number, username) VALUES (?, ?, ?)"
+              ).bind(roomName, seat, username).run();
+            } catch(e) {}
+          }
+        }
 
-      // ============================================================
-      // UPDATE KURSI
-      // ============================================================
-      case "updateKursi": {
-        const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
-        await this.handleUpdateKursi(kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt, env);
+        if (seat) {
+          ws.send(JSON.stringify(["rooMasuk", seat, roomName]));
+          ws.send(JSON.stringify(["numberKursiSaya", seat]));
+          
+          await this.broadcastToRoom(roomName, ["roomUserCount", roomName, await this.getRoomCount(roomName)], env);
+          await this.broadcastAllSeats(roomName, env);
+        }
         break;
       }
 
@@ -220,11 +432,13 @@ export class ChatServer {
         const [chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor] = args;
         if (!chatMsg || !ROOMS_SET.has(chatRoom)) break;
 
-        await env.DB.prepare(
-          "INSERT INTO messages (room, username, message, timestamp) VALUES (?, ?, ?, ?)"
-        ).bind(chatRoom, chatUser, chatMsg, Date.now()).run();
+        try {
+          await env.DB.prepare(
+            "INSERT INTO messages (room, username, message, timestamp) VALUES (?, ?, ?, ?)"
+          ).bind(chatRoom, chatUser, chatMsg, Date.now()).run();
+        } catch(e) {}
 
-        await this.broadcastToRoom(chatRoom, ["chat", chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor], env);
+        await this.broadcastToRoom(chatRoom, ["chat", chatRoom, chatNoimg, chatUser, chatMsg, chatColor || "", chatTextColor || ""], env);
         break;
       }
 
@@ -234,29 +448,14 @@ export class ChatServer {
       case "updatePoint": {
         const [pointRoom, pointSeat, pointX, pointY, pointFast] = args;
         if (pointRoom && typeof pointSeat === 'number' && pointSeat >= 1 && pointSeat <= C.MAX_SEATS) {
-          await env.DB.prepare(
-            "INSERT OR REPLACE INTO points (room, seat_number, x, y, fast) VALUES (?, ?, ?, ?, ?)"
-          ).bind(pointRoom, pointSeat, pointX || 0, pointY || 0, pointFast || 0).run();
+          try {
+            await env.DB.prepare(
+              "INSERT OR REPLACE INTO points (room, seat_number, x, y, fast) VALUES (?, ?, ?, ?, ?)"
+            ).bind(pointRoom, pointSeat, pointX || 0, pointY || 0, pointFast || 0).run();
+          } catch(e) {}
 
           await this.broadcastToRoom(pointRoom, ["pointUpdated", pointRoom, pointSeat, pointX, pointY, pointFast], env);
         }
-        break;
-      }
-
-      // ============================================================
-      // REMOVE KURSI AND POINT
-      // ============================================================
-      case "removeKursiAndPoint": {
-        const [removeRoom, removeSeat] = args;
-        await env.DB.prepare(
-          "DELETE FROM seats WHERE room = ? AND seat_number = ?"
-        ).bind(removeRoom, removeSeat).run();
-        await env.DB.prepare(
-          "DELETE FROM points WHERE room = ? AND seat_number = ?"
-        ).bind(removeRoom, removeSeat).run();
-
-        await this.broadcastToRoom(removeRoom, ["removeKursi", removeRoom, removeSeat], env);
-        await this.broadcastToRoom(removeRoom, ["roomUserCount", removeRoom, await this.getRoomCount(removeRoom)], env);
         break;
       }
 
@@ -266,78 +465,17 @@ export class ChatServer {
       case "private": {
         const [privTarget, privNoimg, privMsg, privSender] = args;
         if (privTarget && privMsg) {
-          const targetUser = await env.DB.prepare(
-            "SELECT ws_id FROM users WHERE username = ? AND active = 1"
-          ).bind(privTarget).first();
+          try {
+            const targetUser = await env.DB.prepare(
+              "SELECT ws_id FROM users WHERE username = ? AND active = 1"
+            ).bind(privTarget).first();
 
-          if (targetUser) {
-            await this.sendToUser(targetUser.ws_id, ["private", privTarget, privNoimg, privMsg, Date.now(), privSender], env);
-          }
+            if (targetUser) {
+              await this.sendToUser(targetUser.ws_id, ["private", privTarget, privNoimg, privMsg, Date.now(), privSender], env);
+            }
+          } catch(e) {}
           ws.send(JSON.stringify(["private", privTarget, privNoimg, privMsg, Date.now(), privSender]));
         }
-        break;
-      }
-
-      // ============================================================
-      // GIFT
-      // ============================================================
-      case "gift": {
-        const [giftRoom, giftSender, giftReceiver, giftGiftName] = args;
-        if (giftRoom && ROOMS_SET.has(giftRoom)) {
-          await this.broadcastToRoom(giftRoom, ["gift", giftRoom, giftSender, giftReceiver, giftGiftName, Date.now()], env);
-        }
-        break;
-      }
-
-      // ============================================================
-      // ROLLANGAK
-      // ============================================================
-      case "rollangak": {
-        const [rollRoom, rollUser, rollAngka] = args;
-        if (rollRoom && ROOMS_SET.has(rollRoom)) {
-          await this.broadcastToRoom(rollRoom, ["rollangakBroadcast", rollRoom, rollUser, rollAngka], env);
-        }
-        break;
-      }
-
-      // ============================================================
-      // SEND NOTIF
-      // ============================================================
-      case "sendnotif": {
-        const [notifTarget, notifNoimg, notifUser, notifMsg] = args;
-        if (notifTarget && notifMsg) {
-          const targetUser = await env.DB.prepare(
-            "SELECT ws_id FROM users WHERE username = ? AND active = 1"
-          ).bind(notifTarget).first();
-
-          if (targetUser) {
-            await this.sendToUser(targetUser.ws_id, ["notif", notifNoimg, notifUser, notifMsg, Date.now()], env);
-          }
-        }
-        break;
-      }
-
-      // ============================================================
-      // GET CURRENT NUMBER
-      // ============================================================
-      case "getCurrentNumber": {
-        const roomSettings = await env.DB.prepare(
-          "SELECT current_number FROM room_settings WHERE room = ?"
-        ).bind("General").first();
-        ws.send(JSON.stringify(["currentNumber", roomSettings?.current_number || 1]));
-        break;
-      }
-
-      // ============================================================
-      // IS USER ONLINE
-      // ============================================================
-      case "isUserOnline": {
-        const [onlineTarget, onlineCallback] = args;
-        const result = await env.DB.prepare(
-          "SELECT active FROM users WHERE username = ?"
-        ).bind(onlineTarget).first();
-        const isOnline = result?.active === 1;
-        ws.send(JSON.stringify(["userOnlineStatus", onlineTarget, isOnline, onlineCallback || ""]));
         break;
       }
 
@@ -345,23 +483,13 @@ export class ChatServer {
       // GET ONLINE USERS
       // ============================================================
       case "getOnlineUsers": {
-        const users = await env.DB.prepare(
-          "SELECT username FROM users WHERE active = 1"
-        ).all();
-        const userList = (users.results || []).map(u => u.username);
-        ws.send(JSON.stringify(["allOnlineUsers", userList]));
-        break;
-      }
-
-      // ============================================================
-      // GET ALL ROOMS USER COUNT
-      // ============================================================
-      case "getAllRoomsUserCount": {
-        const counts = {};
-        for (const room of ROOMS) {
-          counts[room] = await this.getRoomCount(room);
-        }
-        ws.send(JSON.stringify(["allRoomsUserCount", Object.entries(counts)]));
+        try {
+          const users = await env.DB.prepare(
+            "SELECT username FROM users WHERE active = 1"
+          ).all();
+          const userList = (users.results || []).map(u => u.username);
+          ws.send(JSON.stringify(["allOnlineUsers", userList]));
+        } catch(e) {}
         break;
       }
 
@@ -378,14 +506,28 @@ export class ChatServer {
       }
 
       // ============================================================
+      // GET ALL ROOMS USER COUNT
+      // ============================================================
+      case "getAllRoomsUserCount": {
+        const counts = {};
+        for (const room of ROOMS) {
+          counts[room] = await this.getRoomCount(room);
+        }
+        ws.send(JSON.stringify(["allRoomsUserCount", Object.entries(counts)]));
+        break;
+      }
+
+      // ============================================================
       // SET MUTE TYPE
       // ============================================================
       case "setMuteType": {
         const [muteVal, muteRoom] = args;
         if (muteRoom && ROOMS_SET.has(muteRoom)) {
-          await env.DB.prepare(
-            "INSERT OR REPLACE INTO room_settings (room, muted) VALUES (?, ?)"
-          ).bind(muteRoom, muteVal ? 1 : 0).run();
+          try {
+            await env.DB.prepare(
+              "INSERT OR REPLACE INTO room_settings (room, muted) VALUES (?, ?)"
+            ).bind(muteRoom, muteVal ? 1 : 0).run();
+          } catch(e) {}
 
           await this.broadcastToRoom(muteRoom, ["muteStatusChanged", !!muteVal, muteRoom], env);
           ws.send(JSON.stringify(["muteTypeSet", !!muteVal, true, muteRoom]));
@@ -399,35 +541,14 @@ export class ChatServer {
       case "getMuteType": {
         const [muteRoom] = args;
         if (muteRoom && ROOMS_SET.has(muteRoom)) {
-          const result = await env.DB.prepare(
-            "SELECT muted FROM room_settings WHERE room = ?"
-          ).bind(muteRoom).first();
-          ws.send(JSON.stringify(["muteTypeResponse", result?.muted === 1, muteRoom]));
-        }
-        break;
-      }
-
-      // ============================================================
-      // MOD WARNING
-      // ============================================================
-      case "modwarning": {
-        const [modRoom] = args;
-        if (modRoom && ROOMS_SET.has(modRoom)) {
-          await this.broadcastToRoom(modRoom, ["modwarning", modRoom], env);
-        }
-        break;
-      }
-
-      // ============================================================
-      // ON DESTROY
-      // ============================================================
-      case "onDestroy": {
-        const conn = wsConnections.get(ws._wsId);
-        if (conn) {
-          wsConnections.delete(ws._wsId);
-          await env.DB.prepare(
-            "UPDATE users SET active = 0, last_active = ? WHERE ws_id = ?"
-          ).bind(Date.now(), ws._wsId).run();
+          try {
+            const result = await env.DB.prepare(
+              "SELECT muted FROM room_settings WHERE room = ?"
+            ).bind(muteRoom).first();
+            ws.send(JSON.stringify(["muteTypeResponse", result?.muted === 1, muteRoom]));
+          } catch(e) {
+            ws.send(JSON.stringify(["muteTypeResponse", false, muteRoom]));
+          }
         }
         break;
       }
@@ -439,282 +560,101 @@ export class ChatServer {
   }
 
   // ============================================================
-  // HANDLER FUNCTIONS - PERSIS SEPERTI ASLI
-  // ============================================================
-
-  // ========== HANDLE SET ID ==========
-  async handleSetId(ws, username, isNewUser, env) {
-    if (!username) return;
-
-    const existing = await env.DB.prepare(
-      "SELECT username FROM users WHERE username = ?"
-    ).bind(username).first();
-
-    if (!existing) {
-      await env.DB.prepare(
-        "INSERT INTO users (username, active, last_active) VALUES (?, 1, ?)"
-      ).bind(username, Date.now()).run();
-    }
-
-    ws.send(JSON.stringify(isNewUser ? ["joinroomawal"] : ["needJoinRoom"]));
-  }
-
-  // ========== HANDLE JOIN ==========
-  async handleJoin(ws, roomName, env) {
-    if (!roomName || !ROOMS_SET.has(roomName)) return;
-
-    const username = ws.username || "Anonymous";
-
-    await env.DB.prepare(
-      "UPDATE users SET room = ?, last_active = ? WHERE username = ?"
-    ).bind(roomName, Date.now(), username).run();
-
-    let seat = await this.getSeatNumber(username, roomName, env);
-    if (!seat) {
-      seat = await this.getAvailableSeat(roomName, env);
-      if (seat) {
-        await env.DB.prepare(
-          "INSERT INTO seats (room, seat_number, username) VALUES (?, ?, ?)"
-        ).bind(roomName, seat, username).run();
-      }
-    }
-
-    if (seat) {
-      ws.send(JSON.stringify(["rooMasuk", seat, roomName]));
-      ws.send(JSON.stringify(["numberKursiSaya", seat]));
-
-      const muted = await env.DB.prepare(
-        "SELECT muted FROM room_settings WHERE room = ?"
-      ).bind(roomName).first();
-      ws.send(JSON.stringify(["muteTypeResponse", muted?.muted === 1, roomName]));
-
-      await this.broadcastToRoom(roomName, ["roomUserCount", roomName, await this.getRoomCount(roomName)], env);
-      await this.broadcastAllSeats(roomName, env);
-
-      setTimeout(async () => {
-        await this.sendAllStateTo(ws, roomName, env);
-      }, 1000);
-    }
-  }
-
-  // ========== HANDLE MULTI JOIN ==========
-  async handleMultiJoin(ws, multiUsername, multiRoomname, env) {
-    if (!multiUsername || !multiRoomname) return;
-
-    // Hapus dari room lama
-    await env.DB.prepare(
-      "DELETE FROM seats WHERE username = ?"
-    ).bind(multiUsername).run();
-
-    const seat = await this.getAvailableSeat(multiRoomname, env);
-    if (!seat) {
-      ws.send(JSON.stringify(["roomFull", multiRoomname]));
-      return;
-    }
-
-    await env.DB.prepare(
-      "INSERT INTO seats (room, seat_number, username) VALUES (?, ?, ?)"
-    ).bind(multiRoomname, seat, multiUsername).run();
-
-    await env.DB.prepare(
-      "UPDATE users SET room = ?, active = 1, last_active = ? WHERE username = ?"
-    ).bind(multiRoomname, Date.now(), multiUsername).run();
-
-    ws.send(JSON.stringify(["rooMasukMulti", seat, multiRoomname]));
-    await this.broadcastToRoom(multiRoomname, ["roomUserCount", multiRoomname, await this.getRoomCount(multiRoomname)], env);
-  }
-
-  // ========== HANDLE EXIT MULTI ==========
-  async handleExitMulti(ws, targetUsername, env) {
-    if (!targetUsername) return;
-
-    const seat = await this.getSeatNumber(targetUsername, null, env);
-    if (seat) {
-      await env.DB.prepare(
-        "DELETE FROM seats WHERE username = ?"
-      ).bind(targetUsername).run();
-
-      const room = await env.DB.prepare(
-        "SELECT room FROM users WHERE username = ?"
-      ).bind(targetUsername).first();
-
-      if (room) {
-        await this.broadcastToRoom(room.room, ["removeKursi", room.room, seat], env);
-        await this.broadcastToRoom(room.room, ["roomUserCount", room.room, await this.getRoomCount(room.room)], env);
-      }
-    }
-
-    await env.DB.prepare(
-      "UPDATE users SET active = 0, last_active = ? WHERE username = ?"
-    ).bind(Date.now(), targetUsername).run();
-  }
-
-  // ========== HANDLE SET ACTIVE MULTI ==========
-  async handleSetActiveMulti(ws, targetUsername, env) {
-    if (!targetUsername) return;
-
-    const seat = await this.getSeatNumber(targetUsername, null, env);
-    const room = await env.DB.prepare(
-      "SELECT room FROM users WHERE username = ?"
-    ).bind(targetUsername).first();
-
-    if (seat && room) {
-      ws.send(JSON.stringify(["activeChangedMulti", targetUsername, seat, room.room]));
-      await this.broadcastToRoom(room.room, ["userActiveChanged", targetUsername, seat], env);
-    }
-  }
-
-  // ========== HANDLE UPDATE KURSI ==========
-  async handleUpdateKursi(kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt, env) {
-    if (!kursiRoom || !kursiSeat) return;
-
-    await env.DB.prepare(
-      `UPDATE seats SET 
-        noimageUrl = ?, 
-        color = ?, 
-        itembawah = ?, 
-        itematas = ?, 
-        vip = ?, 
-        viptanda = ? 
-      WHERE room = ? AND seat_number = ?`
-    ).bind(
-      kursiNoimg || "",
-      kursiColor || "",
-      kursiBawah || 0,
-      kursiAtas || 0,
-      kursiVip || 0,
-      kursiVt || 0,
-      kursiRoom,
-      kursiSeat
-    ).run();
-
-    const updated = await env.DB.prepare(
-      "SELECT * FROM seats WHERE room = ? AND seat_number = ?"
-    ).bind(kursiRoom, kursiSeat).first();
-
-    if (updated) {
-      await this.broadcastToRoom(kursiRoom, ["kursiBatchUpdate", kursiRoom, [[kursiSeat, updated]]], env);
-    }
-  }
-
-  // ============================================================
   // HELPER FUNCTIONS
   // ============================================================
 
-  // ========== GET ROOM COUNT ==========
   async getRoomCount(room) {
-    const env = this.env;
-    const result = await env.DB.prepare(
-      "SELECT COUNT(*) as count FROM users WHERE room = ? AND active = 1"
-    ).bind(room).first();
-    return result?.count || 0;
+    try {
+      const env = this.env;
+      const result = await env.DB.prepare(
+        "SELECT COUNT(*) as count FROM users WHERE room = ? AND active = 1"
+      ).bind(room).first();
+      return result?.count || 0;
+    } catch(e) {
+      return 0;
+    }
   }
 
-  // ========== GET SEAT NUMBER ==========
   async getSeatNumber(username, room, env) {
-    let query = "SELECT seat_number FROM seats WHERE username = ?";
-    let params = [username];
-    if (room) {
-      query += " AND room = ?";
-      params.push(room);
-    }
-    const result = await env.DB.prepare(query).bind(...params).first();
-    return result?.seat_number || null;
-  }
-
-  // ========== GET AVAILABLE SEAT ==========
-  async getAvailableSeat(room, env) {
-    const seats = await env.DB.prepare(
-      "SELECT seat_number FROM seats WHERE room = ? ORDER BY seat_number"
-    ).bind(room).all();
-
-    const taken = new Set((seats.results || []).map(s => s.seat_number));
-    for (let i = 1; i <= C.MAX_SEATS; i++) {
-      if (!taken.has(i)) return i;
-    }
-    return null;
-  }
-
-  // ========== BROADCAST TO ROOM ==========
-  async broadcastToRoom(room, message, env) {
-    const msgStr = JSON.stringify(message);
-    const users = await env.DB.prepare(
-      "SELECT ws_id FROM users WHERE room = ? AND active = 1"
-    ).bind(room).all();
-
-    for (const user of users.results || []) {
-      const conn = wsConnections.get(user.ws_id);
-      if (conn && conn.ws && conn.ws.readyState === 1) {
-        try {
-          conn.ws.send(msgStr);
-        } catch(e) {}
+    try {
+      let query = "SELECT seat_number FROM seats WHERE username = ?";
+      let params = [username];
+      if (room) {
+        query += " AND room = ?";
+        params.push(room);
       }
+      const result = await env.DB.prepare(query).bind(...params).first();
+      return result?.seat_number || null;
+    } catch(e) {
+      return null;
     }
   }
 
-  // ========== SEND TO USER ==========
+  async getAvailableSeat(room, env) {
+    try {
+      const seats = await env.DB.prepare(
+        "SELECT seat_number FROM seats WHERE room = ? ORDER BY seat_number"
+      ).bind(room).all();
+
+      const taken = new Set((seats.results || []).map(s => s.seat_number));
+      for (let i = 1; i <= C.MAX_SEATS; i++) {
+        if (!taken.has(i)) return i;
+      }
+      return null;
+    } catch(e) {
+      return 1;
+    }
+  }
+
+  async broadcastToRoom(room, message, env) {
+    try {
+      const msgStr = JSON.stringify(message);
+      const users = await env.DB.prepare(
+        "SELECT ws_id FROM users WHERE room = ? AND active = 1"
+      ).bind(room).all();
+
+      for (const user of users.results || []) {
+        const conn = wsConnections.get(user.ws_id);
+        if (conn && conn.ws && conn.ws.readyState === 1) {
+          try {
+            conn.ws.send(msgStr);
+          } catch(e) {}
+        }
+      }
+    } catch(e) {}
+  }
+
   async sendToUser(wsId, message, env) {
-    const conn = wsConnections.get(wsId);
-    if (conn && conn.ws && conn.ws.readyState === 1) {
-      try {
+    try {
+      const conn = wsConnections.get(wsId);
+      if (conn && conn.ws && conn.ws.readyState === 1) {
         conn.ws.send(JSON.stringify(message));
         return true;
-      } catch(e) {}
-    }
+      }
+    } catch(e) {}
     return false;
   }
 
-  // ========== BROADCAST USER LIST ==========
-  async broadcastUserList(room, env) {
-    const users = await env.DB.prepare(
-      "SELECT username FROM users WHERE room = ? AND active = 1"
-    ).bind(room).all();
-
-    await this.broadcastToRoom(room, ["userList", (users.results || []).map(u => u.username)], env);
-  }
-
-  // ========== BROADCAST ALL SEATS ==========
   async broadcastAllSeats(room, env) {
-    const seats = await env.DB.prepare(
-      "SELECT seat_number, username, noimageUrl, color, itembawah, itematas, vip, viptanda FROM seats WHERE room = ?"
-    ).bind(room).all();
+    try {
+      const seats = await env.DB.prepare(
+        "SELECT seat_number, username, noimageUrl, color, itembawah, itematas, vip, viptanda FROM seats WHERE room = ?"
+      ).bind(room).all();
 
-    const seatData = {};
-    for (const seat of seats.results || []) {
-      seatData[seat.seat_number] = {
-        namauser: seat.username,
-        noimageUrl: seat.noimageUrl || "",
-        color: seat.color || "",
-        itembawah: seat.itembawah || 0,
-        itematas: seat.itematas || 0,
-        vip: seat.vip || 0,
-        viptanda: seat.viptanda || 0
-      };
-    }
+      const seatData = {};
+      for (const seat of seats.results || []) {
+        seatData[seat.seat_number] = {
+          namauser: seat.username,
+          noimageUrl: seat.noimageUrl || "",
+          color: seat.color || "",
+          itembawah: seat.itembawah || 0,
+          itematas: seat.itematas || 0,
+          vip: seat.vip || 0,
+          viptanda: seat.viptanda || 0
+        };
+      }
 
-    await this.broadcastToRoom(room, ["allUpdateKursiList", room, seatData], env);
-  }
-
-  // ========== SEND ALL STATE TO CLIENT ==========
-  async sendAllStateTo(ws, room, env) {
-    await this.broadcastAllSeats(room, env);
-
-    const points = await env.DB.prepare(
-      "SELECT seat_number, x, y, fast FROM points WHERE room = ?"
-    ).bind(room).all();
-
-    const pointData = (points.results || []).map(p => ({
-      seat: p.seat_number,
-      x: p.x || 0,
-      y: p.y || 0,
-      fast: p.fast || 0
-    }));
-
-    if (pointData.length > 0) {
-      ws.send(JSON.stringify(["allPointsList", room, pointData]));
-    }
-
-    // ✅ KIRIM ROOM USER COUNT
-    ws.send(JSON.stringify(["roomUserCount", room, await this.getRoomCount(room)]));
+      await this.broadcastToRoom(room, ["allUpdateKursiList", room, seatData], env);
+    } catch(e) {}
   }
 }
