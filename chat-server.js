@@ -1,6 +1,6 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 10.0.0 - PURE WORKER TANPA HIBERNATE
-// SEMUA AKTIF, BROADCAST REAL-TIME SEPERTI DO
+// VERSION: 10.1.0 - PURE WORKER TANPA HIBERNATE
+// FIX: setInterval di dalam fetch handler
 
 const C = {
   MAX_SEATS: 45,
@@ -29,7 +29,7 @@ class RoomManager {
     this.points = new Map();
     this.muted = false;
     this.number = 1;
-    this.clients = new Set(); // ← SEMUA WEBSOCKET DI ROOM INI
+    this.clients = new Set();
   }
 
   getAvailableSeat() {
@@ -131,7 +131,6 @@ class RoomManager {
     return result;
   }
 
-  // ✅ BROADCAST KE SEMUA CLIENT DI ROOM (REAL-TIME)
   broadcast(msg) {
     if (!msg) return;
     const toRemove = new Set();
@@ -169,9 +168,11 @@ class RoomManager {
 // ==================== CHAT SERVER ====================
 export class ChatServer {
   constructor() {
+    // ✅ HANYA inisialisasi - TIDAK ADA setInterval
     this._startTime = Date.now();
     this.closing = false;
     this.isDestroyed = false;
+    this._intervalsStarted = false;
     
     // WebSocket
     this.wsSet = new Set();
@@ -196,16 +197,14 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
-    // Start timers
-    this._startIntervals();
+    // ❌ JANGAN panggil _startIntervals() di sini!
+    // Akan dipanggil di fetch()
   }
 
-  start() {
-    // Already running
-  }
-
+  // ✅ START INTERVALS - dipanggil dari fetch handler
   _startIntervals() {
-    if (this.closing || this.isDestroyed) return;
+    if (this.closing || this.isDestroyed || this._intervalsStarted) return;
+    this._intervalsStarted = true;
     
     // Main interval - 15 menit untuk update number
     this._mainInterval = setInterval(() => {
@@ -272,6 +271,9 @@ export class ChatServer {
 
   // ==================== FETCH ====================
   async fetch(request) {
+    // ✅ START INTERVALS DI SINI (dalam handler)
+    this._startIntervals();
+    
     if (this.closing || this.isDestroyed) {
       return new Response("Shutting down", { status: 503 });
     }
@@ -292,8 +294,6 @@ export class ChatServer {
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       
-      // ✅ ACCEPT WEBSOCKET - TANPA HIBERNATE
-      // Langsung accept, tidak pakai ctx.acceptWebSocket()
       try {
         server.accept();
       } catch(e) {
@@ -311,7 +311,7 @@ export class ChatServer {
       
       this.wsSet.add(server);
       
-      // ✅ EVENT HANDLERS LANGSUNG
+      // Event handlers
       server.onmessage = async (event) => {
         if (server._closing) return;
         await this.handleMessage(server, event.data);
@@ -324,23 +324,6 @@ export class ChatServer {
       server.onerror = () => {
         this.cleanup(server);
       };
-      
-      // ✅ PING INTERVAL - JAGA KONEKSI TETAP AKTIF
-      const pingInterval = setInterval(() => {
-        if (server._closing || server.readyState !== 1) {
-          clearInterval(pingInterval);
-          return;
-        }
-        try {
-          server.send(JSON.stringify(["ping", Date.now()]));
-          server._lastPing = Date.now();
-        } catch (e) {
-          clearInterval(pingInterval);
-          this.cleanup(server);
-        }
-      }, C.WS_PING_INTERVAL);
-      
-      server._pingInterval = pingInterval;
       
       return new Response(null, { status: 101, webSocket: client });
       
@@ -455,10 +438,6 @@ export class ChatServer {
           
         case "onDestroy":
           this.cleanup(ws);
-          break;
-          
-        case "pong":
-          ws._lastPing = Date.now();
           break;
           
         default:
@@ -590,7 +569,6 @@ export class ChatServer {
     this._safeSend(ws, ["currentNumber", this.currentNumber]);
     this._safeSend(ws, ["roomUserCount", roomName, roomMan.getCount()]);
     
-    // ✅ BROADCAST KE SEMUA USER DI ROOM
     roomMan.broadcast(JSON.stringify(["roomUserCount", roomName, roomMan.getCount()]));
     
     setTimeout(() => {
@@ -736,7 +714,6 @@ export class ChatServer {
       return;
     }
     
-    // ✅ BROADCAST CHAT KE SEMUA USER DI ROOM
     roomMan.broadcast(JSON.stringify([
       "chat", chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor
     ]));
@@ -1009,11 +986,6 @@ export class ChatServer {
       }
       
       this.wsActiveMulti.delete(ws);
-      
-      if (ws._pingInterval) {
-        clearInterval(ws._pingInterval);
-        ws._pingInterval = null;
-      }
       
     } catch (e) {}
     

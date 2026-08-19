@@ -1,50 +1,54 @@
 // ==================== INDEX.JS ====================
-// VERSION: 1.0.0 - CHAT + GAME
+// VERSION: 4.0.0 - PURE WORKER TANPA HIBERNATE
 
-import { ChatServer } from "./chat-server.js";
-import { GameServer } from "./game-server.js";
-
-const chatServer = new ChatServer();
-const gameServer = new GameServer();
+import { ChatServer } from './chat-server.js';
+import { GameServer } from './game-server.js';
 
 export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    const path = url.pathname;
+  async fetch(request, env, ctx) {
+    try {
+      const url = new URL(request.url);
+      const pathname = url.pathname;
 
-    // Chat
-    if (path === "/ws" || path === "/chat" || path === "/") {
-      chatServer.start();
-      return chatServer.fetch(request);
-    }
+      // ========== HEALTH CHECK ==========
+      if (pathname === "/health") {
+        return new Response(JSON.stringify({
+          status: "ok",
+          timestamp: Date.now(),
+          service: "chat-game-server",
+          version: "4.0.0",
+        }), {
+          headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+        });
+      }
 
-    // Game
-    if (path === "/game/ws" || path === "/game/health" || path === "/game/metrics") {
-      return gameServer.fetch(request);
-    }
+      // ========== CHAT WEBSOCKET ==========
+      if (pathname === "/chat/ws") {
+        const chatServer = new ChatServer();
+        return await chatServer.fetch(request);
+      }
 
-    // Health
-    if (path === "/health") {
+      // ========== GAME WEBSOCKET ==========
+      if (pathname === "/game/ws") {
+        const gameServer = new GameServer(env);
+        return await gameServer.fetch(request);
+      }
+
+      // ========== ROOT ==========
+      return new Response("Chat & Game Server Running", {
+        status: 200,
+        headers: { "Content-Type": "text/plain", "Cache-Control": "no-cache" },
+      });
+
+    } catch (error) {
       return new Response(JSON.stringify({
-        chat: {
-          connections: chatServer.wsSet?.size || 0,
-          rooms: chatServer.rooms?.size || 0,
-          users: chatServer.userSeat?.size || 0
-        },
-        game: {
-          connections: gameServer.wsMap?.size || 0,
-          games: gameServer.activeGames?.size || 0,
-          diceActive: !!gameServer.currentDiceRoll,
-          tieActive: gameServer._tieActive || false
-        },
-        uptime: Math.floor((Date.now() - chatServer._startTime) / 1000)
+        error: "Internal Server Error",
+        message: error.message || "Unknown error",
+        timestamp: Date.now(),
       }), {
-        headers: { "Content-Type": "application/json" }
+        status: 500,
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
       });
     }
-
-    return new Response("Chat + Game Server Running", { status: 200 });
-  }
+  },
 };
-
-export { ChatServer, GameServer };

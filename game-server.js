@@ -1,6 +1,6 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 4.0.0 - PURE WORKER TANPA HIBERNATE
-// TANPA PING PONG - REAL-TIME BROADCAST
+// VERSION: 4.0.1 - PURE WORKER TANPA HIBERNATE
+// FIX: setInterval dipanggil di fetch handler
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -175,9 +175,12 @@ class DiceGameSystem {
 export class GameServer {
   constructor(env) {
     try {
+      // ========== MINIMAL SETUP - HANYA INISIALISASI ==========
+      // TIDAK ADA setInterval DI SINI!
       this.env = env;
       this.closing = false;
       this.isDestroyed = false;
+      this._intervalsStarted = false;
       this._startTime = Date.now();
       this._wsIdCounter = 0;
       this._lastActivity = Date.now();
@@ -264,18 +267,22 @@ export class GameServer {
       this._mainInterval = null;
       this._cleanupInterval = null;
       
-      // INIT DICE SYSTEM
+      // ========== INIT DICE SYSTEM ==========
       this.diceGameSystem = new DiceGameSystem(this.env);
       
-      // START INTERVALS
-      this._startIntervals();
+      // ❌ JANGAN panggil _startIntervals() di sini!
+      // Akan dipanggil di fetch()
       
-    } catch(e) {}
+    } catch(e) {
+      console.error('GameServer constructor error:', e);
+    }
   }
 
   // ========== START INTERVALS ==========
+  // ✅ Dipanggil dari fetch handler, BUKAN dari constructor!
   _startIntervals() {
-    if (this.closing || this.isDestroyed) return;
+    if (this.closing || this.isDestroyed || this._intervalsStarted) return;
+    this._intervalsStarted = true;
     
     this._mainInterval = setInterval(() => {
       if (this.closing || this.isDestroyed) {
@@ -1052,6 +1059,9 @@ export class GameServer {
 
   // ========== FETCH ==========
   async fetch(req) {
+    // ✅ START INTERVALS DI SINI (dalam handler)
+    this._startIntervals();
+    
     try {
       if (this._circuitOpen) {
         const now = Date.now();
@@ -1883,7 +1893,7 @@ export class GameServer {
     } catch(e) { return 0; }
   }
 
-  // ========== LOW CARD GAME - FULL METHODS ==========
+  // ========== LOW CARD GAME - METHODS ==========
 
   _isGameActuallyRunning(game) { 
     return game?._isActive === true && !game?._gameEnded; 
@@ -2217,7 +2227,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== ✅ FIXED: _closeDrawPhase DENGAN ASYNC ==========
   async _closeDrawPhase(room, game) {
     try {
       if (!this._isGameActuallyRunning(game) || game.drawTimeExpired || game.evaluationLocked) return;
