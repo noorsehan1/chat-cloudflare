@@ -1,7 +1,7 @@
 // ==================== CHAT-SERVER.JS ====================
 // VERSION: 8.0.0 - PURE WORKER (NO DO, NO KV)
 
-const C = {
+ const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 300,
   MAX_MESSAGE_SIZE: 5000,
