@@ -1,22 +1,8 @@
 // ==================== WORKER.JS ====================
-// VERSION: 4.0.0 - D1 MIGRATION
+// VERSION: 4.0.0 - D1 FULL INTEGRATION
 
 import { ChatWorker } from "./chat-worker.js";
 import { GameWorker } from "./game-worker.js";
-
-// Konfigurasi
-const CONFIG = {
-    MAX_ROOMS: 12,
-    MAX_GLOBAL_CONNECTIONS: 150,
-    MAX_SEATS: 45,
-    CLEANUP_INTERVAL_MS: 60000,
-    LOCK_TIMEOUT: 10000,
-    BATCH_SIZE: 20,
-};
-
-// Cache untuk instance
-const instanceCache = new Map();
-const CACHE_TTL = 30000;
 
 // Room list
 const ROOMS = [
@@ -35,7 +21,7 @@ export default {
             // ========== INIT DATABASE ==========
             if (pathname === "/init") {
                 try {
-                    // Baca dan jalankan schema
+                    // Baca schema
                     const schema = await fetch(new URL('./schema.sql', import.meta.url)).then(r => r.text());
                     const statements = schema.split(';').filter(s => s.trim());
                     
@@ -45,7 +31,7 @@ export default {
                         }
                     }
                     
-                    // Inisialisasi rooms
+                    // Insert rooms
                     for (const room of ROOMS) {
                         await env.DB.prepare(
                             `INSERT OR IGNORE INTO rooms (room_name, number) VALUES (?, 1)`
@@ -55,7 +41,7 @@ export default {
                     return new Response(JSON.stringify({
                         status: "success",
                         message: "Database initialized",
-                        rooms: ROOMS
+                        rooms: ROOMS.length
                     }), {
                         headers: { 'Content-Type': 'application/json' }
                     });
@@ -77,18 +63,18 @@ export default {
             }
 
             // ========== GAME ==========
-            if (pathname === "/game/ws") {
+            if (pathname === "/game/ws" || pathname === "/game") {
                 const gameWorker = new GameWorker(env);
                 return gameWorker.fetch(request);
             }
 
             // ========== HEALTH CHECK ==========
-            if (pathname === "/health" || pathname === "/game/health") {
+            if (pathname === "/health") {
                 try {
-                    const [chatCount, gameCount, roomCount] = await Promise.all([
+                    const [roomCount, userCount, gameCount] = await Promise.all([
+                        env.DB.prepare(`SELECT COUNT(*) as count FROM rooms`).first(),
                         env.DB.prepare(`SELECT COUNT(*) as count FROM user_connections`).first(),
                         env.DB.prepare(`SELECT COUNT(*) as count FROM active_games WHERE is_active = 1`).first(),
-                        env.DB.prepare(`SELECT COUNT(*) as count FROM rooms`).first(),
                     ]);
 
                     return new Response(JSON.stringify({
@@ -96,9 +82,9 @@ export default {
                         timestamp: Date.now(),
                         version: "4.0.0",
                         database: "D1",
-                        connections: chatCount?.count || 0,
-                        activeGames: gameCount?.count || 0,
                         rooms: roomCount?.count || 0,
+                        users: userCount?.count || 0,
+                        activeGames: gameCount?.count || 0,
                     }), {
                         headers: { 'Content-Type': 'application/json' }
                     });
@@ -107,29 +93,6 @@ export default {
                         status: "error",
                         message: e.message
                     }), {
-                        status: 500,
-                        headers: { 'Content-Type': 'application/json' }
-                    });
-                }
-            }
-
-            // ========== STATS ==========
-            if (pathname === "/stats") {
-                try {
-                    const stats = await env.DB.prepare(`
-                        SELECT 
-                            (SELECT COUNT(*) FROM user_connections) as total_users,
-                            (SELECT COUNT(*) FROM active_games WHERE is_active = 1) as active_games,
-                            (SELECT COUNT(*) FROM seats) as total_seats,
-                            (SELECT COUNT(*) FROM dice_points) as dice_players,
-                            (SELECT COUNT(*) FROM game_players) as game_players
-                    `).first();
-
-                    return new Response(JSON.stringify(stats), {
-                        headers: { 'Content-Type': 'application/json' }
-                    });
-                } catch(e) {
-                    return new Response(JSON.stringify({ error: e.message }), {
                         status: 500,
                         headers: { 'Content-Type': 'application/json' }
                     });
@@ -165,7 +128,12 @@ export default {
                 }
             }
 
-            return new Response("Server running", { status: 200 });
+            return new Response("Chat & Game Server - D1 Version", { 
+                status: 200,
+                headers: {
+                    'Content-Type': 'text/plain'
+                }
+            });
 
         } catch(e) {
             console.error("Fetch error:", e);
@@ -192,13 +160,13 @@ export default {
 async function cleanupDatabase(env) {
     try {
         const now = Date.now();
-        const staleThreshold = now - 300000; // 5 menit
+        const staleThreshold = Math.floor((now - 300000) / 1000); // 5 menit
 
         // Hapus user connections yang sudah tidak aktif
         await env.DB.prepare(`
             DELETE FROM user_connections 
             WHERE updated_at < ?
-        `).bind(Math.floor(staleThreshold / 1000)).run();
+        `).bind(staleThreshold).run();
 
         // Hapus seats yang tidak terpakai
         await env.DB.prepare(`
@@ -212,14 +180,17 @@ async function cleanupDatabase(env) {
             WHERE (room_name, seat_number) NOT IN (SELECT room_name, seat_number FROM seats)
         `).run();
 
-        // Cleanup game yang sudah selesai
+        // Cleanup game yang sudah selesai (> 1 jam)
+        const oneHourAgo = Math.floor((now - 3600000) / 1000);
         await env.DB.prepare(`
             DELETE FROM active_games 
             WHERE game_ended = 1 AND created_at < ?
-        `).bind(Math.floor((now - 3600000) / 1000)).run();
+        `).bind(oneHourAgo).run();
 
-        console.log("Cleanup completed");
+        console.log("Cleanup completed at:", new Date().toISOString());
     } catch(e) {
         console.error("Cleanup error:", e);
     }
 }
+
+export { ChatWorker, GameWorker };
