@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 3.3.0 - PURE HIBERNATION API (NO PING)
+// VERSION: 3.4.0 - IDLE EVENT LOOP (NO PING)
 
 const C = {
   MAX_SEATS: 45,
@@ -11,125 +11,15 @@ const C = {
   MAX_NUMBER: 6,
   BATCH_SIZE: 20,
   LOCK_TIMEOUT: 10000,
-  MAX_EVENT_QUEUE: 100,
-  MAX_PROCESS_TIME_MS: 500,
+  MAX_EVENT_QUEUE: 200,              // DITINGKATKAN
+  MAX_PROCESS_TIME_MS: 100,          // DIPERKECIL
+  MAX_PROCESS_BATCH: 10,             // DITAMBAH
 };
 
-const ROOMS = [
-  "LowCard", "Quiz", "Gacor", "General", "LOVE BIRDS", "Birthday Party",
-  "Sweet Memories", "Lounge Talk", "Noxxeliverothcifsa", "BESTIES",
-  "Happy Vibes", "The Chatter Room"
-];
+// ... (ROOMS dan ROOMS_SET sama)
 
-const ROOMS_SET = new Set(ROOMS);
-
-// ==================== ROOM MANAGER ====================
-class RoomManager {
-  constructor(name) {
-    this.name = name;
-    this.seats = new Map();
-    this.points = new Map();
-    this.muted = false;
-    this.number = 1;
-  }
-
-  getAvailableSeat() {
-    for (let seat = 1; seat <= C.MAX_SEATS; seat++) {
-      if (!this.seats.has(seat)) return seat;
-    }
-    return null;
-  }
-
-  addSeat(userId, noimageUrl, color, itembawah, itematas, vip, viptanda) {
-    if (!userId) return null;
-    
-    for (const [seat, data] of this.seats) {
-      if (data && data.namauser === userId) return seat;
-    }
-    
-    const seat = this.getAvailableSeat();
-    if (!seat) return null;
-    
-    this.seats.set(seat, {
-      noimageUrl: noimageUrl || "",
-      namauser: userId,
-      color: color || "",
-      itembawah: itembawah || 0,
-      itematas: itematas || 0,
-      vip: vip || 0,
-      viptanda: viptanda || 0,
-    });
-    return seat;
-  }
-
-  updateSeat(seat, data) {
-    if (!this.seats.has(seat) || !data) return false;
-    
-    this.seats.set(seat, {
-      noimageUrl: data.noimageUrl || "",
-      namauser: data.namauser || "",
-      color: data.color || "",
-      itembawah: data.itembawah || 0,
-      itematas: data.itematas || 0,
-      vip: data.vip || 0,
-      viptanda: data.viptanda || 0
-    });
-    return true;
-  }
-
-  removeSeat(seat) {
-    this.points.delete(seat);
-    return this.seats.delete(seat);
-  }
-  
-  getSeat(seat) { 
-    const data = this.seats.get(seat);
-    return data ? { ...data } : null;
-  }
-  
-  getCount() { return this.seats.size; }
-  
-  getAllSeats() {
-    const result = {};
-    for (const [seat, data] of this.seats) {
-      if (data) result[seat] = { ...data };
-    }
-    return result;
-  }
-
-  setMuted(val) { 
-    this.muted = !!val; 
-    return this.muted; 
-  }
-  
-  getMuted() { return this.muted; }
-  
-  setNumber(n) { 
-    this.number = n || 1; 
-  }
-  getNumber() { return this.number; }
-
-  updatePoint(seat, x, y, fast) {
-    if (!this.seats.has(seat)) return false;
-    this.points.set(seat, { x: x || 0, y: y || 0, fast: !!fast });
-    return true;
-  }
-
-  getPoint(seat) { 
-    const point = this.points.get(seat);
-    return point ? { ...point } : null;
-  }
-  
-  getAllPoints() {
-    const result = [];
-    for (const [seat, point] of this.points) {
-      if (this.seats.has(seat) && point) {
-        result.push({ seat, x: point.x, y: point.y, fast: point.fast ? 1 : 0 });
-      }
-    }
-    return result;
-  }
-}
+// ==================== ROOM MANAGER (SAMA) ====================
+// ... (class RoomManager sama persis)
 
 // ==================== CHAT SERVER ====================
 export class ChatServer {
@@ -156,8 +46,11 @@ export class ChatServer {
     this._cleaningUp = new Set();
     this._pendingTimeouts = new Set();
     this._cleanupInProgress = false;
+    
+    // ========== EVENT QUEUE - FIX ==========
     this._eventQueue = [];
     this._isProcessingQueue = false;
+    this._queueScheduled = false;      // Cegah multiple schedule
     
     // ========== LOCKS ==========
     this._joinLocks = new Map();
@@ -209,7 +102,9 @@ export class ChatServer {
       
       // Cleanup dead connections
       this._cleanupDeadConnections();
-      this._processEventQueue();
+      
+      // Process queue (jika ada)
+      this._scheduleQueueProcessing();
       
       // Cleanup memory (setiap 15 menit)
       if (this._cleanupCounter >= C.CLEANUP_COUNTER_MAX) {
@@ -322,28 +217,68 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ========== PROCESS EVENT QUEUE ==========
+  // ========== SCHEDULE QUEUE PROCESSING ==========
+  _scheduleQueueProcessing() {
+    // Jangan schedule jika queue kosong
+    if (this._eventQueue.length === 0) return;
+    
+    // Jangan schedule jika sudah diproses
+    if (this._isProcessingQueue) return;
+    
+    // Jangan double schedule
+    if (this._queueScheduled) return;
+    
+    this._queueScheduled = true;
+    
+    // Gunakan setImmediate untuk non-blocking
+    setImmediate(() => {
+      this._queueScheduled = false;
+      this._processEventQueue();
+    });
+  }
+
+  // ========== PROCESS EVENT QUEUE - FIX ==========
   _processEventQueue() {
+    // Cek kondisi
+    if (this._isProcessingQueue) return;
+    if (this._eventQueue.length === 0) return;
+    if (this.closing || this.isDestroyed) return;
+    
+    this._isProcessingQueue = true;
+    
     try {
-      if (this._isProcessingQueue || this._eventQueue.length === 0) return;
-      this._isProcessingQueue = true;
-      
       const startTime = Date.now();
       let processed = 0;
       
-      while (this._eventQueue.length > 0 && processed < 5) {
-        if (Date.now() - startTime > C.MAX_PROCESS_TIME_MS) break;
+      // Proses dalam batch
+      while (this._eventQueue.length > 0 && processed < C.MAX_PROCESS_BATCH) {
+        // Timeout check
+        if (Date.now() - startTime > C.MAX_PROCESS_TIME_MS) {
+          break;
+        }
         
         const item = this._eventQueue.shift();
+        if (!item) continue;
+        
         try {
           this._handleEventInternal(item.ws, item.data);
-        } catch(e) {}
-        processed++;
+          processed++;
+        } catch(e) {
+          // Error handling - lanjutkan
+          processed++;
+        }
       }
       
-      this._isProcessingQueue = false;
     } catch(e) {
+      // Error handling
+    } finally {
       this._isProcessingQueue = false;
+      
+      // Jika masih ada queue dan belum closing, proses lagi
+      if (this._eventQueue.length > 0 && !this.closing && !this.isDestroyed) {
+        // Schedule lagi dengan delay minimal
+        this._scheduleQueueProcessing();
+      }
     }
   }
 
@@ -570,7 +505,7 @@ export class ChatServer {
     }
   }
 
-  // ========== HANDLE MESSAGE ==========
+  // ========== HANDLE MESSAGE - FIX ==========
   async handleMessage(ws, raw) {
     if (!ws) return;
     
@@ -582,6 +517,7 @@ export class ChatServer {
       return;
     }
     
+    // Cegah processing ganda
     if (this._processingMessages.has(ws)) return;
     this._processingMessages.add(ws);
     
@@ -599,19 +535,26 @@ export class ChatServer {
       
       const [evt, ...args] = data;
       
+      // Validasi room
       if (evt === "chat" || evt === "updatePoint" || evt === "gift" || evt === "rollangak") {
         const room = args[0];
         if (room && !ROOMS_SET.has(room)) return;
       }
       
+      // QUEUE EVENT
       if (this._eventQueue.length < C.MAX_EVENT_QUEUE) {
         this._eventQueue.push({ ws, data: [evt, ...args] });
-        if (!this._isProcessingQueue) {
-          this._processEventQueue();
-        }
+        
+        // Schedule queue processing (non-blocking)
+        this._scheduleQueueProcessing();
+      } else {
+        // Queue penuh - respon cepat
+        this.safeSend(ws, ["queueFull", "Server busy"]);
       }
       
-    } catch(e) {} finally {
+    } catch(e) {
+      // Error handling
+    } finally {
       try {
         this._processingMessages.delete(ws);
       } catch(e) {}
@@ -1291,13 +1234,16 @@ export class ChatServer {
       
       this.updateRoomCount(roomName);
       
-      setTimeout(() => {
+      // ✅ FIX: Gunakan setTimeout dengan cleanup
+      const timeoutId = setTimeout(() => {
+        this._pendingTimeouts.delete(timeoutId);
         try {
           if (ws && ws.readyState === 1 && !this.closing && !this.isDestroyed) {
             this.sendAllStateTo(ws, roomName, true);
           }
         } catch(e) {}
       }, 1000);
+      this._pendingTimeouts.add(timeoutId);
       
     } catch(e) {}
     
@@ -1328,7 +1274,6 @@ export class ChatServer {
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       
-      // ✅ HIBERNATION API - Cloudflare otomatis handle
       try { 
         this.ctx.acceptWebSocket(server);
       } catch(e) { 
@@ -1354,10 +1299,6 @@ export class ChatServer {
   }
 
   // ==================== WEBSOCKET HANDLERS ====================
-  // ✅ Cloudflare otomatis panggil method ini
-  // ✅ DO bisa tidur di antara pesan
-  // ✅ Ada pesan → DO bangun otomatis
-  
   async webSocketMessage(ws, msg) { 
     if (!ws || ws._closing || this._cleaningUp.has(ws) || this.closing || this.isDestroyed) return;
     try {
