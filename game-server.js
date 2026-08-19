@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 3.1.0 - USING ALARM SYSTEM (NO SETINTERVAL)
+// VERSION: 3.1.2 - SINGLE ALARM SLOT (NO SETINTERVAL)
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -21,7 +21,6 @@ const CONSTANTS = {
   LOWCARD_WINNER_KEY: 'lowcard_winner_',
   LOWCARD_RECORDING_KEY: 'lowcard_recording_status_',
   
-  // DICE
   DICE_ANSWER_TIME_MS: 20000,
   DICE_TOTAL_TIME_MS: 20000,
   MAX_DICE_VALUE: 6,
@@ -53,13 +52,11 @@ const CONSTANTS = {
   MAX_RECONNECT_ATTEMPTS: 5,
   RECONNECT_WINDOW_MS: 30000,
   
-  DICE_CHECK_INTERVAL_MS: 10000,
-  DICE_START_WINDOW_MS: 60000,
-  
-  // ALARM
-  ALARM_TICK_MS: 10000,        // 10 DETIK
-  CLEANUP_ALARM_MS: 60000,     // 1 MENIT
-  DICE_CHECK_ALARM_MS: 10000,  // 10 DETIK
+  // ===== ALARM CONFIG (1 SLOT) =====
+  ALARM_INTERVAL_MS: 10000,        // 10 DETIK (TICK)
+  CLEANUP_COUNTER_MAX: 6,          // 6 × 10 detik = 60 detik (1 menit)
+  STUCK_GAME_COUNTER_MAX: 6,       // 6 × 10 detik = 60 detik
+  DICE_CHECK_COUNTER_MAX: 1,       // 1 × 10 detik = 10 detik
 };
 
 const QUIZ_SCHEDULE = {
@@ -182,7 +179,7 @@ class DiceGameSystem {
   clearCache() { this.userScores.clear(); this._isLoaded = false; }
 }
 
-// ==================== GAME SERVER FULL CLASS ====================
+// ==================== GAME SERVER ====================
 export class GameServer {
   constructor(state, env) {
     try {
@@ -269,13 +266,13 @@ export class GameServer {
       this._kvCache = new KVCache();
       this.DICE_ROOM = DICE_ROOM;
       
-      // ========== ALARM ==========
-      this._lastDiceCheckAlarm = 0;
+      // ========== COUNTERS (1 SLOT ALARM) ==========
+      this._cleanupCounter = 0;
+      this._stuckGameCounter = 0;
+      this._diceCheckCounter = 0;
       
-      // ✅ SET ALARM PERTAMA - 10 DETIK
-      this._scheduleAlarm(CONSTANTS.ALARM_TICK_MS);
-      this._scheduleCleanupAlarm(CONSTANTS.CLEANUP_ALARM_MS);
-      this._scheduleDiceCheckAlarm(CONSTANTS.DICE_CHECK_ALARM_MS);
+      // ✅ SET 1 ALARM PERTAMA - 10 DETIK
+      this._scheduleAlarm(CONSTANTS.ALARM_INTERVAL_MS);
       
       // TUNDA INISIALISASI - 2 DETIK
       setTimeout(() => {
@@ -287,22 +284,8 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== SCHEDULE ALARM ==========
+  // ========== SCHEDULE ALARM (1 SLOT) ==========
   _scheduleAlarm(delayMs) {
-    if (this.closing || this.isDestroyed) return;
-    try {
-      this.state.storage.setAlarm(Date.now() + delayMs);
-    } catch(e) {}
-  }
-
-  _scheduleCleanupAlarm(delayMs) {
-    if (this.closing || this.isDestroyed) return;
-    try {
-      this.state.storage.setAlarm(Date.now() + delayMs);
-    } catch(e) {}
-  }
-
-  _scheduleDiceCheckAlarm(delayMs) {
     if (this.closing || this.isDestroyed) return;
     try {
       this.state.storage.setAlarm(Date.now() + delayMs);
@@ -331,221 +314,56 @@ export class GameServer {
     }
   }
 
-  // ========== ALARM - TICK 10 DETIK ==========
+  // ========== ALARM - 1 SLOT UNTUK SEMUA ==========
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
     try {
       this._tickCount++;
-      const tick = this._tickCount % 3;
       
-      switch(tick) {
-        case 0: 
-          this._cleanupDeadConnections();
-          break;
-        case 1: 
-          this._checkStuckGames();
-          break;
-        case 2: 
-          this._cleanupMemory();
-          break;
-      }
-      
+      // ===== 1. CLEANUP DEAD CONNECTIONS (SETIAP TICK) =====
+      this._cleanupDeadConnections();
       this._processEventQueue();
       
-    } catch(e) {}
-    
-    // ✅ Schedule alarm berikutnya (10 DETIK)
-    this._scheduleAlarm(CONSTANTS.ALARM_TICK_MS);
-  }
-
-  // ========== CLEANUP ALARM - 1 MENIT ==========
-  async _cleanupAlarm() {
-    if (this.closing || this.isDestroyed) return;
-    
-    try {
-      this._performCleanup();
-    } catch(e) {}
-    
-    // Schedule cleanup berikutnya (1 MENIT)
-    this._scheduleCleanupAlarm(CONSTANTS.CLEANUP_ALARM_MS);
-  }
-
-  // ========== DICE CHECK ALARM - 10 DETIK ==========
-  async _diceCheckAlarm() {
-    if (this.closing || this.isDestroyed) return;
-    
-    try {
-      // Hanya cek dice jika tidak ada game dice yang aktif
-      if (!this._tieActive && !this._isShowingDice && !this._diceTimeUpCooldown) {
-        if (this._isDiceTime()) {
-          const clients = this.wsClients?.get(DICE_ROOM);
-          if (clients?.size > 0 && !this.currentDiceRoll && !this._diceTimeout && !this._diceLock) {
-            this._startDiceFast();
-          }
-        }
-      }
-    } catch(e) {}
-    
-    // Schedule dice check berikutnya (10 DETIK)
-    this._scheduleDiceCheckAlarm(CONSTANTS.DICE_CHECK_ALARM_MS);
-  }
-
-  // ========== PERFORM CLEANUP ==========
-  _performCleanup() {
-    try {
-      this._cleanupDeadConnections();
-      this._cleanupUserConnections();
-      this._cleanupReconnectAttempts();
-      this._cleanupBannedUsers();
-      
-      if (Date.now() - this._lastErrorReset > CONSTANTS.ERROR_RESET_INTERVAL_MS) {
-        this._errorCount = 0;
-        this._lastErrorReset = Date.now();
-      }
-    } catch(e) {}
-  }
-
-  // ========== CLEANUP DEAD CONNECTIONS ==========
-  _cleanupDeadConnections() {
-    try {
-      const toRemove = [];
-      for (const [wsId, ws] of this.wsMap) {
-        if (!ws || ws.readyState !== 1 || ws._closing) {
-          toRemove.push(wsId);
-        }
-      }
-      for (const wsId of toRemove) {
-        const ws = this.wsMap.get(wsId);
-        if (ws) {
-          const room = this.clientRooms.get(wsId);
-          if (room) this._removeClientFromRoom(room, wsId);
-          this.clientRooms.delete(wsId);
-          this.wsMap.delete(wsId);
-        }
-      }
-    } catch(e) {}
-  }
-
-  // ========== CLEANUP USER CONNECTIONS ==========
-  _cleanupUserConnections() {
-    try {
-      let cleaned = 0;
-      for (const [username, conn] of this.userConnections) {
-        if (cleaned > 20) break;
-        if (!conn?.ws || conn.ws.readyState !== 1) {
-          this.userConnections.delete(username);
-          cleaned++;
-        }
-      }
-    } catch(e) {}
-  }
-
-  // ========== CLEANUP RECONNECT ATTEMPTS ==========
-  _cleanupReconnectAttempts() {
-    try {
-      const now = Date.now();
-      let cleaned = 0;
-      for (const [username, data] of this._reconnectAttempts) {
-        if (cleaned > 10) break;
-        if (now - (data.lastAttempt || 0) > 300000) {
-          this._reconnectAttempts.delete(username);
-          cleaned++;
-        }
-      }
-    } catch(e) {}
-  }
-
-  // ========== CLEANUP BANNED USERS ==========
-  _cleanupBannedUsers() {
-    try {
-      const now = Date.now();
-      let cleaned = 0;
-      for (const [username, banUntil] of this._bannedUsers) {
-        if (cleaned > 10) break;
-        if (now > banUntil) {
-          this._bannedUsers.delete(username);
-          cleaned++;
-        }
-      }
-    } catch(e) {}
-  }
-
-  // ========== CLEANUP MEMORY ==========
-  _cleanupMemory() {
-    try {
-      if (this.wsMap) {
-        const toRemove = [];
-        for (const [id, ws] of this.wsMap) {
-          if (!ws || ws.readyState !== 1 || ws._closing) {
-            toRemove.push(id);
-          }
-        }
-        for (const id of toRemove) {
-          this.wsMap.delete(id);
-        }
+      // ===== 2. CLEANUP (SETIAP 6 TICK = 60 DETIK) =====
+      this._cleanupCounter++;
+      if (this._cleanupCounter >= CONSTANTS.CLEANUP_COUNTER_MAX) {
+        this._performCleanup();
+        this._cleanupCounter = 0;
       }
       
-      if (this._eventQueue && this._eventQueue.length > 50) {
-        this._eventQueue.splice(0, this._eventQueue.length - 50);
+      // ===== 3. CHECK STUCK GAMES (SETIAP 6 TICK = 60 DETIK) =====
+      this._stuckGameCounter++;
+      if (this._stuckGameCounter >= CONSTANTS.STUCK_GAME_COUNTER_MAX) {
+        this._checkStuckGames();
+        this._stuckGameCounter = 0;
       }
       
-      const now = Date.now();
-      for (const [key, time] of this._gameLocks) {
-        if (now - time > 30000) this._gameLocks.delete(key);
+      // ===== 4. CHECK DICE (SETIAP 1 TICK = 10 DETIK) =====
+      this._diceCheckCounter++;
+      if (this._diceCheckCounter >= CONSTANTS.DICE_CHECK_COUNTER_MAX) {
+        this._checkDice();
+        this._diceCheckCounter = 0;
       }
-      for (const [key, time] of this._joinLocks) {
-        if (now - time > 30000) this._joinLocks.delete(key);
-      }
+      
     } catch(e) {}
+    
+    // ✅ SCHEDULE ALARM BERIKUTNYA (10 DETIK)
+    this._scheduleAlarm(CONSTANTS.ALARM_INTERVAL_MS);
   }
 
-  // ========== CHECK STUCK GAMES ==========
-  _checkStuckGames() {
+  // ========== CHECK DICE ==========
+  _checkDice() {
     try {
-      const now = Date.now();
-      for (const [room, game] of this.activeGames) {
-        if (!game?._isActive || game._gameEnded) continue;
-        
-        if (game._phase === 'draw' && game._drawPhaseStart &&
-            (now - game._drawPhaseStart) > CONSTANTS.STUCK_DRAW_TIMEOUT_MS) {
-          this._closeDrawPhase(room, game);
-        }
-        
-        if (game._phase === 'registration' && game.registrationOpen &&
-            game._createdAt && (now - game._createdAt) > CONSTANTS.STUCK_REGISTRATION_TIMEOUT_MS) {
-          this._closeRegistration(room, game);
-        }
+      if (this._tieActive || this._isShowingDice || this._diceTimeUpCooldown) return;
+      if (!this._isDiceTime()) return;
+      if (this.currentDiceRoll || this._diceTimeout || this._diceLock) return;
+      
+      const clients = this.wsClients?.get(DICE_ROOM);
+      if (clients?.size > 0) {
+        this._startDiceFast();
       }
     } catch(e) {}
-  }
-
-  // ========== TIMER MANAGEMENT ==========
-  _trackTimer(timer) {
-    if (timer) this._allTimers.add(timer);
-    return timer;
-  }
-
-  _clearTimer(timer) {
-    if (timer) {
-      clearTimeout(timer);
-      clearInterval(timer);
-      this._allTimers.delete(timer);
-    }
-  }
-
-  _withTimeout(promise, timeoutMs = CONSTANTS.KV_TIMEOUT_MS) {
-    return Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        const timer = setTimeout(() => reject(new Error('KV timeout')), timeoutMs);
-        this._trackTimer(timer);
-      })
-    ]);
-  }
-
-  _fireAndForget(promise) {
-    promise.catch(() => {});
   }
 
   // ========== IS DICE TIME ==========
@@ -1110,6 +928,163 @@ export class GameServer {
     const diff = now - startOfYear;
     const week = Math.ceil((diff / 86400000 + startOfYear.getUTCDay() + 1) / 7);
     return `${year}-W${String(week).padStart(2, '0')}`;
+  }
+
+  // ========== PERFORM CLEANUP ==========
+  _performCleanup() {
+    try {
+      this._cleanupDeadConnections();
+      this._cleanupUserConnections();
+      this._cleanupReconnectAttempts();
+      this._cleanupBannedUsers();
+      
+      if (Date.now() - this._lastErrorReset > CONSTANTS.ERROR_RESET_INTERVAL_MS) {
+        this._errorCount = 0;
+        this._lastErrorReset = Date.now();
+      }
+    } catch(e) {}
+  }
+
+  // ========== CLEANUP DEAD CONNECTIONS ==========
+  _cleanupDeadConnections() {
+    try {
+      const toRemove = [];
+      for (const [wsId, ws] of this.wsMap) {
+        if (!ws || ws.readyState !== 1 || ws._closing) {
+          toRemove.push(wsId);
+        }
+      }
+      for (const wsId of toRemove) {
+        const ws = this.wsMap.get(wsId);
+        if (ws) {
+          const room = this.clientRooms.get(wsId);
+          if (room) this._removeClientFromRoom(room, wsId);
+          this.clientRooms.delete(wsId);
+          this.wsMap.delete(wsId);
+        }
+      }
+    } catch(e) {}
+  }
+
+  // ========== CLEANUP USER CONNECTIONS ==========
+  _cleanupUserConnections() {
+    try {
+      let cleaned = 0;
+      for (const [username, conn] of this.userConnections) {
+        if (cleaned > 20) break;
+        if (!conn?.ws || conn.ws.readyState !== 1) {
+          this.userConnections.delete(username);
+          cleaned++;
+        }
+      }
+    } catch(e) {}
+  }
+
+  // ========== CLEANUP RECONNECT ATTEMPTS ==========
+  _cleanupReconnectAttempts() {
+    try {
+      const now = Date.now();
+      let cleaned = 0;
+      for (const [username, data] of this._reconnectAttempts) {
+        if (cleaned > 10) break;
+        if (now - (data.lastAttempt || 0) > 300000) {
+          this._reconnectAttempts.delete(username);
+          cleaned++;
+        }
+      }
+    } catch(e) {}
+  }
+
+  // ========== CLEANUP BANNED USERS ==========
+  _cleanupBannedUsers() {
+    try {
+      const now = Date.now();
+      let cleaned = 0;
+      for (const [username, banUntil] of this._bannedUsers) {
+        if (cleaned > 10) break;
+        if (now > banUntil) {
+          this._bannedUsers.delete(username);
+          cleaned++;
+        }
+      }
+    } catch(e) {}
+  }
+
+  // ========== CLEANUP MEMORY ==========
+  _cleanupMemory() {
+    try {
+      if (this.wsMap) {
+        const toRemove = [];
+        for (const [id, ws] of this.wsMap) {
+          if (!ws || ws.readyState !== 1 || ws._closing) {
+            toRemove.push(id);
+          }
+        }
+        for (const id of toRemove) {
+          this.wsMap.delete(id);
+        }
+      }
+      
+      if (this._eventQueue && this._eventQueue.length > 50) {
+        this._eventQueue.splice(0, this._eventQueue.length - 50);
+      }
+      
+      const now = Date.now();
+      for (const [key, time] of this._gameLocks) {
+        if (now - time > 30000) this._gameLocks.delete(key);
+      }
+      for (const [key, time] of this._joinLocks) {
+        if (now - time > 30000) this._joinLocks.delete(key);
+      }
+    } catch(e) {}
+  }
+
+  // ========== CHECK STUCK GAMES ==========
+  _checkStuckGames() {
+    try {
+      const now = Date.now();
+      for (const [room, game] of this.activeGames) {
+        if (!game?._isActive || game._gameEnded) continue;
+        
+        if (game._phase === 'draw' && game._drawPhaseStart &&
+            (now - game._drawPhaseStart) > CONSTANTS.STUCK_DRAW_TIMEOUT_MS) {
+          this._closeDrawPhase(room, game);
+        }
+        
+        if (game._phase === 'registration' && game.registrationOpen &&
+            game._createdAt && (now - game._createdAt) > CONSTANTS.STUCK_REGISTRATION_TIMEOUT_MS) {
+          this._closeRegistration(room, game);
+        }
+      }
+    } catch(e) {}
+  }
+
+  // ========== TIMER MANAGEMENT ==========
+  _trackTimer(timer) {
+    if (timer) this._allTimers.add(timer);
+    return timer;
+  }
+
+  _clearTimer(timer) {
+    if (timer) {
+      clearTimeout(timer);
+      clearInterval(timer);
+      this._allTimers.delete(timer);
+    }
+  }
+
+  _withTimeout(promise, timeoutMs = CONSTANTS.KV_TIMEOUT_MS) {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        const timer = setTimeout(() => reject(new Error('KV timeout')), timeoutMs);
+        this._trackTimer(timer);
+      })
+    ]);
+  }
+
+  _fireAndForget(promise) {
+    promise.catch(() => {});
   }
 
   // ========== WS HELPERS ==========
@@ -1946,8 +1921,7 @@ export class GameServer {
     } catch(e) { return 0; }
   }
 
-  // ========== LOW CARD GAME - FULL METHODS ==========
-
+  // ========== LOW CARD GAME ==========
   _isGameActuallyRunning(game) { 
     return game?._isActive === true && !game?._gameEnded; 
   }
