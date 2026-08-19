@@ -1,5 +1,6 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 4.0.0 - PURE WORKER (NO DO, TETAP KV)
+// VERSION: 8.0.0 - PURE WORKER (NO DO, TETAP KV)
+// AUTO RESET MEMORY ON DEPLOY
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -59,7 +60,7 @@ const CONSTANTS = {
 const QUIZ_SCHEDULE = {
   SESSIONS: [
     { start: 1, end: 2 },
-    { start: 12, end: 15 },
+    { start: 14, end: 15 },
     { start: 22, end: 23 }
   ],
   TIMEZONE_OFFSET: 8,
@@ -267,6 +268,10 @@ const STATE = {
   
   // Env
   env: null,
+  
+  // Deploy version
+  _deployVersion: null,
+  _lastDeployVersion: null,
 };
 
 // ==================== INIT DICE SYSTEM ====================
@@ -1025,15 +1030,76 @@ function fireAndForget(promise) {
 
 // ==================== GAME SERVER OBJECT ====================
 export const GameServer = {
-  async fetch(request, env) {
+  async fetch(request, env, deployVersion) {
     STATE.env = env;
+    STATE._deployVersion = deployVersion || Date.now();
     
-    // ✅ LOAD KV DATA ON STARTUP & START INTERVALS
+    // ✅ CEK VERSION - JIKA BERBEDA, RESET STATE
+    if (STATE._lastDeployVersion !== STATE._deployVersion) {
+      STATE._lastDeployVersion = STATE._deployVersion;
+      STATE._initialized = false;
+      
+      // ✅ RESET ALL STATE
+      STATE.activeGames.clear();
+      STATE.wsMap.clear();
+      STATE.wsClients.clear();
+      STATE.clientRooms.clear();
+      STATE.userConnections.clear();
+      STATE.currentDiceRoll = null;
+      STATE._diceLock = false;
+      STATE._tieActive = false;
+      STATE.diceAnswered.clear();
+      STATE._playerAnswers.clear();
+      STATE._eventQueue = [];
+      STATE._gameLocks.clear();
+      STATE._joinLocks.clear();
+      STATE._cleanupTimers.clear();
+      STATE._switchLocks.clear();
+      STATE._switchRetries.clear();
+      STATE._allTimers.clear();
+      STATE._reconnectAttempts.clear();
+      STATE._bannedUsers.clear();
+      STATE._tieBreakers.clear();
+      STATE._tieAnswers.clear();
+      STATE._tiePlayers = [];
+      STATE._tieRound = 0;
+      STATE._diceRound = 0;
+      STATE._canSubmitDiceAnswer = false;
+      STATE._isShowingDice = false;
+      STATE._diceTimeUpCooldown = false;
+      STATE.diceAutoEnabled = false;
+      STATE.diceHasWinner = false;
+      STATE.diceWinner = null;
+      STATE._tickCount = 0;
+      STATE._errorCount = 0;
+      STATE._circuitOpen = false;
+      STATE._requestCount = 0;
+      STATE._wsIdCounter = 0;
+      STATE._startTime = Date.now();
+      
+      // ✅ CLEAR INTERVALS
+      if (STATE._mainInterval) {
+        clearInterval(STATE._mainInterval);
+        STATE._mainInterval = null;
+      }
+      if (STATE._cleanupInterval) {
+        clearInterval(STATE._cleanupInterval);
+        STATE._cleanupInterval = null;
+      }
+      
+      // ✅ CLEAR ALL TIMERS
+      for (const timer of STATE._allTimers) {
+        clearTimeout(timer);
+        clearInterval(timer);
+      }
+      STATE._allTimers.clear();
+    }
+    
+    // ✅ LOAD KV DATA ON STARTUP
     if (!STATE._initialized) {
       STATE._initialized = true;
       await loadKVData();
       
-      // ✅ START INTERVAL DI DALAM HANDLER (BUKAN GLOBAL SCOPE)
       if (!STATE._mainInterval) {
         STATE._mainInterval = setInterval(() => {
           STATE._tickCount++;
@@ -1082,6 +1148,7 @@ export const GameServer = {
       if (url.pathname === "/health") {
         return new Response(JSON.stringify({
           status: "ok",
+          deployVersion: STATE._deployVersion,
           uptime: Date.now() - STATE._startTime,
           connections: STATE.wsMap.size,
           games: STATE.activeGames.size,
@@ -1097,6 +1164,7 @@ export const GameServer = {
       
       if (url.pathname === "/metrics") {
         return new Response(JSON.stringify({
+          deployVersion: STATE._deployVersion,
           connections: STATE.wsMap.size,
           games: STATE.activeGames.size,
           queue: STATE._eventQueue?.length || 0,
