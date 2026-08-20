@@ -1,4 +1,4 @@
-// ==================== CHAT-SERVER.JS ====================
+ // ==================== CHAT-SERVER.JS ====================
 // VERSION: 6.0.0 - MEMORY ONLY, NO LOOP, NO LOGS
 // ISOLATED ROOMS - CHAT TIDAK BOCOR KE ROOM LAIN
 
