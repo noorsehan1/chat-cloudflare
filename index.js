@@ -1,5 +1,5 @@
-// ==================== INDEX.JS - FIXED CHAT CONNECTION ====================
-// VERSION: 3.2.1 - FIXED CHAT CONNECTION
+// ==================== INDEX.JS - FULLY FIXED ====================
+// VERSION: 3.2.2 - FIXED CHAT WEBSOCKET ROUTING
 
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
@@ -89,6 +89,99 @@ class InstanceCache {
   clear() {
     this.cache.clear();
     this.circuitBreaker.clear();
+  }
+}
+
+// ==================== CHAT HANDLER - FIXED ====================
+class ChatHandler {
+  constructor(env) {
+    this.env = env;
+    this._instance = null;
+    this._cacheKey = 'chat_global';
+    this.cache = new InstanceCache();
+  }
+
+  getInstance() {
+    let cached = this.cache.get(this._cacheKey);
+    if (cached) {
+      return cached;
+    }
+    
+    const id = this.env.CHAT_SERVER.idFromName("global");
+    const obj = this.env.CHAT_SERVER.get(id);
+    this.cache.set(this._cacheKey, obj);
+    return obj;
+  }
+
+  // ✅ FIX: Langsung return response dari ChatServer
+  async fetch(request) {
+    try {
+      const obj = this.getInstance();
+      
+      // ✅ LANGSUNG FORWARD REQUEST KE CHAT SERVER
+      // ChatServer sudah handle WebSocket upgrade sendiri
+      const response = await obj.fetch(request);
+      
+      // Record success
+      this.cache.recordSuccess(this._cacheKey);
+      
+      // ✅ TAMBAHKAN CORS HEADER UNTUK RESPONSE
+      const corsResponse = new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers
+      });
+      
+      corsResponse.headers.set('Access-Control-Allow-Origin', '*');
+      corsResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      corsResponse.headers.set('Access-Control-Allow-Headers', 'Content-Type, Upgrade, Sec-WebSocket-Key, Sec-WebSocket-Version, Sec-WebSocket-Extensions');
+      corsResponse.headers.set('Access-Control-Allow-Credentials', 'true');
+      
+      // ✅ JIKA WEBSOCKET, PASTIKAN HEADER TEPAT
+      if (response.status === 101) {
+        // WebSocket upgrade, pertahankan semua header
+        return corsResponse;
+      }
+      
+      return corsResponse;
+      
+    } catch(e) {
+      this.cache.recordFailure(this._cacheKey);
+      return new Response(JSON.stringify({
+        error: "Chat server unavailable",
+        message: e.message,
+        timestamp: Date.now()
+      }), {
+        status: 503,
+        headers: { 
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+  }
+
+  // ✅ HEALTH CHECK
+  async health() {
+    try {
+      const obj = this.getInstance();
+      const response = await obj.fetch(new Request("https://dummy/health"));
+      if (response.ok) {
+        const data = await response.json();
+        return { status: "healthy", ...data };
+      }
+      return { status: "unhealthy" };
+    } catch(e) {
+      return { status: "error", error: e.message };
+    }
+  }
+
+  cleanup() {
+    this.cache.cleanup();
+  }
+
+  clear() {
+    this.cache.clear();
   }
 }
 
@@ -305,67 +398,6 @@ class InstancePool {
   }
 }
 
-// ==================== SINGLETON CHAT HANDLER ====================
-class ChatHandler {
-  constructor(env) {
-    this.env = env;
-    this._instance = null;
-    this._cacheKey = 'chat_global';
-    this.cache = new InstanceCache();
-  }
-
-  getInstance() {
-    // Cek cache
-    let cached = this.cache.get(this._cacheKey);
-    if (cached) {
-      return cached;
-    }
-    
-    // Buat instance baru
-    const id = this.env.CHAT_SERVER.idFromName("global");
-    const obj = this.env.CHAT_SERVER.get(id);
-    this.cache.set(this._cacheKey, obj);
-    return obj;
-  }
-
-  async fetch(request) {
-    try {
-      const obj = this.getInstance();
-      const response = await obj.fetch(request);
-      
-      // Record success
-      this.cache.recordSuccess(this._cacheKey);
-      
-      // ✅ Tambahkan CORS untuk chat
-      const corsResponse = new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers
-      });
-      
-      corsResponse.headers.set('Access-Control-Allow-Origin', '*');
-      corsResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      corsResponse.headers.set('Access-Control-Allow-Headers', 'Content-Type, Upgrade');
-      
-      return corsResponse;
-      
-    } catch(e) {
-      this.cache.recordFailure(this._cacheKey);
-      return new Response(JSON.stringify({
-        error: "Chat server unavailable",
-        message: e.message
-      }), {
-        status: 503,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-  }
-
-  cleanup() {
-    this.cache.cleanup();
-  }
-}
-
 // ==================== MAIN EXPORT ====================
 const instanceCache = new InstanceCache();
 let chatHandler = null;
@@ -390,44 +422,65 @@ export default {
         });
       }
       
-      // ========== CHAT SERVER - SEMUA PATH CHAT ==========
-      // ✅ PERBAIKAN: Tangani semua path yang berhubungan dengan chat
-      if (pathname === "/ws" || 
-          pathname === "/chat" || 
-          pathname === "/chat/ws" ||
-          pathname === "/socket" ||
-          pathname === "/websocket" ||
-          pathname === "/" ||
-          pathname === "/chat-socket" ||
-          pathname.startsWith("/chat/")) {
-        
-        // Initialize chat handler
+      // ========== CHAT SERVER ==========
+      // ✅ SEMUA PATH YANG BERHUBUNGAN DENGAN CHAT
+      const isChatPath = 
+        pathname === "/ws" ||
+        pathname === "/chat" ||
+        pathname === "/chat/ws" ||
+        pathname === "/socket" ||
+        pathname === "/websocket" ||
+        pathname === "/chat-socket" ||
+        pathname.startsWith("/chat/");
+      
+      // ✅ ROOT PATH: CEK APAKAH WEBSOCKET UPGRADE
+      if (pathname === "/") {
+        const upgrade = request.headers.get("Upgrade");
+        if (upgrade === "websocket") {
+          // ✅ INI REQUEST WEBSOCKET KE CHAT
+          if (!chatHandler) {
+            chatHandler = new ChatHandler(env);
+          }
+          return chatHandler.fetch(request);
+        }
+        // BUKAN WEBSOCKET, RETURN INFO
+        return new Response(JSON.stringify({
+          status: "Chat Server Running",
+          version: "3.3.11",
+          endpoints: {
+            websocket: "/ws",
+            chat: "/chat",
+            health: "/chat/health"
+          },
+          timestamp: Date.now()
+        }), {
+          status: 200,
+          headers: { 
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      }
+      
+      // ✅ CHAT PATHS
+      if (isChatPath) {
         if (!chatHandler) {
           chatHandler = new ChatHandler(env);
         }
         
-        // ✅ Untuk root path, cek apakah request WebSocket
-        if (pathname === "/") {
-          const upgrade = request.headers.get("Upgrade");
-          if (upgrade === "websocket") {
-            // Ini request WebSocket ke chat
-            return chatHandler.fetch(request);
-          }
-          // Bukan WebSocket, return info
-          return new Response(JSON.stringify({
-            status: "Chat Server Running",
-            version: "3.3.10",
-            endpoints: {
-              websocket: "/ws",
-              chat: "/chat"
-            }
-          }), {
+        // ✅ HEALTH CHECK KHUSUS CHAT
+        if (pathname === "/chat/health" || pathname === "/chat/ws/health") {
+          const health = await chatHandler.health();
+          return new Response(JSON.stringify(health), {
             status: 200,
-            headers: { 'Content-Type': 'application/json' }
+            headers: { 
+              'Content-Type': 'application/json',
+              'Access-Control-Allow-Origin': '*'
+            }
           });
         }
         
-        // ✅ Semua request chat (termasuk WebSocket)
+        // ✅ FORWARD KE CHAT SERVER
         return chatHandler.fetch(request);
       }
       
@@ -471,7 +524,10 @@ export default {
         const health = await gamePool.healthCheck();
         return new Response(JSON.stringify(health), {
           status: 200,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
         });
       }
       
@@ -491,7 +547,10 @@ export default {
           }
         }), {
           status: 200,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
         });
       }
       
@@ -525,30 +584,37 @@ export default {
       
       // ========== HEALTH CHECK GLOBAL ==========
       if (pathname === "/health") {
+        const chatHealth = chatHandler ? await chatHandler.health() : { status: "not_initialized" };
+        const gameHealth = gamePool ? await gamePool.healthCheck() : { status: "not_initialized" };
+        
         return new Response(JSON.stringify({
           status: "ok",
-          version: "3.2.1",
+          version: "3.2.2",
           timestamp: Date.now(),
           services: {
-            chat: chatHandler ? "ready" : "not_initialized",
-            game: gamePool ? "ready" : "not_initialized"
+            chat: chatHealth,
+            game: gameHealth
           }
         }), {
           status: 200,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*'
+          }
         });
       }
       
       // ========== DEFAULT ==========
       return new Response(JSON.stringify({
         status: "running",
-        version: "3.2.1",
+        version: "3.2.2",
         timestamp: Date.now(),
         endpoints: {
           chat: {
             websocket: "/ws",
             chat: "/chat",
-            root: "/"
+            root: "/",
+            health: "/chat/health"
           },
           game: {
             websocket: "/game/ws?room={room_name}",
@@ -565,7 +631,8 @@ export default {
         status: 200,
         headers: { 
           'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache'
+          'Cache-Control': 'no-cache',
+          'Access-Control-Allow-Origin': '*'
         }
       });
       
@@ -579,7 +646,8 @@ export default {
         status: 500,
         headers: {
           'Retry-After': '30',
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
         }
       });
     }
