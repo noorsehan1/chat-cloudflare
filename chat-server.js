@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 6.0.3 - FIXED SET ID & JOIN ROOM - TIDAK HAPUS WS
+// VERSION: 6.0.2 - FIXED SET ID - TIDAK HAPUS WS
 // ISOLATED ROOMS - CHAT TIDAK BOCOR KE ROOM LAIN
 
 const C = {
@@ -1093,27 +1093,35 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ==================== HANDLE SET ID - FIXED ====================
+  // ========== HANDLE SET ID (FIXED - TIDAK HAPUS WS) ==========
   _handleSetId(ws, username, isNewUser) {
+    // Validasi input
     if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
-      try { if (ws?.readyState === 1) ws.close(1000, "Invalid username"); } catch(e) {}
+      try { 
+        if (ws?.readyState === 1) {
+          ws.close(1000, "Invalid username"); 
+        }
+      } catch(e) {}
       return;
     }
     
     if (ws.readyState !== 1) {
-      try { this.cleanup(ws); } catch(e) {}
+      try { 
+        this.cleanup(ws); 
+      } catch(e) {}
       return;
     }
     
-    // ===== CEK USER SUDAH ADA DI ROOM LAIN =====
-    const existing = this._isUserInAnyRoom(username);
+    // ====== CEK EXISTING SEAT INFO ======
+    const existingSeatInfo = this.userSeat.get(username);
     
-    if (existing) {
+    // Jika user memiliki seat info multi
+    if (existingSeatInfo?.isMulti === true) {
       // Cek apakah ini koneksi yang sama
       let isSameConnection = false;
-      const conns = this.userConnections.get(username);
-      if (conns) {
-        for (const conn of conns) {
+      const connections = this.userConnections.get(username);
+      if (connections) {
+        for (const conn of connections) {
           if (conn === ws) { 
             isSameConnection = true; 
             break; 
@@ -1121,8 +1129,69 @@ export class ChatServer {
         }
       }
       
-      // HANYA hapus jika BUKAN koneksi yang sama
+      // Jika bukan koneksi yang sama, hapus seat lama
       if (!isSameConnection) {
+        const roomName = existingSeatInfo.room;
+        const seat = existingSeatInfo.seat;
+        const roomMan = this.rooms.get(roomName);
+        if (roomMan) {
+          roomMan.removeSeat(seat);
+          this.broadcast(roomName, ["removeKursi", roomName, seat]);
+          this.updateRoomCount(roomName);
+        }
+        
+        this.userSeat.delete(username);
+        this.userRoom.delete(username);
+        this._userRoomMapping.delete(username);
+        
+        // Hapus dari wsActiveMulti
+        for (const [wsKey, data] of this.wsActiveMulti) {
+          if (data && data.username === username) {
+            this.wsActiveMulti.delete(wsKey);
+            if (data.room) {
+              const clients = this.roomClients.get(data.room);
+              if (clients) clients.delete(wsKey);
+            }
+          }
+        }
+        
+        // Hapus koneksi lama (bukan WS saat ini)
+        if (connections) {
+          const toRemove = [];
+          for (const conn of connections) {
+            if (conn !== ws) {
+              this.wsSet.delete(conn);
+              toRemove.push(conn);
+            }
+          }
+          for (const conn of toRemove) {
+            connections.delete(conn);
+            try { conn.close(1000, "Replaced by new connection"); } catch(e) {}
+          }
+        }
+      }
+    }
+    
+    // ====== CEK USER DI ROOM LAIN ======
+    const existing = this._isUserInAnyRoom(username);
+    if (existing) {
+      // Cek apakah ini koneksi yang sama
+      let isSame = false;
+      const seatInfo = this.userSeat.get(username);
+      if (seatInfo && seatInfo.room === existing.room) {
+        const conns = this.userConnections.get(username);
+        if (conns) {
+          for (const conn of conns) {
+            if (conn === ws) { 
+              isSame = true; 
+              break; 
+            }
+          }
+        }
+      }
+      
+      // Hanya hapus jika bukan koneksi yang sama
+      if (!isSame) {
         const roomMan = this.rooms.get(existing.room);
         if (roomMan) {
           roomMan.removeSeat(existing.seat);
@@ -1135,7 +1204,7 @@ export class ChatServer {
       }
     }
     
-    // ===== SET PROPERTIES WS =====
+    // ====== SET WS PROPERTIES (TANPA MENGHAPUS WS) ======
     ws.username = username;
     ws.idtarget = username;
     ws.room = null;
@@ -1144,19 +1213,22 @@ export class ChatServer {
     
     ws.serializeAttachment({ username: username });
     
-    // ===== TAMBAHKAN KE CONNECTIONS =====
+    // ====== TAMBAHKAN KE USER CONNECTIONS (PERTAHANKAN WS) ======
     let connections = this.userConnections.get(username);
     if (!connections) { 
       connections = new Set(); 
       this.userConnections.set(username, connections); 
     }
-    if (!connections.has(ws)) connections.add(ws);
+    if (!connections.has(ws)) {
+      connections.add(ws);
+    }
     
-    // ===== TAMBAHKAN KE WS SET =====
-    if (!this.wsSet.has(ws)) this.wsSet.add(ws);
+    // ====== TAMBAHKAN KE WS SET (PERTAHANKAN WS) ======
+    if (!this.wsSet.has(ws)) {
+      this.wsSet.add(ws);
+    }
     
-    // ===== KIRIM PESAN =====
-    // JANGAN HAPUS WS! Biarkan tetap aktif
+    // ====== KIRIM RESPONSE ======
     if (isNewUser) { 
       this.safeSend(ws, ["joinroomawal"]); 
     } else { 
@@ -1164,7 +1236,7 @@ export class ChatServer {
     }
   }
 
-  // ========== HANDLE JOIN - FIXED ==========
+  // ========== HANDLE JOIN ==========
   _handleJoin(ws, roomName) {
     if (!ws || !ws.username || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) {
       return false;
@@ -1191,9 +1263,9 @@ export class ChatServer {
     }
   }
 
-  // ========== JOIN INTERNAL - FIXED ==========
+  // ========== JOIN INTERNAL ==========
   async _joinInternal(ws, roomName, username) {
-    // Cek apakah WS masih valid - JANGAN HAPUS WS
+    // Cek apakah WS masih valid
     if (!ws || ws.readyState !== 1 || ws._closing) {
       return false;
     }
@@ -1303,9 +1375,6 @@ export class ChatServer {
       this.safeSend(ws, ["roomUserCount", roomName, roomMan.getCount()]);
       
       this.updateRoomCount(roomName);
-      
-      // JANGAN HAPUS WS DISINI!
-      // JANGAN PANGGIL VALIDATE USER YANG BISA MENGHAPUS WS!
       
       setTimeout(() => {
         try {
