@@ -195,146 +195,6 @@ export class ChatServer {
     }
   }
 
-  // ========== CHECK USER DI SEMUA ROOM ==========
-  _isUserInAnyRoom(username) {
-    if (!username) return null;
-    
-    const roomFromMapping = this._userRoomMapping.get(username);
-    if (roomFromMapping) {
-      const roomMan = this.rooms.get(roomFromMapping);
-      if (roomMan) {
-        for (const [seat, seatData] of roomMan.seats) {
-          if (seatData && seatData.namauser === username) {
-            return { room: roomFromMapping, seat: seat };
-          }
-        }
-      }
-      this._userRoomMapping.delete(username);
-    }
-    
-    for (const [roomName, roomMan] of this.rooms) {
-      if (!roomMan) continue;
-      for (const [seat, seatData] of roomMan.seats) {
-        if (seatData && seatData.namauser === username) {
-          this._userRoomMapping.set(username, roomName);
-          return { room: roomName, seat: seat };
-        }
-      }
-    }
-    
-    return null;
-  }
-
-  // ========== FORCE REMOVE USER DARI ROOM ==========
-  _forceRemoveUserFromRoom(username, roomName) {
-    if (!username || !roomName) return false;
-    
-    const roomMan = this.rooms.get(roomName);
-    if (!roomMan) return false;
-    
-    let removed = false;
-    for (const [seat, seatData] of roomMan.seats) {
-      if (seatData && seatData.namauser === username) {
-        roomMan.removeSeat(seat);
-        this.broadcast(roomName, ["removeKursi", roomName, seat]);
-        this.updateRoomCount(roomName);
-        removed = true;
-        break;
-      }
-    }
-    
-    if (this._userRoomMapping.get(username) === roomName) {
-      this._userRoomMapping.delete(username);
-    }
-    
-    // Hanya hapus jika tidak ada koneksi lain yang aktif
-    const connections = this.userConnections.get(username);
-    let hasOtherConn = false;
-    if (connections) {
-      for (const conn of connections) {
-        if (conn && conn.readyState === 1 && !conn._closing) {
-          hasOtherConn = true;
-          break;
-        }
-      }
-    }
-    
-    if (!hasOtherConn) {
-      const seatInfo = this.userSeat.get(username);
-      if (seatInfo && seatInfo.room === roomName) {
-        this.userSeat.delete(username);
-        this.userRoom.delete(username);
-      }
-    }
-    
-    return removed;
-  }
-
-  // ========== REBUILD USER ROOM MAPPING ==========
-  _rebuildUserRoomMapping() {
-    this._userRoomMapping.clear();
-    for (const [username, seatInfo] of this.userSeat) {
-      if (seatInfo && seatInfo.room) {
-        this._userRoomMapping.set(username, seatInfo.room);
-      }
-    }
-  }
-
-  // ========== VALIDASI USER HANYA DI 1 ROOM ==========
-  _validateUserInOneRoomOnly(username) {
-    if (!username) return true;
-    
-    const rooms = [];
-    for (const [roomName, roomMan] of this.rooms) {
-      if (!roomMan) continue;
-      for (const [seat, seatData] of roomMan.seats) {
-        if (seatData && seatData.namauser === username) {
-          rooms.push({ room: roomName, seat: seat });
-        }
-      }
-    }
-    
-    if (rooms.length > 1) {
-      for (let i = 1; i < rooms.length; i++) {
-        const { room, seat } = rooms[i];
-        const roomMan = this.rooms.get(room);
-        if (roomMan) {
-          roomMan.removeSeat(seat);
-          this.broadcast(room, ["removeKursi", room, seat]);
-          this.updateRoomCount(room);
-        }
-      }
-      
-      if (rooms.length > 0) {
-        this._userRoomMapping.set(username, rooms[0].room);
-      }
-      
-      return false;
-    }
-    
-    return true;
-  }
-
-  // ========== CLEANUP ON ALARM ==========
-  _cleanupOnAlarm() {
-    const allUsers = new Set();
-    for (const [roomName, roomMan] of this.rooms) {
-      if (!roomMan) continue;
-      for (const [seat, seatData] of roomMan.seats) {
-        if (seatData && seatData.namauser) {
-          allUsers.add(seatData.namauser);
-        }
-      }
-    }
-    
-    for (const username of allUsers) {
-      this._validateUserInOneRoomOnly(username);
-    }
-    
-    this._rebuildUserRoomMapping();
-    this._cleanupDeadConnections();
-  }
-
   // ========== ALARM ==========
   async alarm() {
     if (this.closing || this.isDestroyed) return;
@@ -343,7 +203,6 @@ export class ChatServer {
     this._cleanupDeadConnections();
     this._cleanupStaleLocks();
     this._cleanupMemory();
-    this._cleanupOnAlarm();
     
     this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
   }
@@ -676,14 +535,6 @@ export class ChatServer {
           const multiRoomname = args[1];
           if (!multiUsername || !multiRoomname || this.closing || this.isDestroyed) break;
           
-          const existing = this._isUserInAnyRoom(multiUsername);
-          if (existing) {
-            this._forceRemoveUserFromRoom(multiUsername, existing.room);
-            this._userRoomMapping.delete(multiUsername);
-            this.userSeat.delete(multiUsername);
-            this.userRoom.delete(multiUsername);
-          }
-          
           const roomMan = this.rooms.get(multiRoomname);
           if (!roomMan || roomMan.getCount() >= C.MAX_SEATS) break;
           
@@ -728,8 +579,6 @@ export class ChatServer {
             
             this.safeSend(ws, ["rooMasukMulti", seat, multiRoomname]);
             this.broadcast(multiRoomname, ["roomUserCount", multiRoomname, roomMan.getCount()]);
-            
-            this._validateUserInOneRoomOnly(multiUsername);
           } catch(e) {}
           break;
         }
@@ -784,19 +633,6 @@ export class ChatServer {
           try {
             const seatInfo = this.userSeat.get(targetUsername);
             if (!seatInfo) break;
-            
-            const existing = this._isUserInAnyRoom(targetUsername);
-            if (existing && existing.room !== seatInfo.room) {
-              seatInfo.room = existing.room;
-              seatInfo.seat = existing.seat;
-              this.userSeat.set(targetUsername, seatInfo);
-              this.userRoom.set(targetUsername, existing.room);
-              this._userRoomMapping.set(targetUsername, existing.room);
-              ws.serializeAttachment({
-                username: targetUsername,
-                seatInfo: seatInfo
-              });
-            }
             
             const roomName = seatInfo.room;
             const seatNumber = seatInfo.seat;
@@ -1161,35 +997,6 @@ export class ChatServer {
       }
     }
     
-    // Cek apakah user ada di room lain
-    const existing = this._isUserInAnyRoom(username);
-    if (existing) {
-      // Cek apakah ini koneksi yang sama dengan yang ada di room
-      let isSame = false;
-      const seatInfo = this.userSeat.get(username);
-      if (seatInfo && seatInfo.room === existing.room) {
-        const conns = this.userConnections.get(username);
-        if (conns) {
-          for (const conn of conns) {
-            if (conn === ws) { isSame = true; break; }
-          }
-        }
-      }
-      
-      // Hanya hapus jika bukan koneksi yang sama
-      if (!isSame) {
-        const roomMan = this.rooms.get(existing.room);
-        if (roomMan) {
-          roomMan.removeSeat(existing.seat);
-          this.broadcast(existing.room, ["removeKursi", existing.room, existing.seat]);
-          this.updateRoomCount(existing.room);
-        }
-        this.userSeat.delete(username);
-        this.userRoom.delete(username);
-        this._userRoomMapping.delete(username);
-      }
-    }
-    
     ws.username = username;
     ws.idtarget = username;
     ws.room = null;
@@ -1245,51 +1052,6 @@ export class ChatServer {
     // Cek apakah WS masih valid
     if (!ws || ws.readyState !== 1 || ws._closing) {
       return false;
-    }
-    
-    // Cek dulu apakah user sudah ada di room ini
-    const existing = this._isUserInAnyRoom(username);
-    
-    // Jika user sudah di room yang sama, langsung kembalikan seat
-    if (existing && existing.room === roomName) {
-      const roomMan = this.rooms.get(roomName);
-      if (roomMan) {
-        const seat = existing.seat;
-        const seatData = roomMan.getSeat(seat);
-        if (seatData && seatData.namauser === username) {
-          // Update seat info di WS
-          const seatInfo = { room: roomName, seat, isMulti: false };
-          this.userSeat.set(username, seatInfo);
-          this.userRoom.set(username, roomName);
-          ws.room = roomName;
-          ws.roomname = roomName;
-          
-          // Tambahkan ke room clients jika belum
-          const roomClients = this.roomClients.get(roomName);
-          if (roomClients && !roomClients.has(ws)) roomClients.add(ws);
-          
-          this.safeSend(ws, ["rooMasuk", seat, roomName]);
-          this.safeSend(ws, ["numberKursiSaya", seat]);
-          this.safeSend(ws, ["muteTypeResponse", roomMan.getMuted(), roomName]);
-          this.updateRoomCount(roomName);
-          
-          setTimeout(() => {
-            try {
-              if (ws && ws.readyState === 1 && !this.closing && !this.isDestroyed) {
-                this.sendAllStateTo(ws, roomName, true);
-              }
-            } catch(e) {}
-          }, 1000);
-          
-          return true;
-        }
-      }
-    }
-    
-    // Jika user ada di room lain, hapus dari room lain
-    if (existing && existing.room !== roomName) {
-      this._forceRemoveUserFromRoom(username, existing.room);
-      await new Promise(resolve => setTimeout(resolve, 100));
     }
     
     const roomMan = this.rooms.get(roomName);
@@ -1352,9 +1114,6 @@ export class ChatServer {
       this.safeSend(ws, ["roomUserCount", roomName, roomMan.getCount()]);
       
       this.updateRoomCount(roomName);
-      
-      // Jangan panggil validate di sini untuk mencegah race condition
-      // this._validateUserInOneRoomOnly(username);
       
       setTimeout(() => {
         try {
