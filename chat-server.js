@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.4.0 - SIMPLIFIED & WORKING
+// VERSION: 4.5.0 - FIXED HIBERNATION WITH PERSISTENT STATE
 
 const C = {
   MAX_SEATS: 45,
@@ -134,6 +134,7 @@ export class ChatServer {
     this.closing = false;
     this.isDestroyed = false;
     this._startTime = Date.now();
+    this._restored = false;
     
     // ========== WEBSOCKET ==========
     this.wsSet = new Set();
@@ -157,7 +158,6 @@ export class ChatServer {
     // ========== NUMBER ==========
     this.currentNumber = 1;
     this._isNumberUpdating = false;
-    this._numberLoaded = false;
     
     // ========== INIT ROOMS ==========
     for (const room of ROOMS) {
@@ -165,26 +165,73 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
-    // ========== PULIHKAN STATE ==========
-    this._restoreState();
+    // ========== RESTORE STATE ==========
+    this._restoreAllState();
   }
 
-  // ========== RESTORE STATE ==========
-  async _restoreState() {
+  // ========== RESTORE ALL STATE ==========
+  async _restoreAllState() {
     try {
-      const saved = await this.ctx.storage.get("currentNumber");
-      if (saved !== undefined) {
-        this.currentNumber = saved;
+      // 1. Restore number
+      const savedNumber = await this.ctx.storage.get("currentNumber");
+      if (savedNumber !== undefined) {
+        this.currentNumber = savedNumber;
         for (const room of this.rooms.values()) {
           if (room) room.setNumber(this.currentNumber);
         }
       }
-      this._numberLoaded = true;
       
-      // Jadwalkan alarm pertama
+      // 2. Restore websocket connections
+      const webSockets = this.ctx.getWebSockets();
+      for (const ws of webSockets) {
+        try {
+          const attachment = ws.deserializeAttachment();
+          if (attachment && attachment.username) {
+            // Restore to userConnections
+            let conns = this.userConnections.get(attachment.username);
+            if (!conns) conns = new Set();
+            conns.add(ws);
+            this.userConnections.set(attachment.username, conns);
+            
+            // Restore seat info
+            if (attachment.seatInfo) {
+              this.userSeat.set(attachment.username, attachment.seatInfo);
+              this.userRoom.set(attachment.username, attachment.seatInfo.room);
+              
+              // Restore room clients
+              if (attachment.seatInfo.room) {
+                const roomClients = this.roomClients.get(attachment.seatInfo.room);
+                if (roomClients) roomClients.add(ws);
+              }
+              
+              // Restore multi
+              if (attachment.seatInfo.isMulti) {
+                this.wsActiveMulti.set(ws, {
+                  username: attachment.username,
+                  room: attachment.seatInfo.room
+                });
+              }
+            }
+            
+            // Restore ws properties
+            ws.username = attachment.username;
+            ws.room = attachment.seatInfo?.room || null;
+            ws.roomname = attachment.seatInfo?.room || null;
+            ws.idtarget = attachment.username;
+            ws._closing = false;
+            
+            this.wsSet.add(ws);
+          }
+        } catch(e) {}
+      }
+      
+      this._restored = true;
+      
+      // 3. Schedule first alarm
       if (!this.closing && !this.isDestroyed) {
         this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
       }
+      
     } catch(e) {}
   }
 
@@ -200,7 +247,7 @@ export class ChatServer {
     this._cleanupStaleLocks();
     this._cleanupMemory();
     
-    // Jadwalkan berikutnya
+    // Schedule next
     this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
   }
 
@@ -555,13 +602,20 @@ export class ChatServer {
           if (!seat) break;
           
           try {
-            this.userSeat.set(multiUsername, { room: multiRoomname, seat, isMulti: true });
+            const seatInfo = { room: multiRoomname, seat, isMulti: true };
+            this.userSeat.set(multiUsername, seatInfo);
             this.userRoom.set(multiUsername, multiRoomname);
             
             let connections = this.userConnections.get(multiUsername);
             if (!connections) connections = new Set();
             if (!connections.has(ws)) connections.add(ws);
             this.userConnections.set(multiUsername, connections);
+            
+            // ✅ SIMPAN KE ATTACHMENT
+            ws.serializeAttachment({
+              username: multiUsername,
+              seatInfo: seatInfo
+            });
             
             this.wsActiveMulti.set(ws, { username: multiUsername, room: multiRoomname });
             const roomClients = this.roomClients.get(multiRoomname);
@@ -611,6 +665,9 @@ export class ChatServer {
               ws.username = null;
               ws.idtarget = null;
             }
+            
+            // ✅ HAPUS ATTACHMENT
+            ws.serializeAttachment({});
           } catch(e) {}
           break;
         }
@@ -638,6 +695,12 @@ export class ChatServer {
             ws.idtarget = targetUsername;
             ws.room = roomName;
             ws.roomname = roomName;
+            
+            // ✅ SIMPAN KE ATTACHMENT
+            ws.serializeAttachment({
+              username: targetUsername,
+              seatInfo: seatInfo
+            });
             
             this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
             this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
@@ -908,6 +971,27 @@ export class ChatServer {
       return;
     }
     
+    // Cek multi user
+    const existingSeatInfo = this.userSeat.get(username);
+    if (existingSeatInfo?.isMulti === true) {
+      try {
+        let connections = this.userConnections.get(username);
+        if (!connections) { connections = new Set(); this.userConnections.set(username, connections); }
+        if (!connections.has(ws)) connections.add(ws);
+        if (!this.wsSet.has(ws)) this.wsSet.add(ws);
+        
+        ws.username = username;
+        ws.idtarget = username;
+        ws.room = null;
+        ws.roomname = null;
+        ws._closing = false;
+        
+        ws.serializeAttachment({ username: username });
+        this.safeSend(ws, ["multiUserActive", username]);
+      } catch(e) {}
+      return;
+    }
+    
     try {
       // Hapus koneksi lama
       const oldConnections = this.userConnections.get(username);
@@ -954,6 +1038,9 @@ export class ChatServer {
       ws.room = null;
       ws.roomname = null;
       ws._closing = false;
+      
+      // ✅ SIMPAN KE ATTACHMENT
+      ws.serializeAttachment({ username: username });
       
       let connections = this.userConnections.get(username);
       if (!connections) { connections = new Set(); this.userConnections.set(username, connections); }
@@ -1030,11 +1117,18 @@ export class ChatServer {
     }
     
     try {
-      this.userSeat.set(username, { room: roomName, seat, isMulti: false });
+      const seatInfo = { room: roomName, seat, isMulti: false };
+      this.userSeat.set(username, seatInfo);
       this.userRoom.set(username, roomName);
       ws.room = roomName;
       ws.roomname = roomName;
       ws.idtarget = username;
+      
+      // ✅ SIMPAN KE ATTACHMENT
+      ws.serializeAttachment({
+        username: username,
+        seatInfo: seatInfo
+      });
       
       const roomClients = this.roomClients.get(roomName);
       if (roomClients && !roomClients.has(ws)) roomClients.add(ws);
@@ -1090,6 +1184,9 @@ export class ChatServer {
       server._closing = false;
       server._wsId = Date.now() + Math.random();
       
+      // ✅ SIMPAN ATTACHMENT KOSONG UNTUK WS BARU
+      server.serializeAttachment({});
+      
       if (!this.wsSet.has(server)) this.wsSet.add(server);
       
       return new Response(null, { status: 101, webSocket: client });
@@ -1101,7 +1198,14 @@ export class ChatServer {
   // ==================== WEBSOCKET HANDLERS ====================
   
   async webSocketMessage(ws, msg) {
+    // ✅ HANDLER INI DIPANGGIL OTOMATIS SAAT ADA PESAN
     if (!ws || ws._closing || this._cleaningUp.has(ws) || this.closing || this.isDestroyed) return;
+    
+    // ✅ PASTIKAN STATE SUDAH DI-RESTORE
+    if (!this._restored) {
+      await this._restoreAllState();
+    }
+    
     try { await this.handleMessage(ws, msg); } catch(e) {}
   }
 
