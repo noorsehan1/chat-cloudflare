@@ -1,6 +1,6 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 6.1.0 - NO PING/PONG, STATE PERSISTENCE
-// ISOLATED ROOMS - CHAT TIDAK BOCOR KE ROOM LAIN
+// VERSION: 6.2.0 - HAPUS STATE HANYA SAAT CLOSE/ERROR
+// STATE TETAP ADA SELAMA WEBSOCKET AKTIF
 
 const C = {
   MAX_SEATS: 45,
@@ -143,7 +143,6 @@ class RoomManager {
     return result;
   }
   
-  // ===== METHOD UNTUK CEK USER =====
   hasUser(username) {
     for (const [seat, data] of this.seats) {
       if (data && data.namauser === username) return true;
@@ -204,7 +203,7 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
-    // ========== SCHEDULE ALARM PERTAMA ==========
+    // ========== SCHEDULE ALARM ==========
     if (!this.closing && !this.isDestroyed) {
       this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
     }
@@ -277,12 +276,13 @@ export class ChatServer {
     }
   }
 
-  // ========== CLEANUP ON ALARM - TIDAK MENGHAPUS STATE ==========
+  // ========== CLEANUP ON ALARM - JANGAN HAPUS STATE ==========
   _cleanupOnAlarm() {
     // HANYA REBUILD MAPPING, TIDAK MENGHAPUS STATE
     this._rebuildUserRoomMapping();
     
     // HANYA BERSIHKAN KONEKSI YANG SUDAH PASTI MATI
+    // TAPI JANGAN HAPUS STATE - STATE DIHAPUS SAAT CLOSE/ERROR
     this._cleanupDeadConnectionsOnly();
   }
 
@@ -298,7 +298,7 @@ export class ChatServer {
       
       for (const ws of toRemove) {
         try {
-          // HAPUS DARI SET TAPI JANGAN HAPUS STATE USER
+          // HAPUS DARI SET
           this.wsSet.delete(ws);
           
           // HAPUS DARI ROOM CLIENTS
@@ -339,7 +339,6 @@ export class ChatServer {
   _cleanupMemory() {
     try {
       // HANYA BERSIHKAN REFERENSI YANG TIDAK TERPAKAI
-      // TIDAK MENGHAPUS STATE USER
       for (const [username, connections] of this.userConnections) {
         const toRemove = [];
         for (const conn of connections) {
@@ -351,7 +350,6 @@ export class ChatServer {
           connections.delete(conn);
         }
         // JANGAN HAPUS userConnections meskipun kosong
-        // STATE TETAP DI PERTAHANKAN
       }
     } catch(e) {}
   }
@@ -404,9 +402,7 @@ export class ChatServer {
         const item = this._eventQueue.shift();
         try { 
           this._handleEventInternal(item.ws, item.data); 
-        } catch(e) {
-          // JANGAN HAPUS STATE KALAU ERROR
-        }
+        } catch(e) {}
         processed++;
       }
       this._isProcessingQueue = false;
@@ -449,7 +445,6 @@ export class ChatServer {
       for (const ws of toRemove) {
         try {
           clients.delete(ws);
-          // JANGAN PANGGIL cleanup() - TIDAK HAPUS STATE
           this.wsSet.delete(ws);
         } catch(e) {}
       }
@@ -472,7 +467,6 @@ export class ChatServer {
       ws.send(JSON.stringify(msg));
       return true;
     } catch(e) {
-      // JANGAN PANGGIL cleanup() - TIDAK HAPUS STATE
       this.wsSet.delete(ws);
       return false;
     }
@@ -531,7 +525,7 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ========== CLEANUP - MODIFIED: TIDAK HAPUS STATE ==========
+  // ========== CLEANUP - HAPUS STATE KALAU WEBSOCKET CLOSE/ERROR ==========
   cleanup(ws) {
     if (!ws || ws._cleaning || this._cleaningUp.has(ws)) return;
     ws._cleaning = true;
@@ -541,10 +535,12 @@ export class ChatServer {
       const username = ws.username;
       const room = ws.room;
       
+      // ===== HAPUS DARI ROOM CLIENTS =====
       if (room) {
         try { this.roomClients.get(room)?.delete(ws); } catch(e) {}
       }
       
+      // ===== HAPUS DARI wsActiveMulti =====
       try {
         const activeData = this.wsActiveMulti.get(ws);
         if (activeData?.room) {
@@ -553,19 +549,41 @@ export class ChatServer {
         this.wsActiveMulti.delete(ws);
       } catch(e) {}
       
-      // ===== PERUBAHAN: JANGAN HAPUS STATE USER =====
-      // HANYA HAPUS DARI userConnections TAPI TETAP PERTAHANKAN STATE
+      // ===== HAPUS STATE USER =====
       if (username) {
         try {
+          // HAPUS DARI userConnections
           const connections = this.userConnections.get(username);
           if (connections) {
             connections.delete(ws);
-            // JANGAN HAPUS userConnections MESKIPUN KOSONG
-            // STATE TETAP DI PERTAHANKAN
+            if (connections.size === 0) {
+              this.userConnections.delete(username);
+            }
           }
+          
+          // HAPUS SEAT DARI ROOM
+          const seatInfo = this.userSeat.get(username);
+          if (seatInfo) {
+            const roomMan = this.rooms.get(seatInfo.room);
+            if (roomMan) {
+              const seatData = roomMan.getSeat(seatInfo.seat);
+              if (seatData?.namauser === username) {
+                roomMan.removeSeat(seatInfo.seat);
+                this.broadcast(seatInfo.room, ["removeKursi", seatInfo.room, seatInfo.seat]);
+                this.updateRoomCount(seatInfo.room);
+              }
+            }
+          }
+          
+          // HAPUS DARI userSeat, userRoom, mapping
+          this.userSeat.delete(username);
+          this.userRoom.delete(username);
+          this._userRoomMapping.delete(username);
+          
         } catch(e) {}
       }
       
+      // ===== HAPUS DARI wsSet =====
       try { this.wsSet.delete(ws); } catch(e) {}
       
     } catch(e) {} finally {
@@ -585,7 +603,6 @@ export class ChatServer {
     } catch(e) { return; }
     
     if (this._processingMessages.has(ws)) {
-      // JANGAN HAPUS STATE - TUNGGU SAMPAI SELESAI
       return;
     }
     this._processingMessages.add(ws);
@@ -693,7 +710,6 @@ export class ChatServer {
             this.safeSend(ws, ["rooMasukMulti", seat, multiRoomname]);
             this.broadcast(multiRoomname, ["roomUserCount", multiRoomname, roomMan.getCount()]);
             
-            // JANGAN VALIDASI - TIDAK HAPUS STATE
           } catch(e) {}
           break;
         }
@@ -730,7 +746,9 @@ export class ChatServer {
             const connections = this.userConnections.get(targetUsername);
             if (connections) {
               connections.delete(ws);
-              // JANGAN HAPUS userConnections - PERTAHANKAN STATE
+              if (connections.size === 0) {
+                this.userConnections.delete(targetUsername);
+              }
             }
             
             if (ws.username === targetUsername) {
@@ -1099,7 +1117,7 @@ export class ChatServer {
         for (const conn of connections) {
           this.wsSet.delete(conn);
         }
-        // JANGAN HAPUS userConnections - PERTAHANKAN STATE
+        this.userConnections.delete(username);
       }
     }
     
@@ -1235,8 +1253,6 @@ export class ChatServer {
       
       this.updateRoomCount(roomName);
       
-      // JANGAN VALIDASI - TIDAK HAPUS STATE
-      
       setTimeout(() => {
         try {
           if (ws && ws.readyState === 1 && !this.closing && !this.isDestroyed) {
@@ -1303,29 +1319,21 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ===== HAPUS STATE KALAU WEBSOCKET CLOSE =====
   async webSocketClose(ws) { 
     if (!ws) return;
     try { 
-      // JANGAN PANGGIL cleanup() - TIDAK HAPUS STATE
-      this.wsSet.delete(ws);
-      if (ws.room) {
-        const clients = this.roomClients.get(ws.room);
-        if (clients) clients.delete(ws);
-      }
-      this.wsActiveMulti.delete(ws);
+      // HAPUS SEMUA STATE USER
+      this.cleanup(ws);
     } catch(e) {}
   }
 
+  // ===== HAPUS STATE KALAU WEBSOCKET ERROR =====
   async webSocketError(ws) { 
     if (!ws) return;
     try { 
-      // JANGAN PANGGIL cleanup() - TIDAK HAPUS STATE
-      this.wsSet.delete(ws);
-      if (ws.room) {
-        const clients = this.roomClients.get(ws.room);
-        if (clients) clients.delete(ws);
-      }
-      this.wsActiveMulti.delete(ws);
+      // HAPUS SEMUA STATE USER
+      this.cleanup(ws);
     } catch(e) {}
   }
 
@@ -1351,20 +1359,19 @@ export class ChatServer {
         try { ws.close(1000, "Shutdown"); } catch(e) {}
       }
       try { 
-        // JANGAN PANGGIL cleanup() - TIDAK HAPUS STATE
-        this.wsSet.delete(ws);
+        // HAPUS SEMUA STATE
+        this.cleanup(ws);
       } catch(e) {}
     }
     
     this.wsSet.clear();
-    // JANGAN HAPUS STATE - PERTAHANKAN SEMUA DATA
-    // this.userConnections.clear();
-    // this.userSeat.clear();
-    // this.userRoom.clear();
-    // this._userRoomMapping.clear();
-    // this.wsActiveMulti.clear();
-    // this.roomClients.clear();
-    // this.rooms.clear();
+    this.userConnections.clear();
+    this.userSeat.clear();
+    this.userRoom.clear();
+    this._userRoomMapping.clear();
+    this.wsActiveMulti.clear();
+    this.roomClients.clear();
+    this.rooms.clear();
     this._processingMessages.clear();
     this._cleaningUp.clear();
     this._eventQueue.clear();
