@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 4.0.0 - WITH DICE SESSION SCHEDULER & IDLE MANAGEMENT
+// VERSION: 4.1.0 - WITH DICE SESSION SCHEDULER & IDLE MANAGEMENT (FIXED)
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -451,9 +451,8 @@ class DiceSessionScheduler {
     this._sessionStartTimers = [];
     this._sessionEndTimers = [];
     this._diceCheckTimers = [];
-    this._lastActivityTime = Date.now();
-    this._idleTimeout = CONSTANTS.IDLE_TIMEOUT_MS || 300000;
     this._isIdle = false;
+    this._idleTimeout = CONSTANTS.IDLE_TIMEOUT_MS || 300000;
   }
 
   scheduleSessions() {
@@ -616,17 +615,19 @@ class DiceSessionScheduler {
   _onSessionStart() {
     try {
       this._sessionActive = true;
-      this._lastActivityTime = Date.now();
       
+      // Broadcast ke semua room
       this.gameServer._broadcastToRoom(DICE_ROOM, ["diceSessionStart", {
         message: "Dice session started!",
         timestamp: Date.now()
       }]);
 
+      // Mulai dice jika ada player
       if (this._shouldStartDice()) {
         this.gameServer.forceStartDice();
       }
 
+      // Schedule dice checks selama sesi
       this._scheduleDiceChecks();
     } catch(e) {}
   }
@@ -635,16 +636,19 @@ class DiceSessionScheduler {
     try {
       this._sessionActive = false;
       
+      // Broadcast ke semua room
       this.gameServer._broadcastToRoom(DICE_ROOM, ["diceSessionEnd", {
         message: "Dice session ended",
         timestamp: Date.now()
       }]);
 
+      // Reset dice state
       this.gameServer._diceLock = false;
       this.gameServer._isShowingDice = false;
       this.gameServer._canSubmitDiceAnswer = false;
       this.gameServer.currentDiceRoll = null;
       
+      // Clear dice timers
       if (this.gameServer._diceTimerInterval) {
         clearInterval(this.gameServer._diceTimerInterval);
         this.gameServer._diceTimerInterval = null;
@@ -662,8 +666,8 @@ class DiceSessionScheduler {
         this.gameServer._diceTimeUpCooldownTimer = null;
       }
 
+      // Clear dice checks
       this._clearDiceChecks();
-      this._updateIdleState();
     } catch(e) {}
   }
 
@@ -724,6 +728,7 @@ class DiceSessionScheduler {
 
   _checkIdleState() {
     try {
+      // Cek apakah ada aktivitas
       const hasActivity = this.gameServer.wsMap.size > 0 || 
                           this.gameServer.activeGames.size > 0 ||
                           this.gameServer._eventQueue?.length > 0 ||
@@ -733,33 +738,20 @@ class DiceSessionScheduler {
                           this.gameServer._isShowingDice;
 
       if (hasActivity) {
-        this._lastActivityTime = Date.now();
         this._isIdle = false;
         return;
       }
 
-      const now = Date.now();
-      if (now - this._lastActivityTime > this._idleTimeout) {
-        this._isIdle = true;
-        this._handleIdleState();
-      } else {
-        this._isIdle = false;
-      }
-    } catch(e) {}
-  }
-
-  _handleIdleState() {
-    try {
-      if (this._sessionActive) {
-        return;
-      }
-
+      // Jika tidak ada aktivitas, idle
+      this._isIdle = true;
       this._performIdleCleanup();
+
     } catch(e) {}
   }
 
   _performIdleCleanup() {
     try {
+      // Hanya cleanup resource saat idle, jangan matikan server
       if (this.gameServer.cacheManager) {
         this.gameServer.cacheManager.cleanup();
       }
@@ -786,18 +778,21 @@ class DiceSessionScheduler {
                           this.gameServer._isShowingDice;
 
       if (hasActivity) {
-        this._lastActivityTime = Date.now();
         this._isIdle = false;
         return;
       }
 
-      const now = Date.now();
-      if (now - this._lastActivityTime > this._idleTimeout) {
-        this._isIdle = true;
-      } else {
-        this._isIdle = false;
-      }
+      this._isIdle = true;
     } catch(e) {}
+  }
+
+  // Method untuk wake up dari idle
+  wakeUp() {
+    this._isIdle = false;
+    // Jika dalam sesi, cek dice
+    if (this._sessionActive) {
+      this._checkAndStartDice();
+    }
   }
 
   isSessionActive() {
@@ -806,11 +801,6 @@ class DiceSessionScheduler {
 
   isIdle() {
     return this._isIdle;
-  }
-
-  updateActivity() {
-    this._lastActivityTime = Date.now();
-    this._isIdle = false;
   }
 
   destroy() {
@@ -1096,10 +1086,10 @@ export class GameServer {
     }
   }
 
-  // ========== UPDATE ACTIVITY ==========
-  _updateActivity() {
+  // ========== WAKE UP FROM IDLE ==========
+  _wakeUp() {
     if (this.sessionScheduler) {
-      this.sessionScheduler.updateActivity();
+      this.sessionScheduler.wakeUp();
     }
     this._lastActivity = Date.now();
   }
@@ -1312,8 +1302,6 @@ export class GameServer {
         this._endDiceRound();
       }, 20000);
       this._allTimers.add(this._diceTimeout);
-      
-      this._updateActivity();
       
     } catch(e) {
       this._diceLock = false;
@@ -1780,8 +1768,6 @@ export class GameServer {
         this.diceWinner = username;
       }
       
-      this._updateActivity();
-      
     } catch(e) {}
   }
 
@@ -2029,6 +2015,9 @@ export class GameServer {
   // ========== FETCH ==========
   async fetch(req) {
     try {
+      // Wake up from idle on any request
+      this._wakeUp();
+      
       if (this._circuitOpen) {
         const now = Date.now();
         if (now - this._lastResetTime > 60000) {
@@ -2207,7 +2196,8 @@ export class GameServer {
     try {
       if (this.isDestroyed || !ws || !data?.[0]) return;
       
-      this._updateActivity();
+      // Wake up from idle on any event
+      this._wakeUp();
       
       if (this._eventQueue.length > CONSTANTS.MAX_EVENT_QUEUE_SIZE) {
         this._safeSend(ws, ["gameLowCardError", "Server busy"]);
@@ -2274,13 +2264,11 @@ export class GameServer {
 
       if (evt === "switchRoom") {
         await this.switchRoom(ws, data[1], data[2]);
-        this._updateActivity();
         return;
       }
 
       if (evt === "submitDiceAnswer") {
         await this.submitDiceAnswer(ws, data[1], data[2]);
-        this._updateActivity();
         return;
       }
 
@@ -2389,7 +2377,6 @@ export class GameServer {
       if (evt === "startGameWithRecording") {
         const [_, room, bet, username] = data;
         await this._startGameWithRecording(ws, room, bet, username);
-        this._updateActivity();
         return;
       }
 
@@ -2406,19 +2393,15 @@ export class GameServer {
       switch (evt) {
         case "gameLowCardStart": 
           await this.startGame(ws, data[1], data[2]); 
-          this._updateActivity();
           break;
         case "gameLowCardJoin": 
           await this.joinGame(ws, data[1]); 
-          this._updateActivity();
           break;
         case "gameLowCardNumber": 
           await this.submitNumber(ws, data[1], data[2] || "", data[3]); 
-          this._updateActivity();
           break;
         case "gameLowCardLeave": 
           await this.leaveGame(ws, data[1]); 
-          this._updateActivity();
           break;
         case "checkGameRunning": 
           await this.checkGameRunning(ws, data[1]); 
@@ -2687,7 +2670,6 @@ export class GameServer {
         if (roomName === DICE_ROOM) {
           this._sendDiceNotificationOnSwitch(ws, wsId);
         }
-        this._updateActivity();
         return;
       }
       
@@ -2733,7 +2715,6 @@ export class GameServer {
           this._broadcastToRoom(currentRoom, ["userLeftRoom", username, currentRoom]);
         }
         
-        this._updateActivity();
       } finally {
         setTimeout(() => {
           this._switchLocks.delete(lockKey);
@@ -3779,8 +3760,6 @@ export class GameServer {
         this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
         this._startRegistration(room, game);
         
-        this._updateActivity();
-        
       } finally {
         setTimeout(() => {
           this._gameLocks.delete(lockKey);
@@ -3846,8 +3825,6 @@ export class GameServer {
         this._addClient(room, ws, usernameClean);
         game.playerWsId.set(usernameClean, wsId);
         this._broadcastToRoom(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
-        
-        this._updateActivity();
       } finally {
         setTimeout(() => {
           this._joinLocks.delete(lockKey);
@@ -3925,8 +3902,6 @@ export class GameServer {
         }, CONSTANTS.EVALUATION_DELAY_MS));
         game._evalTimer = evalTimer;
       }
-      
-      this._updateActivity();
     } catch(e) {}
   }
 
@@ -3958,7 +3933,6 @@ export class GameServer {
         return;
       }
       this._removePlayerFromGame(usernameClean, room);
-      this._updateActivity();
     } catch(e) {}
   }
 
@@ -4092,8 +4066,6 @@ export class GameServer {
       this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
       this._broadcastToRoom(room, ["gameLowCardStartSuccess", username, betAmount]);
       this._startRegistration(room, game);
-      
-      this._updateActivity();
     } catch(e) {
       this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
     }
@@ -4146,7 +4118,8 @@ export class GameServer {
       ws.username = null;
       ws._closing = true;
       
-      this._updateActivity();
+      // Wake up to update idle state
+      this._wakeUp();
     } catch(e) {}
   }
 
@@ -4177,7 +4150,8 @@ export class GameServer {
       ws.username = null;
       ws._closing = true;
       
-      this._updateActivity();
+      // Wake up to update idle state
+      this._wakeUp();
     } catch(e) {}
   }
 
@@ -4191,7 +4165,6 @@ export class GameServer {
       }
       this.diceAutoEnabled = true;
       this._startDiceFast();
-      this._updateActivity();
       return true;
     } catch(e) { return false; }
   }
@@ -4220,7 +4193,6 @@ export class GameServer {
       this.isDestroyed = true;
       this.closing = true;
       
-      // Destroy session scheduler
       if (this.sessionScheduler) {
         this.sessionScheduler.destroy();
         this.sessionScheduler = null;
