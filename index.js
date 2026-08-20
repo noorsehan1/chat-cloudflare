@@ -1,25 +1,17 @@
-// ==================== INDEX.JS - FULLY FIXED ====================
-// VERSION: 3.2.0 - ALARM SYSTEM WITH CONNECTION POOLING
-// COMPATIBLE WITH ChatServer 3.3.10 & GameServer 3.2.0
+// ==================== INDEX.JS - FIXED CHAT CONNECTION ====================
+// VERSION: 3.2.1 - FIXED CHAT CONNECTION
 
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
 
 // ==================== CONFIGURATION ====================
 const CONFIG = {
-  // Cache
   CACHE_TTL_MS: 60000,
   INSTANCE_COUNT: 3,
-  
-  // Retry
   MAX_RETRIES: 3,
   RETRY_DELAY_MS: 100,
   REQUEST_TIMEOUT_MS: 3000,
-  
-  // Health
   HEALTH_TIMEOUT_MS: 2000,
-  
-  // Circuit Breaker
   CIRCUIT_BREAKER_THRESHOLD: 5,
   CIRCUIT_BREAKER_TIMEOUT_MS: 30000,
 };
@@ -35,18 +27,13 @@ class InstanceCache {
   get(key) {
     const entry = this.cache.get(key);
     if (!entry) return null;
-    
-    // Check TTL
     if (Date.now() - entry.timestamp > this.ttl) {
       this.cache.delete(key);
       return null;
     }
-    
-    // Check circuit breaker
     if (this.isCircuitOpen(key)) {
       return null;
     }
-    
     return entry.instance;
   }
 
@@ -61,17 +48,13 @@ class InstanceCache {
     this.cache.delete(key);
   }
 
-  // ========== CIRCUIT BREAKER ==========
   isCircuitOpen(key) {
     const breaker = this.circuitBreaker.get(key);
     if (!breaker) return false;
-    
-    // Check if timeout has passed
     if (Date.now() - breaker.timestamp > CONFIG.CIRCUIT_BREAKER_TIMEOUT_MS) {
       this.circuitBreaker.delete(key);
       return false;
     }
-    
     return breaker.failures >= CONFIG.CIRCUIT_BREAKER_THRESHOLD;
   }
 
@@ -89,7 +72,6 @@ class InstanceCache {
     this.circuitBreaker.delete(key);
   }
 
-  // ========== CLEANUP ==========
   cleanup() {
     const now = Date.now();
     for (const [key, entry] of this.cache) {
@@ -97,7 +79,6 @@ class InstanceCache {
         this.cache.delete(key);
       }
     }
-    
     for (const [key, breaker] of this.circuitBreaker) {
       if (now - breaker.timestamp > CONFIG.CIRCUIT_BREAKER_TIMEOUT_MS * 2) {
         this.circuitBreaker.delete(key);
@@ -120,29 +101,20 @@ class InstancePool {
     this.pendingRequests = new Map();
   }
 
-  // ========== GET INSTANCE ==========
   getInstance(room, attempt = 0) {
     try {
-      // Hash room untuk distribusi
       const hash = this._hashString(room + attempt);
       const instanceId = Math.abs(hash) % CONFIG.INSTANCE_COUNT;
-      
-      // Cache key
       const cacheKey = `instance_${instanceId}`;
       
-      // Cek cache
       let cached = this.cache.get(cacheKey);
       if (cached) {
         return cached;
       }
       
-      // Buat instance baru
       const id = this.env[this.className].idFromName(`game_${instanceId}`);
       const obj = this.env[this.className].get(id);
-      
-      // Simpan ke cache
       this.cache.set(cacheKey, obj);
-      
       return obj;
       
     } catch(e) {
@@ -150,7 +122,6 @@ class InstancePool {
     }
   }
 
-  // ========== FETCH WITH RETRY ==========
   async fetch(request, room) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), CONFIG.REQUEST_TIMEOUT_MS);
@@ -160,7 +131,6 @@ class InstancePool {
     
     for (let attempt = 0; attempt < CONFIG.MAX_RETRIES; attempt++) {
       try {
-        // Get instance dengan retry logic
         let obj = null;
         let instanceKey = null;
         
@@ -170,16 +140,10 @@ class InstancePool {
             const instanceId = Math.abs(hash) % CONFIG.INSTANCE_COUNT;
             const cacheKey = `instance_${instanceId}`;
             
-            // Skip jika sudah dicoba
-            if (triedInstances.has(cacheKey)) {
-              continue;
-            }
+            if (triedInstances.has(cacheKey)) continue;
             triedInstances.add(cacheKey);
             
-            // Check circuit breaker
-            if (this.cache.isCircuitOpen(cacheKey)) {
-              continue;
-            }
+            if (this.cache.isCircuitOpen(cacheKey)) continue;
             
             obj = this.cache.get(cacheKey);
             if (!obj) {
@@ -200,22 +164,17 @@ class InstancePool {
           throw new Error('No available instances');
         }
         
-        // Execute request
         const response = await obj.fetch(request, {
           signal: controller.signal
         });
         
         clearTimeout(timeoutId);
-        
-        // Record success
         this.cache.recordSuccess(instanceKey);
         
-        // Handle response
         if (response.status === 200 || response.status === 101) {
           return response;
         }
         
-        // Handle error responses
         if (response.status === 503 || response.status === 429) {
           this.cache.recordFailure(instanceKey);
           throw new Error('Instance busy or overloaded');
@@ -227,25 +186,21 @@ class InstancePool {
         clearTimeout(timeoutId);
         lastError = error;
         
-        // If abort or timeout
         if (error.name === 'AbortError') {
           throw new Error('Request timeout');
         }
         
-        // If instance busy, retry
         if (error.message === 'Instance busy or overloaded') {
           await new Promise(resolve => setTimeout(resolve, CONFIG.RETRY_DELAY_MS));
           continue;
         }
         
-        // For other errors, return error response
         throw error;
       }
     }
     
     clearTimeout(timeoutId);
     
-    // All retries failed
     return new Response(JSON.stringify({
       error: "All game servers busy, please retry",
       retryAfter: 5,
@@ -259,7 +214,6 @@ class InstancePool {
     });
   }
 
-  // ========== HEALTH CHECK ==========
   async healthCheck() {
     const results = [];
     let totalConnections = 0;
@@ -332,7 +286,6 @@ class InstancePool {
     };
   }
 
-  // ========== HASH HELPER ==========
   _hashString(str) {
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
@@ -343,7 +296,6 @@ class InstancePool {
     return Math.abs(hash);
   }
 
-  // ========== CLEANUP ==========
   cleanup() {
     this.cache.cleanup();
   }
@@ -353,9 +305,70 @@ class InstancePool {
   }
 }
 
+// ==================== SINGLETON CHAT HANDLER ====================
+class ChatHandler {
+  constructor(env) {
+    this.env = env;
+    this._instance = null;
+    this._cacheKey = 'chat_global';
+    this.cache = new InstanceCache();
+  }
+
+  getInstance() {
+    // Cek cache
+    let cached = this.cache.get(this._cacheKey);
+    if (cached) {
+      return cached;
+    }
+    
+    // Buat instance baru
+    const id = this.env.CHAT_SERVER.idFromName("global");
+    const obj = this.env.CHAT_SERVER.get(id);
+    this.cache.set(this._cacheKey, obj);
+    return obj;
+  }
+
+  async fetch(request) {
+    try {
+      const obj = this.getInstance();
+      const response = await obj.fetch(request);
+      
+      // Record success
+      this.cache.recordSuccess(this._cacheKey);
+      
+      // ✅ Tambahkan CORS untuk chat
+      const corsResponse = new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers
+      });
+      
+      corsResponse.headers.set('Access-Control-Allow-Origin', '*');
+      corsResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      corsResponse.headers.set('Access-Control-Allow-Headers', 'Content-Type, Upgrade');
+      
+      return corsResponse;
+      
+    } catch(e) {
+      this.cache.recordFailure(this._cacheKey);
+      return new Response(JSON.stringify({
+        error: "Chat server unavailable",
+        message: e.message
+      }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+  }
+
+  cleanup() {
+    this.cache.cleanup();
+  }
+}
+
 // ==================== MAIN EXPORT ====================
 const instanceCache = new InstanceCache();
-const chatPool = null; // Chat server uses single instance
+let chatHandler = null;
 let gamePool = null;
 
 export default {
@@ -364,34 +377,68 @@ export default {
       const url = new URL(request.url);
       const pathname = url.pathname;
       
-      // ========== CHAT SERVER ==========
-      if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
-        try {
-          const id = env.CHAT_SERVER.idFromName("global");
-          const obj = env.CHAT_SERVER.get(id);
-          return obj.fetch(request);
-        } catch(e) {
+      // ========== PREFLIGHT (CORS) ==========
+      if (request.method === 'OPTIONS') {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Upgrade, Sec-WebSocket-Key, Sec-WebSocket-Version, Sec-WebSocket-Extensions',
+            'Access-Control-Max-Age': '86400'
+          }
+        });
+      }
+      
+      // ========== CHAT SERVER - SEMUA PATH CHAT ==========
+      // ✅ PERBAIKAN: Tangani semua path yang berhubungan dengan chat
+      if (pathname === "/ws" || 
+          pathname === "/chat" || 
+          pathname === "/chat/ws" ||
+          pathname === "/socket" ||
+          pathname === "/websocket" ||
+          pathname === "/" ||
+          pathname === "/chat-socket" ||
+          pathname.startsWith("/chat/")) {
+        
+        // Initialize chat handler
+        if (!chatHandler) {
+          chatHandler = new ChatHandler(env);
+        }
+        
+        // ✅ Untuk root path, cek apakah request WebSocket
+        if (pathname === "/") {
+          const upgrade = request.headers.get("Upgrade");
+          if (upgrade === "websocket") {
+            // Ini request WebSocket ke chat
+            return chatHandler.fetch(request);
+          }
+          // Bukan WebSocket, return info
           return new Response(JSON.stringify({
-            error: "Chat server unavailable",
-            message: e.message
+            status: "Chat Server Running",
+            version: "3.3.10",
+            endpoints: {
+              websocket: "/ws",
+              chat: "/chat"
+            }
           }), {
-            status: 503,
+            status: 200,
             headers: { 'Content-Type': 'application/json' }
           });
         }
+        
+        // ✅ Semua request chat (termasuk WebSocket)
+        return chatHandler.fetch(request);
       }
       
       // ========== GAME SERVER ==========
       if (pathname === "/game/ws") {
-        // Initialize game pool
         if (!gamePool) {
           gamePool = new InstancePool(env, 'GAME_SERVER');
         }
         
-        // Get room from query parameter
         const room = url.searchParams.get("room") || "default";
         
-        // Add room to request for routing
         const newRequest = new Request(request.url, {
           method: request.method,
           headers: request.headers,
@@ -399,13 +446,10 @@ export default {
           duplex: 'half'
         });
         
-        // Add room header
         newRequest.headers.set('X-Room', room);
         
-        // Fetch with retry
         const response = await gamePool.fetch(newRequest, room);
         
-        // Add CORS headers
         const corsResponse = new Response(response.body, {
           status: response.status,
           statusText: response.statusText,
@@ -454,6 +498,7 @@ export default {
       // ========== CACHE CLEANUP ==========
       if (pathname === "/cache/cleanup") {
         if (gamePool) gamePool.cleanup();
+        if (chatHandler) chatHandler.cleanup();
         instanceCache.cleanup();
         return new Response(JSON.stringify({
           status: "ok",
@@ -467,6 +512,7 @@ export default {
       // ========== CACHE CLEAR ==========
       if (pathname === "/cache/clear") {
         if (gamePool) gamePool.clear();
+        if (chatHandler) chatHandler.clear();
         instanceCache.clear();
         return new Response(JSON.stringify({
           status: "ok",
@@ -477,17 +523,43 @@ export default {
         });
       }
       
+      // ========== HEALTH CHECK GLOBAL ==========
+      if (pathname === "/health") {
+        return new Response(JSON.stringify({
+          status: "ok",
+          version: "3.2.1",
+          timestamp: Date.now(),
+          services: {
+            chat: chatHandler ? "ready" : "not_initialized",
+            game: gamePool ? "ready" : "not_initialized"
+          }
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      
       // ========== DEFAULT ==========
       return new Response(JSON.stringify({
         status: "running",
-        version: "3.2.0",
+        version: "3.2.1",
         timestamp: Date.now(),
         endpoints: {
-          chat: "/ws",
-          chatHealth: "/chat/health",
-          game: "/game",
-          gameWebsocket: "/game/ws?room={room_name}",
-          gameHealth: "/game/health"
+          chat: {
+            websocket: "/ws",
+            chat: "/chat",
+            root: "/"
+          },
+          game: {
+            websocket: "/game/ws?room={room_name}",
+            health: "/game/health",
+            info: "/game"
+          },
+          system: {
+            health: "/health",
+            cacheCleanup: "/cache/cleanup",
+            cacheClear: "/cache/clear"
+          }
         }
       }), {
         status: 200,
@@ -515,15 +587,12 @@ export default {
   
   // ========== SCHEDULED CLEANUP ==========
   async scheduled(event, env, ctx) {
-    // Cleanup cache periodically
-    if (gamePool) {
-      gamePool.cleanup();
-    }
+    if (gamePool) gamePool.cleanup();
+    if (chatHandler) chatHandler.cleanup();
     instanceCache.cleanup();
-    
     console.log(`Cache cleaned at ${new Date().toISOString()}`);
   }
 };
 
-// ==================== EXPORTS FOR DU ====================
+// ==================== EXPORTS ====================
 export { ChatServer, GameServer };
