@@ -1,19 +1,19 @@
 // ==================== INDEX.JS - FIXED ====================
-// VERSION: 3.1.2 - SAME ROOM = SAME INSTANCE
+// VERSION: 3.1.2 - NO GLOBAL setInterval
 
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
 
 // Cache untuk instance
 const instanceCache = new Map();
-const CACHE_TTL = 60000; // 1 menit
+const CACHE_TTL = 60000;
 
-// Rate limiting
+// Rate limiting - tanpa setInterval global
 const rateLimitCache = new Map();
 const RATE_LIMIT_WINDOW = 60000;
 const RATE_LIMIT_MAX = 100;
 
-// Helper hash - HANYA UNTUK ROOM
+// Helper hash
 async function hashString(str) {
   const encoder = new TextEncoder();
   const data = encoder.encode(str);
@@ -22,9 +22,17 @@ async function hashString(str) {
   return hashArray.reduce((acc, byte) => acc + byte, 0);
 }
 
-// Helper rate limit
+// Helper rate limit - dengan cleanup otomatis
 function checkRateLimit(ip) {
   const now = Date.now();
+  
+  // Cleanup expired entries (hanya saat dipanggil)
+  for (const [key, record] of rateLimitCache) {
+    if (now - record.timestamp > RATE_LIMIT_WINDOW) {
+      rateLimitCache.delete(key);
+    }
+  }
+  
   const record = rateLimitCache.get(ip);
   
   if (!record) {
@@ -42,16 +50,6 @@ function checkRateLimit(ip) {
   record.count++;
   return true;
 }
-
-// Cleanup rate limit
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, record] of rateLimitCache) {
-    if (now - record.timestamp > RATE_LIMIT_WINDOW) {
-      rateLimitCache.delete(ip);
-    }
-  }
-}, 300000);
 
 export default {
   async fetch(request, env) {
@@ -115,10 +113,8 @@ export default {
           });
         }
         
-        // ============================================================
-        // ✅ FIX: HASH HANYA BERDASARKAN ROOM!
-        // ============================================================
-        const hash = await hashString(room); // HANYA ROOM!
+        // ✅ FIX: Hash HANYA berdasarkan ROOM
+        const hash = await hashString(room);
         const instanceId = Math.abs(hash) % 3;
         
         // Cache key: room saja
@@ -157,12 +153,10 @@ export default {
             return response;
           }
           
-          // Jika error, coba instance lain dengan retry
+          // Jika error, coba instance lain
           if (response.status === 503 || response.status === 429) {
-            // Hapus cache yang bermasalah
             instanceCache.delete(cacheKey);
             
-            // Coba instance lain
             for (let attempt = 0; attempt < 2; attempt++) {
               try {
                 const fallbackId = (instanceId + 1 + attempt) % 3;
@@ -366,8 +360,10 @@ export default {
       });
       
     } catch(e) {
+      console.error("Error:", e);
       return new Response(JSON.stringify({
         error: "Internal Server Error",
+        message: e.message || "Unknown error",
         timestamp: Date.now()
       }), { 
         status: 500,
