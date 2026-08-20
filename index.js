@@ -1,5 +1,5 @@
-// ==================== INDEX.JS - FIXED ====================
-// VERSION: 3.3.1 - SINGLE INSTANCE FOR CHAT & GAME
+// ==================== INDEX.JS - CONNECTION ONLY ====================
+// VERSION: 3.3.2 - CONNECTION ONLY
 
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
@@ -19,7 +19,6 @@ export default {
       
       // ========== GAME SERVER ==========
       if (pathname === "/game/ws") {
-        // SINGLE INSTANCE - LANGSUNG PAKAI ID TETAP
         const id = env.GAME_SERVER.idFromName("game");
         const obj = env.GAME_SERVER.get(id);
         return obj.fetch(request);
@@ -31,11 +30,11 @@ export default {
         return obj.fetch(request);
       }
       
-      if (pathname === "/game") {
-        return this._handleGameInfo();
-      }
-      
-      return new Response("Server running", { status: 200 });
+      // ========== ROOT ==========
+      return new Response("Server running", { 
+        status: 200,
+        headers: { 'Content-Type': 'text/plain' }
+      });
       
     } catch(e) {
       console.error("Fetch error:", e);
@@ -50,32 +49,6 @@ export default {
         }
       });
     }
-  },
-
-  // ========== HANDLE GAME INFO ==========
-  _handleGameInfo() {
-    return new Response(JSON.stringify({
-      status: "running",
-      version: "3.3.1",
-      instances: 1,
-      maxConnections: 150,
-      timestamp: Date.now(),
-      endpoints: {
-        websocket: "/game/ws?room={room_name}",
-        health: "/game/health"
-      },
-      schedule: {
-        sessions: [
-          { start: "01:00", end: "02:00" },
-          { start: "14:00", end: "15:00" },
-          { start: "22:00", end: "23:00" }
-        ],
-        timezone: "WITA (UTC+8)"
-      }
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' }
-    });
   }
 };
 
