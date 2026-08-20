@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 4.1.0 - FULL ALARM SYSTEM
+// VERSION: 4.2.0 - FULL ALARM SYSTEM + ROOM FALLBACK
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -956,7 +956,7 @@ export class GameServer {
           type: 'session_start',
           start: active.session.start,
           end: active.session.end,
-          message: `Session started ${active.session.start}:00 - ${active.session.end}:00 WITA`,
+          message: 'Session started',
           timestamp: Date.now()
         };
         
@@ -1760,12 +1760,57 @@ export class GameServer {
     } catch(e) { return false; }
   }
 
+  // ========== GET ROOM WITH FALLBACK ==========
+  _getRoomWithFallback(ws) {
+    let room = ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
+    
+    // Fallback 1: dari userConnections
+    if (!room && ws.username) {
+      const conn = this.userConnections.get(ws.username);
+      if (conn && conn.room) {
+        room = conn.room;
+        ws.room = room;
+        ws.roomname = room;
+        this.clientRooms.set(ws._wsId, room);
+      }
+    }
+    
+    // Fallback 2: dari activeGames
+    if (!room && ws.username) {
+      for (const [r, game] of this.activeGames) {
+        if (game.players && game.players.has(ws.username)) {
+          room = r;
+          ws.room = room;
+          ws.roomname = room;
+          this.clientRooms.set(ws._wsId, room);
+          break;
+        }
+      }
+    }
+    
+    // Fallback 3: dari wsClients
+    if (!room) {
+      for (const [r, wsIds] of this.wsClients) {
+        if (wsIds && wsIds.has(ws._wsId)) {
+          room = r;
+          ws.room = room;
+          ws.roomname = room;
+          this.clientRooms.set(ws._wsId, room);
+          break;
+        }
+      }
+    }
+    
+    return room;
+  }
+
   // ========== HANDLE EVENT INTERNAL ==========
   async _handleEventInternal(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
 
+      // ========== SESSION EVENTS (TIDAK PERLU ROOM) ==========
       if (evt === "getSessionInfo") {
         try {
           const info = this._getSessionInfo();
@@ -1781,6 +1826,7 @@ export class GameServer {
           const active = this._isSessionActive();
           const next = this._getNextSessionStart();
           const end = this._getTimeUntilSessionEnds();
+          const wita = this._getCurrentWITATime();
           
           this._safeSend(ws, ["sessionStatus", {
             isActive: active.isActive,
@@ -1792,7 +1838,7 @@ export class GameServer {
               startsIn: next.minutesUntilStart ? `${next.minutesUntilStart}m` : null,
               minutesUntil: next.minutesUntilStart
             } : null,
-            currentTime: this._getCurrentWITATime().hours + ':' + String(this._getCurrentWITATime().minutes).padStart(2, '0') + ' WITA'
+            currentTime: `${String(wita.hours).padStart(2, '0')}:${String(wita.minutes).padStart(2, '0')} WITA`
           }]);
         } catch(e) {
           this._safeSend(ws, ["sessionStatus", { isActive: false, currentSession: null, timeLeft: null, nextSessionStart: null, currentTime: '--:-- WITA' }]);
@@ -1800,6 +1846,7 @@ export class GameServer {
         return;
       }
 
+      // ========== DICE EVENTS ==========
       if (evt === "submitDiceAnswer") {
         await this.submitDiceAnswer(ws, data[1], data[2]);
         return;
@@ -1852,6 +1899,7 @@ export class GameServer {
         return;
       }
 
+      // ========== RECORDING EVENTS ==========
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
         if (!roomName) { this._safeSend(ws, ["recordingError", "Room name required"]); return; }
@@ -1877,7 +1925,7 @@ export class GameServer {
       }
 
       if (evt === "sendWinnersToRoom" || evt === "lowCardWinnerUpdate") {
-        const room = data[1] || ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
+        const room = data[1] || this._getRoomWithFallback(ws);
         if (!room) { this._safeSend(ws, ["recordingError", "Room name required"]); return; }
         await this._broadcastLowCardWinners(room);
         this._safeSend(ws, ["sendWinnersResult", { success: true, message: "Winners refreshed" }]);
@@ -1885,7 +1933,7 @@ export class GameServer {
       }
 
       if (evt === "getRoomWinners") {
-        const room = data[1] || ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
+        const room = data[1] || this._getRoomWithFallback(ws);
         if (!room) { this._safeSend(ws, ["recordingError", "Room name required"]); return; }
         const isRecording = this.cacheManager.getRecordingStatus(room);
         const winners = this.cacheManager.getWinners(room);
@@ -1900,16 +1948,20 @@ export class GameServer {
         return;
       }
 
-      const room = ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
+      // ========== AMBIL ROOM DENGAN FALLBACK ==========
+      const room = this._getRoomWithFallback(ws);
+      
       if (!room) {
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first"]);
         return;
       }
+      
       if (room === DICE_ROOM) {
         this._safeSend(ws, ["gameLowCardError", "Cannot start game in Quiz room"]);
         return;
       }
 
+      // ========== GAME EVENTS ==========
       switch (evt) {
         case "switchRoom": await this.switchRoom(ws, data[1], data[2]); break;
         case "gameLowCardStart": await this.startGame(ws, data[1], data[2]); break;
@@ -2883,7 +2935,7 @@ export class GameServer {
       }
       
       const usernameClean = username.trim();
-      const room = ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
+      const room = this._getRoomWithFallback(ws);
       if (!room) {
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first"]);
         return;
@@ -2969,7 +3021,7 @@ export class GameServer {
       
       const usernameClean = username.trim();
       const wsId = ws._wsId;
-      const room = ws.room || ws.roomname || this.clientRooms.get(wsId);
+      const room = this._getRoomWithFallback(ws);
       if (!room) {
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first"]);
         return;
@@ -3034,7 +3086,7 @@ export class GameServer {
       
       const usernameClean = username.trim();
       const wsId = ws._wsId;
-      const room = ws.room || ws.roomname || this.clientRooms.get(wsId);
+      const room = this._getRoomWithFallback(ws);
       if (!room) {
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first"]);
         return;
@@ -3105,7 +3157,7 @@ export class GameServer {
       }
       
       const usernameClean = username.trim();
-      const room = ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
+      const room = this._getRoomWithFallback(ws);
       if (!room) {
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first"]);
         return;
@@ -3130,7 +3182,7 @@ export class GameServer {
         this._safeSend(ws, ["gameStatus", "false"]);
         return;
       }
-      let room = roomname || ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
+      let room = roomname || this._getRoomWithFallback(ws);
       if (!room) {
         this._safeSend(ws, ["gameStatus", "false"]);
         return;
