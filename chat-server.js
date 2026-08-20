@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 6.0.2 - FIXED SET ID - TIDAK HAPUS WS
+// VERSION: 6.0.3 - FIXED SET ID & JOIN ROOM - TIDAK HAPUS WS
 // ISOLATED ROOMS - CHAT TIDAK BOCOR KE ROOM LAIN
 
 const C = {
@@ -1158,15 +1158,13 @@ export class ChatServer {
     // ===== KIRIM PESAN =====
     // JANGAN HAPUS WS! Biarkan tetap aktif
     if (isNewUser) { 
-      // User baru: kirim joinroomawal
       this.safeSend(ws, ["joinroomawal"]); 
     } else { 
-      // User lama: kirim needJoinRoom
       this.safeSend(ws, ["needJoinRoom"]); 
     }
   }
 
-  // ========== HANDLE JOIN ==========
+  // ========== HANDLE JOIN - FIXED ==========
   _handleJoin(ws, roomName) {
     if (!ws || !ws.username || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) {
       return false;
@@ -1193,9 +1191,9 @@ export class ChatServer {
     }
   }
 
-  // ========== JOIN INTERNAL ==========
+  // ========== JOIN INTERNAL - FIXED ==========
   async _joinInternal(ws, roomName, username) {
-    // Cek apakah WS masih valid
+    // Cek apakah WS masih valid - JANGAN HAPUS WS
     if (!ws || ws.readyState !== 1 || ws._closing) {
       return false;
     }
@@ -1305,6 +1303,9 @@ export class ChatServer {
       this.safeSend(ws, ["roomUserCount", roomName, roomMan.getCount()]);
       
       this.updateRoomCount(roomName);
+      
+      // JANGAN HAPUS WS DISINI!
+      // JANGAN PANGGIL VALIDATE USER YANG BISA MENGHAPUS WS!
       
       setTimeout(() => {
         try {
