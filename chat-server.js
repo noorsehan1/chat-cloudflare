@@ -1,6 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 3.3.10 - FULLY OPTIMIZED WITH ALARM & WEB SOCKET HIBERNATION
-// OPTIMIZED FOR DURABLE OBJECTS FREE TIER
+// VERSION: 3.3.11 - FIXED INITIALIZATION
 
 const C = {
   MAX_SEATS: 45,
@@ -139,6 +138,7 @@ export class ChatServer {
     this.ctx = state;
     this.closing = false;
     this.isDestroyed = false;
+    this._initialized = false; // ✅ TETAP false SAMPAI INIT SELESAI
     this._startTime = Date.now();
     this._initPromise = null;
     
@@ -174,10 +174,8 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
-    // ========== ASYNC INIT WITH ALARM ==========
-    this.ctx.blockConcurrencyWhile(async () => {
-      await this._initAsync();
-    });
+    // ✅ SET _initPromise UNTUK DITUNGGU
+    this._initPromise = this._initAsync();
   }
 
   // ==================== INIT ASYNC ====================
@@ -227,9 +225,15 @@ export class ChatServer {
         await this.state.storage.setAlarm(nextAlarm);
       }
       
+      // ✅ ✅ ✅ SET INITIALIZED = TRUE DI SINI!
+      this._initialized = true;
+      
+      console.log(`ChatServer initialized: ${new Date().toISOString()}`);
+      
     } catch(e) {
-      // Silent error
       console.error("Init error:", e);
+      // ✅ TETAP SET INITIALIZED = TRUE AGAR FETCH BISA BERJALAN
+      this._initialized = true;
     }
   }
 
@@ -1408,7 +1412,9 @@ export class ChatServer {
     if (this._initPromise) {
       try {
         await this._initPromise;
-      } catch(e) {}
+      } catch(e) {
+        // Ignore
+      }
     }
     
     // ===== CEK UPDATE NUMBER DI SETIAP REQUEST =====
@@ -1426,6 +1432,20 @@ export class ChatServer {
       if (req.method === "POST" && req.url.includes("/updateNumber")) {
         await this._updateNumber();
         return new Response("OK", { status: 200 });
+      }
+      
+      // ===== HEALTH CHECK =====
+      if (req.url.includes("/health")) {
+        return new Response(JSON.stringify({
+          status: "ok",
+          initialized: this._initialized,
+          connections: this.wsSet.size,
+          rooms: this.rooms.size,
+          timestamp: Date.now()
+        }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
       }
       
       if (upgrade !== "websocket") {
