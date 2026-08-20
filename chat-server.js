@@ -301,11 +301,34 @@ export class ChatServer {
     return true;
   }
 
+  // ========== CLEANUP ON ALARM ==========
+  _cleanupOnAlarm() {
+    const allUsers = new Set();
+    for (const [roomName, roomMan] of this.rooms) {
+      if (!roomMan) continue;
+      for (const [seat, seatData] of roomMan.seats) {
+        if (seatData && seatData.namauser) {
+          allUsers.add(seatData.namauser);
+        }
+      }
+    }
+    
+    for (const username of allUsers) {
+      this._validateUserInOneRoomOnly(username);
+    }
+    
+    this._rebuildUserRoomMapping();
+    this._cleanupDeadConnections();
+  }
+
   // ========== ALARM ==========
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
     this._updateNumber();
+    this._cleanupDeadConnections();
+    this._cleanupMemory();
+    this._cleanupOnAlarm();
     
     this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
   }
@@ -330,6 +353,41 @@ export class ChatServer {
     } catch(e) {} finally {
       this._isNumberUpdating = false;
     }
+  }
+
+  // ========== CLEANUP DEAD CONNECTIONS ==========
+  _cleanupDeadConnections() {
+    try {
+      const toRemove = [];
+      for (const ws of this.wsSet) {
+        if (!ws || ws.readyState !== 1 || ws._closing) {
+          toRemove.push(ws);
+        }
+      }
+      for (const ws of toRemove) {
+        this.cleanup(ws);
+      }
+    } catch(e) {}
+  }
+
+  // ========== CLEANUP MEMORY ==========
+  _cleanupMemory() {
+    try {
+      for (const [username, connections] of this.userConnections) {
+        const toRemove = [];
+        for (const conn of connections) {
+          if (!conn || conn.readyState !== 1 || conn._closing) {
+            toRemove.push(conn);
+          }
+        }
+        for (const conn of toRemove) {
+          connections.delete(conn);
+        }
+        if (connections.size === 0) {
+          this.userConnections.delete(username);
+        }
+      }
+    } catch(e) {}
   }
 
   // ========== PROCESS EVENT QUEUE ==========
@@ -378,9 +436,7 @@ export class ChatServer {
           } else {
             toRemove.add(ws);
           }
-        } catch(e) { 
-          toRemove.add(ws);
-        }
+        } catch(e) { toRemove.add(ws); }
       }
     }
     
@@ -388,6 +444,7 @@ export class ChatServer {
       for (const ws of toRemove) {
         try {
           clients.delete(ws);
+          if (ws && !this._cleaningUp.has(ws)) this.cleanup(ws);
         } catch(e) {}
       }
     }
@@ -409,6 +466,7 @@ export class ChatServer {
       ws.send(JSON.stringify(msg));
       return true;
     } catch(e) {
+      this.cleanup(ws);
       return false;
     }
   }
@@ -534,9 +592,7 @@ export class ChatServer {
       if (ws.readyState !== 1 || ws._closing || this._cleaningUp.has(ws) || this.closing || this.isDestroyed) {
         return;
       }
-    } catch(e) { 
-      return; 
-    }
+    } catch(e) { return; }
     
     if (this._processingMessages.has(ws)) return;
     this._processingMessages.add(ws);
@@ -560,8 +616,7 @@ export class ChatServer {
         this._eventQueue.push({ ws, data: [evt, ...args] });
         if (!this._isProcessingQueue) this._processEventQueue();
       }
-    } catch(e) {
-    } finally {
+    } catch(e) {} finally {
       try { this._processingMessages.delete(ws); } catch(e) {}
     }
   }
@@ -1010,13 +1065,12 @@ export class ChatServer {
   // ========== HANDLE SET ID ==========
   _handleSetId(ws, username, isNewUser) {
     if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
-      try { 
-        if (ws?.readyState === 1) ws.close(1000, "Invalid username"); 
-      } catch(e) {}
+      try { if (ws?.readyState === 1) ws.close(1000, "Invalid username"); } catch(e) {}
       return;
     }
     
     if (ws.readyState !== 1) {
+      try { this.cleanup(ws); } catch(e) {}
       return;
     }
     
@@ -1119,10 +1173,6 @@ export class ChatServer {
 
   // ========== JOIN INTERNAL ==========
   async _joinInternal(ws, roomName, username) {
-    if (!ws || ws.readyState !== 1 || ws._closing) {
-      return false;
-    }
-    
     const existing = this._isUserInAnyRoom(username);
     
     if (existing && existing.room !== roomName) {
