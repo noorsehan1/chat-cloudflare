@@ -1,5 +1,6 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 10.0.0 - FULL CLASS
+// VERSION: 10.0.0 - WITH ALLOWCONCURRENCY & NO HIBERNATION
+// READY FOR DEPLOYMENT
 
 const C = {
   MAX_SEATS: 45,
@@ -17,6 +18,7 @@ const ROOMS = [
 
 const ROOMS_SET = new Set(ROOMS);
 
+// ==================== CHAT SERVER ====================
 export class ChatServer {
   constructor(state, env) {
     this.state = state;
@@ -46,96 +48,6 @@ export class ChatServer {
     this._isNumberUpdating = false;
     
     this._restoreAllState();
-  }
-
-  // ============ WEBSOCKET HANDLERS ============
-  
-  async webSocketMessage(ws, message) {
-    if (!ws || ws._closing || this.closing || this.isDestroyed) return;
-    try { await this.handleMessage(ws, message); } catch(e) {}
-  }
-
-  async webSocketClose(ws) { 
-    if (!ws) return;
-    try {
-      await this._cleanupUserOnDisconnect(ws);
-      this.cleanup(ws);
-    } catch(e) {}
-  }
-
-  async webSocketError(ws) { 
-    if (!ws) return;
-    try {
-      await this._cleanupUserOnDisconnect(ws);
-      this.cleanup(ws);
-    } catch(e) {}
-  }
-
-  // ============ FETCH ============
-  
-  async fetch(request) {
-    const url = new URL(request.url);
-    
-    if (url.pathname === "/health") {
-      return new Response(JSON.stringify({
-        status: "ok",
-        uptime: Date.now() - this._startTime,
-        connections: this.wsSet.size,
-        rooms: Object.keys(this._roomsDataCache).length,
-        onlineUsers: this._onlineUsers.size,
-        timestamp: Date.now()
-      }), {
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-    
-    if (url.pathname === "/reset" && request.method === "POST") {
-      const result = await this.resetAllData();
-      return new Response(JSON.stringify(result), {
-        status: result.success ? 200 : 500,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-    
-    const upgrade = request.headers.get("Upgrade");
-    if (upgrade === "websocket") {
-      if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
-        return new Response("Server full", { status: 503 });
-      }
-      
-      const pair = new WebSocketPair();
-      const [client, server] = Object.values(pair);
-      
-      this.ctx.getWebSockets().accept(server, { 
-        allowConcurrency: true 
-      });
-      
-      server.username = null;
-      server.room = null;
-      server.roomname = null;
-      server.idtarget = null;
-      server._closing = false;
-      server._wsId = Date.now() + Math.random();
-      server._isMulti = false;
-      server._multiRoom = null;
-      server._multiSeat = null;
-      
-      server.serializeAttachment({});
-      
-      if (!this.wsSet.has(server)) {
-        this.wsSet.add(server);
-      }
-      
-      return new Response(null, { 
-        status: 101, 
-        webSocket: client 
-      });
-    }
-    
-    return new Response("Chat Server Running ✅\nWebSocket: wss://" + url.host + "/\n", { 
-      status: 200,
-      headers: { 'Content-Type': 'text/plain' }
-    });
   }
 
   // ============ SERIALIZE / DESERIALIZE ============
@@ -718,6 +630,7 @@ export class ChatServer {
           this.safeSend(ws, ["allPointsList", room, filteredPoints]);
         }
       }
+      
     } catch(e) {}
   }
 
@@ -928,6 +841,29 @@ export class ChatServer {
         timestamp: timestamp
       };
     }
+  }
+
+  // ============ WEBSOCKET EVENT HANDLERS ============
+
+  async webSocketMessage(ws, msg) {
+    if (!ws || ws._closing || this.closing || this.isDestroyed) return;
+    try { await this.handleMessage(ws, msg); } catch(e) {}
+  }
+
+  async webSocketClose(ws) { 
+    if (!ws) return;
+    try {
+      await this._cleanupUserOnDisconnect(ws);
+      this.cleanup(ws);
+    } catch(e) {}
+  }
+
+  async webSocketError(ws) { 
+    if (!ws) return;
+    try {
+      await this._cleanupUserOnDisconnect(ws);
+      this.cleanup(ws);
+    } catch(e) {}
   }
 
   // ============ HANDLE SET ID ============
@@ -1486,6 +1422,7 @@ export class ChatServer {
         }
       }
       
+      // Restore WebSocket connections from Durable Object state
       const webSockets = this.ctx.getWebSockets();
       for (const ws of webSockets) {
         try {
@@ -1538,6 +1475,86 @@ export class ChatServer {
       }
       
     } catch(e) {}
+  }
+
+  // ============ FETCH ============
+
+  async fetch(req) {
+    if (this.closing || this.isDestroyed) {
+      return new Response("Shutting down", { status: 503 });
+    }
+    
+    try {
+      const url = new URL(req.url);
+      
+      if (url.pathname === "/reset" && req.method === "POST") {
+        const result = await this.resetAllData();
+        return new Response(JSON.stringify(result), {
+          status: result.success ? 200 : 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      
+      if (url.pathname === "/health") {
+        return new Response(JSON.stringify({
+          status: "ok",
+          uptime: Date.now() - this._startTime,
+          connections: this.wsSet.size,
+          rooms: Object.keys(this._roomsDataCache).length,
+          onlineUsers: this._onlineUsers.size,
+          timestamp: Date.now()
+        }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      
+      const upgrade = req.headers.get("Upgrade");
+      if (upgrade !== "websocket") {
+        return new Response("Chat Server", { 
+          status: 200,
+          headers: { "Cache-Control": "no-cache" }
+        });
+      }
+      
+      if (this.wsSet.size >= C.MAX_GLOBAL_CONNECTIONS) {
+        return new Response("Server full", { status: 503 });
+      }
+      
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      
+      // 🔥 KUNCI UTAMA: accept dengan allowConcurrency true
+      try { 
+        this.ctx.acceptWebSocket(server, {
+          allowConcurrency: true  // Biar bisa terima pesan sambil proses state
+        });
+      } 
+      catch(e) { 
+        return new Response("WebSocket acceptance failed", { status: 500 }); 
+      }
+      
+      server.username = null;
+      server.room = null;
+      server.roomname = null;
+      server.idtarget = null;
+      server._closing = false;
+      server._wsId = Date.now() + Math.random();
+      server._isMulti = false;
+      server._multiRoom = null;
+      server._multiSeat = null;
+      
+      server.serializeAttachment({});
+      
+      if (!this.wsSet.has(server)) this.wsSet.add(server);
+      
+      return new Response(null, { 
+        status: 101, 
+        webSocket: client
+      });
+      
+    } catch(e) {
+      return new Response("Internal Server Error", { status: 500 });
+    }
   }
 
   // ============ DESTROY ============
