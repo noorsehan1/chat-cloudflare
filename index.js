@@ -1,5 +1,5 @@
 // ==================== INDEX.JS ====================
-// VERSION: 3.3.6 - MINIMALIS
+// VERSION: 3.3.7 - FIXED GAME SERVER ROUTING
 
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
@@ -17,8 +17,8 @@ export default {
         return obj.fetch(request);
       }
       
-      // GAME SERVER
-      if (pathname === "/game/ws" || pathname === "/game/health") {
+      // GAME SERVER - TAMBAHKAN "/game" DAN "/game/"
+      if (pathname === "/game/ws" || pathname === "/game/health" || pathname === "/game" || pathname === "/game/") {
         const id = env.GAME_SERVER.idFromName("game");
         const obj = env.GAME_SERVER.get(id);
         return obj.fetch(request);
