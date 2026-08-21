@@ -1,5 +1,7 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 7.5.0 - STORAGE-ONLY ARCHITECTURE WITH DEPLOY RESET
+// VERSION: 7.6.0 - STORAGE-ONLY WITH DEPLOY RESET & REJOIN
+// MULTI USER = ONLINE SELAMA DI STORAGE
+// HANYA exitMulti YANG BISA MENGHAPUS MULTI USER
 
 const C = {
   MAX_SEATS: 45,
@@ -138,8 +140,9 @@ export class ChatServer {
           ws._closing = false;
           
           if (ws.readyState === 1) {
-            ws.send(JSON.stringify(["storageReset", "Storage has been reset due to deployment"]));
+            ws.send(JSON.stringify(["deployReset", "Server deployed, please re-join"]));
             ws.send(JSON.stringify(["needJoinRoom"]));
+            ws.send(JSON.stringify(["storageCleared", "All data has been reset"]));
           }
         } catch(e) {}
       }
@@ -959,6 +962,22 @@ export class ChatServer {
       if (!ws || !data || !data[0]) return;
       const [evt, ...args] = data;
       
+      const checkUserValid = async (username, roomName) => {
+        if (!username) return true;
+        const userSeat = await this._getUserSeat(username);
+        if (!userSeat) {
+          this.safeSend(ws, ["needJoinRoom", "Please join a room first"]);
+          this.safeSend(ws, ["error", "Not in any room"]);
+          return false;
+        }
+        if (roomName && userSeat.room !== roomName) {
+          this.safeSend(ws, ["needJoinRoom", "Please join the correct room"]);
+          this.safeSend(ws, ["error", "Not in this room"]);
+          return false;
+        }
+        return true;
+      };
+      
       switch(evt) {
         case "getCurrentNumber":
           this.safeSend(ws, ["currentNumber", this.currentNumber]);
@@ -1250,6 +1269,8 @@ export class ChatServer {
         case "updateKursi": {
           const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
           
+          if (!await checkUserValid(kursiName, kursiRoom)) break;
+          
           const lockKey = `kursi_${kursiRoom}_${kursiSeat}`;
           if (this._kursiLocks.has(lockKey)) break;
           this._kursiLocks.set(lockKey, Date.now());
@@ -1282,10 +1303,7 @@ export class ChatServer {
           const [chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor] = args;
           if (!chatMsg || !ROOMS_SET.has(chatRoom)) break;
           
-          const userSeat = await this._getUserSeat(chatUser);
-          if (!userSeat || userSeat.room !== chatRoom) {
-            break;
-          }
+          if (!await checkUserValid(chatUser, chatRoom)) break;
           
           this._broadcastToRoom(chatRoom, JSON.stringify(["chat", chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor]));
           break;
@@ -1294,6 +1312,10 @@ export class ChatServer {
         case "updatePoint": {
           const [pointRoom, pointSeat, pointX, pointY, pointFast] = args;
           if (!pointRoom || typeof pointSeat !== 'number') break;
+          
+          const roomData = await this._getRoomData(pointRoom);
+          const username = roomData?.seats?.[pointSeat]?.namauser;
+          if (!await checkUserValid(username, pointRoom)) break;
           
           const updated = await this._updatePoint(pointRoom, pointSeat, pointX, pointY, pointFast === 1);
           if (updated) {
@@ -1320,6 +1342,8 @@ export class ChatServer {
         case "private": {
           const [privTarget, privNoimg, privMsg, privSender] = args;
           if (privTarget && privMsg) {
+            if (!await checkUserValid(privSender)) break;
+            
             const targetConns = this.userConnections.get(privTarget);
             if (targetConns) {
               for (const targetWs of targetConns) {
@@ -1337,6 +1361,9 @@ export class ChatServer {
         case "gift": {
           const [giftRoom, giftSender, giftReceiver, giftGiftName] = args;
           if (giftRoom && ROOMS_SET.has(giftRoom)) {
+            if (!await checkUserValid(giftSender, giftRoom)) break;
+            if (!await checkUserValid(giftReceiver, giftRoom)) break;
+            
             const receiverSeat = await this._getUserSeat(giftReceiver);
             if (!receiverSeat || receiverSeat.room !== giftRoom) break;
             this._broadcastToRoom(giftRoom, JSON.stringify(["gift", giftRoom, giftSender, giftReceiver, giftGiftName, Date.now()]));
@@ -1347,6 +1374,8 @@ export class ChatServer {
         case "rollangak": {
           const [rollRoom, rollUser, rollAngka] = args;
           if (rollRoom && ROOMS_SET.has(rollRoom)) {
+            if (!await checkUserValid(rollUser, rollRoom)) break;
+            
             const userSeat = await this._getUserSeat(rollUser);
             if (!userSeat || userSeat.room !== rollRoom) break;
             this._broadcastToRoom(rollRoom, JSON.stringify(["rollangakBroadcast", rollRoom, rollUser, rollAngka]));
@@ -1358,6 +1387,8 @@ export class ChatServer {
           try {
             const [notifTarget, notifNoimg, notifUser, notifMsg] = args;
             if (notifTarget && notifMsg) {
+              if (!await checkUserValid(notifUser)) break;
+              
               const targetConns = this.userConnections.get(notifTarget);
               if (targetConns) {
                 for (const c of targetConns) {
