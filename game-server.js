@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 6.0.1 - FIXED GAME START WITH HYBERNATE
+// VERSION: 6.0.3 - FULL CODE WITH HYBERNATE API FIXED
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -48,10 +48,7 @@ const CONSTANTS = {
   
   CACHE_TTL_MS: 60000,
   
-  // STORAGE KEYS FOR HYBERNATE
-  STORAGE_KEY_WS_STATE: 'ws_state',
   STORAGE_KEY_GAMES: 'games_state',
-  STORAGE_KEY_USER_CONNECTIONS: 'user_connections',
   STORAGE_KEY_DICE_STATE: 'dice_state',
   STORAGE_KEY_TIE_STATE: 'tie_state',
   STORAGE_KEY_CACHE: 'cache_state',
@@ -67,7 +64,6 @@ const QUIZ_SCHEDULE = {
   TIMEZONE_OFFSET: 8,
 };
 
-// ========== FUNGSI PARSE TIME ==========
 function parseTime(timeStr) {
   const [hours, minutes] = timeStr.split(':').map(Number);
   return hours * 60 + minutes;
@@ -547,7 +543,6 @@ export class GameServer {
       this._wsIdCounter = 0;
       this._lastActivity = Date.now();
       
-      // ===== STATE YANG AKAN DISIMPAN KE STORAGE (HYBERNATE) =====
       this.cacheManager = new CacheManager();
       
       this.activeGames = new Map();
@@ -624,11 +619,6 @@ export class GameServer {
       
       this._lastNotifTime = {};
       
-      // ===== IMPORTANT: JANGAN RESTORE DARI STORAGE DULU =====
-      // Biarkan state kosong, nanti di-restore saat dibutuhkan
-      // Ini mencegah konflik dengan WebSocket yang baru connect
-      
-      // ===== INIT LAZY =====
       setTimeout(() => {
         if (!this.closing && !this.isDestroyed) {
           this._initLazy();
@@ -653,7 +643,6 @@ export class GameServer {
       this._loadKVData().catch(() => {});
       this.alarmScheduler.scheduleAlarms().catch(() => {});
       
-      // ===== RESTORE STATE DARI STORAGE (SETELAH INISIALISASI) =====
       this._restoreFromStorage().catch(() => {});
       
       setTimeout(() => {
@@ -677,47 +666,29 @@ export class GameServer {
   // ========== RESTORE STATE DARI STORAGE ==========
   async _restoreFromStorage() {
     try {
-      // Hanya restore games, dice, tie - BUKAN WebSocket
-      // WebSocket akan di-restore otomatis oleh Cloudflare
-      
       // 1. Restore Games State
       const gamesState = await this.state.storage.get(CONSTANTS.STORAGE_KEY_GAMES) || {};
       for (const [room, gameData] of Object.entries(gamesState)) {
         try {
           const game = this._deserializeGame(gameData);
-          if (game && game._isActive && !game._gameEnded) {
-            // Cek apakah game masih valid
-            if (game.players && game.players.size > 0) {
-              this.activeGames.set(room, game);
-              console.log(`[RESTORE] Game restored for room: ${room}`);
-            }
+          if (game && game._isActive && !game._gameEnded && game.players && game.players.size > 0) {
+            this.activeGames.set(room, game);
+            console.log(`[RESTORE] Game restored for room: ${room}`);
           }
         } catch(e) {}
       }
       
-      // 2. Restore Dice State (hanya jika tidak ada game aktif)
+      // 2. Restore Dice State
       const diceState = await this.state.storage.get(CONSTANTS.STORAGE_KEY_DICE_STATE) || {};
-      if (diceState.currentDiceRoll && !this.currentDiceRoll) {
+      if (diceState.currentDiceRoll) {
         this.currentDiceRoll = diceState.currentDiceRoll;
         this._diceRound = diceState._diceRound || 0;
         this._canSubmitDiceAnswer = diceState._canSubmitDiceAnswer || false;
-        this._isShowingDice = diceState._isShowingDice || false;
-        this._diceLock = diceState._diceLock || false;
         this.diceAutoEnabled = diceState.diceAutoEnabled || false;
         console.log(`[RESTORE] Dice state restored`);
       }
       
-      // 3. Restore Tie State
-      const tieState = await this.state.storage.get(CONSTANTS.STORAGE_KEY_TIE_STATE) || {};
-      if (tieState._tieActive) {
-        this._tieActive = tieState._tieActive;
-        this._tieRound = tieState._tieRound || 0;
-        this._tiePlayers = tieState._tiePlayers || [];
-        this._tieLock = tieState._tieLock || false;
-        console.log(`[RESTORE] Tie state restored`);
-      }
-      
-      // 4. Restore Cache State
+      // 3. Restore Cache State
       const cacheState = await this.state.storage.get(CONSTANTS.STORAGE_KEY_CACHE) || {};
       if (cacheState.recordingStatus) {
         this.cacheManager.recordingStatus = new Map(Object.entries(cacheState.recordingStatus));
@@ -738,7 +709,6 @@ export class GameServer {
     try {
       if (this.closing || this.isDestroyed) return;
       
-      // 1. Save Games State (hanya yang aktif)
       const gamesState = {};
       for (const [room, game] of this.activeGames) {
         if (game && game._isActive && !game._gameEnded && game.players && game.players.size > 0) {
@@ -747,38 +717,20 @@ export class GameServer {
       }
       await this.state.storage.put(CONSTANTS.STORAGE_KEY_GAMES, gamesState);
       
-      // 2. Save Dice State
       const diceState = {
         currentDiceRoll: this.currentDiceRoll,
         _diceLock: this._diceLock,
         _tieActive: this._tieActive,
         _isShowingDice: this._isShowingDice,
         _diceTimeUpCooldown: this._diceTimeUpCooldown,
-        _diceQuestionStartTime: this._diceQuestionStartTime,
-        _diceStartTime: this._diceStartTime,
         diceAutoEnabled: this.diceAutoEnabled,
-        diceHasWinner: this.diceHasWinner,
-        diceWinner: this.diceWinner,
         _canSubmitDiceAnswer: this._canSubmitDiceAnswer,
         _diceRound: this._diceRound,
-        _diceNotifiedFlags: this._diceNotifiedFlags,
         diceAnswered: Array.from(this.diceAnswered),
         _playerAnswers: Object.fromEntries(this._playerAnswers)
       };
       await this.state.storage.put(CONSTANTS.STORAGE_KEY_DICE_STATE, diceState);
       
-      // 3. Save Tie State
-      const tieState = {
-        _tieActive: this._tieActive,
-        _tieRound: this._tieRound,
-        _tiePlayers: this._tiePlayers,
-        _tieAnswers: Object.fromEntries(this._tieAnswers),
-        _tieLock: this._tieLock,
-        _tieBreakers: Array.from(this._tieBreakers.entries()).map(([id, data]) => [id, data])
-      };
-      await this.state.storage.put(CONSTANTS.STORAGE_KEY_TIE_STATE, tieState);
-      
-      // 4. Save Cache State
       const cacheState = {
         recordingStatus: Object.fromEntries(this.cacheManager.recordingStatus),
         winnersCache: Object.fromEntries(
@@ -826,7 +778,7 @@ export class GameServer {
 
   _deserializeGame(data) {
     if (!data) return null;
-    const game = {
+    return {
       room: data.room,
       players: new Map(data.players || []),
       botPlayers: new Map(data.botPlayers || []),
@@ -858,7 +810,6 @@ export class GameServer {
       _evalTimer: null,
       _safetyTimer: null
     };
-    return game;
   }
 
   // ========== CEK DAN MULAI SESI ==========
@@ -1168,7 +1119,9 @@ export class GameServer {
         // ===== HYBERNATE: ACCEPT WEBSOCKET =====
         try {
           this.state.acceptWebSocket(server);
+          server.accept();  // ← WAJIB! TANPA INI TIDAK NYAMBUNG
         } catch(e) {
+          console.error('[WS] Accept error:', e);
           try { server.close(1008, "Accept failed"); } catch(err) {}
           return new Response("WebSocket acceptance failed", { status: 500 });
         }
@@ -1179,7 +1132,9 @@ export class GameServer {
             _wsId: wsId,
             _createdAt: Date.now()
           });
-        } catch(e) {}
+        } catch(e) {
+          console.error('[WS] Serialize attachment error:', e);
+        }
         
         this.wsMap.set(wsId, server);
         
@@ -1190,14 +1145,18 @@ export class GameServer {
             if (Array.isArray(data) && data.length > 0) {
               await this._processWithTimeout(server, data);
             }
-          } catch(e) {}
+          } catch(e) {
+            console.error('[WS] Message error:', e);
+          }
         });
         
         server.addEventListener("close", () => { 
+          console.log('[WS] Close:', wsId);
           this.webSocketClose(server);
         }, { once: true });
         
-        server.addEventListener("error", () => { 
+        server.addEventListener("error", (e) => { 
+          console.error('[WS] Error:', wsId, e);
           this.webSocketError(server);
         }, { once: true });
         
@@ -1207,6 +1166,7 @@ export class GameServer {
       return new Response("Game Server", { status: 200 });
       
     } catch(e) {
+      console.error('[FETCH] Error:', e);
       this._handleError('fetch', e);
       return new Response(JSON.stringify({
         error: "Internal Server Error",
@@ -1477,13 +1437,11 @@ export class GameServer {
       const wsId = this._getWsId(ws);
       if (!wsId) { this._safeSend(ws, ["gameLowCardError", "Connection error"]); return; }
       
-      // Hapus dari room lama
       if (this.clientRooms.has(wsId)) {
         const oldRoom = this.clientRooms.get(wsId);
         if (oldRoom && oldRoom !== room) this._removeClientFromRoom(oldRoom, wsId);
       }
       
-      // Set username di WebSocket
       if (username) {
         ws.username = username;
         
@@ -1499,7 +1457,6 @@ export class GameServer {
         this._reconnectAttempts.delete(username);
       }
       
-      // Tambahkan ke room
       let clients = this.wsClients.get(room);
       if (!clients) { clients = new Set(); this.wsClients.set(room, clients); }
       clients.add(wsId);
@@ -1508,7 +1465,6 @@ export class GameServer {
       ws.room = room;
       ws.roomname = room;
       
-      // Update attachment untuk hibernate
       try {
         ws.serializeAttachment({
           _wsId: wsId,
@@ -1628,7 +1584,6 @@ export class GameServer {
         ws.roomname = roomName;
         if (username) ws.username = username;
         
-        // Update attachment untuk hibernate
         try {
           ws.serializeAttachment({
             _wsId: wsId,
@@ -1997,7 +1952,6 @@ export class GameServer {
       this._broadcastToRoom(room, ["gameLowCardEnd", []]);
       this._releaseLock(this._cleanupLocks, lockKey);
       
-      // Save state
       this._saveStateToStorage().catch(() => {});
     } catch(e) {
       this._releaseLock(this._cleanupLocks, lockKey);
@@ -2583,7 +2537,6 @@ export class GameServer {
         this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
         this._startRegistration(room, game);
         
-        // Save state
         this._saveStateToStorage().catch(() => {});
       } finally {
         setTimeout(() => { this._gameLocks.delete(lockKey); }, 3000);
@@ -2942,7 +2895,6 @@ export class GameServer {
         this._endDiceRound();
       }, 20000));
       
-      // Save state
       this._saveStateToStorage().catch(() => {});
       
     } catch(e) {
@@ -3039,7 +2991,6 @@ export class GameServer {
         }
       }, 15000);
       
-      // Save state
       this._saveStateToStorage().catch(() => {});
       
     } catch(e) {
@@ -3130,7 +3081,6 @@ export class GameServer {
       }
     }, (timeLimit * 1000) + 2000));
     
-    // Save state
     this._saveStateToStorage().catch(() => {});
   }
 
@@ -3300,7 +3250,6 @@ export class GameServer {
     }
     this._tieNotificationTimeouts = [];
     
-    // Save state
     this._saveStateToStorage().catch(() => {});
   }
 
@@ -3480,7 +3429,6 @@ export class GameServer {
       this.isDestroyed = true;
       this.closing = true;
       
-      // Save state sebelum destroy
       await this._saveStateToStorage();
       
       for (const timer of this._allTimers) {
@@ -3567,3 +3515,5 @@ export class GameServer {
     } catch(e) {}
   }
 }
+
+export { GameServer };
