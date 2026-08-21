@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 7.0.0 - STORAGE-ONLY ARCHITECTURE
+// VERSION: 7.1.0 - STORAGE-ONLY ARCHITECTURE WITH MULTI FIX
 // SEMUA DATA LANGSUNG BACA/TULIS KE STORAGE
 // TIDAK PAKAI MEMORY UNTUK DATA (userSeat, userRoom, rooms)
 
@@ -434,10 +434,14 @@ export class ChatServer {
     ws.room = roomName;
     ws.roomname = roomName;
     ws.idtarget = username;
+    ws._isMulti = false;
+    ws._multiRoom = null;
+    ws._multiSeat = null;
     
     ws.serializeAttachment({
       username: username,
-      seatInfo: seatInfo
+      seatInfo: seatInfo,
+      isMulti: false
     });
     
     // 7. UPDATE ROOM CLIENTS
@@ -918,6 +922,9 @@ export class ChatServer {
     ws.room = null;
     ws.roomname = null;
     ws._closing = false;
+    ws._isMulti = false;
+    ws._multiRoom = null;
+    ws._multiSeat = null;
     
     ws.serializeAttachment({ username: username });
     
@@ -1059,22 +1066,46 @@ export class ChatServer {
             data.points = roomData.points || {};
           });
           
-          const seatInfo = { room: multiRoomname, seat, isMulti: true };
+          const seatInfo = { 
+            room: multiRoomname, 
+            seat, 
+            isMulti: true,
+            multiRoom: multiRoomname,
+            multiSeat: seat
+          };
           await this._updateUserSeat(multiUsername, (data) => {
             Object.assign(data, seatInfo);
           });
           
-          let connections = this.userConnections.get(multiUsername);
-          if (!connections) connections = new Set();
-          if (!connections.has(ws)) connections.add(ws);
-          this.userConnections.set(multiUsername, connections);
+          this.wsActiveMulti.set(ws, { 
+            username: multiUsername, 
+            room: multiRoomname,
+            seat: seat,
+            isMulti: true
+          });
           
           ws.serializeAttachment({
             username: multiUsername,
-            seatInfo: seatInfo
+            seatInfo: seatInfo,
+            isMulti: true,
+            multiRoom: multiRoomname,
+            multiSeat: seat
           });
           
-          this.wsActiveMulti.set(ws, { username: multiUsername, room: multiRoomname });
+          ws.username = multiUsername;
+          ws.idtarget = multiUsername;
+          ws.room = multiRoomname;
+          ws.roomname = multiRoomname;
+          ws._isMulti = true;
+          ws._multiRoom = multiRoomname;
+          ws._multiSeat = seat;
+          
+          let connections = this.userConnections.get(multiUsername);
+          if (!connections) {
+            connections = new Set();
+            this.userConnections.set(multiUsername, connections);
+          }
+          if (!connections.has(ws)) connections.add(ws);
           
           for (const [otherRoom, clients] of this.roomClients) {
             if (otherRoom !== multiRoomname && clients) {
@@ -1084,8 +1115,90 @@ export class ChatServer {
           const roomClients = this.roomClients.get(multiRoomname);
           if (roomClients && !roomClients.has(ws)) roomClients.add(ws);
           
+          if (!this.wsSet.has(ws)) this.wsSet.add(ws);
+          
           this.safeSend(ws, ["rooMasukMulti", seat, multiRoomname]);
           this.broadcast(multiRoomname, ["roomUserCount", multiRoomname, Object.keys(roomData.seats).length]);
+          
+          break;
+        }
+        
+        case "setActiveMulti": {
+          const targetUsername = args[0];
+          if (!targetUsername) break;
+          
+          const multiData = this.wsActiveMulti.get(ws);
+          let userSeat = null;
+          let roomName = null;
+          let seatNumber = null;
+          
+          if (multiData && multiData.username === targetUsername) {
+            roomName = multiData.room;
+            seatNumber = multiData.seat;
+            userSeat = { room: roomName, seat: seatNumber, isMulti: true };
+          } else {
+            userSeat = await this._getUserSeat(targetUsername);
+            if (userSeat) {
+              roomName = userSeat.room;
+              seatNumber = userSeat.seat;
+            }
+          }
+          
+          if (!userSeat || !roomName) {
+            this.safeSend(ws, ["activeChangedMultiError", "User not found"]);
+            break;
+          }
+          
+          await this._updateUserSeat(targetUsername, (data) => {
+            data.room = roomName;
+            data.seat = seatNumber;
+            data.isMulti = true;
+            data.multiRoom = roomName;
+            data.multiSeat = seatNumber;
+          });
+          
+          this.wsActiveMulti.set(ws, { 
+            username: targetUsername, 
+            room: roomName,
+            seat: seatNumber,
+            isMulti: true
+          });
+          
+          for (const [otherRoom, clients] of this.roomClients) {
+            if (otherRoom !== roomName && clients) {
+              clients.delete(ws);
+            }
+          }
+          const roomClients = this.roomClients.get(roomName);
+          if (roomClients && !roomClients.has(ws)) roomClients.add(ws);
+          
+          ws.username = targetUsername;
+          ws.idtarget = targetUsername;
+          ws.room = roomName;
+          ws.roomname = roomName;
+          ws._isMulti = true;
+          ws._multiRoom = roomName;
+          ws._multiSeat = seatNumber;
+          
+          ws.serializeAttachment({
+            username: targetUsername,
+            seatInfo: { room: roomName, seat: seatNumber, isMulti: true },
+            isMulti: true,
+            multiRoom: roomName,
+            multiSeat: seatNumber
+          });
+          
+          let connections = this.userConnections.get(targetUsername);
+          if (!connections) {
+            connections = new Set();
+            this.userConnections.set(targetUsername, connections);
+          }
+          if (!connections.has(ws)) connections.add(ws);
+          
+          if (!this.wsSet.has(ws)) this.wsSet.add(ws);
+          
+          this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
+          this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
           
           break;
         }
@@ -1095,12 +1208,21 @@ export class ChatServer {
           if (!targetUsername) break;
           
           try {
-            console.log(`[exitMulti] Exiting user "${targetUsername}"`);
+            let userSeat = null;
+            let targetWs = null;
             
-            // 1. CARI USER DI STORAGE
-            let userSeat = await this._getUserSeat(targetUsername);
+            for (const [wsKey, data] of this.wsActiveMulti) {
+              if (data && data.username === targetUsername) {
+                userSeat = { room: data.room, seat: data.seat };
+                targetWs = wsKey;
+                break;
+              }
+            }
             
-            // 2. FALLBACK: SCAN SEMUA ROOM
+            if (!userSeat) {
+              userSeat = await this._getUserSeat(targetUsername);
+            }
+            
             if (!userSeat) {
               const storage = await this._loadFromStorage();
               const roomsData = storage.roomsData || {};
@@ -1117,7 +1239,6 @@ export class ChatServer {
             }
             
             if (!userSeat) {
-              console.log(`[exitMulti] User "${targetUsername}" not found anywhere`);
               await this._deleteUserSeat(targetUsername);
               this.safeSend(ws, ["exitMultiSuccess", targetUsername, null, null]);
               break;
@@ -1126,11 +1247,9 @@ export class ChatServer {
             const roomName = userSeat.room;
             const seatNumber = userSeat.seat;
             
-            // 3. HAPUS DARI STORAGE
             await this._removeUserFromRoom(targetUsername, roomName);
             await this._deleteUserSeat(targetUsername);
             
-            // 4. HAPUS DARI SEMUA WEBSOCKET
             const connections = this.userConnections.get(targetUsername);
             if (connections) {
               for (const conn of connections) {
@@ -1139,6 +1258,9 @@ export class ChatServer {
                   if (rc) rc.delete(conn);
                 }
                 this.wsActiveMulti.delete(conn);
+                conn._isMulti = false;
+                conn._multiRoom = null;
+                conn._multiSeat = null;
                 try {
                   conn.serializeAttachment({});
                   conn.username = null;
@@ -1158,6 +1280,9 @@ export class ChatServer {
                   const rc = this.roomClients.get(data.room);
                   if (rc) rc.delete(wsKey);
                 }
+                wsKey._isMulti = false;
+                wsKey._multiRoom = null;
+                wsKey._multiSeat = null;
                 try {
                   wsKey.serializeAttachment({});
                   wsKey.username = null;
@@ -1172,51 +1297,15 @@ export class ChatServer {
               this.wsSet.delete(wsKey);
             }
             
-            // 5. BROADCAST
             this.broadcast(roomName, ["removeKursi", roomName, seatNumber]);
             await this.updateRoomCount(roomName);
             await this._deleteRoomIfEmpty(roomName);
             
             this.safeSend(ws, ["exitMultiSuccess", targetUsername, roomName, seatNumber]);
-            console.log(`[exitMulti] User "${targetUsername}" successfully exited from "${roomName}" seat ${seatNumber}`);
             
           } catch(e) {
-            console.error('[exitMulti] Error:', e.message);
             this.safeSend(ws, ["exitMultiError", e.message]);
           }
-          break;
-        }
-        
-        case "setActiveMulti": {
-          const targetUsername = args[0];
-          const userSeat = await this._getUserSeat(targetUsername);
-          if (!userSeat) break;
-          
-          const roomName = userSeat.room;
-          const seatNumber = userSeat.seat;
-          
-          this.wsActiveMulti.set(ws, { username: targetUsername, room: roomName });
-          
-          for (const [otherRoom, clients] of this.roomClients) {
-            if (otherRoom !== roomName && clients) {
-              clients.delete(ws);
-            }
-          }
-          const roomClients = this.roomClients.get(roomName);
-          if (roomClients && !roomClients.has(ws)) roomClients.add(ws);
-          
-          ws.username = targetUsername;
-          ws.idtarget = targetUsername;
-          ws.room = roomName;
-          ws.roomname = roomName;
-          
-          ws.serializeAttachment({
-            username: targetUsername,
-            seatInfo: userSeat
-          });
-          
-          this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
-          this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
           break;
         }
         
@@ -1251,14 +1340,12 @@ export class ChatServer {
           break;
         }
         
-        // ✅ CHAT: LANGSUNG KIRIM (TANPA SAVE)
         case "chat": {
           const [chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor] = args;
           if (!chatMsg || !ROOMS_SET.has(chatRoom)) break;
           
           const userSeat = await this._getUserSeat(chatUser);
           if (!userSeat || userSeat.room !== chatRoom) {
-            console.log(`[chat] User "${chatUser}" not in room "${chatRoom}"`);
             break;
           }
           
@@ -1292,7 +1379,6 @@ export class ChatServer {
           break;
         }
         
-        // ✅ PRIVATE: LANGSUNG KIRIM
         case "private": {
           const [privTarget, privNoimg, privMsg, privSender] = args;
           if (privTarget && privMsg) {
@@ -1310,7 +1396,6 @@ export class ChatServer {
           break;
         }
         
-        // ✅ GIFT: LANGSUNG KIRIM
         case "gift": {
           const [giftRoom, giftSender, giftReceiver, giftGiftName] = args;
           if (giftRoom && ROOMS_SET.has(giftRoom)) {
@@ -1321,7 +1406,6 @@ export class ChatServer {
           break;
         }
         
-        // ✅ ROLL: LANGSUNG KIRIM
         case "rollangak": {
           const [rollRoom, rollUser, rollAngka] = args;
           if (rollRoom && ROOMS_SET.has(rollRoom)) {
@@ -1332,7 +1416,6 @@ export class ChatServer {
           break;
         }
         
-        // ✅ NOTIF: LANGSUNG KIRIM (SAMA SEPERTI KODE AWAL)
         case "sendnotif": {
           try {
             const [notifTarget, notifNoimg, notifUser, notifMsg] = args;
@@ -1347,9 +1430,7 @@ export class ChatServer {
                 }
               }
             }
-          } catch(e) {
-            console.error('[notif] Error:', e.message);
-          }
+          } catch(e) {}
           break;
         }
         
@@ -1468,7 +1549,6 @@ export class ChatServer {
         this.currentNumber = currentNumber;
       }
       
-      // Validasi data
       for (const [username, seatInfo] of Object.entries(userSeatData)) {
         if (!seatInfo || !seatInfo.room) {
           delete userSeatData[username];
@@ -1481,7 +1561,6 @@ export class ChatServer {
         }
       }
       
-      // Restore websockets
       const webSockets = this.ctx.getWebSockets();
       for (const ws of webSockets) {
         try {
@@ -1489,22 +1568,43 @@ export class ChatServer {
           if (attachment && attachment.username) {
             const userSeat = userSeatData[attachment.username];
             if (userSeat) {
-              attachment.seatInfo = userSeat;
-              ws.serializeAttachment(attachment);
+              const isMulti = attachment.isMulti || userSeat.isMulti || false;
+              const roomName = userSeat.room;
+              const seatNumber = userSeat.seat;
               
               ws.username = attachment.username;
-              ws.room = userSeat.room;
-              ws.roomname = userSeat.room;
+              ws.room = roomName;
+              ws.roomname = roomName;
               ws.idtarget = attachment.username;
               ws._closing = false;
+              ws._isMulti = isMulti;
+              ws._multiRoom = roomName;
+              ws._multiSeat = seatNumber;
               
-              const roomClients = this.roomClients.get(userSeat.room);
+              ws.serializeAttachment({
+                username: attachment.username,
+                seatInfo: userSeat,
+                isMulti: isMulti,
+                multiRoom: roomName,
+                multiSeat: seatNumber
+              });
+              
+              const roomClients = this.roomClients.get(roomName);
               if (roomClients) roomClients.add(ws);
               
               let conns = this.userConnections.get(attachment.username);
               if (!conns) conns = new Set();
               conns.add(ws);
               this.userConnections.set(attachment.username, conns);
+              
+              if (isMulti) {
+                this.wsActiveMulti.set(ws, { 
+                  username: attachment.username, 
+                  room: roomName,
+                  seat: seatNumber,
+                  isMulti: true
+                });
+              }
               
               this.wsSet.add(ws);
             }
@@ -1557,6 +1657,9 @@ export class ChatServer {
       server.idtarget = null;
       server._closing = false;
       server._wsId = Date.now() + Math.random();
+      server._isMulti = false;
+      server._multiRoom = null;
+      server._multiSeat = null;
       
       server.serializeAttachment({});
       
