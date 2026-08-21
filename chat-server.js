@@ -1,5 +1,5 @@
-// ==================== CHAT-SERVER.JS (LENGKAP) ====================
-// VERSION: 9.0.5 - FINAL
+// ==================== CHAT-SERVER.JS (LENGKAP + ERROR HANDLING) ====================
+// VERSION: 9.0.6 - FINAL WITH ERROR HANDLING
 // READY FOR DEPLOYMENT
 
 const C = {
@@ -47,28 +47,44 @@ export class ChatServer {
     
     this._isNumberUpdating = false;
     
-    this._restoreAllState();
+    this._restoreAllState().catch(e => {
+      console.error("Restore state error:", e);
+    });
   }
 
   // ============ SERIALIZE / DESERIALIZE ============
   
   async serializeState() {
-    return {
-      roomsData: this._roomsDataCache,
-      userSeatData: this._userSeatDataCache,
-      currentNumber: this.currentNumber,
-      userCounts: this._userCounts,
-      onlineUsers: Array.from(this._onlineUsers),
-    };
+    try {
+      return {
+        roomsData: this._roomsDataCache || {},
+        userSeatData: this._userSeatDataCache || {},
+        currentNumber: this.currentNumber || 1,
+        userCounts: this._userCounts || {},
+        onlineUsers: Array.from(this._onlineUsers || new Set()),
+      };
+    } catch(e) {
+      return {
+        roomsData: {},
+        userSeatData: {},
+        currentNumber: 1,
+        userCounts: {},
+        onlineUsers: []
+      };
+    }
   }
 
   async deserializeState(data) {
-    if (!data) return;
-    this._roomsDataCache = data.roomsData || {};
-    this._userSeatDataCache = data.userSeatData || {};
-    this.currentNumber = data.currentNumber || 1;
-    this._userCounts = data.userCounts || {};
-    this._onlineUsers = new Set(data.onlineUsers || []);
+    try {
+      if (!data) return;
+      this._roomsDataCache = data.roomsData || {};
+      this._userSeatDataCache = data.userSeatData || {};
+      this.currentNumber = data.currentNumber || 1;
+      this._userCounts = data.userCounts || {};
+      this._onlineUsers = new Set(data.onlineUsers || []);
+    } catch(e) {
+      console.error("Deserialize error:", e);
+    }
   }
 
   // ============ CORE OPERATIONS ============
@@ -86,6 +102,7 @@ export class ChatServer {
       
       await this.ctx.storage.put(updates);
     } catch(e) {
+      console.error("Update cache error:", e);
       await this._rollbackCache();
     }
   }
@@ -96,7 +113,9 @@ export class ChatServer {
       if (storage.roomsData !== undefined) this._roomsDataCache = storage.roomsData;
       if (storage.userSeatData !== undefined) this._userSeatDataCache = storage.userSeatData;
       if (storage.currentNumber !== undefined) this.currentNumber = storage.currentNumber;
-    } catch(e) {}
+    } catch(e) {
+      console.error("Rollback error:", e);
+    }
   }
 
   async _updateUserCounts() {
@@ -113,7 +132,7 @@ export class ChatServer {
       
       this._userCounts = newCounts;
       this._onlineUsers.clear();
-      for (const [username] of Object.entries(this._userSeatDataCache)) {
+      for (const [username] of Object.entries(this._userSeatDataCache || {})) {
         this._onlineUsers.add(username);
       }
       
@@ -124,14 +143,15 @@ export class ChatServer {
       
       return { counts: newCounts, total: totalUsers };
     } catch(e) {
-      return { counts: this._userCounts, total: this._onlineUsers.size };
+      console.error("Update user counts error:", e);
+      return { counts: this._userCounts || {}, total: this._onlineUsers?.size || 0 };
     }
   }
 
   async _loadFromStorage() {
     try {
-      if (Object.keys(this._roomsDataCache).length === 0 && 
-          Object.keys(this._userSeatDataCache).length === 0) {
+      if (Object.keys(this._roomsDataCache || {}).length === 0 && 
+          Object.keys(this._userSeatDataCache || {}).length === 0) {
         const roomsData = await this.ctx.storage.get("roomsData") || {};
         const userSeatData = await this.ctx.storage.get("userSeatData") || {};
         const currentNumber = await this.ctx.storage.get("currentNumber") || 1;
@@ -146,13 +166,14 @@ export class ChatServer {
       }
       
       return {
-        roomsData: this._roomsDataCache,
-        userSeatData: this._userSeatDataCache,
-        currentNumber: this.currentNumber,
-        userCounts: this._userCounts,
-        onlineUsers: Array.from(this._onlineUsers)
+        roomsData: this._roomsDataCache || {},
+        userSeatData: this._userSeatDataCache || {},
+        currentNumber: this.currentNumber || 1,
+        userCounts: this._userCounts || {},
+        onlineUsers: Array.from(this._onlineUsers || new Set())
       };
     } catch(e) {
+      console.error("Load from storage error:", e);
       return { roomsData: {}, userSeatData: {}, currentNumber: 1, userCounts: {}, onlineUsers: [] };
     }
   }
@@ -399,11 +420,13 @@ export class ChatServer {
     ws._multiRoom = null;
     ws._multiSeat = null;
     
-    ws.serializeAttachment({
-      username: username,
-      seatInfo: seatInfo,
-      isMulti: false
-    });
+    try {
+      ws.serializeAttachment({
+        username: username,
+        seatInfo: seatInfo,
+        isMulti: false
+      });
+    } catch(e) {}
     
     for (const [otherRoom, clients] of this.roomClients) {
       if (otherRoom !== roomName && clients) {
@@ -487,7 +510,9 @@ export class ChatServer {
       
       this.wsSet.delete(ws);
       
-    } catch(e) {}
+    } catch(e) {
+      console.error("Cleanup user error:", e);
+    }
   }
 
   cleanup(ws) {
@@ -676,6 +701,7 @@ export class ChatServer {
       }
       
     } catch(e) {
+      console.error("Update number error:", e);
       const storage = await this.ctx.storage.get(["currentNumber", "roomsData"]);
       if (storage.currentNumber !== undefined) {
         this.currentNumber = storage.currentNumber;
@@ -740,7 +766,9 @@ export class ChatServer {
         await this._saveToStorage(roomsData, userSeatData, storage.currentNumber);
       }
       
-    } catch(e) {}
+    } catch(e) {
+      console.error("Cleanup storage error:", e);
+    }
   }
 
   async _saveToStorage(roomsData, userSeatData, currentNumber) {
@@ -754,7 +782,9 @@ export class ChatServer {
       if (currentNumber !== undefined) {
         await this.ctx.storage.put("currentNumber", currentNumber);
       }
-    } catch(e) {}
+    } catch(e) {
+      console.error("Save to storage error:", e);
+    }
   }
 
   _cleanupDeadConnections() {
@@ -834,6 +864,7 @@ export class ChatServer {
       };
       
     } catch(e) {
+      console.error("Reset all data error:", e);
       return {
         success: false,
         error: e.message,
@@ -899,7 +930,9 @@ export class ChatServer {
     ws._multiRoom = null;
     ws._multiSeat = null;
     
-    ws.serializeAttachment({ username: username });
+    try {
+      ws.serializeAttachment({ username: username });
+    } catch(e) {}
     
     if (!this.wsSet.has(ws)) this.wsSet.add(ws);
     
@@ -936,7 +969,9 @@ export class ChatServer {
       }
       
       await this._handleEventInternal(ws, [evt, ...args]);
-    } catch(e) {}
+    } catch(e) {
+      console.error("Handle message error:", e);
+    }
   }
 
   // ============ EVENT HANDLER INTERNAL ============
@@ -1389,7 +1424,9 @@ export class ChatServer {
           this.safeSend(ws, ["error", `Unknown event: ${evt}`]);
           break;
       }
-    } catch(e) {}
+    } catch(e) {
+      console.error("Event handler error:", e);
+    }
   }
 
   // ============ RESTORE STATE ============
@@ -1472,19 +1509,22 @@ export class ChatServer {
         await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
       }
       
-    } catch(e) {}
+    } catch(e) {
+      console.error("Restore all state error:", e);
+    }
   }
 
   // ============ FETCH ============
 
   async fetch(req) {
-    if (this.closing || this.isDestroyed) {
-      return new Response("Shutting down", { status: 503 });
-    }
-    
     try {
+      if (this.closing || this.isDestroyed) {
+        return new Response("Shutting down", { status: 503 });
+      }
+      
       const url = new URL(req.url);
       
+      // === HTTP ROUTES ===
       if (url.pathname === "/reset" && req.method === "POST") {
         const result = await this.resetAllData();
         return new Response(JSON.stringify(result), {
@@ -1497,15 +1537,16 @@ export class ChatServer {
         return new Response(JSON.stringify({
           status: "ok",
           uptime: Date.now() - this._startTime,
-          connections: this.wsSet.size,
-          rooms: Object.keys(this._roomsDataCache).length,
-          onlineUsers: this._onlineUsers.size,
+          connections: this.wsSet?.size || 0,
+          rooms: Object.keys(this._roomsDataCache || {}).length,
+          onlineUsers: this._onlineUsers?.size || 0,
           timestamp: Date.now()
         }), {
           headers: { "Content-Type": "application/json" }
         });
       }
       
+      // === WEBSOCKET ===
       const upgrade = req.headers.get("Upgrade");
       if (upgrade !== "websocket") {
         return new Response("Chat Server", { 
@@ -1521,15 +1562,14 @@ export class ChatServer {
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       
-      // ============ YANG BENAR ============
-      // HANYA GUNAKAN acceptWebSocket
       try { 
         this.ctx.acceptWebSocket(server); 
       } catch(e) { 
         console.error("WebSocket accept error:", e);
-        return new Response("WebSocket acceptance failed", { status: 500 }); 
+        return new Response("WebSocket acceptance failed: " + e.message, { status: 500 }); 
       }
       
+      // Setup server WebSocket
       server.username = null;
       server.room = null;
       server.roomname = null;
@@ -1540,9 +1580,13 @@ export class ChatServer {
       server._multiRoom = null;
       server._multiSeat = null;
       
-      server.serializeAttachment({});
+      try {
+        server.serializeAttachment({});
+      } catch(e) {}
       
-      if (!this.wsSet.has(server)) this.wsSet.add(server);
+      if (!this.wsSet.has(server)) {
+        this.wsSet.add(server);
+      }
       
       return new Response(null, { 
         status: 101, 
@@ -1551,7 +1595,7 @@ export class ChatServer {
       
     } catch(e) {
       console.error("Fetch error:", e);
-      return new Response("Internal Server Error", { status: 500 });
+      return new Response("Internal Server Error: " + e.message, { status: 500 });
     }
   }
 
@@ -1562,9 +1606,13 @@ export class ChatServer {
     this.closing = true;
     this.isDestroyed = true;
     
-    await this._cleanupStorage();
+    try {
+      await this._cleanupStorage();
+    } catch(e) {
+      console.error("Cleanup storage error:", e);
+    }
     
-    const wsCopy = Array.from(this.wsSet);
+    const wsCopy = Array.from(this.wsSet || new Set());
     for (const ws of wsCopy) {
       if (ws?.readyState === 1) {
         try { ws.send(JSON.stringify(["serverShutdown", "Server shutting down"])); } catch(e) {}
