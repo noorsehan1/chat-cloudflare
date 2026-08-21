@@ -1,6 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 10.0.0 - WITH CONCURRENCY SUPPORT, NO HIBERNATION
-// READY FOR DEPLOYMENT
+// VERSION: 10.0.0 - WITH CONCURRENCY SUPPORT
 
 const C = {
   MAX_SEATS: 45,
@@ -18,7 +17,6 @@ const ROOMS = [
 
 const ROOMS_SET = new Set(ROOMS);
 
-// ==================== CHAT SERVER ====================
 export class ChatServer {
   constructor(state, env) {
     this.state = state;
@@ -50,8 +48,6 @@ export class ChatServer {
     this._restoreAllState();
   }
 
-  // ============ SERIALIZE / DESERIALIZE ============
-  
   async serializeState() {
     return {
       roomsData: this._roomsDataCache,
@@ -70,8 +66,6 @@ export class ChatServer {
     this._userCounts = data.userCounts || {};
     this._onlineUsers = new Set(data.onlineUsers || []);
   }
-
-  // ============ CORE OPERATIONS ============
 
   async _updateCacheAndStorage(roomsData, userSeatData, currentNumber) {
     try {
@@ -220,8 +214,6 @@ export class ChatServer {
     }
   }
 
-  // ============ USER MANAGEMENT ============
-
   async _isUserInAnyRoom(username) {
     if (!username) return null;
     
@@ -323,8 +315,6 @@ export class ChatServer {
     await this.ctx.storage.put("roomsData", this._roomsDataCache);
     return true;
   }
-
-  // ============ JOIN HANDLING ============
 
   async _handleJoin(ws, roomName) {
     if (!ws || !ws.username || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) {
@@ -432,8 +422,6 @@ export class ChatServer {
     return true;
   }
 
-  // ============ CLEANUP ============
-
   async _cleanupUserOnDisconnect(ws) {
     try {
       const username = ws.username;
@@ -509,8 +497,6 @@ export class ChatServer {
     }
   }
 
-  // ============ BROADCAST ============
-
   _broadcastToRoom(room, msgStr) {
     if (this.closing || this.isDestroyed || !room) return;
     const clients = this.roomClients.get(room);
@@ -565,8 +551,6 @@ export class ChatServer {
       return false;
     }
   }
-
-  // ============ STATE MANAGEMENT ============
 
   async updateRoomCount(room) {
     if (this.closing || this.isDestroyed || !room) return 0;
@@ -632,8 +616,6 @@ export class ChatServer {
       }
     } catch(e) {}
   }
-
-  // ============ ALARM / NUMBER UPDATER ============
 
   async alarm() {
     if (this.closing || this.isDestroyed) return;
@@ -771,8 +753,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ============ RESET ALL DATA ============
-
   async resetAllData() {
     const timestamp = Date.now();
     
@@ -842,8 +822,6 @@ export class ChatServer {
     }
   }
 
-  // ============ WEBSOCKET EVENT HANDLERS ============
-
   async webSocketMessage(ws, msg) {
     if (!ws || ws._closing || this.closing || this.isDestroyed) return;
     try { await this.handleMessage(ws, msg); } catch(e) {}
@@ -864,8 +842,6 @@ export class ChatServer {
       this.cleanup(ws);
     } catch(e) {}
   }
-
-  // ============ HANDLE SET ID ============
 
   async _handleSetId(ws, username, isNewUser) {
     if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
@@ -910,8 +886,6 @@ export class ChatServer {
     }
   }
 
-  // ============ HANDLE MESSAGE ============
-
   async handleMessage(ws, raw) {
     if (!ws) return;
     try {
@@ -938,8 +912,6 @@ export class ChatServer {
       await this._handleEventInternal(ws, [evt, ...args]);
     } catch(e) {}
   }
-
-  // ============ EVENT HANDLER INTERNAL ============
 
   async _handleEventInternal(ws, data) {
     try {
@@ -1392,8 +1364,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ============ RESTORE STATE ============
-
   async _restoreAllState() {
     try {
       const roomsData = await this.ctx.storage.get("roomsData") || {};
@@ -1475,8 +1445,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ============ FETCH ============
-
   async fetch(req) {
     if (this.closing || this.isDestroyed) {
       return new Response("Shutting down", { status: 503 });
@@ -1521,9 +1489,8 @@ export class ChatServer {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       
-      // KUNCI: Menggunakan ctx.getWebSockets().accept() dengan allowConcurrency
       this.ctx.getWebSockets().accept(server, { 
-        allowConcurrency: true // biar bisa terima msg pas bangun
+        allowConcurrency: true
       });
       
       server.username = null;
@@ -1549,8 +1516,6 @@ export class ChatServer {
       return new Response("Internal Server Error", { status: 500 });
     }
   }
-
-  // ============ DESTROY ============
 
   async destroy() {
     if (this.isDestroyed) return;
