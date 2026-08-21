@@ -1,6 +1,5 @@
-// ==================== INDEX.JS (FIXED) ====================
+// ==================== INDEX.JS ====================
 import { ChatServer } from "./chat-server.js";
-import { GameServer } from "./game-server.js";
 
 export default {
   async fetch(request, env) {
@@ -10,29 +9,30 @@ export default {
       const upgrade = request.headers.get("Upgrade");
       
       // === CHAT SERVER ===
-      // Tambahkan kondisi untuk root WebSocket
-      if (
-        pathname === "/ws" || 
-        pathname === "/chat" || 
-        pathname === "/reset" ||
-        pathname === "/health" ||
-        (pathname === "/" && upgrade === "websocket")  // ← INI TAMBAHAN
-      ) {
+      // Perhatikan: WebSocket harus dideteksi SEBELUM response HTTP
+      if (upgrade === "websocket") {
+        // Arahkan SEMUA WebSocket ke ChatServer
         const id = env.CHAT_SERVER.idFromName("global");
         const obj = env.CHAT_SERVER.get(id);
         return obj.fetch(request);
       }
       
-      // === GAME SERVER ===
-      if (pathname === "/game/ws" || pathname === "/game/health" || pathname === "/game" || pathname === "/game/") {
-        const id = env.GAME_SERVER.idFromName("game");
-        const obj = env.GAME_SERVER.get(id);
+      // === HTTP ROUTES ===
+      if (pathname === "/reset" && request.method === "POST") {
+        const id = env.CHAT_SERVER.idFromName("global");
+        const obj = env.CHAT_SERVER.get(id);
+        return obj.fetch(request);
+      }
+      
+      if (pathname === "/health") {
+        const id = env.CHAT_SERVER.idFromName("global");
+        const obj = env.CHAT_SERVER.get(id);
         return obj.fetch(request);
       }
       
       // === ROOT (HTTP) ===
       if (pathname === "/") {
-        return new Response("Chat Server Running\nWebSocket: wss://" + url.host + "/ws\n", { 
+        return new Response("Chat Server Running\nWebSocket: wss://" + url.host + "/\n", { 
           status: 200,
           headers: { 'Content-Type': 'text/plain' }
         });
@@ -49,4 +49,4 @@ export default {
   }
 };
 
-export { ChatServer, GameServer };
+export { ChatServer };
