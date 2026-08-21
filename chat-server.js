@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 9.0.0 - WITH PROPER HYBERNATION HANDLING (NO LOGS)
+// VERSION: 10.0.0 - FULL CLOUDFLARE HIBERNATION API COMPLIANT
 
 const C = {
   MAX_SEATS: 45,
@@ -26,6 +26,7 @@ export class ChatServer {
     this.isDestroyed = false;
     this._startTime = Date.now();
     
+    // ===== WEBSOCKET CONNECTIONS (MEMORY) =====
     this.wsSet = new Set();
     this.roomClients = new Map();
     
@@ -33,6 +34,7 @@ export class ChatServer {
       this.roomClients.set(room, new Set());
     }
     
+    // ===== CACHE DATA (MEMORY) =====
     this._roomsDataCache = {};
     this._userSeatDataCache = {};
     this.currentNumber = 1;
@@ -44,42 +46,104 @@ export class ChatServer {
     
     this._isNumberUpdating = false;
     
-    this._restoreAllState().then(() => {
-      this._restoreWebSockets();
-    });
+    // ===== RESTORE FROM HIBERNATION =====
+    this._restoreFromHibernation();
   }
 
-  async _restoreWebSockets() {
+  // ============ RESTORE FROM HIBERNATION ============
+  
+  _restoreFromHibernation() {
     try {
+      // 1. Restore data dari storage
+      this.ctx.storage.get(["roomsData", "userSeatData", "currentNumber", "userCounts", "onlineUsers"])
+        .then((storage) => {
+          if (storage.roomsData !== undefined) {
+            this._roomsDataCache = storage.roomsData;
+          }
+          if (storage.userSeatData !== undefined) {
+            this._userSeatDataCache = storage.userSeatData;
+          }
+          if (storage.currentNumber !== undefined) {
+            this.currentNumber = storage.currentNumber;
+          }
+          if (storage.userCounts !== undefined) {
+            this._userCounts = storage.userCounts;
+          }
+          if (storage.onlineUsers !== undefined) {
+            this._onlineUsers = new Set(storage.onlineUsers);
+          }
+          
+          // 2. Restore WebSocket connections dari hibernasi
+          this._restoreWebSockets();
+          
+          // 3. Set alarm untuk number updater
+          if (!this.closing && !this.isDestroyed) {
+            this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+          }
+        })
+        .catch(() => {
+          // Jika gagal restore, inisialisasi kosong
+          this._roomsDataCache = {};
+          this._userSeatDataCache = {};
+          this.currentNumber = 1;
+          this._onlineUsers = new Set();
+          this._userCounts = {};
+          for (const room of ROOMS) {
+            this._userCounts[room] = 0;
+          }
+        });
+    } catch(e) {}
+  }
+
+  _restoreWebSockets() {
+    try {
+      // Ambil semua WebSocket yang masih terhubung dari hibernasi
       const webSockets = this.ctx.getWebSockets();
+      
       for (const ws of webSockets) {
         try {
+          // Deserialize attachment yang disimpan saat accept
           const attachment = ws.deserializeAttachment();
+          
           if (attachment && attachment.username) {
-            const userSeat = this._userSeatDataCache[attachment.username];
-            if (userSeat) {
-              ws.username = attachment.username;
-              ws.room = userSeat.room;
-              ws.roomname = userSeat.room;
-              ws.idtarget = attachment.username;
-              ws._closing = false;
-              ws._isMulti = attachment.isMulti || false;
-              ws._multiRoom = attachment.multiRoom || userSeat.room;
-              ws._multiSeat = attachment.multiSeat || userSeat.seat;
+            // Restore user data dari attachment
+            ws.username = attachment.username;
+            ws.idtarget = attachment.username;
+            ws.room = attachment.room || null;
+            ws.roomname = attachment.room || null;
+            ws._closing = false;
+            ws._isMulti = attachment.isMulti || false;
+            ws._multiRoom = attachment.multiRoom || null;
+            ws._multiSeat = attachment.multiSeat || null;
+            
+            // Restore seat info jika ada
+            if (attachment.room && attachment.seat) {
+              const seatInfo = {
+                room: attachment.room,
+                seat: attachment.seat,
+                isMulti: attachment.isMulti || false
+              };
               
-              const roomClients = this.roomClients.get(userSeat.room);
+              // Simpan ke userSeatDataCache
+              this._userSeatDataCache[attachment.username] = seatInfo;
+              this._onlineUsers.add(attachment.username);
+              
+              // Tambahkan ke room clients
+              const roomClients = this.roomClients.get(attachment.room);
               if (roomClients) {
                 roomClients.add(ws);
               }
-              
-              this.wsSet.add(ws);
-              this._onlineUsers.add(attachment.username);
             }
+            
+            // Tambahkan ke wsSet
+            this.wsSet.add(ws);
           }
         } catch(e) {}
       }
     } catch(e) {}
   }
+
+  // ============ CORE: UPDATE CACHE + STORAGE ============
 
   async _updateCacheAndStorage(roomsData, userSeatData, currentNumber) {
     try {
@@ -127,6 +191,20 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  async _saveFullState() {
+    try {
+      await this.ctx.storage.put({
+        roomsData: this._roomsDataCache,
+        userSeatData: this._userSeatDataCache,
+        currentNumber: this.currentNumber,
+        userCounts: this._userCounts,
+        onlineUsers: Array.from(this._onlineUsers)
+      });
+    } catch(e) {}
+  }
+
+  // ============ USER COUNT MANAGEMENT ============
+
   async _updateUserCounts() {
     try {
       const newCounts = {};
@@ -155,6 +233,8 @@ export class ChatServer {
       return { counts: this._userCounts, total: this._onlineUsers.size };
     }
   }
+
+  // ============ STORAGE OPERATIONS ============
 
   async _loadFromStorage() {
     try {
@@ -206,6 +286,7 @@ export class ChatServer {
     updater(this._roomsDataCache[roomName]);
     await this.ctx.storage.put("roomsData", this._roomsDataCache);
     await this._updateUserCounts();
+    await this._saveFullState();
     return this._roomsDataCache[roomName];
   }
 
@@ -228,6 +309,7 @@ export class ChatServer {
     }
     await this.ctx.storage.put("onlineUsers", Array.from(this._onlineUsers));
     await this._updateUserCounts();
+    await this._saveFullState();
     
     return this._userSeatDataCache[username];
   }
@@ -238,6 +320,7 @@ export class ChatServer {
     this._onlineUsers.delete(username);
     await this.ctx.storage.put("onlineUsers", Array.from(this._onlineUsers));
     await this._updateUserCounts();
+    await this._saveFullState();
   }
 
   async _deleteRoomIfEmpty(roomName) {
@@ -251,8 +334,11 @@ export class ChatServer {
       delete this._roomsDataCache[roomName];
       await this.ctx.storage.put("roomsData", this._roomsDataCache);
       await this._updateUserCounts();
+      await this._saveFullState();
     }
   }
+
+  // ============ USER MANAGEMENT ============
 
   async _isUserInAnyRoom(username) {
     if (!username) return null;
@@ -275,6 +361,7 @@ export class ChatServer {
       await this.ctx.storage.put("userSeatData", this._userSeatDataCache);
       this._onlineUsers.delete(username);
       await this.ctx.storage.put("onlineUsers", Array.from(this._onlineUsers));
+      await this._saveFullState();
     }
     
     for (const [roomName, roomData] of Object.entries(this._roomsDataCache)) {
@@ -289,6 +376,7 @@ export class ChatServer {
           await this.ctx.storage.put("userSeatData", this._userSeatDataCache);
           this._onlineUsers.add(username);
           await this.ctx.storage.put("onlineUsers", Array.from(this._onlineUsers));
+          await this._saveFullState();
           return { room: roomName, seat: parseInt(seat), isMulti: false };
         }
       }
@@ -327,6 +415,7 @@ export class ChatServer {
     });
     
     await this._updateUserCounts();
+    await this._saveFullState();
     
     this.broadcast(roomName, ["removeKursi", roomName, seat]);
     await this.updateRoomCount(roomName);
@@ -350,6 +439,7 @@ export class ChatServer {
     };
     
     await this.ctx.storage.put("roomsData", this._roomsDataCache);
+    await this._saveFullState();
     return true;
   }
 
@@ -361,8 +451,11 @@ export class ChatServer {
     roomData.points[seat] = { x: x || 0, y: y || 0, fast: !!fast };
     
     await this.ctx.storage.put("roomsData", this._roomsDataCache);
+    await this._saveFullState();
     return true;
   }
+
+  // ============ JOIN HANDLING ============
 
   async _handleJoin(ws, roomName) {
     if (!ws || !ws.username || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) {
@@ -429,6 +522,7 @@ export class ChatServer {
     this._onlineUsers.add(username);
     await this.ctx.storage.put("onlineUsers", Array.from(this._onlineUsers));
     await this._updateUserCounts();
+    await this._saveFullState();
     
     ws.room = roomName;
     ws.roomname = roomName;
@@ -437,9 +531,11 @@ export class ChatServer {
     ws._multiRoom = null;
     ws._multiSeat = null;
     
+    // 🔥 KRITIS: Simpan state untuk hibernasi
     ws.serializeAttachment({
       username: username,
-      seatInfo: seatInfo,
+      room: roomName,
+      seat: seat,
       isMulti: false
     });
     
@@ -467,21 +563,10 @@ export class ChatServer {
       } catch(e) {}
     }, 1000);
     
-    await this._saveFullState();
     return true;
   }
 
-  async _saveFullState() {
-    try {
-      await this.ctx.storage.put({
-        roomsData: this._roomsDataCache,
-        userSeatData: this._userSeatDataCache,
-        currentNumber: this.currentNumber,
-        userCounts: this._userCounts,
-        onlineUsers: Array.from(this._onlineUsers)
-      });
-    } catch(e) {}
-  }
+  // ============ CLEANUP ============
 
   async _cleanupUserOnDisconnect(ws) {
     try {
@@ -560,6 +645,8 @@ export class ChatServer {
     }
   }
 
+  // ============ BROADCAST ============
+
   _broadcastToRoom(room, msgStr) {
     if (this.closing || this.isDestroyed || !room) return;
     const clients = this.roomClients.get(room);
@@ -614,6 +701,8 @@ export class ChatServer {
       return false;
     }
   }
+
+  // ============ STATE MANAGEMENT ============
 
   async updateRoomCount(room) {
     if (this.closing || this.isDestroyed || !room) return 0;
@@ -679,6 +768,8 @@ export class ChatServer {
       }
     } catch(e) {}
   }
+
+  // ============ ALARM / NUMBER UPDATER ============
 
   async alarm() {
     if (this.closing || this.isDestroyed) return;
@@ -784,6 +875,7 @@ export class ChatServer {
       
       if (changed) {
         await this._saveToStorage(roomsData, userSeatData, storage.currentNumber);
+        await this._saveFullState();
       }
       
     } catch(e) {}
@@ -816,6 +908,8 @@ export class ChatServer {
       }
     } catch(e) {}
   }
+
+  // ============ RESET ALL DATA ============
 
   async resetAllData() {
     const timestamp = Date.now();
@@ -869,6 +963,7 @@ export class ChatServer {
       }
       
       await this.ctx.storage.put("lastReset", timestamp);
+      await this._saveFullState();
       
       return {
         success: true,
@@ -886,17 +981,45 @@ export class ChatServer {
     }
   }
 
+  // ============ WEBSOCKET EVENT HANDLERS (HIBERNATION API) ============
+
+  // 🔥 KRITIS: Method ini dipanggil oleh Cloudflare runtime untuk message
   async webSocketMessage(ws, msg) {
     if (!ws || ws._closing || this.closing || this.isDestroyed) return;
+    
+    // Restore state dari attachment jika perlu
+    if (!ws.room && !ws.username) {
+      try {
+        const attachment = ws.deserializeAttachment();
+        if (attachment) {
+          ws.username = attachment.username;
+          ws.room = attachment.room;
+          ws.roomname = attachment.room;
+          ws.idtarget = attachment.username;
+          ws._isMulti = attachment.isMulti || false;
+          ws._multiRoom = attachment.multiRoom || null;
+          ws._multiSeat = attachment.multiSeat || null;
+          
+          // Tambahkan ke room clients jika belum
+          if (attachment.room) {
+            const roomClients = this.roomClients.get(attachment.room);
+            if (roomClients && !roomClients.has(ws)) {
+              roomClients.add(ws);
+            }
+            if (!this.wsSet.has(ws)) {
+              this.wsSet.add(ws);
+            }
+          }
+        }
+      } catch(e) {}
+    }
+    
     try { 
-      if (Object.keys(this._roomsDataCache).length === 0) {
-        await this._restoreAllState();
-        await this._restoreWebSockets();
-      }
       await this.handleMessage(ws, msg); 
     } catch(e) {}
   }
 
+  // 🔥 KRITIS: Method ini dipanggil oleh Cloudflare runtime saat close
   async webSocketClose(ws) { 
     if (!ws) return;
     try {
@@ -906,6 +1029,7 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // 🔥 KRITIS: Method ini dipanggil oleh Cloudflare runtime saat error
   async webSocketError(ws) { 
     if (!ws) return;
     try {
@@ -914,6 +1038,8 @@ export class ChatServer {
       await this._saveFullState();
     } catch(e) {}
   }
+
+  // ============ HANDLE SET ID ============
 
   async _handleSetId(ws, username, isNewUser) {
     if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
@@ -947,7 +1073,12 @@ export class ChatServer {
     ws._multiRoom = null;
     ws._multiSeat = null;
     
-    ws.serializeAttachment({ username: username });
+    // 🔥 Simpan state untuk hibernasi
+    ws.serializeAttachment({ 
+      username: username,
+      room: null,
+      isMulti: false
+    });
     
     if (!this.wsSet.has(ws)) this.wsSet.add(ws);
     
@@ -957,6 +1088,8 @@ export class ChatServer {
       this.safeSend(ws, ["needJoinRoom"]); 
     }
   }
+
+  // ============ HANDLE MESSAGE ============
 
   async handleMessage(ws, raw) {
     if (!ws) return;
@@ -984,6 +1117,8 @@ export class ChatServer {
       await this._handleEventInternal(ws, [evt, ...args]);
     } catch(e) {}
   }
+
+  // ============ EVENT HANDLER INTERNAL ============
 
   async _handleEventInternal(ws, data) {
     try {
@@ -1074,10 +1209,13 @@ export class ChatServer {
           this._onlineUsers.add(multiUsername);
           await this.ctx.storage.put("onlineUsers", Array.from(this._onlineUsers));
           await this._updateUserCounts();
+          await this._saveFullState();
           
+          // 🔥 Simpan state untuk hibernasi
           ws.serializeAttachment({
             username: multiUsername,
-            seatInfo: seatInfo,
+            room: multiRoomname,
+            seat: seat,
             isMulti: true,
             multiRoom: multiRoomname,
             multiSeat: seat
@@ -1104,7 +1242,6 @@ export class ChatServer {
           this.safeSend(ws, ["rooMasukMulti", seat, multiRoomname]);
           this.broadcast(multiRoomname, ["roomUserCount", multiRoomname, Object.keys(roomData.seats).length]);
           
-          await this._saveFullState();
           break;
         }
         
@@ -1129,6 +1266,7 @@ export class ChatServer {
             multiSeat: seatNumber
           };
           await this.ctx.storage.put("userSeatData", this._userSeatDataCache);
+          await this._saveFullState();
           
           for (const [otherRoom, clients] of this.roomClients) {
             if (otherRoom !== roomName && clients) {
@@ -1146,9 +1284,11 @@ export class ChatServer {
           ws._multiRoom = roomName;
           ws._multiSeat = seatNumber;
           
+          // 🔥 Simpan state untuk hibernasi
           ws.serializeAttachment({
             username: targetUsername,
-            seatInfo: { room: roomName, seat: seatNumber, isMulti: true },
+            room: roomName,
+            seat: seatNumber,
             isMulti: true,
             multiRoom: roomName,
             multiSeat: seatNumber
@@ -1159,7 +1299,6 @@ export class ChatServer {
           this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
           this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
           
-          await this._saveFullState();
           break;
         }
         
@@ -1217,9 +1356,9 @@ export class ChatServer {
             this.broadcast(roomName, ["removeKursi", roomName, seatNumber]);
             await this.updateRoomCount(roomName);
             await this._deleteRoomIfEmpty(roomName);
+            await this._saveFullState();
             
             this.safeSend(ws, ["exitMultiSuccess", targetUsername, roomName, seatNumber]);
-            await this._saveFullState();
             
           } catch(e) {
             this.safeSend(ws, ["exitMultiError", e.message]);
@@ -1413,11 +1552,11 @@ export class ChatServer {
           if (roomData) {
             roomData.muted = !!muteVal;
             await this.ctx.storage.put("roomsData", this._roomsDataCache);
+            await this._saveFullState();
           }
           
           this.broadcast(muteRoom, ["muteStatusChanged", !!muteVal, muteRoom]);
           this.safeSend(ws, ["muteTypeSet", !!muteVal, true, muteRoom]);
-          await this._saveFullState();
           break;
         }
 
@@ -1448,6 +1587,8 @@ export class ChatServer {
       }
     } catch(e) {}
   }
+
+  // ============ RESTORE ALL STATE ============
 
   async _restoreAllState() {
     try {
@@ -1492,6 +1633,8 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ============ FETCH ============
+
   async fetch(req) {
     if (this.closing || this.isDestroyed) {
       return new Response("Shutting down", { status: 503 });
@@ -1510,6 +1653,23 @@ export class ChatServer {
         });
       }
       
+      if (url.pathname === "/health") {
+        return new Response(JSON.stringify({
+          status: "ok",
+          uptime: Date.now() - this._startTime,
+          connections: this.wsSet.size,
+          rooms: this.roomClients.size,
+          users: this._onlineUsers.size,
+          isDestroyed: this.isDestroyed,
+          closing: this.closing,
+          currentNumber: this.currentNumber,
+          roomsData: Object.keys(this._roomsDataCache).length,
+          userSeatData: Object.keys(this._userSeatDataCache).length
+        }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      
       const upgrade = req.headers.get("Upgrade");
       if (upgrade !== "websocket") {
         return new Response("Chat Server", { 
@@ -1525,8 +1685,10 @@ export class ChatServer {
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       
-      try { this.ctx.acceptWebSocket(server); } 
-      catch(e) { 
+      // 🔥 KRITIS: Gunakan ctx.acceptWebSocket() BUKAN server.accept()
+      try { 
+        this.ctx.acceptWebSocket(server); 
+      } catch(e) { 
         return new Response("WebSocket acceptance failed", { status: 500 }); 
       }
       
@@ -1540,7 +1702,12 @@ export class ChatServer {
       server._multiRoom = null;
       server._multiSeat = null;
       
-      server.serializeAttachment({});
+      // 🔥 KRITIS: Simpan state untuk hibernasi
+      server.serializeAttachment({
+        username: null,
+        room: null,
+        isMulti: false
+      });
       
       if (!this.wsSet.has(server)) this.wsSet.add(server);
       
@@ -1553,6 +1720,8 @@ export class ChatServer {
       return new Response("Internal Server Error", { status: 500 });
     }
   }
+
+  // ============ DESTROY ============
 
   async destroy() {
     if (this.isDestroyed) return;
