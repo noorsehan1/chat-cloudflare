@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 6.0.3 - FULL CODE WITH HYBERNATE API FIXED
+// VERSION: 6.0.4 - FIXED WEBSOCKET CONNECTION
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -688,7 +688,17 @@ export class GameServer {
         console.log(`[RESTORE] Dice state restored`);
       }
       
-      // 3. Restore Cache State
+      // 3. Restore Tie State
+      const tieState = await this.state.storage.get(CONSTANTS.STORAGE_KEY_TIE_STATE) || {};
+      if (tieState._tieActive) {
+        this._tieActive = tieState._tieActive;
+        this._tieRound = tieState._tieRound || 0;
+        this._tiePlayers = tieState._tiePlayers || [];
+        this._tieLock = tieState._tieLock || false;
+        console.log(`[RESTORE] Tie state restored`);
+      }
+      
+      // 4. Restore Cache State
       const cacheState = await this.state.storage.get(CONSTANTS.STORAGE_KEY_CACHE) || {};
       if (cacheState.recordingStatus) {
         this.cacheManager.recordingStatus = new Map(Object.entries(cacheState.recordingStatus));
@@ -709,6 +719,7 @@ export class GameServer {
     try {
       if (this.closing || this.isDestroyed) return;
       
+      // 1. Save Games State
       const gamesState = {};
       for (const [room, game] of this.activeGames) {
         if (game && game._isActive && !game._gameEnded && game.players && game.players.size > 0) {
@@ -717,6 +728,7 @@ export class GameServer {
       }
       await this.state.storage.put(CONSTANTS.STORAGE_KEY_GAMES, gamesState);
       
+      // 2. Save Dice State
       const diceState = {
         currentDiceRoll: this.currentDiceRoll,
         _diceLock: this._diceLock,
@@ -731,6 +743,18 @@ export class GameServer {
       };
       await this.state.storage.put(CONSTANTS.STORAGE_KEY_DICE_STATE, diceState);
       
+      // 3. Save Tie State
+      const tieState = {
+        _tieActive: this._tieActive,
+        _tieRound: this._tieRound,
+        _tiePlayers: this._tiePlayers,
+        _tieAnswers: Object.fromEntries(this._tieAnswers),
+        _tieLock: this._tieLock,
+        _tieBreakers: Array.from(this._tieBreakers.entries()).map(([id, data]) => [id, data])
+      };
+      await this.state.storage.put(CONSTANTS.STORAGE_KEY_TIE_STATE, tieState);
+      
+      // 4. Save Cache State
       const cacheState = {
         recordingStatus: Object.fromEntries(this.cacheManager.recordingStatus),
         winnersCache: Object.fromEntries(
@@ -1119,7 +1143,7 @@ export class GameServer {
         // ===== HYBERNATE: ACCEPT WEBSOCKET =====
         try {
           this.state.acceptWebSocket(server);
-          server.accept();  // ← WAJIB! TANPA INI TIDAK NYAMBUNG
+          // ✅ WebSocket otomatis terhubung, TIDAK PERLU server.accept()
         } catch(e) {
           console.error('[WS] Accept error:', e);
           try { server.close(1008, "Accept failed"); } catch(err) {}
@@ -3515,3 +3539,7 @@ export class GameServer {
     } catch(e) {}
   }
 }
+
+// ========== EXPORT ==========
+// ✅ HANYA SATU EXPORT - HAPUS export { GameServer }
+// Sudah ada export class GameServer di atas
