@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 8.0.4 - WITH RESET CASE (FULL CLASS)
+// VERSION: 8.0.5 - WITH MULTI-USER SKIP LOGIC
 
 const C = {
   MAX_SEATS: 45,
@@ -144,7 +144,11 @@ export class ChatServer {
       if (roomData && roomData.seats) {
         for (const [seat, data] of Object.entries(roomData.seats)) {
           if (data && data.namauser === username) {
-            return { room: seatInfo.room, seat: parseInt(seat), isMulti: seatInfo.isMulti || false };
+            return { 
+              room: seatInfo.room, 
+              seat: parseInt(seat), 
+              isMulti: seatInfo.isMulti || false 
+            };
           }
         }
       }
@@ -745,6 +749,17 @@ export class ChatServer {
       return;
     }
     
+    // ===== SKIP UNTUK MULTI-USER DENGAN isNewUser = false =====
+    // Jika user adalah multi-user dan isNewUser = false, TIDAK LAKUKAN APA PUN
+    if (!isNewUser) {
+      const existing = await this._isUserInAnyRoom(username);
+      if (existing && existing.isMulti) {
+        // Multi-user dengan isNewUser = false → Langsung return tanpa aksi
+        return;
+      }
+    }
+    
+    // ===== PROSES NORMAL UNTUK USER BARU ATAU NON-MULTI =====
     const existing = await this._isUserInAnyRoom(username);
     if (existing) {
       await this._removeUserFromRoom(username, existing.room);
@@ -818,9 +833,24 @@ export class ChatServer {
           this.safeSend(ws, ["currentNumber", this.currentNumber]);
           break;
         
-        case "setIdTarget2":
-          await this._handleSetId(ws, args[0], args[1]);
+        case "setIdTarget2": {
+          // ===== CEK MULTI-USER DENGAN isNewUser = false =====
+          const username = args[0];
+          const isNewUser = args[1];
+          
+          // Jika isNewUser = false dan user adalah multi-user, SKIP
+          if (isNewUser === false) {
+            const existing = await this._isUserInAnyRoom(username);
+            if (existing && existing.isMulti) {
+              // Multi-user, isNewUser = false → SKIP tanpa aksi
+              break;
+            }
+          }
+          
+          // Lanjutkan proses normal
+          await this._handleSetId(ws, username, isNewUser);
           break;
+        }
         
         case "joinRoom":
           await this._handleJoin(ws, args[0]);
