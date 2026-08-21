@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 6.0.3 - HYBERNATE API WITH MINIMAL ATTACHMENT
+// VERSION: 6.0.4 - FULL HYBERNATE API WITH this.ctx
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -64,9 +64,9 @@ function parseTime(timeStr) {
 }
 
 class AlarmScheduler {
-  constructor(env, state) {
+  constructor(env, ctx) {
     this.env = env;
-    this.state = state;
+    this.ctx = ctx;
     this._alarms = new Map();
   }
 
@@ -139,12 +139,12 @@ class AlarmScheduler {
       
       this._alarms.set(name, alarm);
       
-      if (this.state) {
-        await this.state.storage.put('alarm_state', {
+      if (this.ctx) {
+        await this.ctx.storage.put('alarm_state', {
           alarms: Array.from(this._alarms.entries()),
           updatedAt: Date.now()
         });
-        await this.state.storage.setAlarm(Date.now() + delayMs);
+        await this.ctx.storage.setAlarm(Date.now() + delayMs);
       }
       
       return true;
@@ -154,17 +154,17 @@ class AlarmScheduler {
   async _clearAllAlarms() {
     try {
       this._alarms.clear();
-      if (this.state) {
-        await this.state.storage.delete('alarm_state');
-        try { await this.state.storage.setAlarm(null); } catch(e) {}
+      if (this.ctx) {
+        await this.ctx.storage.delete('alarm_state');
+        try { await this.ctx.storage.setAlarm(null); } catch(e) {}
       }
     } catch(e) {}
   }
 
   async restoreAlarms() {
     try {
-      if (!this.state) return;
-      const data = await this.state.storage.get('alarm_state');
+      if (!this.ctx) return;
+      const data = await this.ctx.storage.get('alarm_state');
       if (!data || !data.alarms) return;
       
       this._alarms = new Map(data.alarms);
@@ -179,7 +179,7 @@ class AlarmScheduler {
       }
       
       if (minDelay > 0 && minDelay < Infinity) {
-        await this.state.storage.setAlarm(Date.now() + minDelay);
+        await this.ctx.storage.setAlarm(Date.now() + minDelay);
       }
       
       return true;
@@ -203,8 +203,8 @@ class AlarmScheduler {
         this._alarms.delete(name);
       }
       
-      if (expired.length > 0 && this.state) {
-        await this.state.storage.put('alarm_state', {
+      if (expired.length > 0 && this.ctx) {
+        await this.ctx.storage.put('alarm_state', {
           alarms: Array.from(this._alarms.entries()),
           updatedAt: Date.now()
         });
@@ -221,8 +221,8 @@ class AlarmScheduler {
       
       this._alarms.delete(name);
       
-      if (this.state) {
-        await this.state.storage.put('alarm_state', {
+      if (this.ctx) {
+        await this.ctx.storage.put('alarm_state', {
           alarms: Array.from(this._alarms.entries()),
           updatedAt: Date.now()
         });
@@ -238,7 +238,7 @@ class AlarmScheduler {
       }
       
       if (minDelay > 0 && minDelay < Infinity) {
-        await this.state.storage.setAlarm(Date.now() + minDelay);
+        await this.ctx.storage.setAlarm(Date.now() + minDelay);
       }
       
       return alarm;
@@ -598,6 +598,8 @@ export class GameServer {
     try {
       this.state = state;
       this.env = env;
+      this.ctx = state;
+      
       this.closing = false;
       this.isDestroyed = false;
       this._initialized = false;
@@ -678,23 +680,19 @@ export class GameServer {
       this.DICE_ROOM = CONSTANTS.DICE_ROOM;
       this._lastNotifTime = {};
       
-      this.alarmScheduler = new AlarmScheduler(env, state);
+      this.alarmScheduler = new AlarmScheduler(env, this.ctx);
       
       this._restoreAllState().then(() => {});
       
     } catch(e) {}
   }
 
-  // ========== HYBERNATE API METHODS ==========
-  
   async _restoreAllState() {
     try {
-      // 1. RESTORE DARI STORAGE (DATA BESAR)
-      const gameState = await this.state.storage.get("gameState") || {};
-      const diceState = await this.state.storage.get("diceState") || {};
-      const cacheState = await this.state.storage.get("cacheState") || {};
+      const gameState = await this.ctx.storage.get("gameState") || {};
+      const diceState = await this.ctx.storage.get("diceState") || {};
+      const cacheState = await this.ctx.storage.get("cacheState") || {};
       
-      // Restore cache
       if (cacheState.recordingStatus) {
         this.cacheManager.recordingStatus = new Map(Object.entries(cacheState.recordingStatus));
       }
@@ -704,7 +702,6 @@ export class GameServer {
         }
       }
       
-      // Restore games
       if (gameState.activeGames && gameState.activeGames.length > 0) {
         for (const gameData of gameState.activeGames) {
           const game = this._deserializeGame(gameData);
@@ -714,7 +711,6 @@ export class GameServer {
         }
       }
       
-      // Restore dice state
       if (diceState) {
         this.currentDiceRoll = diceState.currentDiceRoll || null;
         this._isShowingDice = diceState.isShowingDice || false;
@@ -747,8 +743,7 @@ export class GameServer {
         }
       }
       
-      // ===== 2. RESTORE WEBSOCKET DARI ATTACHMENT (HANYA IDENTITAS) =====
-      const webSockets = this.state.getWebSockets();
+      const webSockets = this.ctx.getWebSockets();
       for (const ws of webSockets) {
         try {
           const attachment = ws.deserializeAttachment();
@@ -800,7 +795,7 @@ export class GameServer {
 
   async _saveToStorage() {
     try {
-      if (!this.state) return;
+      if (!this.ctx) return;
       
       const activeGamesList = [];
       for (const [room, game] of this.activeGames) {
@@ -836,7 +831,7 @@ export class GameServer {
         tieAnswers: Object.fromEntries(this._tieAnswers),
       };
       
-      await this.state.storage.put({
+      await this.ctx.storage.put({
         gameState: { activeGames: activeGamesList },
         cacheState: cacheState,
         diceState: diceState,
@@ -960,7 +955,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== FETCH - FULL HYBERNATE API ==========
   async fetch(req) {
     try {
       if (this._isHibernating) {
@@ -998,7 +992,7 @@ export class GameServer {
       
       const url = new URL(req.url);
       
-      if (url.pathname === "/health") {
+      if (url.pathname === "/game/health" || url.pathname === "/health") {
         return new Response(JSON.stringify({
           status: "ok",
           uptime: Date.now() - this._startTime,
@@ -1014,6 +1008,13 @@ export class GameServer {
           timestamp: Date.now()
         }), {
           headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      
+      if (url.pathname === "/game" || url.pathname === "/") {
+        return new Response("Game Server Running", { 
+          status: 200,
+          headers: { 'Content-Type': 'text/plain' }
         });
       }
       
@@ -1048,9 +1049,8 @@ export class GameServer {
         server.username = null;
         server._createdAt = Date.now();
         
-        // ===== ACCEPT WEBSOCKET - HYBERNATE API =====
         try {
-          this.state.acceptWebSocket(server);
+          this.ctx.acceptWebSocket(server);
         } catch(e) {
           try { 
             server.accept(); 
@@ -1060,7 +1060,6 @@ export class GameServer {
           }
         }
         
-        // ===== ATTACHMENT HANYA IDENTITAS (KECIL) =====
         try {
           server.serializeAttachment({
             wsId: wsId,
@@ -1218,7 +1217,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== SWITCH ROOM - DENGAN ATTACHMENT MINIMAL ==========
   async switchRoom(ws, room, username = null) {
     try {
       if (this.isDestroyed) {
@@ -1274,7 +1272,6 @@ export class GameServer {
         ws.roomname = roomName;
         if (username) ws.username = username;
         
-        // ===== ATTACHMENT HANYA IDENTITAS (KECIL) =====
         try {
           if (ws.serializeAttachment) {
             ws.serializeAttachment({
@@ -1348,7 +1345,6 @@ export class GameServer {
       ws.roomname = room;
       if (username) ws.username = username;
       
-      // ===== ATTACHMENT HANYA IDENTITAS =====
       try {
         if (ws.serializeAttachment) {
           ws.serializeAttachment({
@@ -2573,7 +2569,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== GAME METHODS (SAMA SEPERTI SEBELUMNYA) ==========
   async startGame(ws, bet, username) {
     try {
       if (this.isDestroyed) {
