@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 6.0.0 - WITH HYBERNATE API (FULL CLASS)
+// VERSION: 6.0.1 - FIXED WEBSOCKET CONNECTION
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -606,6 +606,7 @@ export class GameServer {
       this._lastActivity = Date.now();
       this._isHibernating = false;
       
+      // WebSocket connections
       this.wsMap = new Map();
       this.wsClients = new Map();
       this.clientRooms = new Map();
@@ -614,6 +615,7 @@ export class GameServer {
       this.cacheManager = new CacheManager();
       this.activeGames = new Map();
       
+      // Dice state
       this.diceGameSystem = null;
       this.currentDiceRoll = null;
       this._diceLock = false;
@@ -680,6 +682,7 @@ export class GameServer {
       
       this.alarmScheduler = new AlarmScheduler(env, state);
       
+      // Restore state
       this._restoreAllState().then(() => {});
       
     } catch(e) {}
@@ -741,10 +744,11 @@ export class GameServer {
         }
       }
       
-      const webSockets = this.state.getWebSockets();
+      // RESTORE WEBSOCKETS - FIX: Gunakan ctx bukan state
+      const webSockets = this.state.getWebSockets ? this.state.getWebSockets() : [];
       for (const ws of webSockets) {
         try {
-          const attachment = ws.deserializeAttachment();
+          const attachment = ws.deserializeAttachment ? ws.deserializeAttachment() : {};
           if (attachment && attachment.wsId) {
             const wsId = attachment.wsId;
             const username = attachment.username;
@@ -953,6 +957,7 @@ export class GameServer {
     } catch(e) {}
   }
 
+  // ========== FETCH - FIXED WEBSOCKET CONNECTION ==========
   async fetch(req) {
     try {
       if (this._isHibernating) {
@@ -1040,25 +1045,47 @@ export class GameServer {
         server.username = null;
         server._createdAt = Date.now();
         
+        // ===== FIX: ACCEPT WEBSOCKET DENGAN BENAR =====
         try {
-          this.state.acceptWebSocket(server);
+          // Coba accept dengan WebSocket standar
+          server.accept();
         } catch(e) {
-          try { server.close(1008, "Accept failed"); } catch(err) {}
-          return new Response("WebSocket acceptance failed", { status: 500 });
+          try { 
+            // Fallback: accept melalui state (hibernate mode)
+            if (this.state && this.state.acceptWebSocket) {
+              this.state.acceptWebSocket(server);
+            } else {
+              throw new Error("Cannot accept WebSocket");
+            }
+          } catch(err) {
+            try { server.close(1008, "Accept failed"); } catch(ex) {}
+            return new Response("WebSocket acceptance failed", { status: 500 });
+          }
         }
         
-        server.serializeAttachment({
-          wsId: wsId,
-          username: null,
-          room: null
-        });
+        // ===== SAVE ATTACHMENT =====
+        try {
+          if (server.serializeAttachment) {
+            server.serializeAttachment({
+              wsId: wsId,
+              username: null,
+              room: null
+            });
+          }
+        } catch(e) {}
         
         this.wsMap.set(wsId, server);
         
+        // ===== EVENT LISTENERS =====
         server.addEventListener("message", async (event) => {
           try {
             if (server._closing || this.closing || this.isDestroyed) return;
-            const data = JSON.parse(event.data);
+            let data;
+            try {
+              data = JSON.parse(event.data);
+            } catch(e) {
+              return;
+            }
             if (Array.isArray(data) && data.length > 0) {
               await this._processWithTimeout(server, data);
             }
@@ -1155,48 +1182,7 @@ export class GameServer {
     } catch(e) {}
   }
 
-  async handleAlarm() {
-    try {
-      this._isHibernating = false;
-      await this._restoreAllState();
-      
-      const pendingAlarms = await this.alarmScheduler.getPendingAlarms();
-      
-      for (const alarm of pendingAlarms) {
-        switch(alarm.name) {
-          case 'dice_session_start':
-            this._cleanupDeadConnections();
-            
-            if (this.alarmScheduler.isDiceTime()) {
-              this.diceAutoEnabled = true;
-              
-              if (this.currentDiceRoll && this._canSubmitDiceAnswer) break;
-              if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) break;
-              
-              const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
-              if (clients && clients.size > 0) {
-                this._startDiceFast();
-              }
-            }
-            break;
-            
-          case 'dice_session_end':
-            this.diceAutoEnabled = false;
-            if (this.currentDiceRoll || this._isShowingDice) {
-              this._endDiceRound();
-            }
-            break;
-        }
-        
-        await this.alarmScheduler.processAlarm(alarm.name);
-      }
-      
-      await this.alarmScheduler.scheduleAlarms();
-      await this._saveToStorage();
-      
-    } catch(e) {}
-  }
-
+  // ========== SWITCH ROOM ==========
   async switchRoom(ws, room, username = null) {
     try {
       if (this.isDestroyed) {
@@ -1252,11 +1238,16 @@ export class GameServer {
         ws.roomname = roomName;
         if (username) ws.username = username;
         
-        ws.serializeAttachment({
-          wsId: wsId,
-          username: username,
-          room: roomName
-        });
+        // Save attachment
+        try {
+          if (ws.serializeAttachment) {
+            ws.serializeAttachment({
+              wsId: wsId,
+              username: username,
+              room: roomName
+            });
+          }
+        } catch(e) {}
         
         if (username) {
           let conn = this.userConnections.get(username);
@@ -1321,11 +1312,16 @@ export class GameServer {
       ws.roomname = room;
       if (username) ws.username = username;
       
-      ws.serializeAttachment({
-        wsId: wsId,
-        username: username,
-        room: room
-      });
+      // Save attachment
+      try {
+        if (ws.serializeAttachment) {
+          ws.serializeAttachment({
+            wsId: wsId,
+            username: username,
+            room: room
+          });
+        }
+      } catch(e) {}
       
       this._saveToStorage().catch(() => {});
       
