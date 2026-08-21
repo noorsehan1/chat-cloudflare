@@ -1,5 +1,5 @@
 // ==================== INDEX.JS ====================
-// VERSION: 3.3.7 - FIXED GAME SERVER ROUTING
+// VERSION: 3.3.8 - SEDERHANA
 
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
@@ -9,31 +9,41 @@ export default {
     try {
       const url = new URL(request.url);
       const pathname = url.pathname;
+      const upgrade = request.headers.get("Upgrade");
       
-      // CHAT SERVER
-      if (pathname === "/ws" || pathname === "/chat" || pathname === "/" || pathname === "/reset") {
+      // ========== CHAT SERVER ==========
+      // Handle semua request chat (termasuk root untuk WebSocket)
+      if (
+        pathname === "/ws" || 
+        pathname === "/chat" || 
+        pathname === "/reset" || 
+        pathname === "/health" ||
+        (pathname === "/" && upgrade === "websocket") // ← root untuk WebSocket
+      ) {
         const id = env.CHAT_SERVER.idFromName("global");
         const obj = env.CHAT_SERVER.get(id);
         return obj.fetch(request);
       }
       
-      // GAME SERVER - TAMBAHKAN "/game" DAN "/game/"
-      if (pathname === "/game/ws" || pathname === "/game/health" || pathname === "/game" || pathname === "/game/") {
+      // ========== GAME SERVER ==========
+      if (pathname.startsWith("/game")) {
         const id = env.GAME_SERVER.idFromName("game");
         const obj = env.GAME_SERVER.get(id);
         return obj.fetch(request);
       }
       
-      return new Response("Server running", { 
-        status: 200,
-        headers: { 'Content-Type': 'text/plain' }
-      });
+      // ========== ROOT (HTTP) ==========
+      if (pathname === "/") {
+        return new Response("Chat Server Running ✅", { 
+          status: 200,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      }
+      
+      return new Response("Not Found", { status: 404 });
       
     } catch(e) {
-      return new Response("Internal Server Error", { 
-        status: 500,
-        headers: { 'Content-Type': 'text/plain' }
-      });
+      return new Response("Error: " + e.message, { status: 500 });
     }
   }
 };
