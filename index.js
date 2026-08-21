@@ -10,30 +10,41 @@ export default {
       const url = new URL(request.url);
       const pathname = url.pathname;
       
-      // ========== CHAT SERVER ==========
-      if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
-        const id = env.CHAT_SERVER.idFromName("global");
-        const obj = env.CHAT_SERVER.get(id);
-        return obj.fetch(request);
+      // ========== CORS HEADERS ==========
+      const corsHeaders = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+      };
+      
+      // ========== OPTIONS (CORS Preflight) ==========
+      if (request.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: corsHeaders
+        });
       }
       
-      // ========== CHAT RESET ENDPOINT ==========
+      // ========== CHAT RESET ==========
       if (pathname === "/reset" && request.method === "POST") {
         const id = env.CHAT_SERVER.idFromName("global");
         const obj = env.CHAT_SERVER.get(id);
         return obj.fetch(request);
       }
       
-      // ========== CHAT RESET OPTIONS (CORS) ==========
+      // ========== CHAT RESET OPTIONS ==========
       if (pathname === "/reset" && request.method === "OPTIONS") {
         return new Response(null, {
           status: 204,
-          headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type"
-          }
+          headers: corsHeaders
         });
+      }
+      
+      // ========== CHAT SERVER ==========
+      if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
+        const id = env.CHAT_SERVER.idFromName("global");
+        const obj = env.CHAT_SERVER.get(id);
+        return obj.fetch(request);
       }
       
       // ========== GAME SERVER ==========
@@ -49,7 +60,7 @@ export default {
         return obj.fetch(request);
       }
       
-      // ========== GAME RESET ENDPOINT ==========
+      // ========== GAME RESET ==========
       if (pathname === "/game/reset" && request.method === "POST") {
         const id = env.GAME_SERVER.idFromName("game");
         const obj = env.GAME_SERVER.get(id);
@@ -59,7 +70,10 @@ export default {
       // ========== ROOT ==========
       return new Response("Server running", { 
         status: 200,
-        headers: { 'Content-Type': 'text/plain' }
+        headers: { 
+          'Content-Type': 'text/plain',
+          ...corsHeaders
+        }
       });
       
     } catch(e) {
@@ -71,7 +85,8 @@ export default {
         status: 500,
         headers: { 
           'Retry-After': '30',
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          "Access-Control-Allow-Origin": "*"
         }
       });
     }
