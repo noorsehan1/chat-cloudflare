@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 10.0.1 - FIXED HIBERNATION (NO PENDING PROMISES)
+// VERSION: 10.1.0 - FIXED HIBERNATION (NO PENDING PROMISES, NO TIMEOUTS)
 
 const C = {
   MAX_SEATS: 45,
@@ -53,49 +53,48 @@ export class ChatServer {
 
   // ============ RESTORE FROM HIBERNATION (SYNC) ============
   
-  _restoreFromHibernationSync() {
+  async _restoreFromHibernationSync() {
     try {
-      // Restore WebSocket connections DULUAN (SYNC)
+      // 1. Restore WebSocket connections DULUAN (SYNC)
       this._restoreWebSockets();
       
-      // Restore data dari storage (async tapi tidak blocking)
-      this.ctx.storage.get(["roomsData", "userSeatData", "currentNumber", "userCounts", "onlineUsers"])
-        .then((storage) => {
-          if (storage.roomsData !== undefined) {
-            this._roomsDataCache = storage.roomsData;
-          }
-          if (storage.userSeatData !== undefined) {
-            this._userSeatDataCache = storage.userSeatData;
-          }
-          if (storage.currentNumber !== undefined) {
-            this.currentNumber = storage.currentNumber;
-          }
-          if (storage.userCounts !== undefined) {
-            this._userCounts = storage.userCounts;
-          }
-          if (storage.onlineUsers !== undefined) {
-            this._onlineUsers = new Set(storage.onlineUsers);
-          }
-          
-          this._restored = true;
-          
-          // Set alarm (LANGSUNG, tanpa setTimeout)
-          if (!this.closing && !this.isDestroyed) {
-            this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
-          }
-        })
-        .catch(() => {
-          this._restored = true;
-          this._roomsDataCache = {};
-          this._userSeatDataCache = {};
-          this.currentNumber = 1;
-          this._onlineUsers = new Set();
-          this._userCounts = {};
-          for (const room of ROOMS) {
-            this._userCounts[room] = 0;
-          }
-        });
-    } catch(e) {}
+      // 2. Restore data dari storage (ASYNC TAPI WAIT)
+      const storage = await this.ctx.storage.get(["roomsData", "userSeatData", "currentNumber", "userCounts", "onlineUsers"]);
+      
+      if (storage.roomsData !== undefined) {
+        this._roomsDataCache = storage.roomsData;
+      }
+      if (storage.userSeatData !== undefined) {
+        this._userSeatDataCache = storage.userSeatData;
+      }
+      if (storage.currentNumber !== undefined) {
+        this.currentNumber = storage.currentNumber;
+      }
+      if (storage.userCounts !== undefined) {
+        this._userCounts = storage.userCounts;
+      }
+      if (storage.onlineUsers !== undefined) {
+        this._onlineUsers = new Set(storage.onlineUsers);
+      }
+      
+      this._restored = true;
+      
+      // 3. Set alarm (LANGSUNG, tanpa setTimeout)
+      if (!this.closing && !this.isDestroyed) {
+        await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+      }
+      
+    } catch(e) {
+      this._restored = true;
+      this._roomsDataCache = {};
+      this._userSeatDataCache = {};
+      this.currentNumber = 1;
+      this._onlineUsers = new Set();
+      this._userCounts = {};
+      for (const room of ROOMS) {
+        this._userCounts[room] = 0;
+      }
+    }
   }
 
   _restoreWebSockets() {
@@ -552,14 +551,10 @@ export class ChatServer {
     this.safeSend(ws, ["roomUserCount", roomName, count]);
     this.broadcast(roomName, ["roomUserCount", roomName, count]);
     
-    // Hanya 1 timeout, tidak masalah (1 detik)
-    setTimeout(() => {
-      try {
-        if (ws && ws.readyState === 1) {
-          this.sendAllStateTo(ws, roomName, true);
-        }
-      } catch(e) {}
-    }, 1000);
+    // HAPUS setTimeout - kirim langsung
+    if (ws && ws.readyState === 1) {
+      this.sendAllStateTo(ws, roomName, true);
+    }
     
     return true;
   }
@@ -777,7 +772,7 @@ export class ChatServer {
     await this._cleanupStorage();
     await this._saveFullState();
     
-    this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+    await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
   }
 
   async _updateNumber() {
@@ -1635,7 +1630,7 @@ export class ChatServer {
       });
       
       if (!this.closing && !this.isDestroyed) {
-        this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+        await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
       }
       
     } catch(e) {}
