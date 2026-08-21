@@ -1,7 +1,7 @@
 // ==================== CHAT-SERVER.JS ====================
 // VERSION: 8.0.8 - WITH CACHE + STORAGE SYNC (NO NEW CASES)
 
-const C = {
+ const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 5000,
