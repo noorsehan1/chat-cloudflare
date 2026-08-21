@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 5.0.7 - REMOVED WAIT FOR USERS - CLEAN VERSION
+// VERSION: 5.0.8 - WITH HIBERNATION SUPPORT
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -47,6 +47,13 @@ const CONSTANTS = {
   RECONNECT_WINDOW_MS: 30000,
   
   CACHE_TTL_MS: 60000,
+  
+  // HIBERNATION CONSTANTS
+  HIBERNATION_STATE_KEY: 'hibernation_state',
+  HIBERNATION_ALARM_KEY: 'hibernation_alarm',
+  HIBERNATION_CHECK_INTERVAL_MS: 60000,
+  HIBERNATION_INACTIVITY_TIMEOUT_MS: 300000, // 5 menit
+  HIBERNATION_ALARM_DELAY_MS: 5000,
 };
 
 // ========== QUIZ SCHEDULE ==========
@@ -538,6 +545,8 @@ export class GameServer {
       this._startTime = Date.now();
       this._wsIdCounter = 0;
       this._lastActivity = Date.now();
+      this._isHibernating = false;
+      this._hibernationCheckTimer = null;
       
       this.cacheManager = new CacheManager();
       
@@ -615,14 +624,283 @@ export class GameServer {
       
       this._lastNotifTime = {};
       
-      setTimeout(() => {
-        if (!this.closing && !this.isDestroyed) {
-          this._initLazy();
-        }
-      }, 2000);
+      // RESTORE HIBERNATION STATE
+      this._restoreFromHibernation().catch(() => {});
+      
+      // ALARM UNTUK AUTO-START SETELAH HIBERNASI
+      this._scheduleHibernationCheck();
       
     } catch(e) {
       console.error('[GAME] Constructor error:', e);
+    }
+  }
+
+  // ========== HIBERNATION METHODS ==========
+  
+  async _restoreFromHibernation() {
+    try {
+      if (!this.state) return;
+      
+      const stateData = await this.state.storage.get(CONSTANTS.HIBERNATION_STATE_KEY);
+      if (!stateData) {
+        console.log('[HIBERNATION] No saved state found');
+        return;
+      }
+      
+      console.log('[HIBERNATION] Restoring state from hibernation...');
+      
+      // Restore basic state
+      this._cachedResetWeek = stateData.cachedResetWeek || null;
+      this._cachedLastWeekWinner = stateData.cachedLastWeekWinner || null;
+      this._diceRound = stateData.diceRound || 0;
+      this.diceAutoEnabled = stateData.diceAutoEnabled || false;
+      
+      // Restore active games
+      if (stateData.activeGames && stateData.activeGames.length > 0) {
+        for (const gameData of stateData.activeGames) {
+          const game = this._deserializeGame(gameData);
+          if (game) {
+            this.activeGames.set(game.room, game);
+            console.log(`[HIBERNATION] Restored game in room: ${game.room}`);
+          }
+        }
+      }
+      
+      // Restore cache managers
+      if (stateData.cacheManager) {
+        this.cacheManager.recordingStatus = new Map(Object.entries(stateData.cacheManager.recordingStatus || {}));
+        for (const [room, data] of Object.entries(stateData.cacheManager.winnersCache || {})) {
+          this.cacheManager.winnersCache.set(room, data);
+        }
+      }
+      
+      // Restore dice game state
+      if (stateData.diceGameState) {
+        this.currentDiceRoll = stateData.diceGameState.currentDiceRoll;
+        this._isShowingDice = stateData.diceGameState.isShowingDice || false;
+        this._canSubmitDiceAnswer = stateData.diceGameState.canSubmitDiceAnswer || false;
+        this._diceLock = stateData.diceGameState.diceLock || false;
+        this.diceHasWinner = stateData.diceGameState.diceHasWinner || false;
+        this.diceWinner = stateData.diceGameState.diceWinner || null;
+        this._diceTimeUpCooldown = stateData.diceGameState.diceTimeUpCooldown || false;
+        this._diceStartTime = stateData.diceGameState.diceStartTime || null;
+        this._diceQuestionStartTime = stateData.diceGameState.diceQuestionStartTime || null;
+        
+        // Restore dice answered set
+        if (stateData.diceGameState.diceAnswered) {
+          this.diceAnswered = new Set(stateData.diceGameState.diceAnswered);
+        }
+        if (stateData.diceGameState.playerAnswers) {
+          this._playerAnswers = new Map(Object.entries(stateData.diceGameState.playerAnswers));
+        }
+        
+        // Restore tie breaker state
+        if (stateData.diceGameState.tieActive) {
+          this._tieActive = true;
+          this._tieRound = stateData.diceGameState.tieRound || 0;
+          this._tiePlayers = stateData.diceGameState.tiePlayers || [];
+          if (stateData.diceGameState.tieAnswers) {
+            this._tieAnswers = new Map(Object.entries(stateData.diceGameState.tieAnswers));
+          }
+        }
+      }
+      
+      // Restore dice points
+      if (stateData.dicePoints && this.diceGameSystem) {
+        await this.diceGameSystem.pointsCache.setPoints(stateData.dicePoints, this.env);
+        await this.diceGameSystem.loadScores();
+      }
+      
+      console.log('[HIBERNATION] State restored successfully');
+      this._initialized = true;
+      
+      // Schedule auto-start if in active session
+      this._checkAndStartCurrentSession();
+      
+    } catch(e) {
+      console.error('[HIBERNATION] Restore error:', e);
+      this._initLazy();
+    }
+  }
+
+  async _saveHibernationState() {
+    try {
+      if (!this.state) return;
+      
+      // Only save if there's meaningful state
+      const activeGamesList = [];
+      for (const [room, game] of this.activeGames) {
+        if (game._isActive && !game._gameEnded) {
+          activeGamesList.push(this._serializeGame(game));
+        }
+      }
+      
+      // Don't save if nothing to save
+      if (activeGamesList.length === 0 && !this.currentDiceRoll && 
+          !this._tieActive && this.cacheManager.recordingStatus.size === 0) {
+        return;
+      }
+      
+      const stateData = {
+        version: '1.0',
+        timestamp: Date.now(),
+        cachedResetWeek: this._cachedResetWeek,
+        cachedLastWeekWinner: this._cachedLastWeekWinner,
+        diceRound: this._diceRound,
+        diceAutoEnabled: this.diceAutoEnabled,
+        activeGames: activeGamesList,
+        cacheManager: {
+          recordingStatus: Object.fromEntries(this.cacheManager.recordingStatus),
+          winnersCache: Object.fromEntries(this.cacheManager.winnersCache),
+        },
+        diceGameState: {
+          currentDiceRoll: this.currentDiceRoll,
+          isShowingDice: this._isShowingDice,
+          canSubmitDiceAnswer: this._canSubmitDiceAnswer,
+          diceLock: this._diceLock,
+          diceHasWinner: this.diceHasWinner,
+          diceWinner: this.diceWinner,
+          diceTimeUpCooldown: this._diceTimeUpCooldown,
+          diceStartTime: this._diceStartTime,
+          diceQuestionStartTime: this._diceQuestionStartTime,
+          diceAnswered: Array.from(this.diceAnswered),
+          playerAnswers: Object.fromEntries(this._playerAnswers),
+          tieActive: this._tieActive,
+          tieRound: this._tieRound,
+          tiePlayers: this._tiePlayers,
+          tieAnswers: Object.fromEntries(this._tieAnswers),
+        },
+        dicePoints: this.diceGameSystem?.pointsCache?.getPoints() || null,
+      };
+      
+      await this.state.storage.put(CONSTANTS.HIBERNATION_STATE_KEY, stateData);
+      
+    } catch(e) {
+      console.error('[HIBERNATION] Save error:', e);
+    }
+  }
+
+  _serializeGame(game) {
+    if (!game) return null;
+    return {
+      room: game.room,
+      betAmount: game.betAmount,
+      round: game.round,
+      hostName: game.hostName,
+      hostId: game.hostId,
+      useBots: game.useBots || false,
+      _botsAdded: game._botsAdded || false,
+      _isActive: game._isActive,
+      _gameEnded: game._gameEnded,
+      _phase: game._phase || 'registration',
+      _startedByRecording: game._startedByRecording || false,
+      _startedBy: game._startedBy || 'user',
+      _createdAt: game._createdAt,
+      _drawPhaseStart: game._drawPhaseStart,
+      registrationOpen: game.registrationOpen || false,
+      evaluationLocked: game.evaluationLocked || false,
+      drawTimeExpired: game.drawTimeExpired || false,
+      _isEvaluating: game._isEvaluating || false,
+      players: Array.from(game.players?.entries() || []).map(([id, p]) => [id, p]),
+      botPlayers: Array.from(game.botPlayers?.entries() || []),
+      eliminated: Array.from(game.eliminated || []),
+      numbers: Array.from(game.numbers || []),
+      tanda: Array.from(game.tanda || []),
+      playerWsId: Array.from(game.playerWsId || []),
+    };
+  }
+
+  _deserializeGame(data) {
+    try {
+      const game = {
+        room: data.room,
+        betAmount: data.betAmount,
+        round: data.round || 1,
+        hostName: data.hostName,
+        hostId: data.hostId,
+        useBots: data.useBots || false,
+        _botsAdded: data._botsAdded || false,
+        _isActive: data._isActive,
+        _gameEnded: data._gameEnded,
+        _phase: data._phase || 'registration',
+        _startedByRecording: data._startedByRecording || false,
+        _startedBy: data._startedBy || 'user',
+        _createdAt: data._createdAt,
+        _drawPhaseStart: data._drawPhaseStart,
+        registrationOpen: data.registrationOpen || false,
+        evaluationLocked: data.evaluationLocked || false,
+        drawTimeExpired: data.drawTimeExpired || false,
+        _isEvaluating: data._isEvaluating || false,
+        players: new Map(data.players || []),
+        botPlayers: new Map(data.botPlayers || []),
+        eliminated: new Set(data.eliminated || []),
+        numbers: new Map(data.numbers || []),
+        tanda: new Map(data.tanda || []),
+        playerWsId: new Map(data.playerWsId || []),
+        _botTimeouts: new Set(),
+        _registrationTimer: null,
+        _drawTimer: null,
+        _evalTimer: null,
+        _safetyTimer: null,
+        _endTime: null,
+      };
+      return game;
+    } catch(e) {
+      console.error('[HIBERNATION] Deserialize game error:', e);
+      return null;
+    }
+  }
+
+  _scheduleHibernationCheck() {
+    if (this._hibernationCheckTimer) {
+      clearInterval(this._hibernationCheckTimer);
+    }
+    
+    this._hibernationCheckTimer = setInterval(() => {
+      if (this.closing || this.isDestroyed) {
+        clearInterval(this._hibernationCheckTimer);
+        this._hibernationCheckTimer = null;
+        return;
+      }
+      this._checkHibernation();
+    }, CONSTANTS.HIBERNATION_CHECK_INTERVAL_MS);
+  }
+
+  async _checkHibernation() {
+    try {
+      const now = Date.now();
+      const inactivityMs = now - this._lastActivity;
+      
+      // Jangan hibernasi jika ada koneksi WebSocket aktif
+      if (this.wsMap.size > 0) {
+        return;
+      }
+      
+      // Jangan hibernasi jika ada game aktif
+      let hasActiveGame = false;
+      for (const [room, game] of this.activeGames) {
+        if (game._isActive && !game._gameEnded) {
+          hasActiveGame = true;
+          break;
+        }
+      }
+      if (hasActiveGame) {
+        return;
+      }
+      
+      // Jangan hibernasi jika ada dice aktif
+      if (this.currentDiceRoll || this._isShowingDice || this._tieActive) {
+        return;
+      }
+      
+      // Hibernasi jika tidak ada aktivitas dalam waktu tertentu
+      if (inactivityMs > CONSTANTS.HIBERNATION_INACTIVITY_TIMEOUT_MS) {
+        console.log('[HIBERNATION] Inactivity detected, saving state...');
+        await this._saveHibernationState();
+        this._isHibernating = true;
+      }
+    } catch(e) {
+      console.error('[HIBERNATION] Check error:', e);
     }
   }
 
@@ -764,6 +1042,13 @@ export class GameServer {
   // ========== HANDLE ALARM ==========
   async handleAlarm() {
     try {
+      // Wake up from hibernation
+      this._isHibernating = false;
+      this._lastActivity = Date.now();
+      
+      // Restore state if needed
+      await this._restoreFromHibernation();
+      
       const pendingAlarms = await this.alarmScheduler.getPendingAlarms();
       
       for (const alarm of pendingAlarms) {
@@ -865,6 +1150,13 @@ export class GameServer {
   // ========== FETCH ==========
   async fetch(req) {
     try {
+      // Wake up from hibernation
+      if (this._isHibernating) {
+        this._isHibernating = false;
+        await this._restoreFromHibernation();
+      }
+      this._lastActivity = Date.now();
+      
       if (this._circuitOpen) {
         const now = Date.now();
         if (now - this._lastResetTime > 60000) {
@@ -905,6 +1197,7 @@ export class GameServer {
           circuitOpen: this._circuitOpen,
           initialized: this._initialized,
           errors: this._errorCount,
+          isHibernating: this._isHibernating,
           timestamp: Date.now()
         }), {
           headers: { 'Content-Type': 'application/json' }
@@ -924,7 +1217,8 @@ export class GameServer {
           tieActive: this._tieActive,
           cacheSize: this.cacheManager?.winnersCache?.size || 0,
           pointsCacheSize: this.diceGameSystem?.pointsCache?.pointsCache?.size || 0,
-          alarms: await this.alarmScheduler.getPendingAlarms()
+          alarms: await this.alarmScheduler.getPendingAlarms(),
+          isHibernating: this._isHibernating
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -973,6 +1267,7 @@ export class GameServer {
         server.addEventListener("message", async (event) => {
           try {
             if (server._closing || this.closing || this.isDestroyed) return;
+            this._lastActivity = Date.now();
             const data = JSON.parse(event.data);
             if (Array.isArray(data) && data.length > 0) {
               await this._processWithTimeout(server, data);
@@ -3193,6 +3488,9 @@ export class GameServer {
       this.isDestroyed = true;
       this.closing = true;
       
+      // Save state before destroy
+      await this._saveHibernationState();
+      
       for (const timer of this._allTimers) {
         try { clearTimeout(timer); clearInterval(timer); } catch(e) {}
       }
@@ -3209,6 +3507,10 @@ export class GameServer {
       if (this._diceTimeUpCooldownTimer) {
         clearTimeout(this._diceTimeUpCooldownTimer);
         this._diceTimeUpCooldownTimer = null;
+      }
+      if (this._hibernationCheckTimer) {
+        clearInterval(this._hibernationCheckTimer);
+        this._hibernationCheckTimer = null;
       }
       for (const timeout of this._diceNotificationTimeouts) {
         clearTimeout(timeout);
