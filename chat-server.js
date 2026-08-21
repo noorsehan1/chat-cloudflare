@@ -1522,13 +1522,13 @@ export class ChatServer {
       const [client, server] = [pair[0], pair[1]];
       
       // ============ INI YANG DITAMBAHKAN ============
-      // MENERIMA WEBSOCKET DENGAN CONCURRENCY ENABLED
-      try { 
-        this.ctx.acceptWebSocket(server, { 
-          allowConcurrency: true 
-        }); 
-      } catch(e) { 
-        return new Response("WebSocket acceptance failed", { status: 500 }); 
+      // MENGGUNAKAN ctx.getWebSockets().accept() DENGAN CONCURRENCY
+      try {
+        this.ctx.getWebSockets().accept(server, {
+          allowConcurrency: true
+        });
+      } catch(e) {
+        return new Response("WebSocket acceptance failed", { status: 500 });
       }
       
       server.username = null;
