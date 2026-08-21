@@ -1365,7 +1365,7 @@ export class GameServer {
         server._createdAt = Date.now();
         
         try {
-          server.accept();
+          this.ctx.acceptWebSocket(server);
         } catch(e) {
           try { server.close(1008, "Accept failed"); } catch(err) {}
           return new Response("WebSocket acceptance failed", { status: 500 });
