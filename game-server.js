@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 5.0.15 - FULL HYBERNATE API (DENGAN server.accept())
+// VERSION: 5.0.16 - FULL HYBERNATE API (ALARM TEPAT WAKTU)
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -116,7 +116,8 @@ class AlarmScheduler {
       }
       
       if (nextSession) {
-        let startDelay = (minDiff * 60 * 1000) - 30000;
+        // ✅ ALARM TEPAT WAKTU - TANPA 30 DETIK
+        let startDelay = minDiff * 60 * 1000;
         if (startDelay < 0) startDelay = 0;
         await this._scheduleAlarm('dice_session_start', startDelay);
         
@@ -739,7 +740,6 @@ export class GameServer {
       this._diceRound = stateData.diceRound || 0;
       this.diceAutoEnabled = stateData.diceAutoEnabled || false;
       
-      // Restore active games
       if (stateData.activeGames && stateData.activeGames.length > 0) {
         for (const gameData of stateData.activeGames) {
           const game = this._deserializeGame(gameData);
@@ -750,7 +750,6 @@ export class GameServer {
         }
       }
       
-      // Restore cache managers
       if (stateData.cacheManager) {
         this.cacheManager.recordingStatus = new Map(Object.entries(stateData.cacheManager.recordingStatus || {}));
         for (const [room, data] of Object.entries(stateData.cacheManager.winnersCache || {})) {
@@ -758,7 +757,6 @@ export class GameServer {
         }
       }
       
-      // Restore dice game state
       if (stateData.diceGameState) {
         this.currentDiceRoll = stateData.diceGameState.currentDiceRoll;
         this._isShowingDice = stateData.diceGameState.isShowingDice || false;
@@ -787,13 +785,11 @@ export class GameServer {
         }
       }
       
-      // Restore dice points
       if (stateData.dicePoints && this.diceGameSystem) {
         await this.diceGameSystem.pointsCache.setPoints(stateData.dicePoints, this.env);
         await this.diceGameSystem.loadScores();
       }
       
-      // RESTORE WEBSOCKETS FROM HYBERNATION
       const webSockets = this.state.getWebSockets();
       console.log(`[HIBERNATION] Found ${webSockets.length} WebSockets to restore`);
       
@@ -801,7 +797,6 @@ export class GameServer {
         try {
           const attachment = ws.deserializeAttachment();
           if (attachment && attachment.wsId) {
-            // Restore WebSocket state
             ws._wsId = attachment.wsId;
             ws._closing = false;
             ws.room = attachment.room || null;
@@ -809,7 +804,6 @@ export class GameServer {
             ws.username = attachment.username || null;
             ws._createdAt = attachment.createdAt || Date.now();
             
-            // Add to maps
             this.wsMap.set(attachment.wsId, ws);
             
             if (attachment.username) {
@@ -1069,10 +1063,7 @@ export class GameServer {
     try {
       console.log('[ALARM] Alarm triggered!');
       
-      // Restore state from hibernation
       await this._restoreFromStorage();
-      
-      // Restore alarms
       await this.alarmScheduler.restoreAlarms();
       
       const pendingAlarms = await this.alarmScheduler.getPendingAlarms();
@@ -1264,7 +1255,6 @@ export class GameServer {
         const [client, server] = [pair[0], pair[1]];
         const wsId = ++this._wsIdCounter;
         
-        // Set WebSocket properties
         server._wsId = wsId;
         server._closing = false;
         server.room = null;
@@ -1272,7 +1262,6 @@ export class GameServer {
         server.username = null;
         server._createdAt = Date.now();
         
-        // ✅ GUNAKAN server.accept() - INI WORK
         try {
           server.accept();
         } catch(e) {
@@ -1280,7 +1269,6 @@ export class GameServer {
           return new Response("WebSocket acceptance failed", { status: 500 });
         }
         
-        // ✅ SAVE STATE TO ATTACHMENT (for hibernation restore)
         server.serializeAttachment({
           wsId: wsId,
           username: null,
@@ -1289,10 +1277,8 @@ export class GameServer {
           createdAt: Date.now()
         });
         
-        // Add to maps
         this.wsMap.set(wsId, server);
         
-        // WebSocket event handlers
         server.addEventListener("message", async (event) => {
           try {
             if (server._closing || this.closing || this.isDestroyed) return;
@@ -1587,7 +1573,6 @@ export class GameServer {
         if (oldRoom && oldRoom !== room) this._removeClientFromRoom(oldRoom, wsId);
       }
       
-      // Update attachment for hibernation
       ws.serializeAttachment({
         wsId: wsId,
         username: username,
@@ -1715,7 +1700,6 @@ export class GameServer {
         ws.roomname = roomName;
         if (username) ws.username = username;
         
-        // Update attachment for hibernation
         ws.serializeAttachment({
           wsId: wsId,
           username: username,
