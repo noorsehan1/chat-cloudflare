@@ -1,5 +1,5 @@
 // ==================== INDEX.JS ====================
-// VERSION: 3.3.5 - SEDERHANA
+// VERSION: 3.3.6 - MINIMALIS
 
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
@@ -10,34 +10,20 @@ export default {
       const url = new URL(request.url);
       const pathname = url.pathname;
       
-      // ===== CHAT SERVER =====
-      if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
+      // CHAT SERVER
+      if (pathname === "/ws" || pathname === "/chat" || pathname === "/" || pathname === "/reset") {
         const id = env.CHAT_SERVER.idFromName("global");
         const obj = env.CHAT_SERVER.get(id);
         return obj.fetch(request);
       }
       
-      // ===== CHAT RESET =====
-      if (pathname === "/reset") {
-        const id = env.CHAT_SERVER.idFromName("global");
-        const obj = env.CHAT_SERVER.get(id);
-        return obj.fetch(request);
-      }
-      
-      // ===== GAME SERVER =====
-      if (pathname === "/game/ws") {
+      // GAME SERVER
+      if (pathname === "/game/ws" || pathname === "/game/health") {
         const id = env.GAME_SERVER.idFromName("game");
         const obj = env.GAME_SERVER.get(id);
         return obj.fetch(request);
       }
       
-      if (pathname === "/game/health") {
-        const id = env.GAME_SERVER.idFromName("game");
-        const obj = env.GAME_SERVER.get(id);
-        return obj.fetch(request);
-      }
-      
-      // ===== ROOT =====
       return new Response("Server running", { 
         status: 200,
         headers: { 'Content-Type': 'text/plain' }
