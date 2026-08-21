@@ -1,6 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 8.0.0 - STORAGE ONLY (NO REDUNDANT MEMORY CACHE)
-// ALL DATA IN STORAGE, MEMORY ONLY FOR WEBSOCKET CONNECTIONS
+// VERSION: 8.0.1 - WITH CORS & RESET ENDPOINT
 
 const C = {
   MAX_SEATS: 45,
@@ -17,6 +16,13 @@ const ROOMS = [
 ];
 
 const ROOMS_SET = new Set(ROOMS);
+
+// CORS HEADERS
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
 
 export class ChatServer {
   constructor(state, env) {
@@ -1320,33 +1326,36 @@ export class ChatServer {
     try {
       const url = new URL(req.url);
       
-      // ENDPOINT RESET
-      if (url.pathname === "/reset" && req.method === "POST") {
-        const result = await this.resetAllData();
-        return new Response(JSON.stringify(result), {
-          status: result.success ? 200 : 500,
-          headers: { 
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type"
-          }
+      // ===== RESET ENDPOINT =====
+      if (url.pathname === "/reset") {
+        // OPTIONS (CORS preflight)
+        if (req.method === "OPTIONS") {
+          return new Response(null, {
+            status: 204,
+            headers: CORS_HEADERS
+          });
+        }
+        
+        // POST (reset)
+        if (req.method === "POST") {
+          const result = await this.resetAllData();
+          return new Response(JSON.stringify(result), {
+            status: result.success ? 200 : 500,
+            headers: {
+              "Content-Type": "application/json",
+              ...CORS_HEADERS
+            }
+          });
+        }
+        
+        // Method not allowed
+        return new Response("Method not allowed", {
+          status: 405,
+          headers: CORS_HEADERS
         });
       }
       
-      // OPTIONS CORS
-      if (url.pathname === "/reset" && req.method === "OPTIONS") {
-        return new Response(null, {
-          status: 204,
-          headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type"
-          }
-        });
-      }
-      
-      // WEBSOCKET
+      // ===== WEBSOCKET =====
       const upgrade = req.headers.get("Upgrade");
       if (upgrade !== "websocket") {
         return new Response("Chat Server", { 
@@ -1363,7 +1372,12 @@ export class ChatServer {
       const [client, server] = [pair[0], pair[1]];
       
       try { this.ctx.acceptWebSocket(server); } 
-      catch(e) { return new Response("WebSocket acceptance failed", { status: 500 }); }
+      catch(e) { 
+        return new Response("WebSocket acceptance failed", { 
+          status: 500,
+          headers: CORS_HEADERS
+        }); 
+      }
       
       server.username = null;
       server.room = null;
@@ -1379,9 +1393,17 @@ export class ChatServer {
       
       if (!this.wsSet.has(server)) this.wsSet.add(server);
       
-      return new Response(null, { status: 101, webSocket: client });
+      return new Response(null, { 
+        status: 101, 
+        webSocket: client,
+        headers: CORS_HEADERS
+      });
+      
     } catch(e) {
-      return new Response("Internal Server Error", { status: 500 });
+      return new Response("Internal Server Error", { 
+        status: 500,
+        headers: CORS_HEADERS
+      });
     }
   }
 
