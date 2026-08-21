@@ -1,5 +1,5 @@
 // ==================== INDEX.JS - CONNECTION ONLY ====================
-// VERSION: 3.3.3 - WITH RESET ENDPOINT
+// VERSION: 3.3.3 - WITH WSS SUPPORT
 
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
@@ -17,7 +17,7 @@ export default {
         "Access-Control-Allow-Headers": "Content-Type",
       };
       
-      // ========== OPTIONS (CORS Preflight) ==========
+      // ========== OPTIONS ==========
       if (request.method === "OPTIONS") {
         return new Response(null, {
           status: 204,
@@ -40,7 +40,7 @@ export default {
         });
       }
       
-      // ========== CHAT SERVER ==========
+      // ========== CHAT SERVER (WSS) ==========
       if (pathname === "/ws" || pathname === "/chat" || pathname === "/") {
         const id = env.CHAT_SERVER.idFromName("global");
         const obj = env.CHAT_SERVER.get(id);
@@ -77,14 +77,12 @@ export default {
       });
       
     } catch(e) {
-      console.error("Fetch error:", e);
       return new Response(JSON.stringify({
         error: "Internal Server Error",
         message: e.message || "Unknown error"
       }), { 
         status: 500,
         headers: { 
-          'Retry-After': '30',
           'Content-Type': 'application/json',
           "Access-Control-Allow-Origin": "*"
         }
