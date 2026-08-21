@@ -1,7 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 7.4.0 - STORAGE-ONLY ARCHITECTURE WITH AUTO CLEAR ON DEPLOY
-// MULTI USER = ONLINE SELAMA DI STORAGE
-// HANYA exitMulti YANG BISA MENGHAPUS MULTI USER
+// VERSION: 7.5.0 - STORAGE-ONLY ARCHITECTURE WITH DEPLOY RESET
 
 const C = {
   MAX_SEATS: 45,
@@ -125,6 +123,43 @@ export class ChatServer {
         storedDeployTimestamp: this._deployTimestamp
       };
       this._storageCacheTime = Date.now();
+      
+      const webSockets = this.ctx.getWebSockets();
+      for (const ws of webSockets) {
+        try {
+          ws.serializeAttachment({});
+          ws.username = null;
+          ws.room = null;
+          ws.roomname = null;
+          ws.idtarget = null;
+          ws._isMulti = false;
+          ws._multiRoom = null;
+          ws._multiSeat = null;
+          ws._closing = false;
+          
+          if (ws.readyState === 1) {
+            ws.send(JSON.stringify(["storageReset", "Storage has been reset due to deployment"]));
+            ws.send(JSON.stringify(["needJoinRoom"]));
+          }
+        } catch(e) {}
+      }
+      
+      this.wsSet.clear();
+      this.userConnections.clear();
+      this.roomClients.clear();
+      this.wsActiveMulti.clear();
+      
+      for (const room of ROOMS) {
+        this.roomClients.set(room, new Set());
+      }
+      
+      for (const ws of webSockets) {
+        try {
+          if (ws.readyState === 1) {
+            this.wsSet.add(ws);
+          }
+        } catch(e) {}
+      }
       
     } catch(e) {}
   }
