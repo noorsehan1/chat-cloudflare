@@ -1,8 +1,7 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 7.6.0 - STORAGE-ONLY WITH DEPLOY RESET & REJOIN
+// VERSION: 7.3.1 - NO CACHE TTL
 // MULTI USER = ONLINE SELAMA DI STORAGE
 // HANYA exitMulti YANG BISA MENGHAPUS MULTI USER
-// DEPLOY = HAPUS SEMUA DATA STORAGE (TERMASUK MULTI USER)
 
 const C = {
   MAX_SEATS: 45,
@@ -15,8 +14,6 @@ const C = {
   MAX_EVENT_QUEUE: 100,
   MAX_PROCESS_TIME_MS: 500,
   USER_JOIN_LOCK_TIMEOUT: 10000,
-  STORAGE_CACHE_TTL: 2000,
-  DEPLOY_TIMESTAMP_KEY: "deploy_timestamp",
 };
 
 const ROOMS = [
@@ -36,7 +33,6 @@ export class ChatServer {
     this.isDestroyed = false;
     this._startTime = Date.now();
     this._restored = false;
-    this._deployTimestamp = Date.now();
     
     this.wsSet = new Set();
     this.userConnections = new Map();
@@ -56,10 +52,6 @@ export class ChatServer {
     this.currentNumber = 1;
     this._isNumberUpdating = false;
     
-    this._storageCache = null;
-    this._storageCacheTime = 0;
-    this._storageCacheTTL = C.STORAGE_CACHE_TTL;
-    
     for (const room of ROOMS) {
       this.roomClients.set(room, new Set());
     }
@@ -72,23 +64,14 @@ export class ChatServer {
   }
 
   async _loadFromStorage() {
-    const now = Date.now();
-    if (this._storageCache && (now - this._storageCacheTime) < this._storageCacheTTL) {
-      return this._storageCache;
-    }
-    
     try {
       const roomsData = await this.ctx.storage.get("roomsData") || {};
       const userSeatData = await this.ctx.storage.get("userSeatData") || {};
       const currentNumber = await this.ctx.storage.get("currentNumber") || 1;
-      const storedDeployTimestamp = await this.ctx.storage.get(C.DEPLOY_TIMESTAMP_KEY) || 0;
       
-      this._storageCache = { roomsData, userSeatData, currentNumber, storedDeployTimestamp };
-      this._storageCacheTime = now;
-      
-      return this._storageCache;
+      return { roomsData, userSeatData, currentNumber };
     } catch(e) {
-      return { roomsData: {}, userSeatData: {}, currentNumber: 1, storedDeployTimestamp: 0 };
+      return { roomsData: {}, userSeatData: {}, currentNumber: 1 };
     }
   }
 
@@ -103,68 +86,6 @@ export class ChatServer {
       if (currentNumber !== undefined) {
         await this.ctx.storage.put("currentNumber", currentNumber);
       }
-      
-      this._storageCache.roomsData = roomsData;
-      this._storageCache.userSeatData = userSeatData;
-      this._storageCache.currentNumber = currentNumber;
-      this._storageCacheTime = Date.now();
-      
-    } catch(e) {}
-  }
-
-  async _clearAllStorage() {
-    try {
-      await this.ctx.storage.put(C.DEPLOY_TIMESTAMP_KEY, this._deployTimestamp);
-      await this.ctx.storage.put("roomsData", {});
-      await this.ctx.storage.put("userSeatData", {});
-      await this.ctx.storage.put("currentNumber", 1);
-      
-      this._storageCache = { 
-        roomsData: {}, 
-        userSeatData: {}, 
-        currentNumber: 1,
-        storedDeployTimestamp: this._deployTimestamp
-      };
-      this._storageCacheTime = Date.now();
-      
-      const webSockets = this.ctx.getWebSockets();
-      for (const ws of webSockets) {
-        try {
-          ws.serializeAttachment({});
-          ws.username = null;
-          ws.room = null;
-          ws.roomname = null;
-          ws.idtarget = null;
-          ws._isMulti = false;
-          ws._multiRoom = null;
-          ws._multiSeat = null;
-          ws._closing = false;
-          
-          if (ws.readyState === 1) {
-            ws.send(JSON.stringify(["deployReset", "Server deployed, please re-join"]));
-            ws.send(JSON.stringify(["needJoinRoom"]));
-            ws.send(JSON.stringify(["storageCleared", "All data has been reset"]));
-          }
-        } catch(e) {}
-      }
-      
-      this.wsSet.clear();
-      this.userConnections.clear();
-      this.roomClients.clear();
-      this.wsActiveMulti.clear();
-      
-      for (const room of ROOMS) {
-        this.roomClients.set(room, new Set());
-      }
-      
-      for (const ws of webSockets) {
-        try {
-          if (ws.readyState === 1) {
-            this.wsSet.add(ws);
-          }
-        } catch(e) {}
-      }
-      
     } catch(e) {}
   }
 
@@ -190,9 +111,6 @@ export class ChatServer {
     
     await this.ctx.storage.put("roomsData", roomsData);
     
-    this._storageCache.roomsData = roomsData;
-    this._storageCacheTime = Date.now();
-    
     return roomsData[roomName];
   }
 
@@ -212,9 +130,6 @@ export class ChatServer {
     
     await this.ctx.storage.put("userSeatData", userSeatData);
     
-    this._storageCache.userSeatData = userSeatData;
-    this._storageCacheTime = Date.now();
-    
     return userSeatData[username];
   }
 
@@ -225,9 +140,6 @@ export class ChatServer {
     delete userSeatData[username];
     
     await this.ctx.storage.put("userSeatData", userSeatData);
-    
-    this._storageCache.userSeatData = userSeatData;
-    this._storageCacheTime = Date.now();
   }
 
   async _deleteRoomIfEmpty(roomName) {
@@ -243,9 +155,6 @@ export class ChatServer {
       delete roomsData[roomName];
       
       await this.ctx.storage.put("roomsData", roomsData);
-      
-      this._storageCache.roomsData = roomsData;
-      this._storageCacheTime = Date.now();
     }
   }
 
@@ -721,8 +630,6 @@ export class ChatServer {
       
       if (changed) {
         await this.ctx.storage.put("roomsData", roomsData);
-        this._storageCache.roomsData = roomsData;
-        this._storageCacheTime = Date.now();
       }
       
       const numberMsg = JSON.stringify(["currentNumber", this.currentNumber]);
@@ -962,22 +869,6 @@ export class ChatServer {
     try {
       if (!ws || !data || !data[0]) return;
       const [evt, ...args] = data;
-      
-      const checkUserValid = async (username, roomName) => {
-        if (!username) return true;
-        const userSeat = await this._getUserSeat(username);
-        if (!userSeat) {
-          this.safeSend(ws, ["needJoinRoom", "Please join a room first"]);
-          this.safeSend(ws, ["error", "Not in any room"]);
-          return false;
-        }
-        if (roomName && userSeat.room !== roomName) {
-          this.safeSend(ws, ["needJoinRoom", "Please join the correct room"]);
-          this.safeSend(ws, ["error", "Not in this room"]);
-          return false;
-        }
-        return true;
-      };
       
       switch(evt) {
         case "getCurrentNumber":
@@ -1270,8 +1161,6 @@ export class ChatServer {
         case "updateKursi": {
           const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
           
-          if (!await checkUserValid(kursiName, kursiRoom)) break;
-          
           const lockKey = `kursi_${kursiRoom}_${kursiSeat}`;
           if (this._kursiLocks.has(lockKey)) break;
           this._kursiLocks.set(lockKey, Date.now());
@@ -1304,7 +1193,10 @@ export class ChatServer {
           const [chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor] = args;
           if (!chatMsg || !ROOMS_SET.has(chatRoom)) break;
           
-          if (!await checkUserValid(chatUser, chatRoom)) break;
+          const userSeat = await this._getUserSeat(chatUser);
+          if (!userSeat || userSeat.room !== chatRoom) {
+            break;
+          }
           
           this._broadcastToRoom(chatRoom, JSON.stringify(["chat", chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor]));
           break;
@@ -1313,10 +1205,6 @@ export class ChatServer {
         case "updatePoint": {
           const [pointRoom, pointSeat, pointX, pointY, pointFast] = args;
           if (!pointRoom || typeof pointSeat !== 'number') break;
-          
-          const roomData = await this._getRoomData(pointRoom);
-          const username = roomData?.seats?.[pointSeat]?.namauser;
-          if (!await checkUserValid(username, pointRoom)) break;
           
           const updated = await this._updatePoint(pointRoom, pointSeat, pointX, pointY, pointFast === 1);
           if (updated) {
@@ -1343,8 +1231,6 @@ export class ChatServer {
         case "private": {
           const [privTarget, privNoimg, privMsg, privSender] = args;
           if (privTarget && privMsg) {
-            if (!await checkUserValid(privSender)) break;
-            
             const targetConns = this.userConnections.get(privTarget);
             if (targetConns) {
               for (const targetWs of targetConns) {
@@ -1362,9 +1248,6 @@ export class ChatServer {
         case "gift": {
           const [giftRoom, giftSender, giftReceiver, giftGiftName] = args;
           if (giftRoom && ROOMS_SET.has(giftRoom)) {
-            if (!await checkUserValid(giftSender, giftRoom)) break;
-            if (!await checkUserValid(giftReceiver, giftRoom)) break;
-            
             const receiverSeat = await this._getUserSeat(giftReceiver);
             if (!receiverSeat || receiverSeat.room !== giftRoom) break;
             this._broadcastToRoom(giftRoom, JSON.stringify(["gift", giftRoom, giftSender, giftReceiver, giftGiftName, Date.now()]));
@@ -1375,8 +1258,6 @@ export class ChatServer {
         case "rollangak": {
           const [rollRoom, rollUser, rollAngka] = args;
           if (rollRoom && ROOMS_SET.has(rollRoom)) {
-            if (!await checkUserValid(rollUser, rollRoom)) break;
-            
             const userSeat = await this._getUserSeat(rollUser);
             if (!userSeat || userSeat.room !== rollRoom) break;
             this._broadcastToRoom(rollRoom, JSON.stringify(["rollangakBroadcast", rollRoom, rollUser, rollAngka]));
@@ -1388,8 +1269,6 @@ export class ChatServer {
           try {
             const [notifTarget, notifNoimg, notifUser, notifMsg] = args;
             if (notifTarget && notifMsg) {
-              if (!await checkUserValid(notifUser)) break;
-              
               const targetConns = this.userConnections.get(notifTarget);
               if (targetConns) {
                 for (const c of targetConns) {
@@ -1520,12 +1399,7 @@ export class ChatServer {
   async _restoreAllState() {
     try {
       const storage = await this._loadFromStorage();
-      const { roomsData, userSeatData, currentNumber, storedDeployTimestamp } = storage;
-      
-      if (!storedDeployTimestamp || storedDeployTimestamp !== this._deployTimestamp) {
-        await this._clearAllStorage();
-        return;
-      }
+      const { roomsData, userSeatData, currentNumber } = storage;
       
       if (currentNumber !== undefined) {
         this.currentNumber = currentNumber;
