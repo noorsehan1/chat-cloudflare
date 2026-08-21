@@ -1,5 +1,5 @@
-// ==================== CHAT-SERVER.JS ====================
-// VERSION: 8.0.5 - WITH MULTI-USER SKIP LOGIC
+// ==================== CHAT-SERVER-HIBERNATE.JS ====================
+// VERSION: 8.0.6 - WITH HIBERNATE MODE
 
 const C = {
   MAX_SEATS: 45,
@@ -36,6 +36,7 @@ export class ChatServer {
     this.currentNumber = 1;
     this._isNumberUpdating = false;
     
+    // HIBERNATE: Restore state dari storage
     this._restoreAllState().then(() => {});
   }
 
@@ -322,6 +323,9 @@ export class ChatServer {
       isMulti: false
     });
     
+    // HIBERNATE: Simpan state ke attachment sebelum hibernate
+    this._saveWebSocketState(ws);
+    
     for (const [otherRoom, clients] of this.roomClients) {
       if (otherRoom !== roomName && clients) {
         clients.delete(ws);
@@ -347,6 +351,60 @@ export class ChatServer {
     }, 1000);
     
     return true;
+  }
+
+  // ============ HIBERNATE STATE MANAGEMENT ============
+
+  _saveWebSocketState(ws) {
+    try {
+      if (ws && ws.username) {
+        ws.serializeAttachment({
+          username: ws.username,
+          room: ws.room,
+          roomname: ws.roomname,
+          idtarget: ws.idtarget,
+          _isMulti: ws._isMulti || false,
+          _multiRoom: ws._multiRoom || null,
+          _multiSeat: ws._multiSeat || null,
+          seatInfo: ws._seatInfo || null
+        });
+      }
+    } catch(e) {}
+  }
+
+  async _restoreWebSocketState(ws) {
+    try {
+      const attachment = ws.deserializeAttachment();
+      if (!attachment || !attachment.username) {
+        return false;
+      }
+      
+      // Restore properties
+      ws.username = attachment.username;
+      ws.room = attachment.room || null;
+      ws.roomname = attachment.roomname || null;
+      ws.idtarget = attachment.idtarget || attachment.username;
+      ws._isMulti = attachment._isMulti || false;
+      ws._multiRoom = attachment._multiRoom || null;
+      ws._multiSeat = attachment._multiSeat || null;
+      ws._seatInfo = attachment.seatInfo || null;
+      
+      // Restore ke roomClients
+      if (ws.room) {
+        const roomClients = this.roomClients.get(ws.room);
+        if (roomClients && !roomClients.has(ws)) {
+          roomClients.add(ws);
+        }
+      }
+      
+      if (!this.wsSet.has(ws)) {
+        this.wsSet.add(ws);
+      }
+      
+      return true;
+    } catch(e) {
+      return false;
+    }
   }
 
   // ============ CLEANUP ============
@@ -425,6 +483,11 @@ export class ChatServer {
     
     for (const ws of clientArray) {
       if (!ws) { toRemove.add(ws); continue; }
+      
+      // HIBERNATE: Pastikan state direstore sebelum broadcast
+      if (!ws.username) {
+        this._restoreWebSocketState(ws).then(() => {});
+      }
       
       const wsRoom = ws.room || ws.roomname;
       if (wsRoom !== room) {
@@ -715,8 +778,15 @@ export class ChatServer {
 
   async webSocketMessage(ws, msg) {
     if (!ws || ws._closing || this.closing || this.isDestroyed) return;
+    
+    // HIBERNATE: Restore state sebelum handle message
+    await this._restoreWebSocketState(ws);
+    
     try { 
       await this.handleMessage(ws, msg); 
+      
+      // HIBERNATE: Simpan state setelah handle message
+      this._saveWebSocketState(ws);
     } catch(e) {}
   }
 
@@ -750,16 +820,13 @@ export class ChatServer {
     }
     
     // ===== SKIP UNTUK MULTI-USER DENGAN isNewUser = false =====
-    // Jika user adalah multi-user dan isNewUser = false, TIDAK LAKUKAN APA PUN
     if (!isNewUser) {
       const existing = await this._isUserInAnyRoom(username);
       if (existing && existing.isMulti) {
-        // Multi-user dengan isNewUser = false → Langsung return tanpa aksi
         return;
       }
     }
     
-    // ===== PROSES NORMAL UNTUK USER BARU ATAU NON-MULTI =====
     const existing = await this._isUserInAnyRoom(username);
     if (existing) {
       await this._removeUserFromRoom(username, existing.room);
@@ -774,7 +841,8 @@ export class ChatServer {
     ws._multiRoom = null;
     ws._multiSeat = null;
     
-    ws.serializeAttachment({ username: username });
+    // HIBERNATE: Simpan state
+    this._saveWebSocketState(ws);
     
     if (!this.wsSet.has(ws)) this.wsSet.add(ws);
     
@@ -811,6 +879,9 @@ export class ChatServer {
       }
       
       await this._handleEventInternal(ws, [evt, ...args]);
+      
+      // HIBERNATE: Simpan state setelah setiap event
+      this._saveWebSocketState(ws);
     } catch(e) {}
   }
 
@@ -822,7 +893,6 @@ export class ChatServer {
       const [evt, ...args] = data;
       
       switch(evt) {
-        // ===== RESET CASE =====
         case "resetServer": {
           const result = await this.resetAllData();
           this.safeSend(ws, ["resetResult", result]);
@@ -834,20 +904,16 @@ export class ChatServer {
           break;
         
         case "setIdTarget2": {
-          // ===== CEK MULTI-USER DENGAN isNewUser = false =====
           const username = args[0];
           const isNewUser = args[1];
           
-          // Jika isNewUser = false dan user adalah multi-user, SKIP
           if (isNewUser === false) {
             const existing = await this._isUserInAnyRoom(username);
             if (existing && existing.isMulti) {
-              // Multi-user, isNewUser = false → SKIP tanpa aksi
               break;
             }
           }
           
-          // Lanjutkan proses normal
           await this._handleSetId(ws, username, isNewUser);
           break;
         }
@@ -926,6 +992,9 @@ export class ChatServer {
           ws._multiRoom = multiRoomname;
           ws._multiSeat = seat;
           
+          // HIBERNATE: Simpan state
+          this._saveWebSocketState(ws);
+          
           for (const [otherRoom, clients] of this.roomClients) {
             if (otherRoom !== multiRoomname && clients) {
               clients.delete(ws);
@@ -986,6 +1055,9 @@ export class ChatServer {
             multiRoom: roomName,
             multiSeat: seatNumber
           });
+          
+          // HIBERNATE: Simpan state
+          this._saveWebSocketState(ws);
           
           if (!this.wsSet.has(ws)) this.wsSet.add(ws);
           
@@ -1358,7 +1430,6 @@ export class ChatServer {
     try {
       const url = new URL(req.url);
       
-      // ===== RESET ENDPOINT (HTTP) =====
       if (url.pathname === "/reset" && req.method === "POST") {
         const result = await this.resetAllData();
         return new Response(JSON.stringify(result), {
@@ -1369,7 +1440,6 @@ export class ChatServer {
         });
       }
       
-      // ===== WEBSOCKET =====
       const upgrade = req.headers.get("Upgrade");
       if (upgrade !== "websocket") {
         return new Response("Chat Server", { 
@@ -1385,7 +1455,8 @@ export class ChatServer {
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       
-      try { this.ctx.acceptWebSocket(server); } 
+      // ===== AKTIFKAN HIBERNATE =====
+      try { this.ctx.acceptWebSocket(server, true); }  // <-- Parameter true = Hibernate
       catch(e) { 
         return new Response("WebSocket acceptance failed", { status: 500 }); 
       }
@@ -1400,6 +1471,7 @@ export class ChatServer {
       server._multiRoom = null;
       server._multiSeat = null;
       
+      // HIBERNATE: Simpan state awal
       server.serializeAttachment({});
       
       if (!this.wsSet.has(server)) this.wsSet.add(server);
