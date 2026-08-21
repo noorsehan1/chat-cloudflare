@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 5.0.13 - WITH FULL HYBERNATE API
+// VERSION: 5.0.15 - FULL HYBERNATE API (DENGAN server.accept())
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -622,7 +622,6 @@ class DiceGameSystem {
 
 // ==================== GAME SERVER ====================
 export class GameServer {
-  static allowConcurrency = true;
 
   constructor(state, env) {
     try {
@@ -1214,7 +1213,7 @@ export class GameServer {
           initialized: this._initialized,
           errors: this._errorCount,
           alarms: this.alarmScheduler._alarms.size,
-          concurrencyEnabled: GameServer.allowConcurrency,
+          concurrencyEnabled: false,
           timestamp: Date.now()
         }), {
           headers: { 'Content-Type': 'application/json' }
@@ -1235,7 +1234,7 @@ export class GameServer {
           cacheSize: this.cacheManager?.winnersCache?.size || 0,
           pointsCacheSize: this.diceGameSystem?.pointsCache?.pointsCache?.size || 0,
           alarms: this.alarmScheduler._alarms.size,
-          concurrencyEnabled: GameServer.allowConcurrency
+          concurrencyEnabled: false
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -1273,9 +1272,9 @@ export class GameServer {
         server.username = null;
         server._createdAt = Date.now();
         
-        // ✅ USE HYBERNATE API: acceptWebSocket
+        // ✅ GUNAKAN server.accept() - INI WORK
         try {
-          this.state.acceptWebSocket(server);
+          server.accept();
         } catch(e) {
           try { server.close(1008, "Accept failed"); } catch(err) {}
           return new Response("WebSocket acceptance failed", { status: 500 });
@@ -1588,7 +1587,7 @@ export class GameServer {
         if (oldRoom && oldRoom !== room) this._removeClientFromRoom(oldRoom, wsId);
       }
       
-      // ✅ Update attachment for hibernation
+      // Update attachment for hibernation
       ws.serializeAttachment({
         wsId: wsId,
         username: username,
@@ -1716,7 +1715,7 @@ export class GameServer {
         ws.roomname = roomName;
         if (username) ws.username = username;
         
-        // ✅ Update attachment for hibernation
+        // Update attachment for hibernation
         ws.serializeAttachment({
           wsId: wsId,
           username: username,
