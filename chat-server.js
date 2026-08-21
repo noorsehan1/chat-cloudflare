@@ -1,8 +1,8 @@
- // ==================== CHAT-SERVER.JS ====================
+// ==================== CHAT-SERVER.JS ====================
 // VERSION: 8.0.0 - STORAGE ONLY (NO REDUNDANT MEMORY CACHE)
 // ALL DATA IN STORAGE, MEMORY ONLY FOR WEBSOCKET CONNECTIONS
 
- const C = {
+const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 5000,
@@ -657,6 +657,91 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ============ RESET ALL DATA ============
+  // FUNCTION UNTUK RESET SEMUA DATA DI MEMORY DAN STORAGE
+  // PAKAI TIMESTAMP UNTUK VERIFIKASI
+
+  async resetAllData() {
+    console.log("🚀 MEMULAI RESET ALL DATA...");
+    const timestamp = Date.now();
+    
+    try {
+      // 1. RESET STORAGE - HAPUS SEMUA DATA
+      console.log("📦 Menghapus data storage...");
+      
+      await this.ctx.storage.delete("roomsData");
+      await this.ctx.storage.delete("userSeatData");
+      await this.ctx.storage.delete("currentNumber");
+      
+      console.log("✅ Data storage berhasil dihapus");
+      
+      // 2. RESET MEMORY - HAPUS SEMUA WEBSOCKET
+      console.log("🔄 Mereset memory...");
+      
+      // Kirim notifikasi ke semua client
+      const resetMessage = JSON.stringify(["serverReset", "Server di-reset pada: " + new Date(timestamp).toLocaleString()]);
+      for (const ws of this.wsSet) {
+        try {
+          if (ws.readyState === 1) {
+            ws.send(resetMessage);
+          }
+        } catch(e) {}
+      }
+      
+      // Tutup semua koneksi WebSocket
+      const wsCopy = Array.from(this.wsSet);
+      for (const ws of wsCopy) {
+        try {
+          if (ws.readyState === 1) {
+            ws.close(1000, "Server reset - " + timestamp);
+          }
+        } catch(e) {}
+        try {
+          this.cleanup(ws);
+        } catch(e) {}
+      }
+      
+      // Kosongkan semua Set/Map di memory
+      this.wsSet.clear();
+      this.roomClients.clear();
+      
+      // Reset ulang room clients
+      for (const room of ROOMS) {
+        this.roomClients.set(room, new Set());
+      }
+      
+      // Reset current number
+      this.currentNumber = 1;
+      
+      console.log("✅ Memory berhasil direset");
+      console.log("✅ SEMUA DATA BERHASIL DI-RESET!");
+      console.log("🕐 Timestamp:", timestamp);
+      
+      // 3. SET ALARM ULANG
+      if (!this.closing && !this.isDestroyed) {
+        await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+      }
+      
+      // SIMPAN TIMESTAMP RESET TERAKHIR
+      await this.ctx.storage.put("lastReset", timestamp);
+      
+      return {
+        success: true,
+        message: "Semua data berhasil direset",
+        timestamp: timestamp,
+        resetTime: new Date(timestamp).toLocaleString()
+      };
+      
+    } catch(e) {
+      console.error("❌ Error reset data:", e);
+      return {
+        success: false,
+        error: e.message,
+        timestamp: timestamp
+      };
+    }
+  }
+
   // ============ WEBSOCKET EVENT HANDLERS ============
 
   async webSocketMessage(ws, msg) {
@@ -1272,6 +1357,18 @@ export class ChatServer {
     }
     
     try {
+      const url = new URL(req.url);
+      
+      // ENDPOINT RESET - PAKAI TIMESTAMP
+      if (url.pathname === "/reset" && req.method === "POST") {
+        const result = await this.resetAllData();
+        return new Response(JSON.stringify(result), {
+          status: result.success ? 200 : 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      
+      // WEBSOCKET CONNECTION
       const upgrade = req.headers.get("Upgrade");
       if (upgrade !== "websocket") {
         return new Response("Chat Server", { 
