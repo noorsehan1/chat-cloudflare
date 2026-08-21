@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 10.0.0 - WITH ALLOWCONCURRENCY & NO HIBERNATION
+// VERSION: 9.0.4 - NO HIBERNATION
 // READY FOR DEPLOYMENT
 
 const C = {
@@ -8,6 +8,8 @@ const C = {
   MAX_MESSAGE_SIZE: 5000,
   NUMBER_INTERVAL_MS: 900000,
   MAX_NUMBER: 6,
+  
+  // HAPUS: HIBERNATION_IDLE_MS, HIBERNATION_SAVE_DEBOUNCE_MS, HIBERNATION_STATE_KEY, HIBERNATION_VERSION
 };
 
 const ROOMS = [
@@ -18,6 +20,9 @@ const ROOMS = [
 
 const ROOMS_SET = new Set(ROOMS);
 
+// ==================== HAPUS: HIBERNATION MANAGER ====================
+// HAPUS SELURUH CLASS HibernationManager
+
 // ==================== CHAT SERVER ====================
 export class ChatServer {
   constructor(state, env) {
@@ -27,6 +32,8 @@ export class ChatServer {
     this.closing = false;
     this.isDestroyed = false;
     this._startTime = Date.now();
+    
+    // HAPUS: this.hibernationManager = new HibernationManager(state, this);
     
     this.wsSet = new Set();
     this.roomClients = new Map();
@@ -47,7 +54,9 @@ export class ChatServer {
     
     this._isNumberUpdating = false;
     
-    this._restoreAllState();
+    this._restoreAllState().then(() => {
+      // HAPUS: this.hibernationManager.markActivity();
+    });
   }
 
   // ============ SERIALIZE / DESERIALIZE ============
@@ -85,6 +94,7 @@ export class ChatServer {
       if (currentNumber !== undefined) updates.currentNumber = currentNumber;
       
       await this.ctx.storage.put(updates);
+      // HAPUS: this.hibernationManager.markActivity();
     } catch(e) {
       await this._rollbackCache();
     }
@@ -122,6 +132,7 @@ export class ChatServer {
         onlineUsers: Array.from(this._onlineUsers)
       });
       
+      // HAPUS: this.hibernationManager.markActivity();
       return { counts: newCounts, total: totalUsers };
     } catch(e) {
       return { counts: this._userCounts, total: this._onlineUsers.size };
@@ -172,6 +183,7 @@ export class ChatServer {
     updater(this._roomsDataCache[roomName]);
     await this.ctx.storage.put("roomsData", this._roomsDataCache);
     await this._updateUserCounts();
+    // HAPUS: this.hibernationManager.markActivity();
     return this._roomsDataCache[roomName];
   }
 
@@ -194,6 +206,7 @@ export class ChatServer {
     }
     await this.ctx.storage.put("onlineUsers", Array.from(this._onlineUsers));
     await this._updateUserCounts();
+    // HAPUS: this.hibernationManager.markActivity();
     
     return this._userSeatDataCache[username];
   }
@@ -204,6 +217,7 @@ export class ChatServer {
     this._onlineUsers.delete(username);
     await this.ctx.storage.put("onlineUsers", Array.from(this._onlineUsers));
     await this._updateUserCounts();
+    // HAPUS: this.hibernationManager.markActivity();
   }
 
   async _deleteRoomIfEmpty(roomName) {
@@ -217,6 +231,7 @@ export class ChatServer {
       delete this._roomsDataCache[roomName];
       await this.ctx.storage.put("roomsData", this._roomsDataCache);
       await this._updateUserCounts();
+      // HAPUS: this.hibernationManager.markActivity();
     }
   }
 
@@ -249,6 +264,7 @@ export class ChatServer {
           await this.ctx.storage.put("userSeatData", this._userSeatDataCache);
           this._onlineUsers.add(username);
           await this.ctx.storage.put("onlineUsers", Array.from(this._onlineUsers));
+          // HAPUS: this.hibernationManager.markActivity();
           return { room: roomName, seat: parseInt(seat), isMulti: false };
         }
       }
@@ -287,6 +303,7 @@ export class ChatServer {
     });
     
     await this._updateUserCounts();
+    // HAPUS: this.hibernationManager.markActivity();
     
     this.broadcast(roomName, ["removeKursi", roomName, seat]);
     await this.updateRoomCount(roomName);
@@ -310,6 +327,7 @@ export class ChatServer {
     };
     
     await this.ctx.storage.put("roomsData", this._roomsDataCache);
+    // HAPUS: this.hibernationManager.markActivity();
     return true;
   }
 
@@ -321,6 +339,7 @@ export class ChatServer {
     roomData.points[seat] = { x: x || 0, y: y || 0, fast: !!fast };
     
     await this.ctx.storage.put("roomsData", this._roomsDataCache);
+    // HAPUS: this.hibernationManager.markActivity();
     return true;
   }
 
@@ -330,6 +349,8 @@ export class ChatServer {
     if (!ws || !ws.username || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) {
       return false;
     }
+    
+    // HAPUS: this.hibernationManager.markActivity();
     
     const username = ws.username;
     const existing = await this._isUserInAnyRoom(username);
@@ -436,6 +457,8 @@ export class ChatServer {
 
   async _cleanupUserOnDisconnect(ws) {
     try {
+      // HAPUS: this.hibernationManager.markActivity();
+      
       const username = ws.username;
       if (!username) return;
       
@@ -550,6 +573,7 @@ export class ChatServer {
   broadcast(room, msg) {
     if (this.closing || this.isDestroyed || !room || !msg) return;
     try { this._broadcastToRoom(room, JSON.stringify(msg)); } catch(e) {}
+    // HAPUS: this.hibernationManager.markActivity();
   }
 
   safeSend(ws, msg) {
@@ -559,6 +583,7 @@ export class ChatServer {
         return false;
       }
       ws.send(JSON.stringify(msg));
+      // HAPUS: this.hibernationManager.markActivity();
       return true;
     } catch(e) {
       this.cleanup(ws);
@@ -579,6 +604,7 @@ export class ChatServer {
       await this.ctx.storage.put("userCounts", this._userCounts);
       
       this.broadcast(room, ["roomUserCount", room, count]);
+      // HAPUS: this.hibernationManager.markActivity();
       return count;
     } catch(e) { return 0; }
   }
@@ -631,12 +657,14 @@ export class ChatServer {
         }
       }
       
+      // HAPUS: this.hibernationManager.markActivity();
     } catch(e) {}
   }
 
   // ============ ALARM / NUMBER UPDATER ============
 
   async alarm() {
+    // HAPUS: await this.hibernationManager.wakeup();
     if (this.closing || this.isDestroyed) return;
     
     await this._updateNumber();
@@ -644,6 +672,7 @@ export class ChatServer {
     await this._cleanupStorage();
     
     this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+    // HAPUS: this.hibernationManager.markActivity();
   }
 
   async _updateNumber() {
@@ -675,6 +704,8 @@ export class ChatServer {
           this._broadcastToRoom(room, numberMsg);
         }
       }
+      
+      // HAPUS: this.hibernationManager.markActivity();
       
     } catch(e) {
       const storage = await this.ctx.storage.get(["currentNumber", "roomsData"]);
@@ -739,6 +770,7 @@ export class ChatServer {
       
       if (changed) {
         await this._saveToStorage(roomsData, userSeatData, storage.currentNumber);
+        // HAPUS: this.hibernationManager.markActivity();
       }
       
     } catch(e) {}
@@ -826,6 +858,7 @@ export class ChatServer {
       }
       
       await this.ctx.storage.put("lastReset", timestamp);
+      // HAPUS: this.hibernationManager.markActivity();
       
       return {
         success: true,
@@ -847,6 +880,7 @@ export class ChatServer {
 
   async webSocketMessage(ws, msg) {
     if (!ws || ws._closing || this.closing || this.isDestroyed) return;
+    // HAPUS: this.hibernationManager.markActivity();
     try { await this.handleMessage(ws, msg); } catch(e) {}
   }
 
@@ -855,6 +889,7 @@ export class ChatServer {
     try {
       await this._cleanupUserOnDisconnect(ws);
       this.cleanup(ws);
+      // HAPUS: this.hibernationManager.markActivity();
     } catch(e) {}
   }
 
@@ -863,6 +898,7 @@ export class ChatServer {
     try {
       await this._cleanupUserOnDisconnect(ws);
       this.cleanup(ws);
+      // HAPUS: this.hibernationManager.markActivity();
     } catch(e) {}
   }
 
@@ -878,6 +914,8 @@ export class ChatServer {
       try { this.cleanup(ws); } catch(e) {}
       return;
     }
+    
+    // HAPUS: this.hibernationManager.markActivity();
     
     if (!isNewUser) {
       const existing = await this._isUserInAnyRoom(username);
@@ -921,6 +959,8 @@ export class ChatServer {
       }
     } catch(e) { return; }
     
+    // HAPUS: this.hibernationManager.markActivity();
+    
     try {
       let str = typeof raw === 'string' ? raw : new TextDecoder().decode(raw);
       if (str.length > C.MAX_MESSAGE_SIZE) return;
@@ -946,6 +986,8 @@ export class ChatServer {
     try {
       if (!ws || !data || !data[0]) return;
       const [evt, ...args] = data;
+      
+      // HAPUS: this.hibernationManager.markActivity();
       
       switch(evt) {
         case "resetServer": {
@@ -1397,6 +1439,7 @@ export class ChatServer {
 
   async _restoreAllState() {
     try {
+      // HAPUS: Hibernation state check
       const roomsData = await this.ctx.storage.get("roomsData") || {};
       const userSeatData = await this.ctx.storage.get("userSeatData") || {};
       const currentNumber = await this.ctx.storage.get("currentNumber") || 1;
@@ -1422,7 +1465,6 @@ export class ChatServer {
         }
       }
       
-      // Restore WebSocket connections from Durable Object state
       const webSockets = this.ctx.getWebSockets();
       for (const ws of webSockets) {
         try {
@@ -1474,6 +1516,8 @@ export class ChatServer {
         await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
       }
       
+      // HAPUS: this.hibernationManager.markActivity();
+      
     } catch(e) {}
   }
 
@@ -1485,6 +1529,9 @@ export class ChatServer {
     }
     
     try {
+      // HAPUS: Hibernation wakeup check
+      // HAPUS: this.hibernationManager.markActivity();
+      
       const url = new URL(req.url);
       
       if (url.pathname === "/reset" && req.method === "POST") {
@@ -1502,6 +1549,7 @@ export class ChatServer {
           connections: this.wsSet.size,
           rooms: Object.keys(this._roomsDataCache).length,
           onlineUsers: this._onlineUsers.size,
+          // HAPUS: isHibernating: this.hibernationManager.isHibernating,
           timestamp: Date.now()
         }), {
           headers: { "Content-Type": "application/json" }
@@ -1521,14 +1569,9 @@ export class ChatServer {
       }
       
       const pair = new WebSocketPair();
-      const [client, server] = Object.values(pair);
+      const [client, server] = [pair[0], pair[1]];
       
-      // 🔥 KUNCI UTAMA: accept dengan allowConcurrency true
-      try { 
-        this.ctx.acceptWebSocket(server, {
-          allowConcurrency: true  // Biar bisa terima pesan sambil proses state
-        });
-      } 
+      try { this.ctx.acceptWebSocket(server); } 
       catch(e) { 
         return new Response("WebSocket acceptance failed", { status: 500 }); 
       }
@@ -1547,6 +1590,8 @@ export class ChatServer {
       
       if (!this.wsSet.has(server)) this.wsSet.add(server);
       
+      // HAPUS: this.hibernationManager.markActivity();
+      
       return new Response(null, { 
         status: 101, 
         webSocket: client
@@ -1564,6 +1609,8 @@ export class ChatServer {
     this.closing = true;
     this.isDestroyed = true;
     
+    // HAPUS: await this.hibernationManager.forceSaveState();
+    // HAPUS: await this.hibernationManager.cleanup();
     await this._cleanupStorage();
     
     const wsCopy = Array.from(this.wsSet);
