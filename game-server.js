@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 5.0.12 - WITH HYBRID HYBERNATE (MANUAL + API)
+// VERSION: 5.0.13 - WITH FULL HYBERNATE API
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -95,7 +95,6 @@ class AlarmScheduler {
       }
       
       if (currentSession) {
-        console.log(`[ALARM] Current session: ${currentSession.start} - ${currentSession.end}`);
         const endDelay = (currentSession.endTotal - currentTotal) * 60 * 1000;
         if (endDelay > 0) {
           await this._scheduleAlarm('dice_session_end', endDelay);
@@ -117,8 +116,6 @@ class AlarmScheduler {
       }
       
       if (nextSession) {
-        console.log(`[ALARM] Next session: ${nextSession.start} in ${Math.floor(minDiff/60)}h ${minDiff%60}m`);
-        
         let startDelay = (minDiff * 60 * 1000) - 30000;
         if (startDelay < 0) startDelay = 0;
         await this._scheduleAlarm('dice_session_start', startDelay);
@@ -132,7 +129,6 @@ class AlarmScheduler {
       
       return true;
     } catch(e) { 
-      console.error('[ALARM] Schedule error:', e);
       return false; 
     }
   }
@@ -164,7 +160,6 @@ class AlarmScheduler {
       
       return true;
     } catch(e) { 
-      console.error('[ALARM] Schedule error:', e);
       return false; 
     }
   }
@@ -188,12 +183,10 @@ class AlarmScheduler {
       
       const data = await this.state.storage.get(CONSTANTS.ALARM_STATE_KEY);
       if (!data || !data.alarms) {
-        console.log('[ALARM] No saved alarms found');
         return;
       }
       
       this._alarms = new Map(data.alarms);
-      console.log(`[ALARM] Restored ${this._alarms.size} alarms`);
       
       let minDelay = Infinity;
       const now = Date.now();
@@ -210,7 +203,6 @@ class AlarmScheduler {
       
       return true;
     } catch(e) {
-      console.error('[ALARM] Restore error:', e);
       return false;
     }
   }
@@ -274,7 +266,6 @@ class AlarmScheduler {
       
       return alarm;
     } catch(e) {
-      console.error('[ALARM] Process error:', e);
       return null;
     }
   }
@@ -642,8 +633,6 @@ export class GameServer {
       this._initialized = false;
       this._startTime = Date.now();
       this._wsIdCounter = 0;
-      this._lastActivity = Date.now();
-      this._isHibernating = false;
       
       this.cacheManager = new CacheManager();
       
@@ -732,7 +721,7 @@ export class GameServer {
     }
   }
 
-  // ========== HYBRID HYBERNATE METHODS ==========
+  // ========== HYBERNATE API METHODS ==========
   
   async _restoreFromStorage() {
     try {
@@ -803,6 +792,51 @@ export class GameServer {
       if (stateData.dicePoints && this.diceGameSystem) {
         await this.diceGameSystem.pointsCache.setPoints(stateData.dicePoints, this.env);
         await this.diceGameSystem.loadScores();
+      }
+      
+      // RESTORE WEBSOCKETS FROM HYBERNATION
+      const webSockets = this.state.getWebSockets();
+      console.log(`[HIBERNATION] Found ${webSockets.length} WebSockets to restore`);
+      
+      for (const ws of webSockets) {
+        try {
+          const attachment = ws.deserializeAttachment();
+          if (attachment && attachment.wsId) {
+            // Restore WebSocket state
+            ws._wsId = attachment.wsId;
+            ws._closing = false;
+            ws.room = attachment.room || null;
+            ws.roomname = attachment.room || null;
+            ws.username = attachment.username || null;
+            ws._createdAt = attachment.createdAt || Date.now();
+            
+            // Add to maps
+            this.wsMap.set(attachment.wsId, ws);
+            
+            if (attachment.username) {
+              this.userConnections.set(attachment.username, {
+                wsId: attachment.wsId,
+                ws: ws,
+                room: attachment.room,
+                timestamp: Date.now()
+              });
+            }
+            
+            if (attachment.room) {
+              let clients = this.wsClients.get(attachment.room);
+              if (!clients) {
+                clients = new Set();
+                this.wsClients.set(attachment.room, clients);
+              }
+              clients.add(attachment.wsId);
+              this.clientRooms.set(attachment.wsId, attachment.room);
+            }
+            
+            console.log(`[HIBERNATION] Restored WebSocket ${attachment.wsId} for user ${attachment.username || 'unknown'}`);
+          }
+        } catch(e) {
+          console.error('[HIBERNATION] Error restoring WebSocket:', e);
+        }
       }
       
       console.log('[HIBERNATION] State restored successfully');
@@ -958,7 +992,6 @@ export class GameServer {
       
       setTimeout(() => {
         if (!this.closing && !this.isDestroyed) {
-          this._cleanupDeadConnections();
           this._checkAndStartCurrentSession();
         }
       }, 3000);
@@ -978,30 +1011,23 @@ export class GameServer {
   _checkAndStartCurrentSession() {
     try {
       if (!this.alarmScheduler.isDiceTime()) {
-        console.log('[DICE] No active session');
         return;
       }
       
-      console.log('[DICE] Session is ACTIVE!');
       this.diceAutoEnabled = true;
       
       if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
-        console.log('[DICE] Dice already active, NOT starting new game');
         return;
       }
       
       if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) {
-        console.log('[DICE] Dice in cooldown/lock state, waiting...');
         return;
       }
       
       const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
       
       if (clients && clients.size > 0) {
-        console.log(`[DICE] ${clients.size} users in Quiz room, starting dice`);
         this._startDiceFast();
-      } else {
-        console.log('[DICE] No users in Quiz room, dice will start when user joins');
       }
     } catch(e) {
       console.error('[DICE] Check current session error:', e);
@@ -1039,92 +1065,42 @@ export class GameServer {
     game.registrationOpen = false;
   }
 
-  // ========== CLEANUP DEAD CONNECTIONS ==========
-  _cleanupDeadConnections() {
-    try {
-      const toRemove = [];
-      let removed = 0;
-      const now = Date.now();
-      
-      for (const [wsId, ws] of this.wsMap) {
-        if (removed > 50) break;
-        
-        const isDead = !ws || 
-                       ws.readyState !== 1 || 
-                       ws._closing ||
-                       (ws._createdAt && (now - ws._createdAt) > 3600000);
-        
-        if (isDead) {
-          toRemove.push(wsId);
-          removed++;
-        }
-      }
-      
-      for (const wsId of toRemove) {
-        const ws = this.wsMap.get(wsId);
-        if (ws) {
-          try {
-            if (ws.readyState === 1) {
-              ws.close(1000, "Cleanup");
-            }
-          } catch(e) {}
-          
-          const room = this.clientRooms.get(wsId);
-          if (room) this._removeClientFromRoom(room, wsId);
-          this.clientRooms.delete(wsId);
-          this.wsMap.delete(wsId);
-        }
-      }
-    } catch(e) {}
-  }
-
   // ========== HANDLE ALARM ==========
   async handleAlarm() {
     try {
       console.log('[ALARM] Alarm triggered!');
       
-      this._isHibernating = false;
-      
+      // Restore state from hibernation
       await this._restoreFromStorage();
       
+      // Restore alarms
       await this.alarmScheduler.restoreAlarms();
       
       const pendingAlarms = await this.alarmScheduler.getPendingAlarms();
       
       for (const alarm of pendingAlarms) {
-        console.log(`[ALARM] Processing: ${alarm.name}`);
-        
         switch(alarm.name) {
           case 'dice_session_start':
-            console.log('[ALARM] Session start alarm triggered');
-            this._cleanupDeadConnections();
-            
             if (this.alarmScheduler.isDiceTime()) {
               this.diceAutoEnabled = true;
               
               if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
-                console.log('[ALARM] Dice already active, NOT starting new game');
                 break;
               }
               
               if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) {
-                console.log('[ALARM] Dice in cooldown/lock state, waiting...');
                 break;
               }
               
               const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
               
               if (clients && clients.size > 0) {
-                console.log(`[ALARM] ${clients.size} users in Quiz room, starting dice`);
                 this._startDiceFast();
-              } else {
-                console.log('[ALARM] No users in Quiz room, dice will start when user joins');
               }
             }
             break;
             
           case 'dice_session_end':
-            console.log('[ALARM] Session end alarm triggered');
             this.diceAutoEnabled = false;
             if (this.currentDiceRoll || this._isShowingDice) {
               this._endDiceRound();
@@ -1197,12 +1173,6 @@ export class GameServer {
   // ========== FETCH ==========
   async fetch(req) {
     try {
-      if (this._isHibernating) {
-        this._isHibernating = false;
-        await this._restoreFromStorage();
-        await this.alarmScheduler.restoreAlarms();
-      }
-      
       if (this._circuitOpen) {
         const now = Date.now();
         if (now - this._lastResetTime > 60000) {
@@ -1243,7 +1213,6 @@ export class GameServer {
           circuitOpen: this._circuitOpen,
           initialized: this._initialized,
           errors: this._errorCount,
-          isHibernating: this._isHibernating,
           alarms: this.alarmScheduler._alarms.size,
           concurrencyEnabled: GameServer.allowConcurrency,
           timestamp: Date.now()
@@ -1266,7 +1235,6 @@ export class GameServer {
           cacheSize: this.cacheManager?.winnersCache?.size || 0,
           pointsCacheSize: this.diceGameSystem?.pointsCache?.pointsCache?.size || 0,
           alarms: this.alarmScheduler._alarms.size,
-          isHibernating: this._isHibernating,
           concurrencyEnabled: GameServer.allowConcurrency
         }), {
           headers: { 'Content-Type': 'application/json' }
@@ -1297,6 +1265,7 @@ export class GameServer {
         const [client, server] = [pair[0], pair[1]];
         const wsId = ++this._wsIdCounter;
         
+        // Set WebSocket properties
         server._wsId = wsId;
         server._closing = false;
         server.room = null;
@@ -1304,15 +1273,27 @@ export class GameServer {
         server.username = null;
         server._createdAt = Date.now();
         
+        // ✅ USE HYBERNATE API: acceptWebSocket
         try {
-          server.accept();
+          this.state.acceptWebSocket(server);
         } catch(e) {
           try { server.close(1008, "Accept failed"); } catch(err) {}
           return new Response("WebSocket acceptance failed", { status: 500 });
         }
         
+        // ✅ SAVE STATE TO ATTACHMENT (for hibernation restore)
+        server.serializeAttachment({
+          wsId: wsId,
+          username: null,
+          room: null,
+          roomname: null,
+          createdAt: Date.now()
+        });
+        
+        // Add to maps
         this.wsMap.set(wsId, server);
         
+        // WebSocket event handlers
         server.addEventListener("message", async (event) => {
           try {
             if (server._closing || this.closing || this.isDestroyed) return;
@@ -1606,6 +1587,16 @@ export class GameServer {
         const oldRoom = this.clientRooms.get(wsId);
         if (oldRoom && oldRoom !== room) this._removeClientFromRoom(oldRoom, wsId);
       }
+      
+      // ✅ Update attachment for hibernation
+      ws.serializeAttachment({
+        wsId: wsId,
+        username: username,
+        room: room,
+        roomname: room,
+        createdAt: ws._createdAt || Date.now()
+      });
+      
       if (username) {
         let conn = this.userConnections.get(username);
         if (conn) { conn.room = room; conn.timestamp = Date.now(); conn.ws = ws; conn.wsId = wsId; }
@@ -1725,6 +1716,15 @@ export class GameServer {
         ws.roomname = roomName;
         if (username) ws.username = username;
         
+        // ✅ Update attachment for hibernation
+        ws.serializeAttachment({
+          wsId: wsId,
+          username: username,
+          room: roomName,
+          roomname: roomName,
+          createdAt: ws._createdAt || Date.now()
+        });
+        
         if (username) {
           let conn = this.userConnections.get(username);
           if (conn) { 
@@ -1778,7 +1778,6 @@ export class GameServer {
         if (remainingInt > 0) {
           this._safeSend(ws, ["diceNotification", `${remainingInt}s remaining`]);
         }
-        console.log('[DICE] User switched to Quiz, dice already active - NOT starting new game');
         return;
       }
       
@@ -1786,11 +1785,9 @@ export class GameServer {
         if (this._diceTimeUpCooldown) {
           this._safeSend(ws, ["diceNotification", "Game in cooldown, please wait..."]);
         }
-        console.log('[DICE] Dice in cooldown/lock state, waiting...');
         return;
       }
       
-      console.log('[DICE] User switched to Quiz, starting dice immediately');
       this._startDiceFast();
       
     } catch(e) {
