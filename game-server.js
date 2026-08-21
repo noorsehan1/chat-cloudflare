@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 5.0.8 - WITH HIBERNATION SUPPORT
+// VERSION: 5.0.10 - ALARM MENGGUNAKAN STORAGE SAJA
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -48,12 +48,9 @@ const CONSTANTS = {
   
   CACHE_TTL_MS: 60000,
   
-  // HIBERNATION CONSTANTS
+  // HIBERNATION - SEDERHANA
   HIBERNATION_STATE_KEY: 'hibernation_state',
-  HIBERNATION_ALARM_KEY: 'hibernation_alarm',
-  HIBERNATION_CHECK_INTERVAL_MS: 60000,
-  HIBERNATION_INACTIVITY_TIMEOUT_MS: 300000, // 5 menit
-  HIBERNATION_ALARM_DELAY_MS: 5000,
+  ALARM_STATE_KEY: 'alarm_state',
 };
 
 // ========== QUIZ SCHEDULE ==========
@@ -74,8 +71,9 @@ function parseTime(timeStr) {
 
 // ==================== ALARM SCHEDULER ====================
 class AlarmScheduler {
-  constructor(env) {
+  constructor(env, state) {
     this.env = env;
+    this.state = state;
     this._alarms = new Map();
   }
 
@@ -85,6 +83,7 @@ class AlarmScheduler {
       const witaNow = this._toWITA(now);
       const currentTotal = witaNow.getHours() * 60 + witaNow.getMinutes();
       
+      // Clear existing alarms
       await this._clearAllAlarms();
       
       let currentSession = null;
@@ -145,28 +144,148 @@ class AlarmScheduler {
       if (delayMs < 1000) delayMs = 1000;
       if (delayMs > 86400000) delayMs = 86400000;
       
-      const alarm = { name, scheduledAt: Date.now() + delayMs, delayMs };
+      const alarm = { 
+        name, 
+        scheduledAt: Date.now() + delayMs, 
+        delayMs,
+        timestamp: Date.now()
+      };
+      
       this._alarms.set(name, alarm);
       
-      if (this.env?.DICE_ALARM) {
-        await this.env.DICE_ALARM.put(name, JSON.stringify(alarm), {
-          expirationTtl: Math.ceil(delayMs / 1000) + 120
+      // Simpan ke storage
+      if (this.state) {
+        await this.state.storage.put(CONSTANTS.ALARM_STATE_KEY, {
+          alarms: Array.from(this._alarms.entries()),
+          updatedAt: Date.now()
         });
       }
+      
+      // Set alarm di DO
+      if (this.state) {
+        await this.state.storage.setAlarm(Date.now() + delayMs);
+      }
+      
       return true;
-    } catch(e) { return false; }
+    } catch(e) { 
+      console.error('[ALARM] Schedule error:', e);
+      return false; 
+    }
   }
 
   async _clearAllAlarms() {
     try {
       this._alarms.clear();
-      if (this.env?.DICE_ALARM) {
-        const keys = await this.env.DICE_ALARM.list();
-        for (const key of keys.keys) {
-          await this.env.DICE_ALARM.delete(key.name);
-        }
+      
+      if (this.state) {
+        await this.state.storage.delete(CONSTANTS.ALARM_STATE_KEY);
+        // Clear DO alarm
+        try {
+          await this.state.storage.setAlarm(null);
+        } catch(e) {}
       }
     } catch(e) {}
+  }
+
+  async restoreAlarms() {
+    try {
+      if (!this.state) return;
+      
+      const data = await this.state.storage.get(CONSTANTS.ALARM_STATE_KEY);
+      if (!data || !data.alarms) {
+        console.log('[ALARM] No saved alarms found');
+        return;
+      }
+      
+      this._alarms = new Map(data.alarms);
+      console.log(`[ALARM] Restored ${this._alarms.size} alarms`);
+      
+      // Set alarm untuk yang terdekat
+      let minDelay = Infinity;
+      const now = Date.now();
+      for (const [name, alarm] of this._alarms) {
+        const remaining = alarm.scheduledAt - now;
+        if (remaining > 0 && remaining < minDelay) {
+          minDelay = remaining;
+        }
+      }
+      
+      if (minDelay > 0 && minDelay < Infinity) {
+        await this.state.storage.setAlarm(Date.now() + minDelay);
+      }
+      
+      return true;
+    } catch(e) {
+      console.error('[ALARM] Restore error:', e);
+      return false;
+    }
+  }
+
+  async getPendingAlarms() {
+    try {
+      const pending = [];
+      const now = Date.now();
+      const expired = [];
+      
+      for (const [name, alarm] of this._alarms) {
+        if (alarm.scheduledAt <= now) {
+          pending.push(alarm);
+          expired.push(name);
+        }
+      }
+      
+      // Hapus alarm yang sudah expired
+      for (const name of expired) {
+        this._alarms.delete(name);
+      }
+      
+      if (expired.length > 0 && this.state) {
+        await this.state.storage.put(CONSTANTS.ALARM_STATE_KEY, {
+          alarms: Array.from(this._alarms.entries()),
+          updatedAt: Date.now()
+        });
+      }
+      
+      return pending;
+    } catch(e) { 
+      return []; 
+    }
+  }
+
+  async processAlarm(name) {
+    try {
+      const alarm = this._alarms.get(name);
+      if (!alarm) return null;
+      
+      // Hapus dari memory
+      this._alarms.delete(name);
+      
+      if (this.state) {
+        await this.state.storage.put(CONSTANTS.ALARM_STATE_KEY, {
+          alarms: Array.from(this._alarms.entries()),
+          updatedAt: Date.now()
+        });
+      }
+      
+      // Schedule alarm berikutnya jika masih ada
+      let minDelay = Infinity;
+      const now = Date.now();
+      for (const [n, a] of this._alarms) {
+        const remaining = a.scheduledAt - now;
+        if (remaining > 0 && remaining < minDelay) {
+          minDelay = remaining;
+        }
+      }
+      
+      if (minDelay > 0 && minDelay < Infinity) {
+        await this.state.storage.setAlarm(Date.now() + minDelay);
+      }
+      
+      return alarm;
+    } catch(e) {
+      console.error('[ALARM] Process error:', e);
+      return null;
+    }
   }
 
   _toWITA(date) {
@@ -187,20 +306,6 @@ class AlarmScheduler {
       }
     }
     return false;
-  }
-
-  async getPendingAlarms() {
-    try {
-      const pending = [];
-      if (this.env?.DICE_ALARM) {
-        const keys = await this.env.DICE_ALARM.list();
-        for (const key of keys.keys) {
-          const data = await this.env.DICE_ALARM.get(key.name, 'json');
-          if (data) pending.push(data);
-        }
-      }
-      return pending;
-    } catch(e) { return []; }
   }
 
   async cleanup() {
@@ -546,7 +651,6 @@ export class GameServer {
       this._wsIdCounter = 0;
       this._lastActivity = Date.now();
       this._isHibernating = false;
-      this._hibernationCheckTimer = null;
       
       this.cacheManager = new CacheManager();
       
@@ -556,7 +660,8 @@ export class GameServer {
       this.clientRooms = new Map();
       this.userConnections = new Map();
       
-      this.alarmScheduler = new AlarmScheduler(env);
+      // Alarm Scheduler dengan state
+      this.alarmScheduler = new AlarmScheduler(env, state);
       
       this.diceGameSystem = null;
       this.currentDiceRoll = null;
@@ -624,11 +729,11 @@ export class GameServer {
       
       this._lastNotifTime = {};
       
-      // RESTORE HIBERNATION STATE
-      this._restoreFromHibernation().catch(() => {});
+      // RESTORE STATE DARI STORAGE
+      this._restoreFromStorage().catch(() => {});
       
-      // ALARM UNTUK AUTO-START SETELAH HIBERNASI
-      this._scheduleHibernationCheck();
+      // RESTORE ALARM DARI STORAGE
+      this.alarmScheduler.restoreAlarms().catch(() => {});
       
     } catch(e) {
       console.error('[GAME] Constructor error:', e);
@@ -637,7 +742,7 @@ export class GameServer {
 
   // ========== HIBERNATION METHODS ==========
   
-  async _restoreFromHibernation() {
+  async _restoreFromStorage() {
     try {
       if (!this.state) return;
       
@@ -647,7 +752,7 @@ export class GameServer {
         return;
       }
       
-      console.log('[HIBERNATION] Restoring state from hibernation...');
+      console.log('[HIBERNATION] Restoring state from storage...');
       
       // Restore basic state
       this._cachedResetWeek = stateData.cachedResetWeek || null;
@@ -686,7 +791,6 @@ export class GameServer {
         this._diceStartTime = stateData.diceGameState.diceStartTime || null;
         this._diceQuestionStartTime = stateData.diceGameState.diceQuestionStartTime || null;
         
-        // Restore dice answered set
         if (stateData.diceGameState.diceAnswered) {
           this.diceAnswered = new Set(stateData.diceGameState.diceAnswered);
         }
@@ -694,7 +798,6 @@ export class GameServer {
           this._playerAnswers = new Map(Object.entries(stateData.diceGameState.playerAnswers));
         }
         
-        // Restore tie breaker state
         if (stateData.diceGameState.tieActive) {
           this._tieActive = true;
           this._tieRound = stateData.diceGameState.tieRound || 0;
@@ -714,7 +817,7 @@ export class GameServer {
       console.log('[HIBERNATION] State restored successfully');
       this._initialized = true;
       
-      // Schedule auto-start if in active session
+      // Check and start current session
       this._checkAndStartCurrentSession();
       
     } catch(e) {
@@ -723,7 +826,7 @@ export class GameServer {
     }
   }
 
-  async _saveHibernationState() {
+  async _saveToStorage() {
     try {
       if (!this.state) return;
       
@@ -774,6 +877,7 @@ export class GameServer {
       };
       
       await this.state.storage.put(CONSTANTS.HIBERNATION_STATE_KEY, stateData);
+      console.log('[HIBERNATION] State saved to storage');
       
     } catch(e) {
       console.error('[HIBERNATION] Save error:', e);
@@ -848,59 +952,6 @@ export class GameServer {
     } catch(e) {
       console.error('[HIBERNATION] Deserialize game error:', e);
       return null;
-    }
-  }
-
-  _scheduleHibernationCheck() {
-    if (this._hibernationCheckTimer) {
-      clearInterval(this._hibernationCheckTimer);
-    }
-    
-    this._hibernationCheckTimer = setInterval(() => {
-      if (this.closing || this.isDestroyed) {
-        clearInterval(this._hibernationCheckTimer);
-        this._hibernationCheckTimer = null;
-        return;
-      }
-      this._checkHibernation();
-    }, CONSTANTS.HIBERNATION_CHECK_INTERVAL_MS);
-  }
-
-  async _checkHibernation() {
-    try {
-      const now = Date.now();
-      const inactivityMs = now - this._lastActivity;
-      
-      // Jangan hibernasi jika ada koneksi WebSocket aktif
-      if (this.wsMap.size > 0) {
-        return;
-      }
-      
-      // Jangan hibernasi jika ada game aktif
-      let hasActiveGame = false;
-      for (const [room, game] of this.activeGames) {
-        if (game._isActive && !game._gameEnded) {
-          hasActiveGame = true;
-          break;
-        }
-      }
-      if (hasActiveGame) {
-        return;
-      }
-      
-      // Jangan hibernasi jika ada dice aktif
-      if (this.currentDiceRoll || this._isShowingDice || this._tieActive) {
-        return;
-      }
-      
-      // Hibernasi jika tidak ada aktivitas dalam waktu tertentu
-      if (inactivityMs > CONSTANTS.HIBERNATION_INACTIVITY_TIMEOUT_MS) {
-        console.log('[HIBERNATION] Inactivity detected, saving state...');
-        await this._saveHibernationState();
-        this._isHibernating = true;
-      }
-    } catch(e) {
-      console.error('[HIBERNATION] Check error:', e);
     }
   }
 
@@ -1042,16 +1093,23 @@ export class GameServer {
   // ========== HANDLE ALARM ==========
   async handleAlarm() {
     try {
+      console.log('[ALARM] Alarm triggered!');
+      
       // Wake up from hibernation
       this._isHibernating = false;
-      this._lastActivity = Date.now();
       
       // Restore state if needed
-      await this._restoreFromHibernation();
+      await this._restoreFromStorage();
       
+      // Restore alarms
+      await this.alarmScheduler.restoreAlarms();
+      
+      // Get pending alarms
       const pendingAlarms = await this.alarmScheduler.getPendingAlarms();
       
       for (const alarm of pendingAlarms) {
+        console.log(`[ALARM] Processing: ${alarm.name}`);
+        
         switch(alarm.name) {
           case 'dice_session_start':
             console.log('[ALARM] Session start alarm triggered');
@@ -1062,12 +1120,12 @@ export class GameServer {
               
               if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
                 console.log('[ALARM] Dice already active, NOT starting new game');
-                return;
+                break;
               }
               
               if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) {
                 console.log('[ALARM] Dice in cooldown/lock state, waiting...');
-                return;
+                break;
               }
               
               const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
@@ -1089,7 +1147,14 @@ export class GameServer {
             }
             break;
         }
+        
+        // Process alarm (remove from queue)
+        await this.alarmScheduler.processAlarm(alarm.name);
       }
+      
+      // Schedule next alarms
+      await this.alarmScheduler.scheduleAlarms();
+      
     } catch(e) {
       console.error('[ALARM] Handle alarm error:', e);
     }
@@ -1153,9 +1218,9 @@ export class GameServer {
       // Wake up from hibernation
       if (this._isHibernating) {
         this._isHibernating = false;
-        await this._restoreFromHibernation();
+        await this._restoreFromStorage();
+        await this.alarmScheduler.restoreAlarms();
       }
-      this._lastActivity = Date.now();
       
       if (this._circuitOpen) {
         const now = Date.now();
@@ -1198,6 +1263,7 @@ export class GameServer {
           initialized: this._initialized,
           errors: this._errorCount,
           isHibernating: this._isHibernating,
+          alarms: this.alarmScheduler._alarms.size,
           timestamp: Date.now()
         }), {
           headers: { 'Content-Type': 'application/json' }
@@ -1217,7 +1283,7 @@ export class GameServer {
           tieActive: this._tieActive,
           cacheSize: this.cacheManager?.winnersCache?.size || 0,
           pointsCacheSize: this.diceGameSystem?.pointsCache?.pointsCache?.size || 0,
-          alarms: await this.alarmScheduler.getPendingAlarms(),
+          alarms: this.alarmScheduler._alarms.size,
           isHibernating: this._isHibernating
         }), {
           headers: { 'Content-Type': 'application/json' }
@@ -1267,7 +1333,6 @@ export class GameServer {
         server.addEventListener("message", async (event) => {
           try {
             if (server._closing || this.closing || this.isDestroyed) return;
-            this._lastActivity = Date.now();
             const data = JSON.parse(event.data);
             if (Array.isArray(data) && data.length > 0) {
               await this._processWithTimeout(server, data);
@@ -3489,7 +3554,7 @@ export class GameServer {
       this.closing = true;
       
       // Save state before destroy
-      await this._saveHibernationState();
+      await this._saveToStorage();
       
       for (const timer of this._allTimers) {
         try { clearTimeout(timer); clearInterval(timer); } catch(e) {}
@@ -3507,10 +3572,6 @@ export class GameServer {
       if (this._diceTimeUpCooldownTimer) {
         clearTimeout(this._diceTimeUpCooldownTimer);
         this._diceTimeUpCooldownTimer = null;
-      }
-      if (this._hibernationCheckTimer) {
-        clearInterval(this._hibernationCheckTimer);
-        this._hibernationCheckTimer = null;
       }
       for (const timeout of this._diceNotificationTimeouts) {
         clearTimeout(timeout);
