@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 6.0.2 - FULL HYBERNATE API (EXPERIMENTAL)
+// VERSION: 6.0.3 - HYBERNATE API WITH MINIMAL ATTACHMENT
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -591,7 +591,6 @@ class DiceGameSystem {
   }
 }
 
-// ==================== GAME SERVER - FULL HYBERNATE API ====================
 export class GameServer {
   static allowConcurrency = true;
 
@@ -607,7 +606,6 @@ export class GameServer {
       this._lastActivity = Date.now();
       this._isHibernating = false;
       
-      // WebSocket connections - MEMORY ONLY
       this.wsMap = new Map();
       this.wsClients = new Map();
       this.clientRooms = new Map();
@@ -616,7 +614,6 @@ export class GameServer {
       this.cacheManager = new CacheManager();
       this.activeGames = new Map();
       
-      // Dice state
       this.diceGameSystem = null;
       this.currentDiceRoll = null;
       this._diceLock = false;
@@ -683,22 +680,21 @@ export class GameServer {
       
       this.alarmScheduler = new AlarmScheduler(env, state);
       
-      // RESTORE STATE DARI HYBERNATE
       this._restoreAllState().then(() => {});
       
     } catch(e) {}
   }
 
-  // ========== FULL HYBERNATE API METHODS ==========
+  // ========== HYBERNATE API METHODS ==========
   
   async _restoreAllState() {
     try {
-      // 1. RESTORE DARI STORAGE
+      // 1. RESTORE DARI STORAGE (DATA BESAR)
       const gameState = await this.state.storage.get("gameState") || {};
       const diceState = await this.state.storage.get("diceState") || {};
       const cacheState = await this.state.storage.get("cacheState") || {};
       
-      // 2. RESTORE CACHE
+      // Restore cache
       if (cacheState.recordingStatus) {
         this.cacheManager.recordingStatus = new Map(Object.entries(cacheState.recordingStatus));
       }
@@ -708,7 +704,7 @@ export class GameServer {
         }
       }
       
-      // 3. RESTORE GAMES
+      // Restore games
       if (gameState.activeGames && gameState.activeGames.length > 0) {
         for (const gameData of gameState.activeGames) {
           const game = this._deserializeGame(gameData);
@@ -718,7 +714,7 @@ export class GameServer {
         }
       }
       
-      // 4. RESTORE DICE STATE
+      // Restore dice state
       if (diceState) {
         this.currentDiceRoll = diceState.currentDiceRoll || null;
         this._isShowingDice = diceState.isShowingDice || false;
@@ -751,12 +747,10 @@ export class GameServer {
         }
       }
       
-      // ===== 5. RESTORE WEBSOCKET DARI HYBERNATE API =====
-      // getWebSockets() adalah Hibernate API untuk restore WebSocket
+      // ===== 2. RESTORE WEBSOCKET DARI ATTACHMENT (HANYA IDENTITAS) =====
       const webSockets = this.state.getWebSockets();
       for (const ws of webSockets) {
         try {
-          // deserializeAttachment() adalah Hibernate API
           const attachment = ws.deserializeAttachment();
           if (attachment && attachment.wsId) {
             const wsId = attachment.wsId;
@@ -969,7 +963,6 @@ export class GameServer {
   // ========== FETCH - FULL HYBERNATE API ==========
   async fetch(req) {
     try {
-      // WAKE UP DARI HYBERNATION
       if (this._isHibernating) {
         this._isHibernating = false;
         await this._restoreAllState();
@@ -1057,11 +1050,9 @@ export class GameServer {
         
         // ===== ACCEPT WEBSOCKET - HYBERNATE API =====
         try {
-          // acceptWebSocket() adalah Hibernate API
           this.state.acceptWebSocket(server);
         } catch(e) {
           try { 
-            // Fallback ke standar jika gagal
             server.accept(); 
           } catch(err) {
             try { server.close(1008, "Accept failed"); } catch(ex) {}
@@ -1069,14 +1060,12 @@ export class GameServer {
           }
         }
         
-        // ===== SAVE STATE KE ATTACHMENT - HYBERNATE API =====
+        // ===== ATTACHMENT HANYA IDENTITAS (KECIL) =====
         try {
-          // serializeAttachment() adalah Hibernate API
           server.serializeAttachment({
             wsId: wsId,
             username: null,
-            room: null,
-            createdAt: Date.now()
+            room: null
           });
         } catch(e) {}
         
@@ -1229,7 +1218,7 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== SWITCH ROOM - DENGAN ATTACHMENT ==========
+  // ========== SWITCH ROOM - DENGAN ATTACHMENT MINIMAL ==========
   async switchRoom(ws, room, username = null) {
     try {
       if (this.isDestroyed) {
@@ -1285,14 +1274,13 @@ export class GameServer {
         ws.roomname = roomName;
         if (username) ws.username = username;
         
-        // ===== UPDATE ATTACHMENT - HYBERNATE API =====
+        // ===== ATTACHMENT HANYA IDENTITAS (KECIL) =====
         try {
           if (ws.serializeAttachment) {
             ws.serializeAttachment({
               wsId: wsId,
               username: username,
-              room: roomName,
-              updatedAt: Date.now()
+              room: roomName
             });
           }
         } catch(e) {}
@@ -1360,14 +1348,13 @@ export class GameServer {
       ws.roomname = room;
       if (username) ws.username = username;
       
-      // ===== SAVE ATTACHMENT - HYBERNATE API =====
+      // ===== ATTACHMENT HANYA IDENTITAS =====
       try {
         if (ws.serializeAttachment) {
           ws.serializeAttachment({
             wsId: wsId,
             username: username,
-            room: room,
-            updatedAt: Date.now()
+            room: room
           });
         }
       } catch(e) {}
@@ -2586,10 +2573,7 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== GAME METHODS ==========
-  // Semua game method sama seperti sebelumnya
-  // (startGame, joinGame, submitNumber, leaveGame, checkGameRunning, dll)
-
+  // ========== GAME METHODS (SAMA SEPERTI SEBELUMNYA) ==========
   async startGame(ws, bet, username) {
     try {
       if (this.isDestroyed) {
