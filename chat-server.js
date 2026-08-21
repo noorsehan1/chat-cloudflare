@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 7.3.1 - WITH RESET ENDPOINTS
+// VERSION: 7.3.1 - NO CACHE TTL
 // MULTI USER = ONLINE SELAMA DI STORAGE
 // HANYA exitMulti YANG BISA MENGHAPUS MULTI USER
 
@@ -52,6 +52,12 @@ export class ChatServer {
     this.currentNumber = 1;
     this._isNumberUpdating = false;
     
+    // ====== FORCE RESET ======
+    // Set ke true untuk reset otomatis saat deploy
+    // Set ke false untuk normal operation
+    this._forceResetOnStart = false;
+    // =========================
+    
     for (const room of ROOMS) {
       this.roomClients.set(room, new Set());
     }
@@ -63,35 +69,53 @@ export class ChatServer {
     });
   }
 
-  // ====== METHOD RESET STORAGE ======
-  async resetStorage() {
+  // ====== METHOD UNTUK RESET STORAGE ======
+  async _forceResetStorage() {
     try {
-      // Hapus semua data dari storage
       await this.ctx.storage.delete("roomsData");
       await this.ctx.storage.delete("userSeatData");
       await this.ctx.storage.delete("currentNumber");
+      await this.ctx.storage.deleteAlarm();
       
-      // Reset state
       this.currentNumber = 1;
       this.roomClients.clear();
       this.userConnections.clear();
       this.wsActiveMulti.clear();
       this.wsSet.clear();
       
-      // Re-initialize rooms
       for (const room of ROOMS) {
         this.roomClients.set(room, new Set());
       }
       
-      // Close semua koneksi
       const wsList = this.ctx.getWebSockets();
       for (const ws of wsList) {
         try {
-          ws.close(1000, "Storage Reset");
+          ws.close(1000, "Server Reset");
         } catch(e) {}
       }
       
-      return { success: true, message: "Storage has been reset successfully" };
+      return { success: true, message: "Storage has been force reset" };
+    } catch(e) {
+      return { success: false, error: e.message };
+    }
+  }
+
+  async resetStorage() {
+    try {
+      await this.ctx.storage.delete("roomsData");
+      await this.ctx.storage.delete("userSeatData");
+      await this.ctx.storage.delete("currentNumber");
+      
+      this.currentNumber = 1;
+      this.roomClients.clear();
+      this.userConnections.clear();
+      this.wsActiveMulti.clear();
+      
+      for (const room of ROOMS) {
+        this.roomClients.set(room, new Set());
+      }
+      
+      return { success: true, message: "Storage has been reset" };
     } catch(e) {
       return { success: false, error: e.message };
     }
@@ -99,23 +123,24 @@ export class ChatServer {
 
   async checkStorage() {
     try {
-      const roomsData = await this.ctx.storage.get("roomsData") || {};
-      const userSeatData = await this.ctx.storage.get("userSeatData") || {};
-      const currentNumber = await this.ctx.storage.get("currentNumber") || 1;
-      
+      const storage = await this._loadFromStorage();
       return {
-        success: true,
-        roomsData: Object.keys(roomsData),
-        userSeatData: Object.keys(userSeatData),
-        currentNumber: currentNumber,
-        isEmpty: Object.keys(roomsData).length === 0 && Object.keys(userSeatData).length === 0,
-        wsConnections: this.wsSet.size
+        roomsData: Object.keys(storage.roomsData),
+        userSeatData: Object.keys(storage.userSeatData),
+        currentNumber: storage.currentNumber,
+        isEmpty: Object.keys(storage.roomsData).length === 0 && 
+                  Object.keys(storage.userSeatData).length === 0,
+        wsConnections: this.wsSet.size,
+        roomClients: Array.from(this.roomClients.keys()).map(room => ({
+          room,
+          count: this.roomClients.get(room)?.size || 0
+        }))
       };
     } catch(e) {
-      return { success: false, error: e.message };
+      return { error: e.message };
     }
   }
-  // ==================================
+  // =========================================
 
   async _loadFromStorage() {
     try {
@@ -1452,6 +1477,13 @@ export class ChatServer {
 
   async _restoreAllState() {
     try {
+      // ====== FORCE RESET ======
+      if (this._forceResetOnStart) {
+        await this._forceResetStorage();
+        return;
+      }
+      // =========================
+      
       const storage = await this._loadFromStorage();
       const { roomsData, userSeatData, currentNumber } = storage;
       
@@ -1538,7 +1570,7 @@ export class ChatServer {
     try {
       const url = new URL(req.url);
       
-      // ====== ENDPOINT RESET STORAGE ======
+      // ====== ENDPOINT UNTUK RESET STORAGE ======
       if (url.pathname === "/reset" && req.method === "POST") {
         const result = await this.resetStorage();
         return new Response(JSON.stringify(result), {
@@ -1546,7 +1578,7 @@ export class ChatServer {
         });
       }
       
-      // ====== ENDPOINT CEK STORAGE ======
+      // ====== ENDPOINT UNTUK CEK STORAGE ======
       if (url.pathname === "/storage-check") {
         const result = await this.checkStorage();
         return new Response(JSON.stringify(result), {
@@ -1554,19 +1586,14 @@ export class ChatServer {
         });
       }
       
-      // ====== ENDPOINT HOME ======
-      if (url.pathname === "/") {
-        return new Response(JSON.stringify({
-          status: "running",
-          endpoints: {
-            "/reset": "POST - Reset storage",
-            "/storage-check": "GET - Check storage",
-            "/": "GET - This info"
-          }
-        }), {
+      // ====== ENDPOINT UNTUK FORCE RESET ======
+      if (url.pathname === "/force-reset" && req.method === "POST") {
+        const result = await this._forceResetStorage();
+        return new Response(JSON.stringify(result), {
           headers: { "Content-Type": "application/json" }
         });
       }
+      // ==========================================
       
       const upgrade = req.headers.get("Upgrade");
       if (upgrade !== "websocket") {
