@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 8.0.1 - WITH CORS & RESET ENDPOINT
+// VERSION: 8.0.2 - WITH WSS SUPPORT
 
 const C = {
   MAX_SEATS: 45,
@@ -1328,7 +1328,6 @@ export class ChatServer {
       
       // ===== RESET ENDPOINT =====
       if (url.pathname === "/reset") {
-        // OPTIONS (CORS preflight)
         if (req.method === "OPTIONS") {
           return new Response(null, {
             status: 204,
@@ -1336,7 +1335,6 @@ export class ChatServer {
           });
         }
         
-        // POST (reset)
         if (req.method === "POST") {
           const result = await this.resetAllData();
           return new Response(JSON.stringify(result), {
@@ -1348,14 +1346,13 @@ export class ChatServer {
           });
         }
         
-        // Method not allowed
         return new Response("Method not allowed", {
           status: 405,
           headers: CORS_HEADERS
         });
       }
       
-      // ===== WEBSOCKET =====
+      // ===== WEBSOCKET (WSS) =====
       const upgrade = req.headers.get("Upgrade");
       if (upgrade !== "websocket") {
         return new Response("Chat Server", { 
