@@ -1,5 +1,5 @@
-// ==================== CHAT-SERVER.JS ====================
-// VERSION: 9.0.4 - NO HIBERNATION WITH CONCURRENCY
+// ==================== CHAT-SERVER.JS (LENGKAP) ====================
+// VERSION: 9.0.5 - FINAL
 // READY FOR DEPLOYMENT
 
 const C = {
@@ -1521,14 +1521,13 @@ export class ChatServer {
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       
-      // ============ INI YANG DITAMBAHKAN ============
-      // MENGGUNAKAN ctx.getWebSockets().accept() DENGAN CONCURRENCY
-      try {
-        this.ctx.getWebSockets().accept(server, {
-          allowConcurrency: true
-        });
-      } catch(e) {
-        return new Response("WebSocket acceptance failed", { status: 500 });
+      // ============ YANG BENAR ============
+      // HANYA GUNAKAN acceptWebSocket
+      try { 
+        this.ctx.acceptWebSocket(server); 
+      } catch(e) { 
+        console.error("WebSocket accept error:", e);
+        return new Response("WebSocket acceptance failed", { status: 500 }); 
       }
       
       server.username = null;
@@ -1551,6 +1550,7 @@ export class ChatServer {
       });
       
     } catch(e) {
+      console.error("Fetch error:", e);
       return new Response("Internal Server Error", { status: 500 });
     }
   }
