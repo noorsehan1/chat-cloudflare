@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 5.0.8 - WITH HYBERNATE API
+// VERSION: 6.0.0 - WITH HYBERNATE API SUPPORT
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -47,6 +47,14 @@ const CONSTANTS = {
   RECONNECT_WINDOW_MS: 30000,
   
   CACHE_TTL_MS: 60000,
+  
+  // STORAGE KEYS FOR HYBERNATE
+  STORAGE_KEY_WS_STATE: 'ws_state',
+  STORAGE_KEY_GAMES: 'games_state',
+  STORAGE_KEY_USER_CONNECTIONS: 'user_connections',
+  STORAGE_KEY_DICE_STATE: 'dice_state',
+  STORAGE_KEY_TIE_STATE: 'tie_state',
+  STORAGE_KEY_CACHE: 'cache_state',
 };
 
 // ========== QUIZ SCHEDULE ==========
@@ -318,6 +326,25 @@ class CacheManager {
     this.winnersCache.clear();
     this._updateLocks.clear();
   }
+
+  // ===== HYBERNATE: Save/Load Cache State =====
+  toJSON() {
+    return {
+      recordingStatus: Object.fromEntries(this.recordingStatus),
+      winnersCache: Object.fromEntries(
+        Array.from(this.winnersCache.entries()).map(([k, v]) => [k, v])
+      )
+    };
+  }
+
+  fromJSON(data) {
+    if (data.recordingStatus) {
+      this.recordingStatus = new Map(Object.entries(data.recordingStatus));
+    }
+    if (data.winnersCache) {
+      this.winnersCache = new Map(Object.entries(data.winnersCache));
+    }
+  }
 }
 
 // ==================== DICE POINTS CACHE ====================
@@ -413,6 +440,27 @@ class DicePointsCache {
     this.pointsCache.clear();
     this.leaderboardCache.clear();
     this._updateLocks.clear();
+  }
+
+  // ===== HYBERNATE: Save/Load Points Cache =====
+  toJSON() {
+    return {
+      pointsCache: Object.fromEntries(
+        Array.from(this.pointsCache.entries()).map(([k, v]) => [k, v])
+      ),
+      leaderboardCache: Object.fromEntries(
+        Array.from(this.leaderboardCache.entries()).map(([k, v]) => [k, v])
+      )
+    };
+  }
+
+  fromJSON(data) {
+    if (data.pointsCache) {
+      this.pointsCache = new Map(Object.entries(data.pointsCache));
+    }
+    if (data.leaderboardCache) {
+      this.leaderboardCache = new Map(Object.entries(data.leaderboardCache));
+    }
   }
 }
 
@@ -524,15 +572,35 @@ class DiceGameSystem {
       this.pointsCache.clear();
     }
   }
+
+  // ===== HYBERNATE: Save/Load Dice Game State =====
+  toJSON() {
+    return {
+      userScores: Object.fromEntries(this.userScores),
+      _isLoaded: this._isLoaded,
+      pointsCache: this.pointsCache.toJSON ? this.pointsCache.toJSON() : null
+    };
+  }
+
+  fromJSON(data) {
+    if (data.userScores) {
+      this.userScores = new Map(Object.entries(data.userScores));
+    }
+    if (data._isLoaded !== undefined) {
+      this._isLoaded = data._isLoaded;
+    }
+    if (data.pointsCache && this.pointsCache.fromJSON) {
+      this.pointsCache.fromJSON(data.pointsCache);
+    }
+  }
 }
 
-// ==================== GAME SERVER - WITH HYBERNATE ====================
+// ==================== GAME SERVER ====================
 export class GameServer {
   constructor(state, env) {
     try {
       this.state = state;
       this.env = env;
-      this.ctx = state;  // ← TAMBAHKAN: Untuk akses ke Durable Object context
       this.closing = false;
       this.isDestroyed = false;
       this._initialized = false;
@@ -540,17 +608,17 @@ export class GameServer {
       this._wsIdCounter = 0;
       this._lastActivity = Date.now();
       
-      // ===== WEBSOCKET CONNECTIONS (MEMORY ONLY) =====
+      // ===== STATE YANG AKAN DISIMPAN KE STORAGE (HYBERNATE) =====
+      this.cacheManager = new CacheManager();
+      
+      this.activeGames = new Map();
       this.wsMap = new Map();
       this.wsClients = new Map();
       this.clientRooms = new Map();
       this.userConnections = new Map();
       
-      // ===== CACHE DATA (MEMORY) - AKAN DI-RESTORE DARI STORAGE =====
-      this.activeGames = new Map();
-      this.cacheManager = new CacheManager();
+      this.alarmScheduler = new AlarmScheduler(env);
       
-      // ===== DICE STATE =====
       this.diceGameSystem = null;
       this.currentDiceRoll = null;
       this._diceLock = false;
@@ -579,7 +647,6 @@ export class GameServer {
       this._canSubmitDiceAnswer = false;
       this._diceRound = 0;
       
-      // ===== TIE BREAKER STATE =====
       this._tieBreakers = new Map();
       this._tieRound = 0;
       this._tiePlayers = [];
@@ -589,7 +656,6 @@ export class GameServer {
       this._tieLock = false;
       this._tieNotificationTimeouts = [];
       
-      // ===== QUEUE & LOCKS =====
       this._eventQueue = [];
       this._isProcessingQueue = false;
       this._allTimers = new Set();
@@ -598,243 +664,312 @@ export class GameServer {
       this._cleanupTimers = new Map();
       this._switchLocks = new Map();
       this._switchRetries = new Map();
+      
       this._evaluationLocks = new Map();
       this._gameOperationLocks = new Map();
       this._drawLocks = new Map();
       this._cleanupLocks = new Map();
       
-      // ===== RATE LIMITING =====
       this._requestCount = 0;
       this._lastResetTime = Date.now();
       this._circuitOpen = false;
       this._errorCount = 0;
       this._lastErrorReset = Date.now();
+      
       this._reconnectAttempts = new Map();
       
-      // ===== CACHE =====
       this._cachedResetWeek = null;
       this._cachedLastWeekWinner = null;
       this._kvCache = new KVCache();
       this.DICE_ROOM = CONSTANTS.DICE_ROOM;
+      
       this._lastNotifTime = {};
       
-      // ===== ALARM SCHEDULER =====
-      this.alarmScheduler = new AlarmScheduler(env);
-      
-      // ===== HYBERNATE: RESTORE STATE =====
-      this._restoreAllState().then(() => {});
-      
-      setTimeout(() => {
+      // ===== HYBERNATE: RESTORE STATE DARI STORAGE =====
+      this._restoreFromStorage().then(() => {
         if (!this.closing && !this.isDestroyed) {
           this._initLazy();
         }
-      }, 2000);
+      });
       
     } catch(e) {
       console.error('[GAME] Constructor error:', e);
     }
   }
 
-  // ========== HYBERNATE: RESTORE ALL STATE ==========
-  async _restoreAllState() {
+  // ========== HYBERNATE: SAVE STATE KE STORAGE ==========
+  async _saveStateToStorage() {
     try {
-      console.log('[HYBERNATE] Restoring state...');
+      if (this.closing || this.isDestroyed) return;
       
-      // 1. LOAD FROM STORAGE
-      const storage = await this.ctx.storage.get([
-        'activeGames',
-        'diceState',
-        'diceRound',
-        'diceAutoEnabled',
-        'cachedResetWeek',
-        'cachedLastWeekWinner'
-      ]);
-      
-      // 2. RESTORE ACTIVE GAMES
-      if (storage.activeGames) {
-        try {
-          const gamesData = JSON.parse(storage.activeGames);
-          for (const [room, gameData] of Object.entries(gamesData)) {
-            // Reconstruct game object
-            const game = {
-              room: gameData.room,
-              players: new Map(gameData.players || []),
-              botPlayers: new Map(gameData.botPlayers || []),
-              registrationOpen: gameData.registrationOpen || false,
-              round: gameData.round || 1,
-              numbers: new Map(gameData.numbers || []),
-              tanda: new Map(gameData.tanda || []),
-              eliminated: new Set(gameData.eliminated || []),
-              betAmount: gameData.betAmount || 0,
-              hostId: gameData.hostId,
-              hostName: gameData.hostName,
-              useBots: gameData.useBots || false,
-              evaluationLocked: gameData.evaluationLocked || false,
-              drawTimeExpired: gameData.drawTimeExpired || false,
-              _isActive: gameData._isActive || false,
-              _gameEnded: gameData._gameEnded || true,
-              _phase: gameData._phase || null,
-              _botTimeouts: new Set(),
-              _botsAdded: gameData._botsAdded || false,
-              _startedByRecording: gameData._startedByRecording || false,
-              _startedBy: gameData._startedBy || null,
-              playerWsId: new Map(gameData.playerWsId || []),
-              _createdAt: gameData._createdAt || Date.now(),
-              _endTime: gameData._endTime || null,
-              _isEvaluating: false,
-              _registrationTimer: null,
-              _drawTimer: null,
-              _evalTimer: null,
-              _safetyTimer: null
-            };
-            
-            // Only restore if game is still active
-            if (game._isActive && !game._gameEnded) {
-              this.activeGames.set(room, game);
-              console.log(`[HYBERNATE] Restored game in room: ${room}`);
-            }
-          }
-        } catch(e) {
-          console.error('[HYBERNATE] Error restoring games:', e);
+      // 1. Save WebSocket State
+      const wsState = {};
+      for (const [wsId, ws] of this.wsMap) {
+        if (ws && ws.readyState === 1) {
+          wsState[wsId] = {
+            username: ws.username || null,
+            room: ws.room || ws.roomname || null,
+            _wsId: wsId,
+            _createdAt: ws._createdAt || Date.now(),
+            _isMulti: ws._isMulti || false,
+            _multiRoom: ws._multiRoom || null,
+            _multiSeat: ws._multiSeat || null
+          };
         }
       }
+      await this.state.storage.put(CONSTANTS.STORAGE_KEY_WS_STATE, wsState);
       
-      // 3. RESTORE DICE STATE
-      if (storage.diceState) {
-        try {
-          const diceData = JSON.parse(storage.diceState);
-          this.currentDiceRoll = diceData.currentDiceRoll || null;
-          this._diceRound = diceData.diceRound || 0;
-          this.diceAutoEnabled = diceData.diceAutoEnabled || false;
-          this._canSubmitDiceAnswer = diceData.canSubmitDiceAnswer || false;
-          this._isShowingDice = diceData.isShowingDice || false;
-          
-          if (this.currentDiceRoll) {
-            console.log(`[HYBERNATE] Restored dice roll: ${this.currentDiceRoll.value}, round: ${this._diceRound}`);
-          }
-        } catch(e) {
-          console.error('[HYBERNATE] Error restoring dice state:', e);
+      // 2. Save Games State
+      const gamesState = {};
+      for (const [room, game] of this.activeGames) {
+        if (game && game._isActive) {
+          gamesState[room] = this._serializeGame(game);
         }
       }
+      await this.state.storage.put(CONSTANTS.STORAGE_KEY_GAMES, gamesState);
       
-      // 4. RESTORE CACHE
-      if (storage.cachedResetWeek) {
-        this._cachedResetWeek = storage.cachedResetWeek;
+      // 3. Save User Connections
+      const userConnState = {};
+      for (const [username, conn] of this.userConnections) {
+        userConnState[username] = {
+          wsId: conn.wsId,
+          room: conn.room,
+          timestamp: conn.timestamp
+        };
       }
-      if (storage.cachedLastWeekWinner) {
-        try {
-          this._cachedLastWeekWinner = JSON.parse(storage.cachedLastWeekWinner);
-        } catch(e) {}
-      }
+      await this.state.storage.put(CONSTANTS.STORAGE_KEY_USER_CONNECTIONS, userConnState);
       
-      // 5. RESTORE WEBSOCKETS FROM HYBERNATION
-      const webSockets = this.ctx.getWebSockets();  // ← KEY: getWebSockets()
-      console.log(`[HYBERNATE] Found ${webSockets.length} WebSockets to restore`);
+      // 4. Save Dice State
+      const diceState = {
+        currentDiceRoll: this.currentDiceRoll,
+        _diceLock: this._diceLock,
+        _tieActive: this._tieActive,
+        diceAnswered: Array.from(this.diceAnswered),
+        _playerAnswers: Object.fromEntries(this._playerAnswers),
+        _isShowingDice: this._isShowingDice,
+        _diceTimeUpCooldown: this._diceTimeUpCooldown,
+        _diceQuestionStartTime: this._diceQuestionStartTime,
+        _diceStartTime: this._diceStartTime,
+        diceAutoEnabled: this.diceAutoEnabled,
+        diceHasWinner: this.diceHasWinner,
+        diceWinner: this.diceWinner,
+        _canSubmitDiceAnswer: this._canSubmitDiceAnswer,
+        _diceRound: this._diceRound,
+        _diceNotifiedFlags: this._diceNotifiedFlags
+      };
+      await this.state.storage.put(CONSTANTS.STORAGE_KEY_DICE_STATE, diceState);
+      
+      // 5. Save Tie State
+      const tieState = {
+        _tieRound: this._tieRound,
+        _tiePlayers: this._tiePlayers,
+        _tieAnswers: Object.fromEntries(this._tieAnswers),
+        _tieLock: this._tieLock,
+        _tieBreakers: Array.from(this._tieBreakers.entries()).map(([id, data]) => [id, data])
+      };
+      await this.state.storage.put(CONSTANTS.STORAGE_KEY_TIE_STATE, tieState);
+      
+      // 6. Save Cache State
+      const cacheState = {
+        recordingStatus: Object.fromEntries(this.cacheManager.recordingStatus),
+        winnersCache: Object.fromEntries(
+          Array.from(this.cacheManager.winnersCache.entries()).map(([k, v]) => [k, v])
+        )
+      };
+      await this.state.storage.put(CONSTANTS.STORAGE_KEY_CACHE, cacheState);
+      
+    } catch(e) {
+      console.error('[HYBERNATE] Save state error:', e);
+    }
+  }
+
+  // ========== HYBERNATE: RESTORE STATE DARI STORAGE ==========
+  async _restoreFromStorage() {
+    try {
+      // 1. Restore WebSocket State
+      const wsState = await this.state.storage.get(CONSTANTS.STORAGE_KEY_WS_STATE) || {};
+      const webSockets = this.state.getWebSockets ? this.state.getWebSockets() : [];
       
       for (const ws of webSockets) {
         try {
-          const attachment = ws.deserializeAttachment();  // ← KEY: deserializeAttachment()
-          if (attachment && attachment.username) {
-            // Restore WebSocket state
-            ws._wsId = attachment.wsId || ++this._wsIdCounter;
+          const attachment = ws.deserializeAttachment ? ws.deserializeAttachment() : {};
+          const wsId = attachment._wsId || ++this._wsIdCounter;
+          
+          if (wsState[wsId]) {
+            const state = wsState[wsId];
+            ws.username = state.username;
+            ws.room = state.room;
+            ws.roomname = state.room;
+            ws._wsId = wsId;
+            ws._createdAt = state._createdAt;
+            ws._isMulti = state._isMulti || false;
+            ws._multiRoom = state._multiRoom;
+            ws._multiSeat = state._multiSeat;
             ws._closing = false;
-            ws.username = attachment.username;
-            ws.room = attachment.room || null;
-            ws.roomname = attachment.room || null;
-            ws._createdAt = attachment.createdAt || Date.now();
             
-            // Add to maps
-            this.wsMap.set(ws._wsId, ws);
+            this.wsMap.set(wsId, ws);
             
-            if (ws.room) {
-              this._addClient(ws.room, ws, ws.username);
+            if (state.room) {
+              let clients = this.wsClients.get(state.room);
+              if (!clients) { clients = new Set(); this.wsClients.set(state.room, clients); }
+              clients.add(wsId);
+              this.clientRooms.set(wsId, state.room);
+              
+              if (state.username) {
+                this.userConnections.set(state.username, {
+                  wsId: wsId,
+                  ws: ws,
+                  room: state.room,
+                  timestamp: state._createdAt || Date.now()
+                });
+              }
             }
-            
-            console.log(`[HYBERNATE] Restored WebSocket: ${attachment.username} (${ws._wsId})`);
           }
-        } catch(e) {
-          console.error('[HYBERNATE] Error restoring WebSocket:', e);
+        } catch(e) {}
+      }
+      
+      // 2. Restore Games State
+      const gamesState = await this.state.storage.get(CONSTANTS.STORAGE_KEY_GAMES) || {};
+      for (const [room, gameData] of Object.entries(gamesState)) {
+        try {
+          const game = this._deserializeGame(gameData);
+          if (game && game._isActive && !game._gameEnded) {
+            this.activeGames.set(room, game);
+          }
+        } catch(e) {}
+      }
+      
+      // 3. Restore User Connections
+      const userConnState = await this.state.storage.get(CONSTANTS.STORAGE_KEY_USER_CONNECTIONS) || {};
+      for (const [username, conn] of Object.entries(userConnState)) {
+        const ws = this.wsMap.get(conn.wsId);
+        if (ws) {
+          this.userConnections.set(username, {
+            wsId: conn.wsId,
+            ws: ws,
+            room: conn.room,
+            timestamp: conn.timestamp
+          });
         }
       }
       
-      // 6. UPDATE DICE GAME SYSTEM
+      // 4. Restore Dice State
+      const diceState = await this.state.storage.get(CONSTANTS.STORAGE_KEY_DICE_STATE) || {};
+      this.currentDiceRoll = diceState.currentDiceRoll || null;
+      this._diceLock = diceState._diceLock || false;
+      this._tieActive = diceState._tieActive || false;
+      this.diceAnswered = new Set(diceState.diceAnswered || []);
+      this._playerAnswers = new Map(Object.entries(diceState._playerAnswers || {}));
+      this._isShowingDice = diceState._isShowingDice || false;
+      this._diceTimeUpCooldown = diceState._diceTimeUpCooldown || false;
+      this._diceQuestionStartTime = diceState._diceQuestionStartTime || null;
+      this._diceStartTime = diceState._diceStartTime || null;
+      this.diceAutoEnabled = diceState.diceAutoEnabled || false;
+      this.diceHasWinner = diceState.diceHasWinner || false;
+      this.diceWinner = diceState.diceWinner || null;
+      this._canSubmitDiceAnswer = diceState._canSubmitDiceAnswer || false;
+      this._diceRound = diceState._diceRound || 0;
+      this._diceNotifiedFlags = diceState._diceNotifiedFlags || { 20: false, 10: false, 5: false, timeup: false };
+      
+      // 5. Restore Tie State
+      const tieState = await this.state.storage.get(CONSTANTS.STORAGE_KEY_TIE_STATE) || {};
+      this._tieRound = tieState._tieRound || 0;
+      this._tiePlayers = tieState._tiePlayers || [];
+      this._tieAnswers = new Map(Object.entries(tieState._tieAnswers || {}));
+      this._tieLock = tieState._tieLock || false;
+      if (tieState._tieBreakers) {
+        this._tieBreakers = new Map(tieState._tieBreakers);
+      }
+      
+      // 6. Restore Cache State
+      const cacheState = await this.state.storage.get(CONSTANTS.STORAGE_KEY_CACHE) || {};
+      if (cacheState.recordingStatus) {
+        this.cacheManager.recordingStatus = new Map(Object.entries(cacheState.recordingStatus));
+      }
+      if (cacheState.winnersCache) {
+        this.cacheManager.winnersCache = new Map(Object.entries(cacheState.winnersCache));
+      }
+      
+      // 7. Restore Dice Game System
       if (!this.diceGameSystem) {
         this.diceGameSystem = new DiceGameSystem(this);
-      }
-      await this.diceGameSystem.loadScores();
-      await this.cacheManager.loadInitialData(this.env);
-      
-      // 7. SET ALARM
-      if (!this.closing && !this.isDestroyed) {
-        this.ctx.storage.setAlarm(Date.now() + 60000);
       }
       
       console.log('[HYBERNATE] State restored successfully');
       
     } catch(e) {
-      console.error('[HYBERNATE] Restore error:', e);
+      console.error('[HYBERNATE] Restore state error:', e);
     }
   }
 
-  // ========== HYBERNATE: SAVE STATE ==========
-  async _saveState() {
-    try {
-      console.log('[HYBERNATE] Saving state...');
-      
-      // 1. SAVE ACTIVE GAMES
-      const gamesData = {};
-      for (const [room, game] of this.activeGames) {
-        if (game._isActive && !game._gameEnded) {
-          gamesData[room] = {
-            room: game.room,
-            players: Array.from(game.players.entries()),
-            botPlayers: Array.from(game.botPlayers.entries()),
-            registrationOpen: game.registrationOpen,
-            round: game.round,
-            numbers: Array.from(game.numbers.entries()),
-            tanda: Array.from(game.tanda.entries()),
-            eliminated: Array.from(game.eliminated),
-            betAmount: game.betAmount,
-            hostId: game.hostId,
-            hostName: game.hostName,
-            useBots: game.useBots,
-            evaluationLocked: game.evaluationLocked,
-            drawTimeExpired: game.drawTimeExpired,
-            _isActive: game._isActive,
-            _gameEnded: game._gameEnded,
-            _phase: game._phase,
-            _botsAdded: game._botsAdded,
-            _startedByRecording: game._startedByRecording,
-            _startedBy: game._startedBy,
-            playerWsId: Array.from(game.playerWsId.entries()),
-            _createdAt: game._createdAt,
-            _endTime: game._endTime
-          };
-        }
-      }
-      
-      // 2. SAVE DICE STATE
-      const diceState = {
-        currentDiceRoll: this.currentDiceRoll,
-        diceRound: this._diceRound,
-        diceAutoEnabled: this.diceAutoEnabled,
-        canSubmitDiceAnswer: this._canSubmitDiceAnswer,
-        isShowingDice: this._isShowingDice
-      };
-      
-      // 3. SAVE TO STORAGE
-      await this.ctx.storage.put({
-        activeGames: JSON.stringify(gamesData),
-        diceState: JSON.stringify(diceState),
-        cachedResetWeek: this._cachedResetWeek || '',
-        cachedLastWeekWinner: this._cachedLastWeekWinner ? JSON.stringify(this._cachedLastWeekWinner) : ''
-      });
-      
-      console.log('[HYBERNATE] State saved successfully');
-      
-    } catch(e) {
-      console.error('[HYBERNATE] Save state error:', e);
-    }
+  // ========== HYBERNATE: SERIALIZE/DESERIALIZE GAME ==========
+  _serializeGame(game) {
+    if (!game) return null;
+    return {
+      room: game.room,
+      players: Array.from(game.players.entries()).map(([id, p]) => [id, p]),
+      botPlayers: game.botPlayers ? Array.from(game.botPlayers.entries()) : [],
+      registrationOpen: game.registrationOpen,
+      round: game.round,
+      numbers: game.numbers ? Array.from(game.numbers.entries()) : [],
+      tanda: game.tanda ? Array.from(game.tanda.entries()) : [],
+      eliminated: game.eliminated ? Array.from(game.eliminated) : [],
+      betAmount: game.betAmount,
+      hostId: game.hostId,
+      hostName: game.hostName,
+      useBots: game.useBots || false,
+      evaluationLocked: game.evaluationLocked || false,
+      drawTimeExpired: game.drawTimeExpired || false,
+      _isActive: game._isActive || false,
+      _gameEnded: game._gameEnded || false,
+      _phase: game._phase || 'registration',
+      _botsAdded: game._botsAdded || false,
+      _isEvaluating: game._isEvaluating || false,
+      _createdAt: game._createdAt || Date.now(),
+      _drawPhaseStart: game._drawPhaseStart || null,
+      _endTime: game._endTime || null,
+      playerWsId: game.playerWsId ? Array.from(game.playerWsId.entries()) : [],
+      _startedByRecording: game._startedByRecording || false,
+      _startedBy: game._startedBy || 'user',
+      _botTimeouts: game._botTimeouts ? Array.from(game._botTimeouts) : []
+    };
+  }
+
+  _deserializeGame(data) {
+    if (!data) return null;
+    const game = {
+      room: data.room,
+      players: new Map(data.players || []),
+      botPlayers: new Map(data.botPlayers || []),
+      registrationOpen: data.registrationOpen || false,
+      round: data.round || 1,
+      numbers: new Map(data.numbers || []),
+      tanda: new Map(data.tanda || []),
+      eliminated: new Set(data.eliminated || []),
+      betAmount: data.betAmount || 0,
+      hostId: data.hostId,
+      hostName: data.hostName,
+      useBots: data.useBots || false,
+      evaluationLocked: data.evaluationLocked || false,
+      drawTimeExpired: data.drawTimeExpired || false,
+      _isActive: data._isActive || false,
+      _gameEnded: data._gameEnded || false,
+      _phase: data._phase || 'registration',
+      _botsAdded: data._botsAdded || false,
+      _isEvaluating: data._isEvaluating || false,
+      _createdAt: data._createdAt || Date.now(),
+      _drawPhaseStart: data._drawPhaseStart || null,
+      _endTime: data._endTime || null,
+      playerWsId: new Map(data.playerWsId || []),
+      _startedByRecording: data._startedByRecording || false,
+      _startedBy: data._startedBy || 'user',
+      _botTimeouts: new Set(data._botTimeouts || []),
+      _registrationTimer: null,
+      _drawTimer: null,
+      _evalTimer: null,
+      _safetyTimer: null
+    };
+    return game;
   }
 
   // ========== LAZY INIT ==========
@@ -969,15 +1104,15 @@ export class GameServer {
           this.wsMap.delete(wsId);
         }
       }
+      
+      // Save state setelah cleanup
+      this._saveStateToStorage().catch(() => {});
     } catch(e) {}
   }
 
   // ========== HANDLE ALARM ==========
   async handleAlarm() {
     try {
-      // Save state before alarm processing
-      await this._saveState();
-      
       const pendingAlarms = await this.alarmScheduler.getPendingAlarms();
       
       for (const alarm of pendingAlarms) {
@@ -1020,9 +1155,8 @@ export class GameServer {
         }
       }
       
-      // Save state after alarm processing
-      await this._saveState();
-      
+      // Save state setelah alarm
+      this._saveStateToStorage().catch(() => {});
     } catch(e) {
       console.error('[ALARM] Handle alarm error:', e);
     }
@@ -1080,7 +1214,7 @@ export class GameServer {
     promise.catch(() => {});
   }
 
-  // ========== FETCH - WITH HYBERNATE ==========
+  // ========== FETCH ==========
   async fetch(req) {
     try {
       if (this._circuitOpen) {
@@ -1123,7 +1257,8 @@ export class GameServer {
           circuitOpen: this._circuitOpen,
           initialized: this._initialized,
           errors: this._errorCount,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          hibernated: true
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -1172,7 +1307,6 @@ export class GameServer {
         const [client, server] = [pair[0], pair[1]];
         const wsId = ++this._wsIdCounter;
         
-        // ===== SETUP WEBSOCKET STATE =====
         server._wsId = wsId;
         server._closing = false;
         server.room = null;
@@ -1180,21 +1314,21 @@ export class GameServer {
         server.username = null;
         server._createdAt = Date.now();
         
-        // ===== HYBERNATE: ACCEPT WITH HIBERNATION =====
-        try { 
-          this.ctx.acceptWebSocket(server);  // ← DENGAN HIBERNATE
-        } catch(e) { 
+        // ===== HYBERNATE: ACCEPT WEBSOCKET =====
+        try {
+          this.state.acceptWebSocket(server);
+        } catch(e) {
           try { server.close(1008, "Accept failed"); } catch(err) {}
-          return new Response("WebSocket acceptance failed", { status: 500 }); 
+          return new Response("WebSocket acceptance failed", { status: 500 });
         }
         
-        // ===== HYBERNATE: SERIALIZE ATTACHMENT =====
-        server.serializeAttachment({
-          wsId: wsId,
-          username: null,
-          room: null,
-          createdAt: Date.now()
-        });
+        // ===== HYBERNATE: SAVE ATTACHMENT =====
+        try {
+          server.serializeAttachment({
+            _wsId: wsId,
+            _createdAt: Date.now()
+          });
+        } catch(e) {}
         
         this.wsMap.set(wsId, server);
         
@@ -1436,6 +1570,7 @@ export class GameServer {
       const success = await this.cacheManager.setRecordingStatus(roomName, true, this.env);
       if (success) {
         this._broadcastToRoom(roomName, ["recordingStatus", true]);
+        await this._saveStateToStorage();
       }
       return success;
     } catch(e) { return false; }
@@ -1454,13 +1589,16 @@ export class GameServer {
         this.cacheManager.winnersCache.delete(room);
         this._broadcastToRoom(room, ["recordingStatus", false]);
         this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners: {}, room, recording: false }]);
+        await this._saveStateToStorage();
       }
       return success;
     } catch(e) { return false; }
   }
 
   async _addLowCardWinner(room, username) {
-    return await this.cacheManager.addWinner(room, username, this.env);
+    const result = await this.cacheManager.addWinner(room, username, this.env);
+    if (result) await this._saveStateToStorage();
+    return result;
   }
 
   async _broadcastLowCardWinners(room) {
@@ -1506,14 +1644,18 @@ export class GameServer {
       ws.roomname = room;
       if (username) ws.username = username;
       
-      // ===== HYBERNATE: UPDATE ATTACHMENT =====
-      ws.serializeAttachment({
-        wsId: wsId,
-        username: username,
-        room: room,
-        createdAt: ws._createdAt || Date.now()
-      });
+      // Update attachment untuk hibernate
+      try {
+        ws.serializeAttachment({
+          _wsId: wsId,
+          username: username,
+          room: room,
+          _createdAt: ws._createdAt || Date.now()
+        });
+      } catch(e) {}
       
+      // Save state ke storage
+      this._saveStateToStorage().catch(() => {});
     } catch(e) {}
   }
 
@@ -1522,6 +1664,9 @@ export class GameServer {
       if (!room || !wsId) return;
       const clients = this.wsClients.get(room);
       if (clients) { clients.delete(wsId); if (clients.size === 0) this.wsClients.delete(room); }
+      
+      // Save state ke storage
+      this._saveStateToStorage().catch(() => {});
     } catch(e) {}
   }
 
@@ -1619,13 +1764,15 @@ export class GameServer {
         ws.roomname = roomName;
         if (username) ws.username = username;
         
-        // ===== HYBERNATE: UPDATE ATTACHMENT =====
-        ws.serializeAttachment({
-          wsId: wsId,
-          username: username || ws.username,
-          room: roomName,
-          createdAt: ws._createdAt || Date.now()
-        });
+        // Update attachment untuk hibernate
+        try {
+          ws.serializeAttachment({
+            _wsId: wsId,
+            username: username,
+            room: roomName,
+            _createdAt: ws._createdAt || Date.now()
+          });
+        } catch(e) {}
         
         if (username) {
           let conn = this.userConnections.get(username);
@@ -1651,6 +1798,9 @@ export class GameServer {
         if (currentRoom && currentRoom !== roomName) {
           this._broadcastToRoom(currentRoom, ["userLeftRoom", username, currentRoom]);
         }
+        
+        // Save state
+        this._saveStateToStorage().catch(() => {});
         
       } finally {
         setTimeout(() => {
@@ -1986,9 +2136,8 @@ export class GameServer {
       this._broadcastToRoom(room, ["gameLowCardEnd", []]);
       this._releaseLock(this._cleanupLocks, lockKey);
       
-      // ===== HYBERNATE: SAVE STATE AFTER CLEANUP =====
-      await this._saveState();
-      
+      // Save state
+      this._saveStateToStorage().catch(() => {});
     } catch(e) {
       this._releaseLock(this._cleanupLocks, lockKey);
     }
@@ -2014,6 +2163,9 @@ export class GameServer {
       }
       game._botsAdded = true;
       game.useBots = true;
+      
+      // Save state
+      this._saveStateToStorage().catch(() => {});
     } catch(e) {}
   }
 
@@ -2141,6 +2293,9 @@ export class GameServer {
         this._broadcastToRoom(room, ["gameLowCardError", "Not enough players"]);
         this._scheduleGameCleanup(room, game);
       }
+      
+      // Save state
+      this._saveStateToStorage().catch(() => {});
     } catch(e) {}
   }
 
@@ -2573,9 +2728,8 @@ export class GameServer {
         this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
         this._startRegistration(room, game);
         
-        // ===== HYBERNATE: SAVE STATE AFTER STARTING GAME =====
-        await this._saveState();
-        
+        // Save state
+        this._saveStateToStorage().catch(() => {});
       } finally {
         setTimeout(() => { this._gameLocks.delete(lockKey); }, 3000);
       }
@@ -2638,9 +2792,8 @@ export class GameServer {
         game.playerWsId.set(usernameClean, wsId);
         this._broadcastToRoom(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
         
-        // ===== HYBERNATE: SAVE STATE AFTER JOINING GAME =====
-        await this._saveState();
-        
+        // Save state
+        this._saveStateToStorage().catch(() => {});
       } finally {
         setTimeout(() => { this._joinLocks.delete(lockKey); }, 2000);
       }
@@ -2778,6 +2931,9 @@ export class GameServer {
         } catch(e) {}
       }, 1000);
       this._trackTimer(checkTimer);
+      
+      // Save state
+      this._saveStateToStorage().catch(() => {});
       return true;
     } catch(e) { return false; }
   }
@@ -2869,9 +3025,8 @@ export class GameServer {
       this._broadcastToRoom(room, ["gameLowCardStartSuccess", username, betAmount]);
       this._startRegistration(room, game);
       
-      // ===== HYBERNATE: SAVE STATE AFTER STARTING GAME =====
-      await this._saveState();
-      
+      // Save state
+      this._saveStateToStorage().catch(() => {});
     } catch(e) {
       this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
     }
@@ -2930,8 +3085,8 @@ export class GameServer {
         this._endDiceRound();
       }, 20000));
       
-      // ===== HYBERNATE: SAVE DICE STATE =====
-      this._saveState().catch(() => {});
+      // Save state
+      this._saveStateToStorage().catch(() => {});
       
     } catch(e) {
       this._diceLock = false;
@@ -3026,8 +3181,8 @@ export class GameServer {
         }
       }, 15000);
       
-      // ===== HYBERNATE: SAVE DICE STATE =====
-      await this._saveState();
+      // Save state
+      this._saveStateToStorage().catch(() => {});
       
     } catch(e) {
       this._diceLock = false;
@@ -3115,6 +3270,9 @@ export class GameServer {
         else { this._resetTieBreakerState(null); this._startCooldownAfterTieBreaker(); }
       }
     }, (timeLimit * 1000) + 2000));
+    
+    // Save state
+    this._saveStateToStorage().catch(() => {});
   }
 
   async _processTieResults(room, id, players) {
@@ -3282,6 +3440,9 @@ export class GameServer {
       clearTimeout(timeout);
     }
     this._tieNotificationTimeouts = [];
+    
+    // Save state
+    this._saveStateToStorage().catch(() => {});
   }
 
   _getActiveTieBreakerId() {
@@ -3377,9 +3538,8 @@ export class GameServer {
       ws.username = null;
       ws._closing = true;
       
-      // ===== HYBERNATE: SAVE STATE AFTER CLOSE =====
-      this._saveState().catch(() => {});
-      
+      // Save state
+      this._saveStateToStorage().catch(() => {});
     } catch(e) {}
   }
 
@@ -3406,9 +3566,8 @@ export class GameServer {
       ws.username = null;
       ws._closing = true;
       
-      // ===== HYBERNATE: SAVE STATE AFTER ERROR =====
-      this._saveState().catch(() => {});
-      
+      // Save state
+      this._saveStateToStorage().catch(() => {});
     } catch(e) {}
   }
 
@@ -3468,8 +3627,8 @@ export class GameServer {
       this.isDestroyed = true;
       this.closing = true;
       
-      // ===== HYBERNATE: SAVE FINAL STATE =====
-      await this._saveState();
+      // Save state sebelum destroy
+      await this._saveStateToStorage();
       
       for (const timer of this._allTimers) {
         try { clearTimeout(timer); clearInterval(timer); } catch(e) {}
