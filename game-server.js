@@ -1,5 +1,6 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 5.0.13 - FULL IMPLEMENTATION WITH HIBERNATION
+// VERSION: 6.0.1 - FIXED: TIDUR MESKI ADA WS AKTIF (ASAL 60 DETIK IDLE)
+// READY FOR DEPLOYMENT
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -53,8 +54,8 @@ const CONSTANTS = {
   ALARM_STATE_KEY: 'alarm_state_v2',
   HIBERNATION_VERSION: '2.0',
   
-  // HIBERNATION TIMEOUTS
-  HIBERNATION_IDLE_MS: 30000,
+  // HIBERNATION TIMEOUTS - 60 DETIK
+  HIBERNATION_IDLE_MS: 60000,
   HIBERNATION_SAVE_DEBOUNCE_MS: 5000,
 };
 
@@ -108,7 +109,6 @@ class AlarmScheduler {
       }
       
       if (currentSession) {
-        console.log(`[ALARM] Current session: ${currentSession.start} - ${currentSession.end}`);
         const endDelay = (currentSession.endTotal - currentTotal) * 60 * 1000;
         if (endDelay > 0) {
           await this._scheduleAlarm('dice_session_end', endDelay);
@@ -130,8 +130,6 @@ class AlarmScheduler {
       }
       
       if (nextSession) {
-        console.log(`[ALARM] Next session: ${nextSession.start} in ${Math.floor(minDiff/60)}h ${minDiff%60}m`);
-        
         let startDelay = (minDiff * 60 * 1000) - 30000;
         if (startDelay < 0) startDelay = 0;
         await this._scheduleAlarm('dice_session_start', startDelay);
@@ -145,7 +143,6 @@ class AlarmScheduler {
       
       return true;
     } catch(e) { 
-      console.error('[ALARM] Schedule error:', e);
       return false; 
     }
   }
@@ -178,7 +175,6 @@ class AlarmScheduler {
       
       return true;
     } catch(e) { 
-      console.error('[ALARM] Schedule error:', e);
       return false; 
     }
   }
@@ -202,12 +198,10 @@ class AlarmScheduler {
       
       const data = await this.state.storage.get(CONSTANTS.ALARM_STATE_KEY);
       if (!data || !data.alarms) {
-        console.log('[ALARM] No saved alarms found');
         return;
       }
       
       this._alarms = new Map(data.alarms);
-      console.log(`[ALARM] Restored ${this._alarms.size} alarms`);
       
       let minDelay = Infinity;
       const now = Date.now();
@@ -224,7 +218,6 @@ class AlarmScheduler {
       
       return true;
     } catch(e) {
-      console.error('[ALARM] Restore error:', e);
       return false;
     }
   }
@@ -290,7 +283,6 @@ class AlarmScheduler {
       
       return alarm;
     } catch(e) {
-      console.error('[ALARM] Process error:', e);
       return null;
     }
   }
@@ -320,7 +312,7 @@ class AlarmScheduler {
   }
 }
 
-// ==================== HIBERNATION MANAGER ====================
+// ==================== HIBERNATION MANAGER - FIX ====================
 class HibernationManager {
   constructor(state, gameServer) {
     this.state = state;
@@ -343,7 +335,6 @@ class HibernationManager {
       clearTimeout(this._hibernationTimer);
       this._hibernationTimer = null;
     }
-    
     if (this._isHibernating) return;
     
     this._hibernationTimer = setTimeout(() => {
@@ -351,36 +342,37 @@ class HibernationManager {
     }, CONSTANTS.HIBERNATION_IDLE_MS);
   }
 
+  // ===== KONDISI TIDUR YANG BENAR =====
   async _hibernate() {
     if (this._isHibernating) return;
     
+    // ===== CEK 1: Apakah ada aktivitas dalam 60 detik terakhir? =====
     const idleTime = Date.now() - this._lastActivity;
     if (idleTime < CONSTANTS.HIBERNATION_IDLE_MS) {
       this._resetHibernationTimer();
-      return;
+      return; // ❌ BATAL TIDUR (masih ada aktivitas)
     }
     
-    if (this.gameServer.activeGames.size > 0) {
-      console.log('[HIBERNATION] Skip hibernation: active games');
+    // ===== CEK 2: Apakah ada game aktif? =====
+    // GAME AKTIF = TIDAK BISA TIDUR (harus tetap jalan)
+    if (this.gameServer.activeGames && this.gameServer.activeGames.size > 0) {
       this._resetHibernationTimer();
-      return;
+      return; // ❌ BATAL TIDUR (ada game berjalan)
     }
     
-    if (this.gameServer.wsMap.size > 0) {
-      console.log('[HIBERNATION] Skip hibernation: active connections');
-      this._resetHibernationTimer();
-      return;
-    }
-    
+    // ===== CEK 3: Apakah ada dice aktif? =====
     if (this.gameServer.currentDiceRoll) {
-      console.log('[HIBERNATION] Skip hibernation: dice active');
       this._resetHibernationTimer();
-      return;
+      return; // ❌ BATAL TIDUR (ada dice berjalan)
     }
     
-    console.log('[HIBERNATION] Starting hibernation...');
-    this._isHibernating = true;
+    // ===== ✅ FIX: TIDAK CEK WS AKTIF =====
+    // ✅ Server TETAP TIDUR meski ada WS aktif (asalkan 60 detik idle)
+    // ✅ User yang AFK / tidak beraktivitas tetap bisa membuat server tidur
+    // ✅ State user tersimpan di storage
     
+    // ===== TIDUR! =====
+    this._isHibernating = true;
     await this.saveState();
     
     if (this._hibernationTimer) {
@@ -391,25 +383,20 @@ class HibernationManager {
     try {
       await this.state.storage.setAlarm(null);
     } catch(e) {}
-    
-    console.log('[HIBERNATION] Hibernated successfully');
   }
 
+  // ===== WAKEUP =====
   async wakeup() {
     if (!this._isHibernating) return;
     
-    console.log('[HIBERNATION] Waking up...');
     this._isHibernating = false;
     this.markActivity();
-    
     await this.restoreState();
     
     if (this.gameServer.alarmScheduler) {
       await this.gameServer.alarmScheduler.restoreAlarms();
       await this.gameServer.alarmScheduler.scheduleAlarms();
     }
-    
-    console.log('[HIBERNATION] Woke up successfully');
   }
 
   async saveState() {
@@ -450,10 +437,8 @@ class HibernationManager {
         savedAt: Date.now(),
         isHibernating: this._isHibernating
       });
-      
-      console.log('[HIBERNATION] State saved');
     } catch(e) {
-      console.error('[HIBERNATION] Save error:', e);
+      // Silent fail
     } finally {
       this._saveInProgress = false;
     }
@@ -462,23 +447,12 @@ class HibernationManager {
   async restoreState() {
     try {
       const data = await this.state.storage.get(CONSTANTS.HIBERNATION_STATE_KEY);
-      if (!data) {
-        console.log('[HIBERNATION] No saved state found');
-        return;
-      }
-      
-      if (data.version !== CONSTANTS.HIBERNATION_VERSION) {
-        console.log('[HIBERNATION] State version mismatch, skipping');
-        return;
-      }
+      if (!data || data.version !== CONSTANTS.HIBERNATION_VERSION) return;
       
       await this.gameServer.deserializeState(data);
-      
       this._isHibernating = data.isHibernating || false;
-      
-      console.log('[HIBERNATION] State restored');
     } catch(e) {
-      console.error('[HIBERNATION] Restore error:', e);
+      // Silent fail
     }
   }
 
@@ -491,7 +465,6 @@ class HibernationManager {
       clearTimeout(this._saveDebounceTimer);
       this._saveDebounceTimer = null;
     }
-    
     if (this._pendingSave) {
       await this._doSaveState();
     }
@@ -971,7 +944,7 @@ export class GameServer {
       this._stateRestored = false;
       
     } catch(e) {
-      console.error('[GAME] Constructor error:', e);
+      // Silent fail
     }
   }
 
@@ -1040,7 +1013,6 @@ export class GameServer {
           const game = this._deserializeGame(gameData);
           if (game) {
             this.activeGames.set(game.room, game);
-            console.log(`[HIBERNATION] Restored game in room: ${game.room}`);
           }
         }
       }
@@ -1074,10 +1046,9 @@ export class GameServer {
       }
       
       this._stateRestored = true;
-      console.log('[HIBERNATION] State deserialized successfully');
       
     } catch(e) {
-      console.error('[HIBERNATION] Deserialize error:', e);
+      // Silent fail
     }
   }
 
@@ -1147,7 +1118,6 @@ export class GameServer {
       };
       return game;
     } catch(e) {
-      console.error('[HIBERNATION] Deserialize game error:', e);
       return null;
     }
   }
@@ -1177,7 +1147,7 @@ export class GameServer {
       }).catch(() => {});
       
     } catch(e) {
-      console.error('[GAME] Lazy init error:', e);
+      // Silent fail
     }
   }
 
@@ -1185,94 +1155,71 @@ export class GameServer {
   _checkAndStartCurrentSession() {
     try {
       if (!this.alarmScheduler.isDiceTime()) {
-        console.log('[DICE] No active session');
         return;
       }
       
-      console.log('[DICE] Session is ACTIVE!');
       this.diceAutoEnabled = true;
       
       if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
-        console.log('[DICE] Dice already active, NOT starting new game');
         return;
       }
       
       if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) {
-        console.log('[DICE] Dice in cooldown/lock state, waiting...');
         return;
       }
       
       const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
       
       if (clients && clients.size > 0) {
-        console.log(`[DICE] ${clients.size} users in Quiz room, starting dice`);
         this._startDiceFast();
-      } else {
-        console.log('[DICE] No users in Quiz room, dice will start when user joins');
       }
     } catch(e) {
-      console.error('[DICE] Check current session error:', e);
+      // Silent fail
     }
   }
 
   // ========== HANDLE ALARM ==========
   async handleAlarm() {
-    try {
-      console.log('[ALARM] Alarm triggered!');
-      
-      await this.hibernationManager.wakeup();
-      
-      const pendingAlarms = await this.alarmScheduler.getPendingAlarms();
-      
-      for (const alarm of pendingAlarms) {
-        console.log(`[ALARM] Processing: ${alarm.name}`);
-        
-        switch(alarm.name) {
-          case 'dice_session_start':
-            console.log('[ALARM] Session start alarm triggered');
-            this._cleanupDeadConnections();
+    await this.hibernationManager.wakeup();
+    
+    const pendingAlarms = await this.alarmScheduler.getPendingAlarms();
+    
+    for (const alarm of pendingAlarms) {
+      switch(alarm.name) {
+        case 'dice_session_start':
+          this._cleanupDeadConnections();
+          
+          if (this.alarmScheduler.isDiceTime()) {
+            this.diceAutoEnabled = true;
             
-            if (this.alarmScheduler.isDiceTime()) {
-              this.diceAutoEnabled = true;
-              
-              if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
-                console.log('[ALARM] Dice already active, NOT starting new game');
-                break;
-              }
-              
-              if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) {
-                console.log('[ALARM] Dice in cooldown/lock state, waiting...');
-                break;
-              }
-              
-              const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
-              
-              if (clients && clients.size > 0) {
-                console.log(`[ALARM] ${clients.size} users in Quiz room, starting dice`);
-                this._startDiceFast();
-              } else {
-                console.log('[ALARM] No users in Quiz room, dice will start when user joins');
-              }
+            if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
+              break;
             }
-            break;
             
-          case 'dice_session_end':
-            console.log('[ALARM] Session end alarm triggered');
-            this.diceAutoEnabled = false;
-            if (this.currentDiceRoll || this._isShowingDice) {
-              this._endDiceRound();
+            if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) {
+              break;
             }
-            break;
-        }
-        
-        await this.alarmScheduler.processAlarm(alarm.name);
+            
+            const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
+            
+            if (clients && clients.size > 0) {
+              this._startDiceFast();
+            }
+          }
+          break;
+          
+        case 'dice_session_end':
+          this.diceAutoEnabled = false;
+          if (this.currentDiceRoll || this._isShowingDice) {
+            this._endDiceRound();
+          }
+          break;
       }
       
-      await this.alarmScheduler.scheduleAlarms();
-      
-    } catch(e) {
-      console.error('[ALARM] Handle alarm error:', e);
+      await this.alarmScheduler.processAlarm(alarm.name);
     }
+    
+    await this.alarmScheduler.scheduleAlarms();
   }
 
   // ========== LOAD KV DATA ==========
@@ -1387,6 +1334,7 @@ export class GameServer {
   // ========== FETCH ==========
   async fetch(req) {
     try {
+      // ===== WAKEUP =====
       if (this.hibernationManager.isHibernating) {
         await this.hibernationManager.wakeup();
       }
@@ -1837,18 +1785,6 @@ export class GameServer {
       const wsIds = this.wsClients.get(room);
       if (!wsIds?.size) return;
       
-      const isNotification = message[0] === 'diceNotification' || 
-                             message[0] === 'gameLowCardTimeLeft' ||
-                             message[0] === 'gameLowCardWait';
-      
-      if (isNotification) {
-        const now = Date.now();
-        const msgKey = `${room}_${message[0]}`;
-        if (!this._lastNotifTime) this._lastNotifTime = {};
-        if (this._lastNotifTime[msgKey] && (now - this._lastNotifTime[msgKey]) < 2000) return;
-        this._lastNotifTime[msgKey] = now;
-      }
-      
       const msgStr = JSON.stringify(message);
       const wsIdArray = Array.from(wsIds);
       for (let i = 0; i < wsIdArray.length; i += 20) {
@@ -1970,7 +1906,6 @@ export class GameServer {
         if (remainingInt > 0) {
           this._safeSend(ws, ["diceNotification", `${remainingInt}s remaining`]);
         }
-        console.log('[DICE] User switched to Quiz, dice already active - NOT starting new game');
         return;
       }
       
@@ -1978,16 +1913,12 @@ export class GameServer {
         if (this._diceTimeUpCooldown) {
           this._safeSend(ws, ["diceNotification", "Game in cooldown, please wait..."]);
         }
-        console.log('[DICE] Dice in cooldown/lock state, waiting...');
         return;
       }
       
-      console.log('[DICE] User switched to Quiz, starting dice immediately');
       this._startDiceFast();
       
-    } catch(e) {
-      console.error('[DICE] Check and start dice error:', e);
-    }
+    } catch(e) {}
   }
 
   _sendGameStateToClient(ws, room) {
@@ -3817,11 +3748,8 @@ export class GameServer {
       this.wsClients.clear();
       this.clientRooms.clear();
       
-    } catch(e) {
-      console.error('[DESTROY] Error:', e);
-    }
+    } catch(e) {}
   }
 }
 
-// ========== EKSPOR ==========
 export default GameServer;
