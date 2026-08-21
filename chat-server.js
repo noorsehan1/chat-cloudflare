@@ -27,11 +27,9 @@ export class ChatServer {
     this.isDestroyed = false;
     this._startTime = Date.now();
     
-    // HANYA WEBSOCKET DI MEMORY (WAJIB)
     this.wsSet = new Set();
     this.roomClients = new Map();
     
-    // INISIALISASI ROOM
     for (const room of ROOMS) {
       this.roomClients.set(room, new Set());
     }
@@ -42,7 +40,7 @@ export class ChatServer {
     this._restoreAllState().then(() => {});
   }
 
-  // ============ STORAGE OPERATIONS (SINGLE SOURCE OF TRUTH) ============
+  // ============ STORAGE OPERATIONS ============
   
   async _loadFromStorage() {
     try {
@@ -321,7 +319,6 @@ export class ChatServer {
       isMulti: false
     });
     
-    // UPDATE ROOM CLIENTS
     for (const [otherRoom, clients] of this.roomClients) {
       if (otherRoom !== roomName && clients) {
         clients.delete(ws);
@@ -404,11 +401,6 @@ export class ChatServer {
       
       if (room) {
         try { this.roomClients.get(room)?.delete(ws); } catch(e) {}
-      }
-      
-      if (username) {
-        // HAPUS DARI memory userConnections? TIDAK PERLU LAGI!
-        // Karena kita pakai storage sebagai source of truth
       }
       
       try { this.wsSet.delete(ws); } catch(e) {}
@@ -593,7 +585,6 @@ export class ChatServer {
       
       let changed = false;
       
-      // CLEANUP USER SEAT DATA
       for (const [username, seatInfo] of Object.entries(userSeatData)) {
         if (!seatInfo || !seatInfo.room) {
           delete userSeatData[username];
@@ -610,7 +601,6 @@ export class ChatServer {
           continue;
         }
         
-        // CEK APAKAH USER MASIH TERHUBUNG
         let isConnected = false;
         for (const ws of this.wsSet) {
           if (ws.username === username && ws.readyState === 1) {
@@ -625,7 +615,6 @@ export class ChatServer {
         }
       }
       
-      // CLEANUP EMPTY ROOMS
       for (const [roomName, roomData] of Object.entries(roomsData)) {
         const hasSeats = roomData.seats && Object.keys(roomData.seats).length > 0;
         const hasPoints = roomData.points && Object.keys(roomData.points).length > 0;
@@ -658,27 +647,15 @@ export class ChatServer {
   }
 
   // ============ RESET ALL DATA ============
-  // FUNCTION UNTUK RESET SEMUA DATA DI MEMORY DAN STORAGE
-  // PAKAI TIMESTAMP UNTUK VERIFIKASI
 
   async resetAllData() {
-    console.log("🚀 MEMULAI RESET ALL DATA...");
     const timestamp = Date.now();
     
     try {
-      // 1. RESET STORAGE - HAPUS SEMUA DATA
-      console.log("📦 Menghapus data storage...");
-      
       await this.ctx.storage.delete("roomsData");
       await this.ctx.storage.delete("userSeatData");
       await this.ctx.storage.delete("currentNumber");
       
-      console.log("✅ Data storage berhasil dihapus");
-      
-      // 2. RESET MEMORY - HAPUS SEMUA WEBSOCKET
-      console.log("🔄 Mereset memory...");
-      
-      // Kirim notifikasi ke semua client
       const resetMessage = JSON.stringify(["serverReset", "Server di-reset pada: " + new Date(timestamp).toLocaleString()]);
       for (const ws of this.wsSet) {
         try {
@@ -688,7 +665,6 @@ export class ChatServer {
         } catch(e) {}
       }
       
-      // Tutup semua koneksi WebSocket
       const wsCopy = Array.from(this.wsSet);
       for (const ws of wsCopy) {
         try {
@@ -701,28 +677,19 @@ export class ChatServer {
         } catch(e) {}
       }
       
-      // Kosongkan semua Set/Map di memory
       this.wsSet.clear();
       this.roomClients.clear();
       
-      // Reset ulang room clients
       for (const room of ROOMS) {
         this.roomClients.set(room, new Set());
       }
       
-      // Reset current number
       this.currentNumber = 1;
       
-      console.log("✅ Memory berhasil direset");
-      console.log("✅ SEMUA DATA BERHASIL DI-RESET!");
-      console.log("🕐 Timestamp:", timestamp);
-      
-      // 3. SET ALARM ULANG
       if (!this.closing && !this.isDestroyed) {
         await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
       }
       
-      // SIMPAN TIMESTAMP RESET TERAKHIR
       await this.ctx.storage.put("lastReset", timestamp);
       
       return {
@@ -733,7 +700,6 @@ export class ChatServer {
       };
       
     } catch(e) {
-      console.error("❌ Error reset data:", e);
       return {
         success: false,
         error: e.message,
@@ -1025,7 +991,6 @@ export class ChatServer {
             await this._removeUserFromRoom(targetUsername, roomName);
             await this._deleteUserSeat(targetUsername);
             
-            // CLEANUP ALL WEBSOCKET FOR THIS USER
             for (const wsKey of this.wsSet) {
               if (wsKey.username === targetUsername) {
                 if (wsKey.room) {
@@ -1122,10 +1087,8 @@ export class ChatServer {
         case "private": {
           const [privTarget, privNoimg, privMsg, privSender] = args;
           if (privTarget && privMsg) {
-            // CEK DI STORAGE apakah user online
             const userSeat = await this._getUserSeat(privTarget);
             if (userSeat) {
-              // KIRIM KE SEMUA WEBSOCKET USER TERSEBUT
               for (const wsKey of this.wsSet) {
                 if (wsKey.username === privTarget && wsKey.readyState === 1) {
                   this.safeSend(wsKey, ["private", privTarget, privNoimg, privMsg, Date.now(), privSender]);
@@ -1290,7 +1253,6 @@ export class ChatServer {
         this.currentNumber = currentNumber;
       }
       
-      // CLEANUP INVALID DATA
       for (const [username, seatInfo] of Object.entries(userSeatData)) {
         if (!seatInfo || !seatInfo.room) {
           delete userSeatData[username];
@@ -1302,7 +1264,6 @@ export class ChatServer {
         }
       }
       
-      // RESTORE WEBSOCKET ATTACHMENTS
       const webSockets = this.ctx.getWebSockets();
       for (const ws of webSockets) {
         try {
@@ -1359,16 +1320,33 @@ export class ChatServer {
     try {
       const url = new URL(req.url);
       
-      // ENDPOINT RESET - PAKAI TIMESTAMP
+      // ENDPOINT RESET
       if (url.pathname === "/reset" && req.method === "POST") {
         const result = await this.resetAllData();
         return new Response(JSON.stringify(result), {
           status: result.success ? 200 : 500,
-          headers: { "Content-Type": "application/json" }
+          headers: { 
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type"
+          }
         });
       }
       
-      // WEBSOCKET CONNECTION
+      // OPTIONS CORS
+      if (url.pathname === "/reset" && req.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type"
+          }
+        });
+      }
+      
+      // WEBSOCKET
       const upgrade = req.headers.get("Upgrade");
       if (upgrade !== "websocket") {
         return new Response("Chat Server", { 
