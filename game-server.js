@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 6.0.1 - FIXED WEBSOCKET CONNECTION
+// VERSION: 6.0.2 - FULL HYBERNATE API (EXPERIMENTAL)
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -591,6 +591,7 @@ class DiceGameSystem {
   }
 }
 
+// ==================== GAME SERVER - FULL HYBERNATE API ====================
 export class GameServer {
   static allowConcurrency = true;
 
@@ -606,7 +607,7 @@ export class GameServer {
       this._lastActivity = Date.now();
       this._isHibernating = false;
       
-      // WebSocket connections
+      // WebSocket connections - MEMORY ONLY
       this.wsMap = new Map();
       this.wsClients = new Map();
       this.clientRooms = new Map();
@@ -682,18 +683,22 @@ export class GameServer {
       
       this.alarmScheduler = new AlarmScheduler(env, state);
       
-      // Restore state
+      // RESTORE STATE DARI HYBERNATE
       this._restoreAllState().then(() => {});
       
     } catch(e) {}
   }
 
+  // ========== FULL HYBERNATE API METHODS ==========
+  
   async _restoreAllState() {
     try {
+      // 1. RESTORE DARI STORAGE
       const gameState = await this.state.storage.get("gameState") || {};
       const diceState = await this.state.storage.get("diceState") || {};
       const cacheState = await this.state.storage.get("cacheState") || {};
       
+      // 2. RESTORE CACHE
       if (cacheState.recordingStatus) {
         this.cacheManager.recordingStatus = new Map(Object.entries(cacheState.recordingStatus));
       }
@@ -703,6 +708,7 @@ export class GameServer {
         }
       }
       
+      // 3. RESTORE GAMES
       if (gameState.activeGames && gameState.activeGames.length > 0) {
         for (const gameData of gameState.activeGames) {
           const game = this._deserializeGame(gameData);
@@ -712,6 +718,7 @@ export class GameServer {
         }
       }
       
+      // 4. RESTORE DICE STATE
       if (diceState) {
         this.currentDiceRoll = diceState.currentDiceRoll || null;
         this._isShowingDice = diceState.isShowingDice || false;
@@ -744,11 +751,13 @@ export class GameServer {
         }
       }
       
-      // RESTORE WEBSOCKETS - FIX: Gunakan ctx bukan state
-      const webSockets = this.state.getWebSockets ? this.state.getWebSockets() : [];
+      // ===== 5. RESTORE WEBSOCKET DARI HYBERNATE API =====
+      // getWebSockets() adalah Hibernate API untuk restore WebSocket
+      const webSockets = this.state.getWebSockets();
       for (const ws of webSockets) {
         try {
-          const attachment = ws.deserializeAttachment ? ws.deserializeAttachment() : {};
+          // deserializeAttachment() adalah Hibernate API
+          const attachment = ws.deserializeAttachment();
           if (attachment && attachment.wsId) {
             const wsId = attachment.wsId;
             const username = attachment.username;
@@ -957,9 +966,10 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== FETCH - FIXED WEBSOCKET CONNECTION ==========
+  // ========== FETCH - FULL HYBERNATE API ==========
   async fetch(req) {
     try {
+      // WAKE UP DARI HYBERNATION
       if (this._isHibernating) {
         this._isHibernating = false;
         await this._restoreAllState();
@@ -1045,38 +1055,33 @@ export class GameServer {
         server.username = null;
         server._createdAt = Date.now();
         
-        // ===== FIX: ACCEPT WEBSOCKET DENGAN BENAR =====
+        // ===== ACCEPT WEBSOCKET - HYBERNATE API =====
         try {
-          // Coba accept dengan WebSocket standar
-          server.accept();
+          // acceptWebSocket() adalah Hibernate API
+          this.state.acceptWebSocket(server);
         } catch(e) {
           try { 
-            // Fallback: accept melalui state (hibernate mode)
-            if (this.state && this.state.acceptWebSocket) {
-              this.state.acceptWebSocket(server);
-            } else {
-              throw new Error("Cannot accept WebSocket");
-            }
+            // Fallback ke standar jika gagal
+            server.accept(); 
           } catch(err) {
             try { server.close(1008, "Accept failed"); } catch(ex) {}
             return new Response("WebSocket acceptance failed", { status: 500 });
           }
         }
         
-        // ===== SAVE ATTACHMENT =====
+        // ===== SAVE STATE KE ATTACHMENT - HYBERNATE API =====
         try {
-          if (server.serializeAttachment) {
-            server.serializeAttachment({
-              wsId: wsId,
-              username: null,
-              room: null
-            });
-          }
+          // serializeAttachment() adalah Hibernate API
+          server.serializeAttachment({
+            wsId: wsId,
+            username: null,
+            room: null,
+            createdAt: Date.now()
+          });
         } catch(e) {}
         
         this.wsMap.set(wsId, server);
         
-        // ===== EVENT LISTENERS =====
         server.addEventListener("message", async (event) => {
           try {
             if (server._closing || this.closing || this.isDestroyed) return;
@@ -1182,7 +1187,49 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ========== SWITCH ROOM ==========
+  async handleAlarm() {
+    try {
+      this._isHibernating = false;
+      await this._restoreAllState();
+      
+      const pendingAlarms = await this.alarmScheduler.getPendingAlarms();
+      
+      for (const alarm of pendingAlarms) {
+        switch(alarm.name) {
+          case 'dice_session_start':
+            this._cleanupDeadConnections();
+            
+            if (this.alarmScheduler.isDiceTime()) {
+              this.diceAutoEnabled = true;
+              
+              if (this.currentDiceRoll && this._canSubmitDiceAnswer) break;
+              if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) break;
+              
+              const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
+              if (clients && clients.size > 0) {
+                this._startDiceFast();
+              }
+            }
+            break;
+            
+          case 'dice_session_end':
+            this.diceAutoEnabled = false;
+            if (this.currentDiceRoll || this._isShowingDice) {
+              this._endDiceRound();
+            }
+            break;
+        }
+        
+        await this.alarmScheduler.processAlarm(alarm.name);
+      }
+      
+      await this.alarmScheduler.scheduleAlarms();
+      await this._saveToStorage();
+      
+    } catch(e) {}
+  }
+
+  // ========== SWITCH ROOM - DENGAN ATTACHMENT ==========
   async switchRoom(ws, room, username = null) {
     try {
       if (this.isDestroyed) {
@@ -1238,13 +1285,14 @@ export class GameServer {
         ws.roomname = roomName;
         if (username) ws.username = username;
         
-        // Save attachment
+        // ===== UPDATE ATTACHMENT - HYBERNATE API =====
         try {
           if (ws.serializeAttachment) {
             ws.serializeAttachment({
               wsId: wsId,
               username: username,
-              room: roomName
+              room: roomName,
+              updatedAt: Date.now()
             });
           }
         } catch(e) {}
@@ -1312,13 +1360,14 @@ export class GameServer {
       ws.roomname = room;
       if (username) ws.username = username;
       
-      // Save attachment
+      // ===== SAVE ATTACHMENT - HYBERNATE API =====
       try {
         if (ws.serializeAttachment) {
           ws.serializeAttachment({
             wsId: wsId,
             username: username,
-            room: room
+            room: room,
+            updatedAt: Date.now()
           });
         }
       } catch(e) {}
@@ -2536,6 +2585,10 @@ export class GameServer {
       }]);
     } catch(e) {}
   }
+
+  // ========== GAME METHODS ==========
+  // Semua game method sama seperti sebelumnya
+  // (startGame, joinGame, submitNumber, leaveGame, checkGameRunning, dll)
 
   async startGame(ws, bet, username) {
     try {
