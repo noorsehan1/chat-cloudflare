@@ -1,6 +1,4 @@
-// ==================== INDEX.JS ====================
-// VERSION: 3.4.3 - WITH GAME SERVER
-
+// ==================== INDEX.JS (FIXED) ====================
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
 
@@ -9,27 +7,41 @@ export default {
     try {
       const url = new URL(request.url);
       const pathname = url.pathname;
+      const upgrade = request.headers.get("Upgrade");
+      
+      // === CHAT SERVER ===
+      // Tambahkan kondisi untuk root WebSocket
+      if (
+        pathname === "/ws" || 
+        pathname === "/chat" || 
+        pathname === "/reset" ||
+        pathname === "/health" ||
+        (pathname === "/" && upgrade === "websocket")  // ← INI TAMBAHAN
+      ) {
+        const id = env.CHAT_SERVER.idFromName("global");
+        const obj = env.CHAT_SERVER.get(id);
+        return obj.fetch(request);
+      }
       
       // === GAME SERVER ===
-      if (pathname.startsWith("/game")) {
-        if (!env.GAME_SERVER) {
-          return new Response("GAME_SERVER binding not found", { status: 500 });
-        }
+      if (pathname === "/game/ws" || pathname === "/game/health" || pathname === "/game" || pathname === "/game/") {
         const id = env.GAME_SERVER.idFromName("game");
         const obj = env.GAME_SERVER.get(id);
         return obj.fetch(request);
       }
       
-      // === CHAT SERVER (SEMUA REQUEST LAIN) ===
-      if (!env.CHAT_SERVER) {
-        return new Response("CHAT_SERVER binding not found", { status: 500 });
+      // === ROOT (HTTP) ===
+      if (pathname === "/") {
+        return new Response("Chat Server Running\nWebSocket: wss://" + url.host + "/ws\n", { 
+          status: 200,
+          headers: { 'Content-Type': 'text/plain' }
+        });
       }
-      const id = env.CHAT_SERVER.idFromName("global");
-      const obj = env.CHAT_SERVER.get(id);
-      return obj.fetch(request);
       
-    } catch(error) {
-      return new Response("Error: " + error.message, { 
+      return new Response("Not Found", { status: 404 });
+      
+    } catch(e) {
+      return new Response("Error: " + e.message, { 
         status: 500,
         headers: { 'Content-Type': 'text/plain' }
       });
