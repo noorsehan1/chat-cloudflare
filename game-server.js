@@ -3515,5 +3515,3 @@ export class GameServer {
     } catch(e) {}
   }
 }
-
-export { GameServer };
