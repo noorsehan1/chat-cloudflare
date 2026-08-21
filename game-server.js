@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 5.0.10 - ALARM MENGGUNAKAN STORAGE SAJA
+// VERSION: 5.0.11 - WITH CONCURRENCY SUPPORT
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -83,7 +83,6 @@ class AlarmScheduler {
       const witaNow = this._toWITA(now);
       const currentTotal = witaNow.getHours() * 60 + witaNow.getMinutes();
       
-      // Clear existing alarms
       await this._clearAllAlarms();
       
       let currentSession = null;
@@ -640,6 +639,9 @@ class DiceGameSystem {
 
 // ==================== GAME SERVER ====================
 export class GameServer {
+  // ========== ALLOW CONCURRENCY ==========
+  static allowConcurrency = true;
+
   constructor(state, env) {
     try {
       this.state = state;
@@ -1264,6 +1266,7 @@ export class GameServer {
           errors: this._errorCount,
           isHibernating: this._isHibernating,
           alarms: this.alarmScheduler._alarms.size,
+          concurrencyEnabled: GameServer.allowConcurrency,
           timestamp: Date.now()
         }), {
           headers: { 'Content-Type': 'application/json' }
@@ -1284,7 +1287,8 @@ export class GameServer {
           cacheSize: this.cacheManager?.winnersCache?.size || 0,
           pointsCacheSize: this.diceGameSystem?.pointsCache?.pointsCache?.size || 0,
           alarms: this.alarmScheduler._alarms.size,
-          isHibernating: this._isHibernating
+          isHibernating: this._isHibernating,
+          concurrencyEnabled: GameServer.allowConcurrency
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
