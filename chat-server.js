@@ -1,5 +1,6 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 8.0.2 - WITH WSS SUPPORT
+// VERSION: 8.0.3 - WITH RESET CASE
+// FULL CLASS - TANPA LOG
 
 const C = {
   MAX_SEATS: 45,
@@ -16,13 +17,6 @@ const ROOMS = [
 ];
 
 const ROOMS_SET = new Set(ROOMS);
-
-// CORS HEADERS
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
 
 export class ChatServer {
   constructor(state, env) {
@@ -806,12 +800,21 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ============ EVENT HANDLER INTERNAL ============
+
   async _handleEventInternal(ws, data) {
     try {
       if (!ws || !data || !data[0]) return;
       const [evt, ...args] = data;
       
       switch(evt) {
+        // ===== RESET CASE =====
+        case "resetServer": {
+          const result = await this.resetAllData();
+          this.safeSend(ws, ["resetResult", result]);
+          break;
+        }
+        
         case "getCurrentNumber":
           this.safeSend(ws, ["currentNumber", this.currentNumber]);
           break;
@@ -1327,32 +1330,17 @@ export class ChatServer {
       const url = new URL(req.url);
       
       // ===== RESET ENDPOINT =====
-      if (url.pathname === "/reset") {
-        if (req.method === "OPTIONS") {
-          return new Response(null, {
-            status: 204,
-            headers: CORS_HEADERS
-          });
-        }
-        
-        if (req.method === "POST") {
-          const result = await this.resetAllData();
-          return new Response(JSON.stringify(result), {
-            status: result.success ? 200 : 500,
-            headers: {
-              "Content-Type": "application/json",
-              ...CORS_HEADERS
-            }
-          });
-        }
-        
-        return new Response("Method not allowed", {
-          status: 405,
-          headers: CORS_HEADERS
+      if (url.pathname === "/reset" && req.method === "POST") {
+        const result = await this.resetAllData();
+        return new Response(JSON.stringify(result), {
+          status: result.success ? 200 : 500,
+          headers: {
+            "Content-Type": "application/json"
+          }
         });
       }
       
-      // ===== WEBSOCKET (WSS) =====
+      // ===== WEBSOCKET =====
       const upgrade = req.headers.get("Upgrade");
       if (upgrade !== "websocket") {
         return new Response("Chat Server", { 
@@ -1370,10 +1358,7 @@ export class ChatServer {
       
       try { this.ctx.acceptWebSocket(server); } 
       catch(e) { 
-        return new Response("WebSocket acceptance failed", { 
-          status: 500,
-          headers: CORS_HEADERS
-        }); 
+        return new Response("WebSocket acceptance failed", { status: 500 }); 
       }
       
       server.username = null;
@@ -1392,15 +1377,11 @@ export class ChatServer {
       
       return new Response(null, { 
         status: 101, 
-        webSocket: client,
-        headers: CORS_HEADERS
+        webSocket: client
       });
       
     } catch(e) {
-      return new Response("Internal Server Error", { 
-        status: 500,
-        headers: CORS_HEADERS
-      });
+      return new Response("Internal Server Error", { status: 500 });
     }
   }
 
