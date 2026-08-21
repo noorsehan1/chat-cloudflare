@@ -1,16 +1,29 @@
 // ==================== INDEX.JS ====================
-// VERSION: 3.4.2 - FIXED
+// VERSION: 3.4.3 - WITH GAME SERVER
 
 import { ChatServer } from "./chat-server.js";
+import { GameServer } from "./game-server.js";
 
 export default {
   async fetch(request, env) {
     try {
-      // PASTIKAN ENV ADA
-      if (!env || !env.CHAT_SERVER) {
-        return new Response("CHAT_SERVER binding not found", { status: 500 });
+      const url = new URL(request.url);
+      const pathname = url.pathname;
+      
+      // === GAME SERVER ===
+      if (pathname.startsWith("/game")) {
+        if (!env.GAME_SERVER) {
+          return new Response("GAME_SERVER binding not found", { status: 500 });
+        }
+        const id = env.GAME_SERVER.idFromName("game");
+        const obj = env.GAME_SERVER.get(id);
+        return obj.fetch(request);
       }
       
+      // === CHAT SERVER (SEMUA REQUEST LAIN) ===
+      if (!env.CHAT_SERVER) {
+        return new Response("CHAT_SERVER binding not found", { status: 500 });
+      }
       const id = env.CHAT_SERVER.idFromName("global");
       const obj = env.CHAT_SERVER.get(id);
       return obj.fetch(request);
@@ -24,4 +37,4 @@ export default {
   }
 };
 
-export { ChatServer };
+export { ChatServer, GameServer };
