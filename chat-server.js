@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 7.3.0 - STORAGE-ONLY ARCHITECTURE WITH MULTI FIX
+// VERSION: 7.4.0 - STORAGE-ONLY ARCHITECTURE WITH AUTO CLEAR ON DEPLOY
 // MULTI USER = ONLINE SELAMA DI STORAGE
 // HANYA exitMulti YANG BISA MENGHAPUS MULTI USER
 
@@ -15,6 +15,7 @@ const C = {
   MAX_PROCESS_TIME_MS: 500,
   USER_JOIN_LOCK_TIMEOUT: 10000,
   STORAGE_CACHE_TTL: 2000,
+  DEPLOY_TIMESTAMP_KEY: "deploy_timestamp",
 };
 
 const ROOMS = [
@@ -34,6 +35,7 @@ export class ChatServer {
     this.isDestroyed = false;
     this._startTime = Date.now();
     this._restored = false;
+    this._deployTimestamp = Date.now();
     
     this.wsSet = new Set();
     this.userConnections = new Map();
@@ -78,13 +80,14 @@ export class ChatServer {
       const roomsData = await this.ctx.storage.get("roomsData") || {};
       const userSeatData = await this.ctx.storage.get("userSeatData") || {};
       const currentNumber = await this.ctx.storage.get("currentNumber") || 1;
+      const storedDeployTimestamp = await this.ctx.storage.get(C.DEPLOY_TIMESTAMP_KEY) || 0;
       
-      this._storageCache = { roomsData, userSeatData, currentNumber };
+      this._storageCache = { roomsData, userSeatData, currentNumber, storedDeployTimestamp };
       this._storageCacheTime = now;
       
       return this._storageCache;
     } catch(e) {
-      return { roomsData: {}, userSeatData: {}, currentNumber: 1 };
+      return { roomsData: {}, userSeatData: {}, currentNumber: 1, storedDeployTimestamp: 0 };
     }
   }
 
@@ -100,7 +103,27 @@ export class ChatServer {
         await this.ctx.storage.put("currentNumber", currentNumber);
       }
       
-      this._storageCache = { roomsData, userSeatData, currentNumber };
+      this._storageCache.roomsData = roomsData;
+      this._storageCache.userSeatData = userSeatData;
+      this._storageCache.currentNumber = currentNumber;
+      this._storageCacheTime = Date.now();
+      
+    } catch(e) {}
+  }
+
+  async _clearAllStorage() {
+    try {
+      await this.ctx.storage.put(C.DEPLOY_TIMESTAMP_KEY, this._deployTimestamp);
+      await this.ctx.storage.put("roomsData", {});
+      await this.ctx.storage.put("userSeatData", {});
+      await this.ctx.storage.put("currentNumber", 1);
+      
+      this._storageCache = { 
+        roomsData: {}, 
+        userSeatData: {}, 
+        currentNumber: 1,
+        storedDeployTimestamp: this._deployTimestamp
+      };
       this._storageCacheTime = Date.now();
       
     } catch(e) {}
@@ -1430,7 +1453,12 @@ export class ChatServer {
   async _restoreAllState() {
     try {
       const storage = await this._loadFromStorage();
-      const { roomsData, userSeatData, currentNumber } = storage;
+      const { roomsData, userSeatData, currentNumber, storedDeployTimestamp } = storage;
+      
+      if (!storedDeployTimestamp || storedDeployTimestamp !== this._deployTimestamp) {
+        await this._clearAllStorage();
+        return;
+      }
       
       if (currentNumber !== undefined) {
         this.currentNumber = currentNumber;
