@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 10.0.0 - FULL CLOUDFLARE HIBERNATION API COMPLIANT
+// VERSION: 10.0.1 - FIXED HIBERNATION (NO PENDING PROMISES)
 
 const C = {
   MAX_SEATS: 45,
@@ -25,6 +25,7 @@ export class ChatServer {
     this.closing = false;
     this.isDestroyed = false;
     this._startTime = Date.now();
+    this._restored = false;
     
     // ===== WEBSOCKET CONNECTIONS (MEMORY) =====
     this.wsSet = new Set();
@@ -46,15 +47,18 @@ export class ChatServer {
     
     this._isNumberUpdating = false;
     
-    // ===== RESTORE FROM HIBERNATION =====
-    this._restoreFromHibernation();
+    // ===== RESTORE FROM HIBERNATION (SYNC) =====
+    this._restoreFromHibernationSync();
   }
 
-  // ============ RESTORE FROM HIBERNATION ============
+  // ============ RESTORE FROM HIBERNATION (SYNC) ============
   
-  _restoreFromHibernation() {
+  _restoreFromHibernationSync() {
     try {
-      // 1. Restore data dari storage
+      // Restore WebSocket connections DULUAN (SYNC)
+      this._restoreWebSockets();
+      
+      // Restore data dari storage (async tapi tidak blocking)
       this.ctx.storage.get(["roomsData", "userSeatData", "currentNumber", "userCounts", "onlineUsers"])
         .then((storage) => {
           if (storage.roomsData !== undefined) {
@@ -73,16 +77,15 @@ export class ChatServer {
             this._onlineUsers = new Set(storage.onlineUsers);
           }
           
-          // 2. Restore WebSocket connections dari hibernasi
-          this._restoreWebSockets();
+          this._restored = true;
           
-          // 3. Set alarm untuk number updater
+          // Set alarm (LANGSUNG, tanpa setTimeout)
           if (!this.closing && !this.isDestroyed) {
             this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
           }
         })
         .catch(() => {
-          // Jika gagal restore, inisialisasi kosong
+          this._restored = true;
           this._roomsDataCache = {};
           this._userSeatDataCache = {};
           this.currentNumber = 1;
@@ -97,16 +100,14 @@ export class ChatServer {
 
   _restoreWebSockets() {
     try {
-      // Ambil semua WebSocket yang masih terhubung dari hibernasi
+      // SYNC: Ambil WebSocket dari runtime
       const webSockets = this.ctx.getWebSockets();
       
       for (const ws of webSockets) {
         try {
-          // Deserialize attachment yang disimpan saat accept
           const attachment = ws.deserializeAttachment();
           
           if (attachment && attachment.username) {
-            // Restore user data dari attachment
             ws.username = attachment.username;
             ws.idtarget = attachment.username;
             ws.room = attachment.room || null;
@@ -116,7 +117,6 @@ export class ChatServer {
             ws._multiRoom = attachment.multiRoom || null;
             ws._multiSeat = attachment.multiSeat || null;
             
-            // Restore seat info jika ada
             if (attachment.room && attachment.seat) {
               const seatInfo = {
                 room: attachment.room,
@@ -124,18 +124,15 @@ export class ChatServer {
                 isMulti: attachment.isMulti || false
               };
               
-              // Simpan ke userSeatDataCache
               this._userSeatDataCache[attachment.username] = seatInfo;
               this._onlineUsers.add(attachment.username);
               
-              // Tambahkan ke room clients
               const roomClients = this.roomClients.get(attachment.room);
               if (roomClients) {
                 roomClients.add(ws);
               }
             }
             
-            // Tambahkan ke wsSet
             this.wsSet.add(ws);
           }
         } catch(e) {}
@@ -531,7 +528,7 @@ export class ChatServer {
     ws._multiRoom = null;
     ws._multiSeat = null;
     
-    // 🔥 KRITIS: Simpan state untuk hibernasi
+    // Simpan state untuk hibernasi
     ws.serializeAttachment({
       username: username,
       room: roomName,
@@ -555,6 +552,7 @@ export class ChatServer {
     this.safeSend(ws, ["roomUserCount", roomName, count]);
     this.broadcast(roomName, ["roomUserCount", roomName, count]);
     
+    // Hanya 1 timeout, tidak masalah (1 detik)
     setTimeout(() => {
       try {
         if (ws && ws.readyState === 1) {
@@ -983,9 +981,22 @@ export class ChatServer {
 
   // ============ WEBSOCKET EVENT HANDLERS (HIBERNATION API) ============
 
-  // 🔥 KRITIS: Method ini dipanggil oleh Cloudflare runtime untuk message
   async webSocketMessage(ws, msg) {
     if (!ws || ws._closing || this.closing || this.isDestroyed) return;
+    
+    // Tunggu restore selesai jika belum
+    if (!this._restored) {
+      await new Promise(resolve => {
+        const check = () => {
+          if (this._restored) {
+            resolve();
+          } else {
+            setTimeout(check, 50);
+          }
+        };
+        check();
+      });
+    }
     
     // Restore state dari attachment jika perlu
     if (!ws.room && !ws.username) {
@@ -1000,7 +1011,6 @@ export class ChatServer {
           ws._multiRoom = attachment.multiRoom || null;
           ws._multiSeat = attachment.multiSeat || null;
           
-          // Tambahkan ke room clients jika belum
           if (attachment.room) {
             const roomClients = this.roomClients.get(attachment.room);
             if (roomClients && !roomClients.has(ws)) {
@@ -1019,7 +1029,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // 🔥 KRITIS: Method ini dipanggil oleh Cloudflare runtime saat close
   async webSocketClose(ws) { 
     if (!ws) return;
     try {
@@ -1029,7 +1038,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // 🔥 KRITIS: Method ini dipanggil oleh Cloudflare runtime saat error
   async webSocketError(ws) { 
     if (!ws) return;
     try {
@@ -1073,7 +1081,7 @@ export class ChatServer {
     ws._multiRoom = null;
     ws._multiSeat = null;
     
-    // 🔥 Simpan state untuk hibernasi
+    // Simpan state untuk hibernasi
     ws.serializeAttachment({ 
       username: username,
       room: null,
@@ -1211,7 +1219,7 @@ export class ChatServer {
           await this._updateUserCounts();
           await this._saveFullState();
           
-          // 🔥 Simpan state untuk hibernasi
+          // Simpan state untuk hibernasi
           ws.serializeAttachment({
             username: multiUsername,
             room: multiRoomname,
@@ -1284,7 +1292,7 @@ export class ChatServer {
           ws._multiRoom = roomName;
           ws._multiSeat = seatNumber;
           
-          // 🔥 Simpan state untuk hibernasi
+          // Simpan state untuk hibernasi
           ws.serializeAttachment({
             username: targetUsername,
             room: roomName,
@@ -1664,7 +1672,8 @@ export class ChatServer {
           closing: this.closing,
           currentNumber: this.currentNumber,
           roomsData: Object.keys(this._roomsDataCache).length,
-          userSeatData: Object.keys(this._userSeatDataCache).length
+          userSeatData: Object.keys(this._userSeatDataCache).length,
+          restored: this._restored
         }), {
           headers: { "Content-Type": "application/json" }
         });
@@ -1685,7 +1694,7 @@ export class ChatServer {
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       
-      // 🔥 KRITIS: Gunakan ctx.acceptWebSocket() BUKAN server.accept()
+      // Gunakan ctx.acceptWebSocket() BUKAN server.accept()
       try { 
         this.ctx.acceptWebSocket(server); 
       } catch(e) { 
@@ -1702,7 +1711,7 @@ export class ChatServer {
       server._multiRoom = null;
       server._multiSeat = null;
       
-      // 🔥 KRITIS: Simpan state untuk hibernasi
+      // Simpan state untuk hibernasi
       server.serializeAttachment({
         username: null,
         room: null,
