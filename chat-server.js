@@ -1,5 +1,5 @@
-// ==================== CHAT-SERVER-HIBERNATION-FINAL.JS ====================
-// VERSION: 9.2.0 - FULLY OPTIMIZED FOR HIBERNATION
+// ==================== CHAT-SERVER-HIBERNATION-NO-PING.JS ====================
+// VERSION: 9.3.0 - NO PING/PONG, WITH setTimeout 1000ms
 
 const C = {
   MAX_SEATS: 45,
@@ -47,7 +47,6 @@ export class ChatServer {
     this._isNumberUpdating = false;
     this._isRestoring = false;
     this._lastRefreshTime = 0;
-    this._cachedWebSockets = null; // Cache WebSocket untuk mengurangi pemanggilan
     
     this._restoreAllState().then(() => {});
   }
@@ -62,15 +61,13 @@ export class ChatServer {
     }
   }
 
-  // ✅ OPTIMASI: Refresh hanya jika perlu (max 1x per 100ms)
   _refreshRoomClients(force = false) {
     const now = Date.now();
     if (!force && (now - this._lastRefreshTime) < 100) {
-      return; // Skip jika terlalu sering
+      return;
     }
     this._lastRefreshTime = now;
     
-    // Bersihkan room clients
     for (const room of ROOMS) {
       this.roomClients.set(room, new Set());
     }
@@ -78,7 +75,6 @@ export class ChatServer {
     const webSockets = this._getActiveWebSockets();
     for (const ws of webSockets) {
       try {
-        // ✅ Gunakan properti langsung jika tersedia, baru fallback ke deserialize
         let room = ws._cachedRoom;
         let username = ws._cachedUsername;
         
@@ -87,7 +83,6 @@ export class ChatServer {
           if (attachment && attachment.username && attachment.room) {
             room = attachment.room;
             username = attachment.username;
-            // Cache untuk penggunaan berikutnya
             ws._cachedRoom = room;
             ws._cachedUsername = username;
           }
@@ -411,7 +406,6 @@ export class ChatServer {
       seatInfo: seatInfo
     });
     
-    // Cache untuk performance
     ws._cachedRoom = roomName;
     ws._cachedUsername = username;
     
@@ -423,7 +417,6 @@ export class ChatServer {
     ws._multiRoom = null;
     ws._multiSeat = null;
     
-    // Refresh room clients (force)
     this._refreshRoomClients(true);
     
     this.safeSend(ws, ["rooMasuk", seat, roomName]);
@@ -434,12 +427,14 @@ export class ChatServer {
     this.safeSend(ws, ["roomUserCount", roomName, count]);
     this.broadcast(roomName, ["roomUserCount", roomName, count]);
     
-    // Kirim state langsung
-    try {
-      if (ws && ws.readyState === 1) {
-        this.sendAllStateTo(ws, roomName, true);
-      }
-    } catch(e) {}
+    // ✅ KEMBALIKAN setTimeout 1000ms (seperti versi awal)
+    setTimeout(() => {
+      try {
+        if (ws && ws.readyState === 1) {
+          this.sendAllStateTo(ws, roomName, true);
+        }
+      } catch(e) {}
+    }, 1000);
     
     return true;
   }
@@ -499,7 +494,6 @@ export class ChatServer {
   _broadcastToRoom(room, msgStr) {
     if (this.closing || this.isDestroyed || !room) return;
     
-    // Refresh clients (dengan throttle)
     this._refreshRoomClients(false);
     
     const clients = this.roomClients.get(room);
@@ -749,12 +743,17 @@ export class ChatServer {
         ws._isMulti = attachment.isMulti || false;
         ws._multiRoom = attachment.multiRoom || null;
         ws._multiSeat = attachment.multiSeat || null;
-        
-        // Cache untuk performance
         ws._cachedUsername = attachment.username;
         ws._cachedRoom = attachment.room;
+        
+        // Restore seatInfo ke cache
+        if (attachment.seatInfo) {
+          this._userSeatDataCache[attachment.username] = attachment.seatInfo;
+        }
       }
       
+      // ❌ HAPUS semua logic ping/pong
+      // Langsung proses pesan
       await this.handleMessage(ws, message);
     } catch(e) {
       console.error("WebSocket message error:", e);
@@ -836,6 +835,9 @@ export class ChatServer {
       if (!Array.isArray(data) || !data.length) return;
       
       const [evt, ...args] = data;
+      
+      // ❌ HAPUS semua handling ping/pong
+      // if (evt === "ping") { ... } // HAPUS INI
       
       if (evt === "chat" || evt === "updatePoint" || evt === "gift" || evt === "rollangak") {
         const room = args[0];
@@ -1378,8 +1380,6 @@ export class ChatServer {
               ws._isMulti = isMulti;
               ws._multiRoom = attachment.multiRoom || roomName;
               ws._multiSeat = attachment.multiSeat || seatNumber;
-              
-              // Cache untuk performance
               ws._cachedUsername = attachment.username;
               ws._cachedRoom = roomName;
               
@@ -1525,7 +1525,7 @@ export class ChatServer {
       
       const upgrade = req.headers.get("Upgrade");
       if (upgrade !== "websocket") {
-        return new Response("Chat Server - Hibernation API", { 
+        return new Response("Chat Server - No Ping/Pong", { 
           status: 200,
           headers: { "Cache-Control": "no-cache" }
         });
