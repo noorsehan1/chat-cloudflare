@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 5.0.20 - FIXED DICE LAST WEEK WINNER WITH WEEK
+// VERSION: 5.0.21 - ALL CACHE + KV SYNC (NO TTL)
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -331,7 +331,7 @@ class KVCache {
     this.cache = new Map();
   }
   get(key) { const entry = this.cache.get(key); return entry ? entry.value : null; }
-  set(key, value) { this.cache.set(key, { value, timestamp: Date.now() }); }
+  set(key, value) { this.cache.set(key, { value }); }
   delete(key) { this.cache.delete(key); }
   clear() { this.cache.clear(); }
   has(key) { return this.cache.has(key); }
@@ -611,23 +611,11 @@ class DiceGameSystem {
     } catch(e) { return false; }
   }
 
-  async getLastWeekWinner() {
-    try {
-      if (!this.env?.QUESTIONS) return null;
-      if (this.gameServer._cachedLastWeekWinner !== null) {
-        return this.gameServer._cachedLastWeekWinner;
-      }
-      const winnerData = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
-      this.gameServer._cachedLastWeekWinner = winnerData;
-      return winnerData;
-    } catch(e) { return null; }
-  }
-
   async deleteLastWeekWinner() {
     try {
       if (!this.env?.QUESTIONS) return false;
-      await this.env.QUESTIONS.delete(CONSTANTS.DICE_LAST_WEEK_WINNER);
       this.gameServer._cachedLastWeekWinner = null;
+      await this.env.QUESTIONS.delete(CONSTANTS.DICE_LAST_WEEK_WINNER);
       return true;
     } catch(e) { return false; }
   }
@@ -733,12 +721,9 @@ export class GameServer {
       
       this._restoreFromStorage().catch(() => {});
       this.alarmScheduler.restoreAlarms().catch(() => {});
-      
       this._loadKVData().catch(() => {});
       
-    } catch(e) {
-      console.error('[GAME] Constructor error:', e);
-    }
+    } catch(e) {}
   }
 
   async _restoreFromStorage() {
@@ -801,6 +786,11 @@ export class GameServer {
       if (this.diceGameSystem) {
         await this.diceGameSystem.pointsCache.loadFromKV(this.env);
         await this.diceGameSystem.getPoints();
+      }
+      
+      const winnerData = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
+      if (winnerData) {
+        this._cachedLastWeekWinner = winnerData;
       }
       
       const webSockets = this.state.getWebSockets();
@@ -981,6 +971,12 @@ export class GameServer {
       
       this.diceGameSystem.pointsCache.loadFromKV(this.env).then(() => {
         this.diceGameSystem.getPoints();
+      }).catch(() => {});
+      
+      this.env?.QUESTIONS?.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json').then((data) => {
+        if (data) {
+          this._cachedLastWeekWinner = data;
+        }
       }).catch(() => {});
       
       this._loadKVData().catch(() => {});
@@ -1165,6 +1161,8 @@ export class GameServer {
       const winnerData = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
       if (winnerData) {
         this._cachedLastWeekWinner = winnerData;
+      } else {
+        this._cachedLastWeekWinner = null;
       }
       
       await this.cacheManager.loadInitialData(this.env);
@@ -1432,7 +1430,7 @@ export class GameServer {
 
       if (evt === "getDiceLastWeekWinner") {
         try {
-          const result = await this._getLastWeekWinnerAndReset();
+          const result = this._getLastWeekWinnerAndReset();
           if (result?.username) {
             this._safeSend(ws, ["diceLastWeekWinner", result.username, result.score || 0, result.week || ""]);
           } else {
@@ -1450,8 +1448,6 @@ export class GameServer {
           
           if (!this.diceGameSystem) {
             this.diceGameSystem = new DiceGameSystem(this);
-            await this.diceGameSystem.pointsCache.loadFromKV(this.env);
-            await this.diceGameSystem.getPoints();
           }
           
           const leaderboard = this.diceGameSystem.getLeaderboard(limit);
@@ -1472,10 +1468,13 @@ export class GameServer {
 
       if (evt === "deleteDiceLastWeekWinner") {
         try {
-          const success = await this.diceGameSystem.deleteLastWeekWinner();
-          this._safeSend(ws, ["diceLastWeekWinnerDeleted", success, success ? "Deleted" : "Failed"]);
-          if (success) this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "Last week winner deleted"]);
-        } catch(e) { this._safeSend(ws, ["diceLastWeekWinnerDeleted", false, e.message]); }
+          this._cachedLastWeekWinner = null;
+          await this.env.QUESTIONS.delete(CONSTANTS.DICE_LAST_WEEK_WINNER);
+          this._safeSend(ws, ["diceLastWeekWinnerDeleted", true, "Deleted"]);
+          this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "Last week winner deleted"]);
+        } catch(e) { 
+          this._safeSend(ws, ["diceLastWeekWinnerDeleted", false, e.message]); 
+        }
         return;
       }
 
@@ -1972,15 +1971,6 @@ export class GameServer {
       if (this._cachedLastWeekWinner !== null) {
         return this._cachedLastWeekWinner;
       }
-      
-      if (this.env?.QUESTIONS) {
-        const winnerData = this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
-        if (winnerData) {
-          this._cachedLastWeekWinner = winnerData;
-          return winnerData;
-        }
-      }
-      
       return null;
     } catch(e) { 
       return null; 
