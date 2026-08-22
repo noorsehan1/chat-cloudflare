@@ -1,5 +1,5 @@
-// ==================== GAME-SERVER-HIBERNATION-FULL.js ====================
-// VERSION: 6.2.0 - FULL HIBERNATION API WITH CACHE STORAGE
+// ==================== GAME-SERVER-HIBERNATION-FULL-FIXED.js ====================
+// VERSION: 6.3.0 - FULL HIBERNATION API WITH FIXED ALARM & DICE STATE
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -785,6 +785,20 @@ export class GameServer {
         }
       }
       
+      // ============================================================
+      // ✅ 7. RESTORE DICE STATE DARI STORAGE (FIXED)
+      // ============================================================
+      const diceState = await this.ctx.storage.get('diceState');
+      if (diceState) {
+        this.currentDiceRoll = diceState.currentDiceRoll || null;
+        this._diceRound = diceState._diceRound || 0;
+        this.diceAutoEnabled = diceState.diceAutoEnabled || false;
+        this._diceStartTime = diceState._diceStartTime || null;
+        this._canSubmitDiceAnswer = diceState._canSubmitDiceAnswer || false;
+        this._isShowingDice = diceState._isShowingDice || false;
+        this._diceTimeUpCooldown = diceState._diceTimeUpCooldown || false;
+      }
+      
     } catch(e) {
       console.error('Restore cache error:', e);
     }
@@ -814,6 +828,25 @@ export class GameServer {
       await this.env.QUESTIONS.put(key, JSON.stringify(winners));
       return true;
     } catch(e) { return false; }
+  }
+
+  // ============================================================
+  // ✅ SAVE DICE STATE KE STORAGE (FIXED)
+  // ============================================================
+  async _saveDiceState() {
+    try {
+      const diceState = {
+        currentDiceRoll: this.currentDiceRoll,
+        _diceRound: this._diceRound,
+        diceAutoEnabled: this.diceAutoEnabled,
+        _diceStartTime: this._diceStartTime,
+        _canSubmitDiceAnswer: this._canSubmitDiceAnswer,
+        _isShowingDice: this._isShowingDice,
+        _diceTimeUpCooldown: this._diceTimeUpCooldown,
+        timestamp: Date.now()
+      };
+      await this.ctx.storage.put('diceState', diceState);
+    } catch(e) {}
   }
 
   _initLazy() {
@@ -908,50 +941,67 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ ALARM
+  // ✅ ALARM - FIXED
   // ============================================================
   async alarm() {
+    // ✅ FIX 1: Cek closing/isDestroyed
+    if (this.closing || this.isDestroyed) return;
+    
     try {
       await this.alarmScheduler.restoreAlarms();
       
       const pendingAlarms = await this.alarmScheduler.getPendingAlarms();
       
       for (const alarm of pendingAlarms) {
-        switch(alarm.name) {
-          case CONSTANTS.WEEKLY_RESET_ALARM:
-            await this._handleWeeklyReset();
-            break;
-            
-          case 'dice_session_start':
-            if (this.alarmScheduler.isDiceTime()) {
-              this.diceAutoEnabled = true;
-              if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
-                break;
+        // ✅ FIX 2: Error handling per alarm
+        try {
+          switch(alarm.name) {
+            case CONSTANTS.WEEKLY_RESET_ALARM:
+              await this._handleWeeklyReset();
+              break;
+              
+            case 'dice_session_start':
+              if (this.alarmScheduler.isDiceTime()) {
+                this.diceAutoEnabled = true;
+                if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
+                  break;
+                }
+                if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) {
+                  break;
+                }
+                const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
+                if (clients && clients.size > 0) {
+                  this._startDiceFast();
+                }
               }
-              if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) {
-                break;
+              break;
+              
+            case 'dice_session_end':
+              this.diceAutoEnabled = false;
+              if (this.currentDiceRoll || this._isShowingDice) {
+                this._endDiceRound();
               }
-              const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
-              if (clients && clients.size > 0) {
-                this._startDiceFast();
-              }
-            }
-            break;
-            
-          case 'dice_session_end':
-            this.diceAutoEnabled = false;
-            if (this.currentDiceRoll || this._isShowingDice) {
-              this._endDiceRound();
-            }
-            break;
+              break;
+          }
+          
+          await this.alarmScheduler.processAlarm(alarm.name);
+        } catch(e) {
+          console.error(`Alarm ${alarm.name} error:`, e);
+          // Tetap lanjut ke alarm berikutnya
         }
-        
-        await this.alarmScheduler.processAlarm(alarm.name);
       }
       
       await this.alarmScheduler.scheduleAlarms();
       
-    } catch(e) {}
+    } catch(e) {
+      console.error('Alarm processing error:', e);
+      // Tetap coba reschedule
+      try {
+        await this.alarmScheduler.scheduleAlarms();
+      } catch(err) {
+        console.error('Failed to reschedule alarms:', err);
+      }
+    }
   }
 
   _getCurrentWeek() {
@@ -2925,6 +2975,9 @@ export class GameServer {
     }
   }
 
+  // ============================================================
+  // ✅ DICE - DENGAN SAVE STATE
+  // ============================================================
   _startDiceFast() {
     try {
       if (this._diceLock || this.currentDiceRoll || this._isShowingDice) return;
@@ -2941,6 +2994,9 @@ export class GameServer {
       this._playerAnswers = new Map();
       this.diceHasWinner = false;
       this.diceWinner = null;
+      
+      // ✅ SAVE DICE STATE KE STORAGE
+      this._saveDiceState();
       
       this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceRoll", { 
         value, 
@@ -3054,6 +3110,9 @@ export class GameServer {
       this._diceLock = false;
       this._diceTimeUpCooldown = true;
       
+      // ✅ SAVE DICE STATE KE STORAGE
+      this._saveDiceState();
+      
       if (this._diceCooldownTimer) {
         clearTimeout(this._diceCooldownTimer);
       }
@@ -3061,6 +3120,9 @@ export class GameServer {
         this._diceTimeUpCooldown = false;
         this._diceNotifiedFlags = { 20: false, 10: false, 5: false, timeup: false };
         this._lastSentRemaining = -1;
+        
+        // ✅ SAVE DICE STATE KE STORAGE
+        this._saveDiceState();
         
         if (this.alarmScheduler.isDiceTime()) {
           const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
@@ -3087,6 +3149,10 @@ export class GameServer {
       this._tieAnswers = new Map();
       const id = `tie_${Date.now()}`;
       this._tieBreakers.set(id, { players, round: 0, winner: null, status: 'waiting' });
+      
+      // ✅ SAVE DICE STATE KE STORAGE
+      this._saveDiceState();
+      
       await this._runTieRound(room, id, players);
     } finally {
       setTimeout(() => { this._tieLock = false; }, 2000);
@@ -3119,6 +3185,9 @@ export class GameServer {
     this.diceHasWinner = false;
     this.diceWinner = null;
     
+    // ✅ SAVE DICE STATE KE STORAGE
+    this._saveDiceState();
+    
     this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", 
       `♡ Tie Round ${this._tieRound}: ${players.join(', ')}`
     ]);
@@ -3144,6 +3213,9 @@ export class GameServer {
         this._canSubmitDiceAnswer = false;
         this._isShowingDice = false;
         this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "TIME UP"]);
+        
+        // ✅ SAVE DICE STATE KE STORAGE
+        this._saveDiceState();
         
         for (const timeout of this._tieNotificationTimeouts) {
           clearTimeout(timeout);
@@ -3286,6 +3358,10 @@ export class GameServer {
       this._lastSentRemaining = -1;
       this._lastNotificationKey = "";
       this._lastNotificationTime = 0;
+      
+      // ✅ SAVE DICE STATE KE STORAGE
+      this._saveDiceState();
+      
       if (this.alarmScheduler.isDiceTime()) {
         const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
         if (clients && clients.size > 0) {
@@ -3308,6 +3384,9 @@ export class GameServer {
     this._playerAnswers = new Map();
     this.diceHasWinner = false;
     this.diceWinner = null;
+    
+    // ✅ SAVE DICE STATE KE STORAGE
+    this._saveDiceState();
     
     if (this._tieTimer) {
       this._clearTimer(this._tieTimer);
@@ -3439,6 +3518,9 @@ export class GameServer {
       if (this.isDestroyed) return;
       this.isDestroyed = true;
       this.closing = true;
+      
+      // ✅ SAVE DICE STATE TERAKHIR
+      await this._saveDiceState();
       
       for (const timer of this._allTimers) {
         try { clearTimeout(timer); clearInterval(timer); } catch(e) {}
