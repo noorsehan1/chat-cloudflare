@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 5.0.16 - FULL HYBERNATE API (ALARM TEPAT WAKTU)
+// VERSION: 5.0.17 - OPTIMIZED CACHE (NO TTL, CACHE ONLY)
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -116,7 +116,6 @@ class AlarmScheduler {
       }
       
       if (nextSession) {
-        // ✅ ALARM TEPAT WAKTU - TANPA 30 DETIK
         let startDelay = minDiff * 60 * 1000;
         if (startDelay < 0) startDelay = 0;
         await this._scheduleAlarm('dice_session_start', startDelay);
@@ -365,7 +364,7 @@ class CacheManager {
         count = parseInt(String(roomWinners[username]).replace("x", "").replace("X", "")) || 0;
       }
       roomWinners[username] = (count + 1) + "x";
-      this.winnersCache.set(room, { winners: roomWinners, timestamp: Date.now() });
+      this.winnersCache.set(room, { winners: roomWinners });
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       await env.QUESTIONS.put(key, JSON.stringify(roomWinners));
       return true;
@@ -400,7 +399,7 @@ class CacheManager {
       if (!env?.QUESTIONS) return;
       const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
       const winners = await env.QUESTIONS.get(key, 'json') || {};
-      this.winnersCache.set(room, { winners, timestamp: Date.now() });
+      this.winnersCache.set(room, { winners });
     } catch(e) {}
   }
 
@@ -423,19 +422,21 @@ class DicePointsCache {
     this._updateLocks = new Map();
   }
 
+  // LANGSUNG AMBIL DARI CACHE, TIDAK CEK TTL
   getPoints() {
     const cached = this.pointsCache.get('points');
     if (cached) return cached.data;
     return null;
   }
 
+  // SIMPAN LANGSUNG KE CACHE DAN KV
   async setPoints(points, env) {
     if (!env?.QUESTIONS) return false;
     const lockKey = 'dice_points_update';
     if (this._updateLocks.has(lockKey)) return false;
     this._updateLocks.set(lockKey, Date.now());
     try {
-      this.pointsCache.set('points', { data: points, timestamp: Date.now() });
+      this.pointsCache.set('points', { data: points });
       this.leaderboardCache.delete('leaderboard');
       await env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify(points));
       return true;
@@ -447,6 +448,7 @@ class DicePointsCache {
     }
   }
 
+  // TAMBAH POIN USER, SIMPAN LANGSUNG KE CACHE DAN KV
   async addPointToUser(username, env) {
     if (!username || !env?.QUESTIONS) return false;
     const lockKey = `dice_point_${username}`;
@@ -455,33 +457,35 @@ class DicePointsCache {
     try {
       let points = this.getPoints();
       if (!points) {
-        points = await env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
+        return false;
       }
       points[username] = (points[username] || 0) + 1;
-      this.pointsCache.set('points', { data: points, timestamp: Date.now() });
+      this.pointsCache.set('points', { data: points });
       this.leaderboardCache.delete('leaderboard');
       await env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify(points));
       return points[username];
     } catch(e) {
-      await this._reloadFromKV(env);
       return false;
     } finally {
       this._updateLocks.delete(lockKey);
     }
   }
 
+  // AMBIL LEADERBOARD DARI CACHE
   getLeaderboard(limit = 10) {
     const cached = this.leaderboardCache.get('leaderboard');
     if (cached) return cached.data.slice(0, limit);
+    
     const points = this.getPoints();
     if (points) {
       const sorted = Object.entries(points).sort((a, b) => b[1] - a[1]);
-      this.leaderboardCache.set('leaderboard', { data: sorted, timestamp: Date.now() });
+      this.leaderboardCache.set('leaderboard', { data: sorted });
       return sorted.slice(0, limit);
     }
     return [];
   }
 
+  // RESET POIN
   async resetPoints(env) {
     if (!env?.QUESTIONS) return false;
     const lockKey = 'dice_points_reset';
@@ -496,12 +500,15 @@ class DicePointsCache {
     finally { this._updateLocks.delete(lockKey); }
   }
 
-  async _reloadFromKV(env) {
+  // LOAD SEMUA DATA DARI KV KE CACHE
+  async loadFromKV(env) {
     try {
-      if (!env?.QUESTIONS) return;
+      if (!env?.QUESTIONS) return false;
       const points = await env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
-      this.pointsCache.set('points', { data: points, timestamp: Date.now() });
-    } catch(e) {}
+      this.pointsCache.set('points', { data: points });
+      this.leaderboardCache.delete('leaderboard');
+      return true;
+    } catch(e) { return false; }
   }
 
   clear() {
@@ -521,6 +528,7 @@ class DiceGameSystem {
     this.pointsCache = new DicePointsCache();
   }
 
+  // LANGSUNG AMBIL DARI CACHE
   async getPoints() {
     try {
       let points = this.pointsCache.getPoints();
@@ -531,14 +539,7 @@ class DiceGameSystem {
         }
         return points;
       }
-      if (!this.env?.QUESTIONS) return {};
-      points = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
-      await this.pointsCache.setPoints(points, this.env);
-      this.userScores.clear();
-      for (const [username, score] of Object.entries(points)) {
-        this.userScores.set(username, score);
-      }
-      return points;
+      return {};
     } catch(e) { return {}; }
   }
 
@@ -583,6 +584,7 @@ class DiceGameSystem {
     try {
       if (this._isLoaded) return true;
       if (!this.env?.QUESTIONS) return false;
+      await this.pointsCache.loadFromKV(this.env);
       await this.getPoints();
       this._isLoaded = true;
       return true;
@@ -710,10 +712,7 @@ export class GameServer {
       
       this._lastNotifTime = {};
       
-      // RESTORE STATE DARI STORAGE
       this._restoreFromStorage().catch(() => {});
-      
-      // RESTORE ALARM DARI STORAGE
       this.alarmScheduler.restoreAlarms().catch(() => {});
       
     } catch(e) {
@@ -785,9 +784,10 @@ export class GameServer {
         }
       }
       
-      if (stateData.dicePoints && this.diceGameSystem) {
-        await this.diceGameSystem.pointsCache.setPoints(stateData.dicePoints, this.env);
-        await this.diceGameSystem.loadScores();
+      // LOAD DATA DICE POINTS DARI KV KE CACHE SAAT DEPLOY/RESTORE
+      if (this.diceGameSystem) {
+        await this.diceGameSystem.pointsCache.loadFromKV(this.env);
+        await this.diceGameSystem.getPoints();
       }
       
       const webSockets = this.state.getWebSockets();
@@ -980,6 +980,11 @@ export class GameServer {
         this.diceGameSystem = new DiceGameSystem(this);
       }
       
+      // LOAD DATA DARI KV KE CACHE SAAT INIT
+      this.diceGameSystem.pointsCache.loadFromKV(this.env).then(() => {
+        this.diceGameSystem.getPoints();
+      }).catch(() => {});
+      
       this._loadKVData().catch(() => {});
       this.alarmScheduler.scheduleAlarms().catch(() => {});
       
@@ -1118,7 +1123,9 @@ export class GameServer {
         this._cachedResetWeek = currentWeek;
         this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_RESET_WEEK, currentWeek).catch(() => {});
       }
-      await this.diceGameSystem.loadScores();
+      // LOAD DICE POINTS DARI KV KE CACHE
+      await this.diceGameSystem.pointsCache.loadFromKV(this.env);
+      await this.diceGameSystem.getPoints();
       await this.cacheManager.loadInitialData(this.env);
     } catch(e) {}
   }
