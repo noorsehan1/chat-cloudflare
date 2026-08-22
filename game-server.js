@@ -1,5 +1,5 @@
-// ==================== GAME-SERVER-HIBERNATION-FULL.JS ====================
-// VERSION: 6.0.0 - FULL HIBERNATION API (NO LOGIC CHANGES)
+// ==================== GAME-SERVER-HIBERNATION-FULL.js ====================
+// VERSION: 6.2.0 - FULL HIBERNATION API WITH CACHE STORAGE
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -595,25 +595,31 @@ export class GameServer {
     try {
       this.state = state;
       this.env = env;
-      this.ctx = state; // ✅ KUNCI: Gunakan ctx dari state untuk hibernasi
+      this.ctx = state;
       this.closing = false;
       this.isDestroyed = false;
       this._initialized = false;
       this._startTime = Date.now();
       this._wsIdCounter = 0;
       
+      // ===== CACHE (AKAN DIRESTORE DARI STORAGE) =====
       this.cacheManager = new CacheManager();
+      this.diceGameSystem = new DiceGameSystem(this);
+      this.alarmScheduler = new AlarmScheduler(env, state);
+      this._cachedLastWeekWinner = null;
+      this._kvCache = new KVCache();
       
+      // ===== MEMORY CACHE (AKAN HILANG SAAT HIBERNASI) =====
       this.activeGames = new Map();
       this.wsMap = new Map();
       this.wsClients = new Map();
       this.clientRooms = new Map();
       this.userConnections = new Map();
+      this._eventQueue = [];
+      this._allTimers = new Set();
+      this._lastNotifTime = {};
       
-      this.alarmScheduler = new AlarmScheduler(env, state);
-      
-      this.diceGameSystem = new DiceGameSystem(this);
-      
+      // ===== DICE STATE =====
       this.currentDiceRoll = null;
       this._diceLock = false;
       this._tieActive = false;
@@ -641,6 +647,7 @@ export class GameServer {
       this._canSubmitDiceAnswer = false;
       this._diceRound = 0;
       
+      // ===== TIE STATE =====
       this._tieBreakers = new Map();
       this._tieRound = 0;
       this._tiePlayers = [];
@@ -650,38 +657,32 @@ export class GameServer {
       this._tieLock = false;
       this._tieNotificationTimeouts = [];
       
-      this._eventQueue = [];
-      this._isProcessingQueue = false;
-      this._allTimers = new Set();
+      // ===== LOCKS =====
       this._gameLocks = new Map();
       this._joinLocks = new Map();
       this._cleanupTimers = new Map();
       this._switchLocks = new Map();
       this._switchRetries = new Map();
-      
       this._evaluationLocks = new Map();
       this._gameOperationLocks = new Map();
       this._drawLocks = new Map();
       this._cleanupLocks = new Map();
       
+      // ===== RATE LIMIT =====
       this._requestCount = 0;
       this._lastResetTime = Date.now();
       this._circuitOpen = false;
       this._errorCount = 0;
       this._lastErrorReset = Date.now();
-      
       this._reconnectAttempts = new Map();
       
-      this._cachedLastWeekWinner = null;
-      this._kvCache = new KVCache();
       this.DICE_ROOM = CONSTANTS.DICE_ROOM;
       
-      this._lastNotifTime = {};
-      
-      // ✅ RESTORE WEBSOCKET DARI HIBERNASI
-      this._restoreWebSockets().then(() => {
+      // ============================================================
+      // ✅ RESTORE SEMUA CACHE DARI STORAGE
+      // ============================================================
+      this._restoreAllCache().then(() => {
         this.alarmScheduler.scheduleAlarms().catch(() => {});
-        this._loadKVData().catch(() => {});
         this._initLazy();
       });
       
@@ -689,10 +690,11 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ RESTORE WEBSOCKET DARI HIBERNASI
+  // ✅ RESTORE SEMUA CACHE DARI STORAGE
   // ============================================================
-  async _restoreWebSockets() {
+  async _restoreAllCache() {
     try {
+      // 1. RESTORE WEBSOCKET (OTOMATIS DARI ATTACHMENT)
       const webSockets = this.ctx.getWebSockets();
       for (const ws of webSockets) {
         try {
@@ -726,7 +728,92 @@ export class GameServer {
           }
         } catch(e) {}
       }
-    } catch(e) {}
+      
+      // 2. RESTORE RECORDING STATUS DARI KV
+      if (this.env?.QUESTIONS) {
+        const rooms = ["LowCard", "Quiz", "Gacor", "General", "LOVE BIRDS", "Birthday Party", "Sweet Memories", "Lounge Talk", "Noxxeliverothcifsa", "BESTIES", "Happy Vibes", "The Chatter Room"];
+        for (const room of rooms) {
+          try {
+            const key = CONSTANTS.LOWCARD_RECORDING_KEY + room;
+            const status = await this.env.QUESTIONS.get(key);
+            if (status === 'true') {
+              this.cacheManager.recordingStatus.set(room, true);
+            } else {
+              this.cacheManager.recordingStatus.set(room, false);
+            }
+          } catch(e) {}
+        }
+      }
+      
+      // 3. RESTORE WINNERS DARI KV
+      if (this.env?.QUESTIONS) {
+        const rooms = ["LowCard", "Quiz", "Gacor", "General", "LOVE BIRDS", "Birthday Party", "Sweet Memories", "Lounge Talk", "Noxxeliverothcifsa", "BESTIES", "Happy Vibes", "The Chatter Room"];
+        for (const room of rooms) {
+          try {
+            const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
+            const winners = await this.env.QUESTIONS.get(key, 'json') || {};
+            if (Object.keys(winners).length > 0) {
+              this.cacheManager.winnersCache.set(room, { winners });
+            }
+          } catch(e) {}
+        }
+      }
+      
+      // 4. RESTORE DICE POINTS DARI KV
+      if (this.diceGameSystem) {
+        await this.diceGameSystem.pointsCache.loadFromKV(this.env);
+        await this.diceGameSystem.getPoints();
+      }
+      
+      // 5. RESTORE LAST WEEK WINNER DARI KV
+      if (this.env?.QUESTIONS) {
+        try {
+          const winnerData = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
+          if (winnerData) {
+            this._cachedLastWeekWinner = winnerData;
+          } else {
+            this._cachedLastWeekWinner = null;
+          }
+        } catch(e) {}
+      }
+      
+      // 6. RESTORE ALARM
+      if (!this.closing && !this.isDestroyed) {
+        const existingAlarm = await this.ctx.storage.getAlarm();
+        if (!existingAlarm) {
+          await this.alarmScheduler.scheduleAlarms();
+        }
+      }
+      
+    } catch(e) {
+      console.error('Restore cache error:', e);
+    }
+  }
+
+  // ============================================================
+  // ✅ SAVE CACHE KE STORAGE
+  // ============================================================
+  
+  async _saveRecordingStatus(room, enabled) {
+    try {
+      if (!this.env?.QUESTIONS) return false;
+      const key = CONSTANTS.LOWCARD_RECORDING_KEY + room;
+      if (enabled) {
+        await this.env.QUESTIONS.put(key, 'true');
+      } else {
+        await this.env.QUESTIONS.delete(key);
+      }
+      return true;
+    } catch(e) { return false; }
+  }
+
+  async _saveWinners(room, winners) {
+    try {
+      if (!this.env?.QUESTIONS) return false;
+      const key = CONSTANTS.LOWCARD_WINNER_KEY + room;
+      await this.env.QUESTIONS.put(key, JSON.stringify(winners));
+      return true;
+    } catch(e) { return false; }
   }
 
   _initLazy() {
@@ -748,7 +835,6 @@ export class GameServer {
         }
       }).catch(() => {});
       
-      this._loadKVData().catch(() => {});
       this.alarmScheduler.scheduleAlarms().catch(() => {});
       
       setTimeout(() => {
@@ -900,8 +986,13 @@ export class GameServer {
           week: currentWeek,
           timestamp: Date.now() 
         };
+        
+        // ✅ UPDATE CACHE
         this._cachedLastWeekWinner = winnerData;
+        
+        // ✅ SIMPAN KE STORAGE
         await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_WEEK_WINNER, JSON.stringify(winnerData));
+        
         this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceLastWeekWinner", winner, highestScore, currentWeek]);
       } else {
         this._cachedLastWeekWinner = null;
@@ -911,26 +1002,6 @@ export class GameServer {
       await this.diceGameSystem.resetPoints();
       this.diceGameSystem.clearCache();
       
-    } catch(e) {}
-  }
-
-  async _loadKVData() {
-    try {
-      if (this.closing || this.isDestroyed || !this.env?.QUESTIONS) return;
-      
-      if (this.diceGameSystem) {
-        await this.diceGameSystem.pointsCache.loadFromKV(this.env);
-        await this.diceGameSystem.getPoints();
-      }
-      
-      const winnerData = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
-      if (winnerData) {
-        this._cachedLastWeekWinner = winnerData;
-      } else {
-        this._cachedLastWeekWinner = null;
-      }
-      
-      await this.cacheManager.loadInitialData(this.env);
     } catch(e) {}
   }
 
@@ -997,7 +1068,6 @@ export class GameServer {
       
       const url = new URL(req.url);
       
-      // ✅ WebSocket Upgrade dengan Hibernation API
       if (url.pathname === "/game/ws") {
         const upgrade = req.headers.get("Upgrade");
         if (upgrade !== "websocket") {
@@ -1005,24 +1075,18 @@ export class GameServer {
         }
         
         if (this.wsMap.size >= CONSTANTS.MAX_WS_CLIENTS) {
-          return new Response("Server at maximum capacity", { 
-            status: 503,
-            headers: { 'Retry-After': '10', 'Content-Type': 'text/plain' }
-          });
+          return new Response("Server full", { status: 503 });
         }
         
         if (this._eventQueue?.length > 500) {
-          return new Response("Server busy", { 
-            status: 503,
-            headers: { 'Retry-After': '5', 'Content-Type': 'text/plain' }
-          });
+          return new Response("Server busy", { status: 503 });
         }
         
         const pair = new WebSocketPair();
         const [client, server] = [pair[0], pair[1]];
         const wsId = ++this._wsIdCounter;
         
-        // ✅ KUNCI HIBERNASI: Gunakan ctx.acceptWebSocket
+        // ✅ KUNCI HIBERNASI
         try {
           this.ctx.acceptWebSocket(server);
         } catch(e) {
@@ -1030,7 +1094,7 @@ export class GameServer {
           return new Response("WebSocket acceptance failed", { status: 500 });
         }
         
-        // ✅ Simpan state di attachment
+        // ✅ SIMPAN DI ATTACHMENT
         server.serializeAttachment({
           wsId: wsId,
           username: null,
@@ -1069,14 +1133,14 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ WEBSOCKET EVENT HANDLERS (DIPANGGIL OTOMATIS CLOUDFLARE)
+  // ✅ WEBSOCKET EVENT HANDLERS
   // ============================================================
   
   async webSocketMessage(ws, message) {
     if (!ws || ws._closing || this.closing || this.isDestroyed) return;
     
     try {
-      // ✅ Restore state dari attachment saat bangun dari hibernasi
+      // ✅ RESTORE STATE DARI ATTACHMENT
       let attachment = null;
       try {
         attachment = ws.deserializeAttachment();
@@ -1111,9 +1175,10 @@ export class GameServer {
   async webSocketClose(ws, code, reason, wasClean) {
     if (!ws) return;
     try {
-      const username = ws.username;
-      const room = ws.room || ws.roomname;
-      const wsId = ws._wsId;
+      const attachment = ws.deserializeAttachment();
+      const username = attachment?.username;
+      const room = attachment?.room;
+      const wsId = attachment?.wsId;
       
       if (username) {
         this.userConnections.delete(username);
@@ -1153,9 +1218,10 @@ export class GameServer {
   async webSocketError(ws, error) {
     if (!ws) return;
     try {
-      const username = ws.username;
-      const room = ws.room || ws.roomname;
-      const wsId = ws._wsId;
+      const attachment = ws.deserializeAttachment();
+      const username = attachment?.username;
+      const room = attachment?.room;
+      const wsId = attachment?.wsId;
       
       if (username) {
         this.userConnections.delete(username);
@@ -1193,7 +1259,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ SWITCH ROOM - DENGAN ATTACHMENT UPDATE
+  // ✅ SWITCH ROOM - UPDATE ATTACHMENT
   // ============================================================
   async switchRoom(ws, room, username = null) {
     try {
@@ -1314,7 +1380,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // SEMUA METHOD LAINNYA TETAP SAMA PERSIS
+  // ✅ SEMUA METHOD LAINNYA TETAP SAMA
   // ============================================================
   
   async _processWithTimeout(ws, data, timeoutMs = 500) {
@@ -1545,6 +1611,9 @@ export class GameServer {
     } catch(e) {}
   }
 
+  // ============================================================
+  // ✅ RECORDING - DENGAN STORAGE
+  // ============================================================
   async _startRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
@@ -1552,11 +1621,15 @@ export class GameServer {
         this._broadcastToRoom(roomName, ["recordingStatus", true]);
         return true;
       }
-      const success = await this.cacheManager.setRecordingStatus(roomName, true, this.env);
-      if (success) {
-        this._broadcastToRoom(roomName, ["recordingStatus", true]);
-      }
-      return success;
+      
+      // ✅ UPDATE CACHE
+      this.cacheManager.recordingStatus.set(roomName, true);
+      
+      // ✅ SIMPAN KE STORAGE
+      await this._saveRecordingStatus(roomName, true);
+      
+      this._broadcastToRoom(roomName, ["recordingStatus", true]);
+      return true;
     } catch(e) { return false; }
   }
 
@@ -1568,18 +1641,41 @@ export class GameServer {
         this._broadcastToRoom(room, ["recordingStatus", false]);
         return true;
       }
-      const success = await this.cacheManager.setRecordingStatus(room, false, this.env);
-      if (success) {
-        this.cacheManager.winnersCache.delete(room);
-        this._broadcastToRoom(room, ["recordingStatus", false]);
-        this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners: {}, room, recording: false }]);
-      }
-      return success;
+      
+      // ✅ UPDATE CACHE
+      this.cacheManager.recordingStatus.set(room, false);
+      this.cacheManager.winnersCache.delete(room);
+      
+      // ✅ HAPUS DARI STORAGE
+      await this._saveRecordingStatus(room, false);
+      await this._saveWinners(room, {});
+      
+      this._broadcastToRoom(room, ["recordingStatus", false]);
+      this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners: {}, room, recording: false }]);
+      return true;
     } catch(e) { return false; }
   }
 
   async _addLowCardWinner(room, username) {
-    return await this.cacheManager.addWinner(room, username, this.env);
+    try {
+      if (!room || !username || room === CONSTANTS.DICE_ROOM) return false;
+      if (!this.cacheManager.getRecordingStatus(room)) return false;
+      if (!this.env?.QUESTIONS) return false;
+      
+      // ✅ UPDATE CACHE
+      let roomWinners = this.cacheManager.getWinners(room);
+      let count = 0;
+      if (roomWinners[username]) {
+        count = parseInt(String(roomWinners[username]).replace("x", "").replace("X", "")) || 0;
+      }
+      roomWinners[username] = (count + 1) + "x";
+      this.cacheManager.winnersCache.set(room, { winners: roomWinners });
+      
+      // ✅ SIMPAN KE STORAGE
+      await this._saveWinners(room, roomWinners);
+      
+      return true;
+    } catch(e) { return false; }
   }
 
   async _broadcastLowCardWinners(room) {
@@ -3290,63 +3386,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  webSocketClose(ws) {
-    try {
-      if (!ws) return;
-      ws._closing = true;
-      try { ws.removeAllListeners(); } catch(e) {}
-      const username = ws.username;
-      if (username) {
-        const attempts = this._reconnectAttempts.get(username) || { count: 0, lastAttempt: 0 };
-        attempts.count++;
-        attempts.lastAttempt = Date.now();
-        this._reconnectAttempts.set(username, attempts);
-      }
-      const wsId = ws._wsId;
-      const room = ws.room || ws.roomname || this.clientRooms.get(wsId);
-      if (room) this._removeClientFromRoom(room, wsId);
-      if (wsId) {
-        this.clientRooms.delete(wsId);
-        this.wsMap.delete(wsId);
-      }
-      if (username) {
-        const conn = this.userConnections.get(username);
-        if (conn?.wsId === wsId) this.userConnections.delete(username);
-        if (room) { this._broadcastToRoom(room, ["userLeftRoom", username, room]); }
-      }
-      ws.room = null;
-      ws.roomname = null;
-      ws._wsId = null;
-      ws.username = null;
-      ws._closing = true;
-    } catch(e) {}
-  }
-
-  webSocketError(ws) {
-    try {
-      if (!ws) return;
-      ws._closing = true;
-      try { ws.removeAllListeners(); } catch(e) {}
-      const wsId = ws._wsId;
-      const username = ws.username;
-      const room = ws.room || ws.roomname || this.clientRooms.get(wsId);
-      if (room) this._removeClientFromRoom(room, wsId);
-      if (wsId) {
-        this.clientRooms.delete(wsId);
-        this.wsMap.delete(wsId);
-      }
-      if (username) {
-        const conn = this.userConnections.get(username);
-        if (conn?.wsId === wsId) this.userConnections.delete(username);
-      }
-      ws.room = null;
-      ws.roomname = null;
-      ws._wsId = null;
-      ws.username = null;
-      ws._closing = true;
-    } catch(e) {}
-  }
-
   forceStartDice() {
     try {
       if (this._tieActive) return false;
@@ -3480,6 +3519,11 @@ export class GameServer {
       this.wsMap.clear();
       this.wsClients.clear();
       this.clientRooms.clear();
+      
+      // Hapus alarm
+      try {
+        await this.ctx.storage.deleteAlarm();
+      } catch(e) {}
       
     } catch(e) {}
   }
