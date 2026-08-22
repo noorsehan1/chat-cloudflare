@@ -1,5 +1,5 @@
 // ==================== INDEX.JS - CONNECTION ONLY ====================
-// VERSION: 3.3.2 - CONNECTION ONLY
+// VERSION: 3.3.3 - NO HEALTH CHECK
 
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
@@ -24,11 +24,12 @@ export default {
         return obj.fetch(request);
       }
       
-      if (pathname === "/game/health") {
-        const id = env.GAME_SERVER.idFromName("game");
-        const obj = env.GAME_SERVER.get(id);
-        return obj.fetch(request);
-      }
+      // ❌ HAPUS BAGIAN INI
+      // if (pathname === "/game/health") {
+      //   const id = env.GAME_SERVER.idFromName("game");
+      //   const obj = env.GAME_SERVER.get(id);
+      //   return obj.fetch(request);
+      // }
       
       // ========== ROOT ==========
       return new Response("Server running", { 
