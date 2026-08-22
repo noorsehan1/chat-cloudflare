@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 5.0.22 - NO DURABLE STORAGE (ONLY KV + ALARM)
+// VERSION: 5.0.23 - FULLY COMPATIBLE WITH CLIENT JAVA
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -854,8 +854,6 @@ export class GameServer {
       
       await this.diceGameSystem.resetPoints();
       this.diceGameSystem.clearCache();
-      
-      this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceReset", { winner, score: highestScore, week: currentWeek }]);
       
     } catch(e) {}
   }
