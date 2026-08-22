@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER.JS ====================
-// VERSION: 5.0.18 - WEEKLY RESET EVERY MONDAY 00:00 UTC
+// VERSION: 5.0.19 - FIXED DICE LEADERBOARD & INITIALIZATION
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -665,7 +665,9 @@ export class GameServer {
       
       this.alarmScheduler = new AlarmScheduler(env, state);
       
-      this.diceGameSystem = null;
+      // ✅ INISIALISASI DICE GAME SYSTEM DI CONSTRUCTOR
+      this.diceGameSystem = new DiceGameSystem(this);
+      
       this.currentDiceRoll = null;
       this._diceLock = false;
       this._tieActive = false;
@@ -732,6 +734,9 @@ export class GameServer {
       
       this._restoreFromStorage().catch(() => {});
       this.alarmScheduler.restoreAlarms().catch(() => {});
+      
+      // ✅ LOAD DATA DARI KV SETELAH INIT
+      this._loadKVData().catch(() => {});
       
     } catch(e) {
       console.error('[GAME] Constructor error:', e);
@@ -976,6 +981,7 @@ export class GameServer {
         this.diceGameSystem = new DiceGameSystem(this);
       }
       
+      // LOAD DATA DARI KV KE CACHE SAAT INIT
       this.diceGameSystem.pointsCache.loadFromKV(this.env).then(() => {
         this.diceGameSystem.getPoints();
       }).catch(() => {});
@@ -1142,9 +1148,13 @@ export class GameServer {
     try {
       if (this.closing || this.isDestroyed || !this.env?.QUESTIONS) return;
       
-      await this.diceGameSystem.pointsCache.loadFromKV(this.env);
-      await this.diceGameSystem.getPoints();
+      // LOAD DICE POINTS DARI KV KE CACHE
+      if (this.diceGameSystem) {
+        await this.diceGameSystem.pointsCache.loadFromKV(this.env);
+        await this.diceGameSystem.getPoints();
+      }
       
+      // LOAD LAST WEEK WINNER DARI KV
       const winnerData = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
       if (winnerData) {
         this._cachedLastWeekWinner = winnerData;
@@ -1428,9 +1438,19 @@ export class GameServer {
       if (evt === "getDiceLeaderboard") {
         try {
           let limit = data.length > 1 && typeof data[1] === 'number' ? Math.min(data[1], 30) : 10;
+          
+          // ✅ PASTIKAN diceGameSystem TIDAK null
+          if (!this.diceGameSystem) {
+            this.diceGameSystem = new DiceGameSystem(this);
+            await this.diceGameSystem.pointsCache.loadFromKV(this.env);
+            await this.diceGameSystem.getPoints();
+          }
+          
           const leaderboard = this.diceGameSystem.getLeaderboard(limit);
           this._safeSend(ws, ["diceLeaderboard", leaderboard.map(([u, s]) => `${u}|${s}`)]);
-        } catch(e) { this._safeSend(ws, ["diceLeaderboard", []]); }
+        } catch(e) { 
+          this._safeSend(ws, ["diceLeaderboard", []]); 
+        }
         return;
       }
 
@@ -1453,6 +1473,31 @@ export class GameServer {
 
       if (evt === "getDiceStatus") {
         this._safeSend(ws, ["diceStatus", !!this.currentDiceRoll && this._canSubmitDiceAnswer, this._diceRound || 1]);
+        return;
+      }
+
+      if (evt === "getDiceNotification") {
+        try {
+          const isDiceTime = this.alarmScheduler.isDiceTime();
+          const isActive = this.currentDiceRoll && this._canSubmitDiceAnswer;
+          const timeLeft = this._getTimeLeftUntilNextDice();
+          
+          let notification = "";
+          if (isActive) {
+            const elapsed = (Date.now() - this._diceStartTime) / 1000;
+            const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
+            const remaining = Math.max(0, totalTime - elapsed);
+            notification = `${Math.floor(remaining)}s remaining`;
+          } else if (isDiceTime) {
+            notification = "Dice game starting soon...";
+          } else {
+            notification = `Next dice game in: ${timeLeft.text}`;
+          }
+          
+          this._safeSend(ws, ["diceNotification", notification]);
+        } catch(e) {
+          this._safeSend(ws, ["diceNotification", "Waiting..."]);
+        }
         return;
       }
 
