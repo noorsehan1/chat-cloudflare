@@ -1731,7 +1731,7 @@ export class GameServer {
       await this._saveAllCache();
       
       this._broadcastToRoom(room, ["recordingStatus", false]);
-      this._broadcastToRoom(room, ["lowCardWinnerUpdate", { winners: {}, room, recording: false }]);
+      
       return true;
     } catch(e) { return false; }
   }
