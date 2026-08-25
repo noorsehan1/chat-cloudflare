@@ -1049,7 +1049,6 @@ export class ChatServer {
           }
           
           if (!userSeat) {
-            this.safeSend(ws, ["activeChangedMultiError", `User ${targetUsername} tidak ditemukan`]);
             break;
           }
           
@@ -1127,7 +1126,6 @@ export class ChatServer {
           const targetUsername = args[0];
           
           if (!targetUsername) {
-            this.safeSend(ws, ["exitMultiError", "Username tidak boleh kosong"]);
             break;
           }
           
