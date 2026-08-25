@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER-HIBERNATION-NO-PING.JS ====================
-// VERSION: 9.3.0 - NO PING/PONG, WITH setTimeout 1000ms
+// VERSION: 9.4.0 - NO PING/PONG, WITH setTimeout 1000ms, FIXED MULTI RESTORE
 
 const C = {
   MAX_SEATS: 45,
@@ -80,11 +80,34 @@ export class ChatServer {
         
         if (!room || !username) {
           const attachment = ws.deserializeAttachment();
-          if (attachment && attachment.username && attachment.room) {
-            room = attachment.room;
-            username = attachment.username;
-            ws._cachedRoom = room;
-            ws._cachedUsername = username;
+          if (attachment) {
+            // 🔥 PERBAIKAN: Ambil semua data dari attachment
+            username = attachment.username || ws._cachedUsername;
+            room = attachment.room || ws._cachedRoom;
+            
+            if (username) {
+              ws._cachedUsername = username;
+              ws.username = username;
+            }
+            if (room) {
+              ws._cachedRoom = room;
+              ws.room = room;
+              ws.roomname = room;
+            }
+            
+            // 🔥 PERBAIKAN: Restore isMulti
+            if (attachment.isMulti !== undefined) {
+              ws._isMulti = attachment.isMulti;
+            }
+            if (attachment.multiRoom) {
+              ws._multiRoom = attachment.multiRoom;
+            }
+            if (attachment.multiSeat) {
+              ws._multiSeat = attachment.multiSeat;
+            }
+            if (attachment.idtarget) {
+              ws.idtarget = attachment.idtarget;
+            }
           }
         }
         
@@ -403,7 +426,10 @@ export class ChatServer {
       room: roomName,
       seat: seat,
       isMulti: false,
-      seatInfo: seatInfo
+      multiRoom: null,
+      multiSeat: null,
+      seatInfo: seatInfo,
+      idtarget: username
     });
     
     ws._cachedRoom = roomName;
@@ -427,7 +453,6 @@ export class ChatServer {
     this.safeSend(ws, ["roomUserCount", roomName, count]);
     this.broadcast(roomName, ["roomUserCount", roomName, count]);
     
-    // ✅ KEMBALIKAN setTimeout 1000ms (seperti versi awal)
     setTimeout(() => {
       try {
         if (ws && ws.readyState === 1) {
@@ -729,7 +754,7 @@ export class ChatServer {
     if (!ws || ws._closing || this.closing || this.isDestroyed) return;
     
     try {
-      // Restore state dari attachment
+      // 🔥 PERBAIKAN: Restore state lengkap dari attachment
       let attachment = null;
       try {
         attachment = ws.deserializeAttachment();
@@ -739,7 +764,7 @@ export class ChatServer {
         ws.username = attachment.username;
         ws.room = attachment.room;
         ws.roomname = attachment.room;
-        ws.idtarget = attachment.username;
+        ws.idtarget = attachment.idtarget || attachment.username;
         ws._isMulti = attachment.isMulti || false;
         ws._multiRoom = attachment.multiRoom || null;
         ws._multiSeat = attachment.multiSeat || null;
@@ -750,6 +775,18 @@ export class ChatServer {
         if (attachment.seatInfo) {
           this._userSeatDataCache[attachment.username] = attachment.seatInfo;
         }
+        
+        // 🔥 PERBAIKAN: Pastikan attachment selalu memiliki semua data
+        ws.serializeAttachment({
+          username: attachment.username,
+          room: attachment.room || ws.room,
+          seat: attachment.seat || ws._multiSeat,
+          isMulti: attachment.isMulti || ws._isMulti || false,
+          multiRoom: attachment.multiRoom || ws._multiRoom,
+          multiSeat: attachment.multiSeat || ws._multiSeat,
+          seatInfo: attachment.seatInfo || this._userSeatDataCache[attachment.username],
+          idtarget: attachment.idtarget || attachment.username
+        });
       }
       
       // ❌ HAPUS semua logic ping/pong
@@ -807,7 +844,13 @@ export class ChatServer {
     ws._cachedUsername = username;
     ws._cachedRoom = null;
     
-    ws.serializeAttachment({ username: username });
+    ws.serializeAttachment({ 
+      username: username,
+      idtarget: username,
+      isMulti: false,
+      multiRoom: null,
+      multiSeat: null
+    });
     
     if (isNewUser) { 
       this.safeSend(ws, ["joinroomawal"]); 
@@ -837,7 +880,6 @@ export class ChatServer {
       const [evt, ...args] = data;
       
       // ❌ HAPUS semua handling ping/pong
-      // if (evt === "ping") { ... } // HAPUS INI
       
       if (evt === "chat" || evt === "updatePoint" || evt === "gift" || evt === "rollangak") {
         const room = args[0];
@@ -947,7 +989,8 @@ export class ChatServer {
             isMulti: true,
             multiRoom: multiRoomname,
             multiSeat: seat,
-            seatInfo: seatInfo
+            seatInfo: seatInfo,
+            idtarget: multiUsername
           });
           
           ws._cachedUsername = multiUsername;
@@ -998,7 +1041,8 @@ export class ChatServer {
             isMulti: true,
             multiRoom: roomName,
             multiSeat: seatNumber,
-            seatInfo: { room: roomName, seat: seatNumber, isMulti: true }
+            seatInfo: { room: roomName, seat: seatNumber, isMulti: true },
+            idtarget: targetUsername
           });
           
           ws._cachedUsername = targetUsername;
@@ -1063,11 +1107,17 @@ export class ChatServer {
                   wsKey._multiRoom = null;
                   wsKey._multiSeat = null;
                   wsKey._cachedRoom = null;
-                  wsKey.serializeAttachment({ username: targetUsername });
+                  wsKey.serializeAttachment({ 
+                    username: targetUsername,
+                    idtarget: targetUsername,
+                    isMulti: false,
+                    multiRoom: null,
+                    multiSeat: null
+                  });
                   wsKey.username = targetUsername;
                   wsKey.room = null;
                   wsKey.roomname = null;
-                  wsKey.idtarget = null;
+                  wsKey.idtarget = targetUsername;
                 }
               } catch(e) {}
             }
@@ -1360,43 +1410,73 @@ export class ChatServer {
         }
       }
       
-      // Restore WebSocket yang masih aktif
+      // 🔥 PERBAIKAN: Restore WebSocket yang masih aktif dengan state lengkap
       const webSockets = this.ctx.getWebSockets();
       for (const ws of webSockets) {
         try {
-          const attachment = ws.deserializeAttachment();
-          if (attachment && attachment.username) {
-            const userSeat = this._userSeatDataCache[attachment.username];
-            if (userSeat) {
-              const isMulti = attachment.isMulti || userSeat.isMulti || false;
-              const roomName = attachment.room || userSeat.room;
-              const seatNumber = attachment.seat || userSeat.seat;
-              
-              ws.username = attachment.username;
-              ws.room = roomName;
-              ws.roomname = roomName;
-              ws.idtarget = attachment.username;
-              ws._closing = false;
-              ws._isMulti = isMulti;
-              ws._multiRoom = attachment.multiRoom || roomName;
-              ws._multiSeat = attachment.multiSeat || seatNumber;
-              ws._cachedUsername = attachment.username;
-              ws._cachedRoom = roomName;
-              
-              ws.serializeAttachment({
-                username: attachment.username,
-                room: roomName,
-                seat: seatNumber,
-                isMulti: isMulti,
-                multiRoom: attachment.multiRoom || roomName,
-                multiSeat: attachment.multiSeat || seatNumber,
-                seatInfo: userSeat
-              });
-              
-              this._onlineUsers.add(attachment.username);
+          let attachment = ws.deserializeAttachment();
+          let username = attachment?.username || ws._cachedUsername;
+          
+          if (!username) continue;
+          
+          const userSeat = this._userSeatDataCache[username];
+          if (!userSeat) {
+            // Coba cari di semua room
+            let found = false;
+            for (const [roomName, roomData] of Object.entries(this._roomsDataCache)) {
+              if (!roomData || !roomData.seats) continue;
+              for (const [seat, data] of Object.entries(roomData.seats)) {
+                if (data && data.namauser === username) {
+                  const seatNum = parseInt(seat);
+                  this._userSeatDataCache[username] = {
+                    room: roomName,
+                    seat: seatNum,
+                    isMulti: true
+                  };
+                  found = true;
+                  break;
+                }
+              }
+              if (found) break;
             }
+            if (!found) continue;
           }
-        } catch(e) {}
+          
+          const currentSeat = this._userSeatDataCache[username];
+          if (!currentSeat) continue;
+          
+          const isMulti = attachment?.isMulti || currentSeat.isMulti || false;
+          const roomName = attachment?.room || currentSeat.room;
+          const seatNumber = attachment?.seat || currentSeat.seat;
+          
+          // 🔥 PERBAIKAN: Set semua state dengan benar
+          ws.username = username;
+          ws.room = roomName;
+          ws.roomname = roomName;
+          ws.idtarget = attachment?.idtarget || username;
+          ws._closing = false;
+          ws._isMulti = isMulti;
+          ws._multiRoom = attachment?.multiRoom || (isMulti ? roomName : null);
+          ws._multiSeat = attachment?.multiSeat || (isMulti ? seatNumber : null);
+          ws._cachedUsername = username;
+          ws._cachedRoom = roomName;
+          
+          // 🔥 PERBAIKAN: Simpan semua data di attachment
+          ws.serializeAttachment({
+            username: username,
+            room: roomName,
+            seat: seatNumber,
+            isMulti: isMulti,
+            multiRoom: ws._multiRoom,
+            multiSeat: ws._multiSeat,
+            seatInfo: currentSeat,
+            idtarget: ws.idtarget
+          });
+          
+          this._onlineUsers.add(username);
+        } catch(e) {
+          console.error("Restore WebSocket error:", e);
+        }
       }
       
       this._refreshRoomClients(true);
