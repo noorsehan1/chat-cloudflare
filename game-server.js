@@ -613,6 +613,7 @@ export class GameServer {
       this._initialized = false;
       this._startTime = Date.now();
       this._wsIdCounter = 0;
+      this._deployResetDone = false;
       
       // ===== CACHE =====
       this.cacheManager = new CacheManager();
@@ -691,14 +692,89 @@ export class GameServer {
       this.DICE_ROOM = CONSTANTS.DICE_ROOM;
       
       // ============================================================
-      // ✅ RESTORE SEMUA CACHE DARI STORAGE
+      // ✅ DEPLOY: HAPUS STORAGE & AMBIL DARI KV
       // ============================================================
-      this._restoreAllCache().then(() => {
+      this._deployResetAndLoadFromKV().then(() => {
+        this._deployResetDone = true;
         this.alarmScheduler.scheduleAlarms().catch(() => {});
         this._initLazy();
       });
       
     } catch(e) {}
+  }
+
+  // ============================================================
+  // ✅ DEPLOY HOOK - HAPUS STORAGE & AMBIL DARI KV
+  // ============================================================
+  async _deployResetAndLoadFromKV() {
+    try {
+      // 1. HAPUS SEMUA DATA DI STORAGE
+      const storageKeys = [
+        'recordingStatusMap',
+        'winnersMap', 
+        'dicePointsBackup',
+        'cachedLastWeekWinner'
+      ];
+      
+      for (const key of storageKeys) {
+        try {
+          await this.ctx.storage.delete(key);
+        } catch(e) {}
+      }
+      
+      // 2. HAPUS ALARM
+      try {
+        await this.ctx.storage.deleteAlarm();
+      } catch(e) {}
+      
+      // 3. AMBIL DATA DARI KV
+      if (this.env?.QUESTIONS) {
+        // 3a. RECORDING STATUS
+        const recordingKeys = await this.env.QUESTIONS.list({ prefix: CONSTANTS.LOWCARD_RECORDING_KEY });
+        for (const key of recordingKeys.keys) {
+          const room = key.name.replace(CONSTANTS.LOWCARD_RECORDING_KEY, '');
+          const status = await this.env.QUESTIONS.get(key.name);
+          if (status === 'true') {
+            this.cacheManager.recordingStatus.set(room, true);
+          }
+        }
+        
+        // 3b. WINNERS
+        const winnerKeys = await this.env.QUESTIONS.list({ prefix: CONSTANTS.LOWCARD_WINNER_KEY });
+        for (const key of winnerKeys.keys) {
+          const room = key.name.replace(CONSTANTS.LOWCARD_WINNER_KEY, '');
+          const winners = await this.env.QUESTIONS.get(key.name, 'json');
+          if (winners && Object.keys(winners).length > 0) {
+            this.cacheManager.winnersCache.set(room, { winners });
+          }
+        }
+        
+        // 3c. DICE POINTS
+        const dicePoints = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json');
+        if (dicePoints && Object.keys(dicePoints).length > 0) {
+          await this.diceGameSystem.pointsCache.setPoints(dicePoints, this.env);
+          await this.diceGameSystem.getPoints();
+        }
+        
+        // 3d. LAST WEEK WINNER
+        const lastWeekWinner = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
+        if (lastWeekWinner) {
+          this._cachedLastWeekWinner = lastWeekWinner;
+        }
+      }
+      
+      // 4. SIMPAN KE STORAGE
+      await this._saveAllCache();
+      
+      // 5. RESTORE ALARM
+      if (!this.closing && !this.isDestroyed) {
+        await this.alarmScheduler.restoreAlarms();
+      }
+      
+      return true;
+    } catch(e) {
+      return false;
+    }
   }
 
   // ============================================================
@@ -757,10 +833,15 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ RESTORE ALL CACHE - HANYA DARI STORAGE
+  // ✅ RESTORE ALL CACHE - SKIP JIKA DEPLOY RESET
   // ============================================================
   async _restoreAllCache() {
     try {
+      // JIKA SUDAH DEPLOY RESET, TIDAK PERLU RESTORE DARI STORAGE
+      if (this._deployResetDone) {
+        return true;
+      }
+      
       // 1. RESTORE WEBSOCKET (OTOMATIS DARI ATTACHMENT)
       const webSockets = this.ctx.getWebSockets();
       for (const ws of webSockets) {
@@ -803,7 +884,6 @@ export class GameServer {
           this.cacheManager.recordingStatus.set(room, status);
         }
       }
-      // Jika tidak ada data, default dari constructor (semua false)
       
       // 3. RESTORE WINNERS
       const winnersMap = await this.ctx.storage.get('winnersMap');
