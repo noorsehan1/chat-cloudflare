@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER-HIBERNATION-FULL-FIXED.js ====================
-// VERSION: 6.7.0 - FULL HIBERNATION API WITH CACHE PERSISTENCE (OPTIMIZED)
+// VERSION: 6.7.1 - FIXED NOTIFICATION CONSISTENCY
 
 const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -691,9 +691,6 @@ export class GameServer {
       
       this.DICE_ROOM = CONSTANTS.DICE_ROOM;
       
-      // ============================================================
-      // ✅ DEPLOY: HAPUS STORAGE & AMBIL DARI KV
-      // ============================================================
       this._deployResetAndLoadFromKV().then(() => {
         this._deployResetDone = true;
         this.alarmScheduler.scheduleAlarms().catch(() => {});
@@ -704,11 +701,10 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ DEPLOY HOOK - HAPUS STORAGE & AMBIL DARI KV
+  // DEPLOY HOOK - HAPUS STORAGE & AMBIL DARI KV
   // ============================================================
   async _deployResetAndLoadFromKV() {
     try {
-      // 1. HAPUS SEMUA DATA DI STORAGE
       const storageKeys = [
         'recordingStatusMap',
         'winnersMap', 
@@ -722,14 +718,11 @@ export class GameServer {
         } catch(e) {}
       }
       
-      // 2. HAPUS ALARM
       try {
         await this.ctx.storage.deleteAlarm();
       } catch(e) {}
       
-      // 3. AMBIL DATA DARI KV
       if (this.env?.QUESTIONS) {
-        // 3a. RECORDING STATUS
         const recordingKeys = await this.env.QUESTIONS.list({ prefix: CONSTANTS.LOWCARD_RECORDING_KEY });
         for (const key of recordingKeys.keys) {
           const room = key.name.replace(CONSTANTS.LOWCARD_RECORDING_KEY, '');
@@ -739,7 +732,6 @@ export class GameServer {
           }
         }
         
-        // 3b. WINNERS
         const winnerKeys = await this.env.QUESTIONS.list({ prefix: CONSTANTS.LOWCARD_WINNER_KEY });
         for (const key of winnerKeys.keys) {
           const room = key.name.replace(CONSTANTS.LOWCARD_WINNER_KEY, '');
@@ -749,24 +741,20 @@ export class GameServer {
           }
         }
         
-        // 3c. DICE POINTS
         const dicePoints = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json');
         if (dicePoints && Object.keys(dicePoints).length > 0) {
           await this.diceGameSystem.pointsCache.setPoints(dicePoints, this.env);
           await this.diceGameSystem.getPoints();
         }
         
-        // 3d. LAST WEEK WINNER
         const lastWeekWinner = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
         if (lastWeekWinner) {
           this._cachedLastWeekWinner = lastWeekWinner;
         }
       }
       
-      // 4. SIMPAN KE STORAGE
       await this._saveAllCache();
       
-      // 5. RESTORE ALARM
       if (!this.closing && !this.isDestroyed) {
         await this.alarmScheduler.restoreAlarms();
       }
@@ -778,11 +766,10 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ SAVE ALL CACHE KE STORAGE (HANYA JIKA ADA DATA)
+  // SAVE ALL CACHE KE STORAGE
   // ============================================================
   async _saveAllCache() {
     try {
-      // 1. Save recording status - hanya jika ada yang true
       const recordingStatusMap = {};
       let hasRecordingData = false;
       for (const [room, status] of this.cacheManager.recordingStatus) {
@@ -797,7 +784,6 @@ export class GameServer {
         await this.ctx.storage.delete('recordingStatusMap');
       }
       
-      // 2. Save winners - hanya jika ada data
       const winnersMap = {};
       let hasWinnersData = false;
       for (const [room, data] of this.cacheManager.winnersCache) {
@@ -812,7 +798,6 @@ export class GameServer {
         await this.ctx.storage.delete('winnersMap');
       }
       
-      // 3. Save dice points - hanya jika ada data
       const points = this.diceGameSystem.pointsCache.getPoints();
       if (points && Object.keys(points).length > 0) {
         await this.ctx.storage.put('dicePointsBackup', points);
@@ -820,7 +805,6 @@ export class GameServer {
         await this.ctx.storage.delete('dicePointsBackup');
       }
       
-      // 4. Save last week winner - hanya jika ada data
       if (this._cachedLastWeekWinner) {
         await this.ctx.storage.put('cachedLastWeekWinner', this._cachedLastWeekWinner);
       } else {
@@ -833,16 +817,14 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ RESTORE ALL CACHE - SKIP JIKA DEPLOY RESET
+  // RESTORE ALL CACHE
   // ============================================================
   async _restoreAllCache() {
     try {
-      // JIKA SUDAH DEPLOY RESET, TIDAK PERLU RESTORE DARI STORAGE
       if (this._deployResetDone) {
         return true;
       }
       
-      // 1. RESTORE WEBSOCKET (OTOMATIS DARI ATTACHMENT)
       const webSockets = this.ctx.getWebSockets();
       for (const ws of webSockets) {
         try {
@@ -877,7 +859,6 @@ export class GameServer {
         } catch(e) {}
       }
       
-      // 2. RESTORE RECORDING STATUS
       const recordingStatusMap = await this.ctx.storage.get('recordingStatusMap');
       if (recordingStatusMap && Object.keys(recordingStatusMap).length > 0) {
         for (const [room, status] of Object.entries(recordingStatusMap)) {
@@ -885,7 +866,6 @@ export class GameServer {
         }
       }
       
-      // 3. RESTORE WINNERS
       const winnersMap = await this.ctx.storage.get('winnersMap');
       if (winnersMap && Object.keys(winnersMap).length > 0) {
         for (const [room, winners] of Object.entries(winnersMap)) {
@@ -895,14 +875,12 @@ export class GameServer {
         }
       }
       
-      // 4. RESTORE DICE POINTS
       const dicePoints = await this.ctx.storage.get('dicePointsBackup');
       if (dicePoints && Object.keys(dicePoints).length > 0) {
         await this.diceGameSystem.pointsCache.setPoints(dicePoints, this.env);
         await this.diceGameSystem.getPoints();
       }
       
-      // 5. RESTORE LAST WEEK WINNER
       const lastWeekWinner = await this.ctx.storage.get('cachedLastWeekWinner');
       if (lastWeekWinner) {
         this._cachedLastWeekWinner = lastWeekWinner;
@@ -910,7 +888,6 @@ export class GameServer {
         this._cachedLastWeekWinner = null;
       }
       
-      // 6. RESTORE ALARM
       if (!this.closing && !this.isDestroyed) {
         const existingAlarm = await this.ctx.storage.getAlarm();
         if (!existingAlarm) {
@@ -927,7 +904,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ SAVE CACHE KE STORAGE (UTILITY)
+  // SAVE RECORDING STATUS
   // ============================================================
   async _saveRecordingStatus(room, enabled) {
     try {
@@ -1011,6 +988,9 @@ export class GameServer {
     } catch(e) {}
   }
 
+  // ============================================================
+  // CLEANUP GAME TIMERS - FIXED
+  // ============================================================
   _cleanupGameTimers(game) {
     if (!game) return;
     
@@ -1028,6 +1008,21 @@ export class GameServer {
       }
     }
     
+    // CLEANUP NOTIFICATION TIMERS - FIXED
+    if (game._notificationTimers) {
+      for (const timer of game._notificationTimers) {
+        this._clearTimer(timer);
+      }
+      game._notificationTimers = [];
+    }
+    
+    if (game._drawNotificationTimers) {
+      for (const timer of game._drawNotificationTimers) {
+        this._clearTimer(timer);
+      }
+      game._drawNotificationTimers = [];
+    }
+    
     if (game._botTimeouts) {
       for (const timeout of game._botTimeouts) {
         this._clearTimer(timeout);
@@ -1042,7 +1037,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ ALARM
+  // ALARM
   // ============================================================
   async alarm() {
     if (this.closing || this.isDestroyed) return;
@@ -1178,7 +1173,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ FETCH - DENGAN HIBERNATION API
+  // FETCH
   // ============================================================
   async fetch(req) {
     try {
@@ -1275,7 +1270,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ WEBSOCKET EVENT HANDLERS
+  // WEBSOCKET EVENT HANDLERS
   // ============================================================
   
   async webSocketMessage(ws, message) {
@@ -1400,7 +1395,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ SWITCH ROOM - UPDATE ATTACHMENT
+  // SWITCH ROOM
   // ============================================================
   async switchRoom(ws, room, username = null) {
     try {
@@ -1520,7 +1515,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ SEMUA METHOD LAINNYA
+  // PROCESS EVENT
   // ============================================================
   
   async _processWithTimeout(ws, data, timeoutMs = 500) {
@@ -1752,27 +1747,20 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ RECORDING - OPTIMIZED (TIDAK SAVE JIKA TIDAK PERLU)
+  // RECORDING
   // ============================================================
   async _startRecordingWinners(roomName) {
     try {
       if (!roomName) return false;
       
-      // ✅ Jika sudah aktif, return true (tidak perlu save ulang)
       if (this.cacheManager.getRecordingStatus(roomName)) {
         this._broadcastToRoom(roomName, ["recordingStatus", true]);
         return true;
       }
       
-      // 1️⃣ UPDATE CACHE
       this.cacheManager.recordingStatus.set(roomName, true);
-      
-      // 2️⃣ SIMPAN KE KV
       await this._saveRecordingStatus(roomName, true);
-      
-      // 3️⃣ SIMPAN KE STORAGE
       await this._saveAllCache();
-      
       this._broadcastToRoom(roomName, ["recordingStatus", true]);
       return true;
     } catch(e) { 
@@ -1785,26 +1773,17 @@ export class GameServer {
       if (!roomName) return false;
       const room = roomName.trim();
       
-      // ✅ Jika sudah tidak aktif, return true (tidak perlu save)
       if (!this.cacheManager.getRecordingStatus(room)) {
         this._broadcastToRoom(room, ["recordingStatus", false]);
         return true;
       }
       
-      // 1️⃣ UPDATE CACHE - HAPUS
       this.cacheManager.recordingStatus.set(room, false);
       this.cacheManager.winnersCache.delete(room);
-      
-      // 2️⃣ SIMPAN KE KV - HAPUS
       await this._saveRecordingStatus(room, false);
       await this._saveWinners(room, {});
-      
-      // 3️⃣ SIMPAN KE STORAGE - HAPUS
       await this._saveAllCache();
-      
-      // ✅ HANYA KIRIM STATUS RECORDING, TANPA SCORE
       this._broadcastToRoom(room, ["recordingStatus", false]);
-      
       return true;
     } catch(e) { 
       return false; 
@@ -1814,13 +1793,9 @@ export class GameServer {
   async _addLowCardWinner(room, username) {
     try {
       if (!room || !username || room === CONSTANTS.DICE_ROOM) return false;
-      
-      // ✅ Jika recording tidak aktif, return false (tidak perlu save)
       if (!this.cacheManager.getRecordingStatus(room)) return false;
-      
       if (!this.env?.QUESTIONS) return false;
       
-      // 1️⃣ UPDATE CACHE
       let roomWinners = this.cacheManager.getWinners(room);
       let count = 0;
       if (roomWinners[username]) {
@@ -1828,13 +1803,8 @@ export class GameServer {
       }
       roomWinners[username] = (count + 1) + "x";
       this.cacheManager.winnersCache.set(room, { winners: roomWinners });
-      
-      // 2️⃣ SIMPAN KE KV
       await this._saveWinners(room, roomWinners);
-      
-      // 3️⃣ SIMPAN KE STORAGE
       await this._saveAllCache();
-      
       return true;
     } catch(e) { 
       return false; 
@@ -2300,6 +2270,9 @@ export class GameServer {
     } catch(e) {}
   }
 
+  // ============================================================
+  // START REGISTRATION - FIXED NOTIFICATIONS
+  // ============================================================
   _startRegistration(room, game) {
     try {
       if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
@@ -2308,23 +2281,31 @@ export class GameServer {
         game._registrationTimer = null;
       }
       
-      setTimeout(() => {
-        if (this._isGameActuallyRunning(game) && game.registrationOpen) {
-          this._broadcastToRoom(room, ["gameLowCardTimeLeft", "15s"]);
+      // CLEANUP OLD NOTIFICATION TIMERS
+      if (game._notificationTimers) {
+        for (const timer of game._notificationTimers) {
+          this._clearTimer(timer);
         }
-      }, 5000);
+        game._notificationTimers = [];
+      } else {
+        game._notificationTimers = [];
+      }
       
-      setTimeout(() => {
-        if (this._isGameActuallyRunning(game) && game.registrationOpen) {
-          this._broadcastToRoom(room, ["gameLowCardTimeLeft", "10s"]);
-        }
-      }, 10000);
+      // KONSISTEN NOTIFICATIONS: 15s, 10s, 5s
+      const notifications = [
+        { delay: 5000, message: "15s" },
+        { delay: 10000, message: "10s" },
+        { delay: 15000, message: "5s" }
+      ];
       
-      setTimeout(() => {
-        if (this._isGameActuallyRunning(game) && game.registrationOpen) {
-          this._broadcastToRoom(room, ["gameLowCardTimeLeft", "5s"]);
-        }
-      }, 15000);
+      for (const notif of notifications) {
+        const timer = this._trackTimer(setTimeout(() => {
+          if (this._isGameActuallyRunning(game) && game.registrationOpen) {
+            this._broadcastToRoom(room, ["gameLowCardTimeLeft", notif.message]);
+          }
+        }, notif.delay));
+        game._notificationTimers.push(timer);
+      }
       
       const timer = this._trackTimer(setTimeout(() => {
         if (this._isGameActuallyRunning(game) && game.registrationOpen) {
@@ -2436,6 +2417,9 @@ export class GameServer {
     }
   }
 
+  // ============================================================
+  // START DRAW COUNTDOWN - FIXED NOTIFICATIONS
+  // ============================================================
   _startDrawCountdown(room, game) {
     try {
       if (!this._isGameActuallyRunning(game)) return;
@@ -2444,23 +2428,31 @@ export class GameServer {
         game._drawTimer = null;
       }
       
-      setTimeout(() => {
-        if (this._isGameActuallyRunning(game) && !game.drawTimeExpired) {
-          this._broadcastToRoom(room, ["gameLowCardTimeLeft", "15s"]);
+      // CLEANUP OLD NOTIFICATION TIMERS
+      if (game._drawNotificationTimers) {
+        for (const timer of game._drawNotificationTimers) {
+          this._clearTimer(timer);
         }
-      }, 5000);
+        game._drawNotificationTimers = [];
+      } else {
+        game._drawNotificationTimers = [];
+      }
       
-      setTimeout(() => {
-        if (this._isGameActuallyRunning(game) && !game.drawTimeExpired) {
-          this._broadcastToRoom(room, ["gameLowCardTimeLeft", "10s"]);
-        }
-      }, 10000);
+      // KONSISTEN NOTIFICATIONS: 15s, 10s, 5s
+      const notifications = [
+        { delay: 5000, message: "15s" },
+        { delay: 10000, message: "10s" },
+        { delay: 15000, message: "5s" }
+      ];
       
-      setTimeout(() => {
-        if (this._isGameActuallyRunning(game) && !game.drawTimeExpired) {
-          this._broadcastToRoom(room, ["gameLowCardTimeLeft", "5s"]);
-        }
-      }, 15000);
+      for (const notif of notifications) {
+        const timer = this._trackTimer(setTimeout(() => {
+          if (this._isGameActuallyRunning(game) && !game.drawTimeExpired) {
+            this._broadcastToRoom(room, ["gameLowCardTimeLeft", notif.message]);
+          }
+        }, notif.delay));
+        game._drawNotificationTimers.push(timer);
+      }
       
       const timer = this._trackTimer(setTimeout(() => {
         if (this._isGameActuallyRunning(game) && !game.drawTimeExpired) {
@@ -2785,7 +2777,9 @@ export class GameServer {
           _registrationTimer: null, _drawTimer: null, _evalTimer: null, _safetyTimer: null,
           _isEvaluating: false, _createdAt: Date.now(), _drawPhaseStart: null, _endTime: null,
           playerWsId: new Map(),
-          _startedByRecording: false, _startedBy: 'user'
+          _startedByRecording: false, _startedBy: 'user',
+          _notificationTimers: [],  // FOR REGISTRATION NOTIFICATIONS
+          _drawNotificationTimers: []  // FOR DRAW NOTIFICATIONS
         };
         
         game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
@@ -3074,7 +3068,9 @@ export class GameServer {
         _registrationTimer: null, _drawTimer: null, _evalTimer: null, _safetyTimer: null,
         _isEvaluating: false, _createdAt: Date.now(), _drawPhaseStart: null, _endTime: null,
         playerWsId: new Map(),
-        _startedByRecording: true, _startedBy: 'recording'
+        _startedByRecording: true, _startedBy: 'recording',
+        _notificationTimers: [],  // FOR REGISTRATION NOTIFICATIONS
+        _drawNotificationTimers: []  // FOR DRAW NOTIFICATIONS
       };
       game.players.set(username, { id: username, name: username });
       game.playerWsId.set(username, wsId);
@@ -3089,7 +3085,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // ✅ DICE - TANPA SAVE KE STORAGE
+  // DICE
   // ============================================================
   _startDiceFast() {
     try {
@@ -3608,7 +3604,6 @@ export class GameServer {
       this.isDestroyed = true;
       this.closing = true;
       
-      // ✅ SAVE ALL CACHE TERAKHIR
       await this._saveAllCache();
       
       for (const timer of this._allTimers) {
@@ -3691,7 +3686,6 @@ export class GameServer {
       this.wsClients.clear();
       this.clientRooms.clear();
       
-      // Hapus alarm
       try {
         await this.ctx.storage.deleteAlarm();
       } catch(e) {}
