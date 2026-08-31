@@ -1,7 +1,7 @@
 // ==================== GAME-SERVER-HIBERNATION-FULL-FIXED.js ====================
-// VERSION: 6.8.0 - FIXED WEEKLY RESET & LEADERBOARD
+// VERSION: 6.9.0 - FIXED STORAGE CACHE & KV INTEGRATION
 
- const CONSTANTS = {
+const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
   REGISTRATION_TIME_MS: 20000,
   DRAW_TIME_MS: 20000,
@@ -49,9 +49,14 @@
   
   ALARM_STATE_KEY: 'alarm_state',
   
-  WEEKLY_RESET_DAY: 1, // Monday
+  WEEKLY_RESET_DAY: 1,
   WEEKLY_RESET_HOUR: 0,
   WEEKLY_RESET_ALARM: 'weekly_reset',
+  
+  STORAGE_WINNER_KEY: 'cachedLastWeekWinner',
+  STORAGE_POINTS_KEY: 'dicePointsBackup',
+  STORAGE_RECORDING_KEY: 'recordingStatusMap',
+  STORAGE_WINNERS_MAP_KEY: 'winnersMap',
 };
 
 const QUIZ_SCHEDULE = {
@@ -69,7 +74,7 @@ function parseTime(timeStr) {
 }
 
 // ============================================================
-// ALARM SCHEDULER - FIXED
+// ALARM SCHEDULER
 // ============================================================
 class AlarmScheduler {
   constructor(env, state) {
@@ -156,13 +161,11 @@ class AlarmScheduler {
       
       if (delayMs > 0 && delayMs < 7 * 24 * 60 * 60 * 1000) {
         await this._scheduleAlarm(CONSTANTS.WEEKLY_RESET_ALARM, delayMs);
-        console.log(`Weekly reset scheduled in ${Math.floor(delayMs/3600000)} hours`);
         return true;
       }
       
       return false;
     } catch(e) {
-      console.error('Schedule weekly reset error:', e);
       return false;
     }
   }
@@ -618,14 +621,12 @@ export class GameServer {
       this._wsIdCounter = 0;
       this._deployResetDone = false;
       
-      // ===== CACHE =====
       this.cacheManager = new CacheManager();
       this.diceGameSystem = new DiceGameSystem(this);
       this.alarmScheduler = new AlarmScheduler(env, state);
       this._cachedLastWeekWinner = null;
       this._kvCache = new KVCache();
       
-      // ===== MEMORY CACHE =====
       this.activeGames = new Map();
       this.wsMap = new Map();
       this.wsClients = new Map();
@@ -635,7 +636,6 @@ export class GameServer {
       this._allTimers = new Set();
       this._lastNotifTime = {};
       
-      // ===== DICE STATE =====
       this.currentDiceRoll = null;
       this._diceLock = false;
       this._tieActive = false;
@@ -663,7 +663,6 @@ export class GameServer {
       this._canSubmitDiceAnswer = false;
       this._diceRound = 0;
       
-      // ===== TIE STATE =====
       this._tieBreakers = new Map();
       this._tieRound = 0;
       this._tiePlayers = [];
@@ -673,7 +672,6 @@ export class GameServer {
       this._tieLock = false;
       this._tieNotificationTimeouts = [];
       
-      // ===== LOCKS =====
       this._gameLocks = new Map();
       this._joinLocks = new Map();
       this._cleanupTimers = new Map();
@@ -684,7 +682,6 @@ export class GameServer {
       this._drawLocks = new Map();
       this._cleanupLocks = new Map();
       
-      // ===== RATE LIMIT =====
       this._requestCount = 0;
       this._lastResetTime = Date.now();
       this._circuitOpen = false;
@@ -694,7 +691,7 @@ export class GameServer {
       
       this.DICE_ROOM = CONSTANTS.DICE_ROOM;
       
-      this._deployResetAndLoadFromKV().then(() => {
+      this._loadAllData().then(() => {
         this._deployResetDone = true;
         this.alarmScheduler.scheduleAlarms().catch(() => {});
         this._initLazy();
@@ -704,135 +701,217 @@ export class GameServer {
   }
 
   // ============================================================
-  // DEPLOY HOOK - HAPUS STORAGE & AMBIL DARI KV
+  // STORAGE & KV FUNCTIONS
+  // ============================================================
+  
+  async _saveToStorage(key, data) {
+    try {
+      if (!this.ctx?.storage) return false;
+      await this.ctx.storage.put(key, data);
+      return true;
+    } catch(e) { return false; }
+  }
+
+  async _saveToKV(key, data) {
+    try {
+      if (!this.env?.QUESTIONS) return false;
+      if (data === null || data === undefined) {
+        await this.env.QUESTIONS.delete(key);
+        return true;
+      }
+      await this.env.QUESTIONS.put(key, JSON.stringify(data));
+      return true;
+    } catch(e) { return false; }
+  }
+
+  async _getFromStorage(key) {
+    try {
+      if (!this.ctx?.storage) return null;
+      const data = await this.ctx.storage.get(key);
+      if (data !== undefined && data !== null) return data;
+      return null;
+    } catch(e) { return null; }
+  }
+
+  async _getFromKV(key) {
+    try {
+      if (!this.env?.QUESTIONS) return null;
+      const data = await this.env.QUESTIONS.get(key, 'json');
+      if (data !== null && data !== undefined) return data;
+      return null;
+    } catch(e) { return null; }
+  }
+
+  // ============================================================
+  // SAVE ALL DATA - STORAGE & KV
+  // ============================================================
+
+  async _saveAllData() {
+    try {
+      if (this._cachedLastWeekWinner) {
+        await this._saveToStorage(CONSTANTS.STORAGE_WINNER_KEY, this._cachedLastWeekWinner);
+        await this._saveToKV(CONSTANTS.DICE_LAST_WEEK_WINNER, this._cachedLastWeekWinner);
+      } else {
+        await this._saveToStorage(CONSTANTS.STORAGE_WINNER_KEY, null);
+        await this._saveToKV(CONSTANTS.DICE_LAST_WEEK_WINNER, null);
+      }
+      
+      const points = this.diceGameSystem.pointsCache.getPoints();
+      if (points && Object.keys(points).length > 0) {
+        await this._saveToStorage(CONSTANTS.STORAGE_POINTS_KEY, points);
+        await this._saveToKV(CONSTANTS.DICE_POINT_KEY, points);
+      } else {
+        await this._saveToStorage(CONSTANTS.STORAGE_POINTS_KEY, {});
+        await this._saveToKV(CONSTANTS.DICE_POINT_KEY, {});
+      }
+      
+      const recordingStatusMap = {};
+      for (const [room, status] of this.cacheManager.recordingStatus) {
+        if (status === true) {
+          recordingStatusMap[room] = status;
+          await this._saveToKV(CONSTANTS.LOWCARD_RECORDING_KEY + room, 'true');
+        }
+      }
+      if (Object.keys(recordingStatusMap).length > 0) {
+        await this._saveToStorage(CONSTANTS.STORAGE_RECORDING_KEY, recordingStatusMap);
+      } else {
+        await this._saveToStorage(CONSTANTS.STORAGE_RECORDING_KEY, null);
+      }
+      
+      const winnersMap = {};
+      for (const [room, data] of this.cacheManager.winnersCache) {
+        if (data && Object.keys(data.winners).length > 0) {
+          winnersMap[room] = data.winners;
+          await this._saveToKV(CONSTANTS.LOWCARD_WINNER_KEY + room, data.winners);
+        }
+      }
+      if (Object.keys(winnersMap).length > 0) {
+        await this._saveToStorage(CONSTANTS.STORAGE_WINNERS_MAP_KEY, winnersMap);
+      } else {
+        await this._saveToStorage(CONSTANTS.STORAGE_WINNERS_MAP_KEY, null);
+      }
+      
+      return true;
+    } catch(e) { return false; }
+  }
+
+  // ============================================================
+  // LOAD ALL DATA - STORAGE & KV
+  // ============================================================
+
+  async _loadAllData() {
+    try {
+      let winnerData = await this._getFromStorage(CONSTANTS.STORAGE_WINNER_KEY);
+      if (!winnerData) {
+        winnerData = await this._getFromKV(CONSTANTS.DICE_LAST_WEEK_WINNER);
+        if (winnerData) {
+          await this._saveToStorage(CONSTANTS.STORAGE_WINNER_KEY, winnerData);
+        }
+      }
+      if (winnerData && winnerData.username) {
+        this._cachedLastWeekWinner = winnerData;
+      } else {
+        this._cachedLastWeekWinner = null;
+      }
+      
+      let points = await this._getFromStorage(CONSTANTS.STORAGE_POINTS_KEY);
+      if (!points || Object.keys(points).length === 0) {
+        points = await this._getFromKV(CONSTANTS.DICE_POINT_KEY);
+        if (points && Object.keys(points).length > 0) {
+          await this._saveToStorage(CONSTANTS.STORAGE_POINTS_KEY, points);
+        }
+      }
+      if (points && Object.keys(points).length > 0) {
+        await this.diceGameSystem.pointsCache.setPoints(points, this.env);
+        await this.diceGameSystem.getPoints();
+      }
+      
+      let recordingMap = await this._getFromStorage(CONSTANTS.STORAGE_RECORDING_KEY);
+      if (recordingMap) {
+        for (const [room, status] of Object.entries(recordingMap)) {
+          if (status === true) {
+            this.cacheManager.recordingStatus.set(room, true);
+          }
+        }
+      } else {
+        try {
+          const keys = await this.env.QUESTIONS.list({ prefix: CONSTANTS.LOWCARD_RECORDING_KEY });
+          for (const key of keys.keys) {
+            const room = key.name.replace(CONSTANTS.LOWCARD_RECORDING_KEY, '');
+            const status = await this.env.QUESTIONS.get(key.name);
+            if (status === 'true') {
+              this.cacheManager.recordingStatus.set(room, true);
+            }
+          }
+        } catch(e) {}
+      }
+      
+      let winnersMap = await this._getFromStorage(CONSTANTS.STORAGE_WINNERS_MAP_KEY);
+      if (winnersMap) {
+        for (const [room, winners] of Object.entries(winnersMap)) {
+          if (Object.keys(winners).length > 0) {
+            this.cacheManager.winnersCache.set(room, { winners });
+          }
+        }
+      } else {
+        try {
+          const keys = await this.env.QUESTIONS.list({ prefix: CONSTANTS.LOWCARD_WINNER_KEY });
+          for (const key of keys.keys) {
+            const room = key.name.replace(CONSTANTS.LOWCARD_WINNER_KEY, '');
+            const winners = await this.env.QUESTIONS.get(key.name, 'json');
+            if (winners && Object.keys(winners).length > 0) {
+              this.cacheManager.winnersCache.set(room, { winners });
+            }
+          }
+        } catch(e) {}
+      }
+      
+      return true;
+    } catch(e) { return false; }
+  }
+
+  // ============================================================
+  // DEPLOY HOOK
   // ============================================================
   async _deployResetAndLoadFromKV() {
     try {
       const storageKeys = [
-        'recordingStatusMap',
-        'winnersMap', 
-        'dicePointsBackup',
-        'cachedLastWeekWinner'
+        CONSTANTS.STORAGE_RECORDING_KEY,
+        CONSTANTS.STORAGE_WINNERS_MAP_KEY,
+        CONSTANTS.STORAGE_POINTS_KEY,
+        CONSTANTS.STORAGE_WINNER_KEY
       ];
       
       for (const key of storageKeys) {
-        try {
-          await this.ctx.storage.delete(key);
-        } catch(e) {}
+        try { await this.ctx.storage.delete(key); } catch(e) {}
       }
       
-      try {
-        await this.ctx.storage.deleteAlarm();
-      } catch(e) {}
+      try { await this.ctx.storage.deleteAlarm(); } catch(e) {}
       
-      if (this.env?.QUESTIONS) {
-        const recordingKeys = await this.env.QUESTIONS.list({ prefix: CONSTANTS.LOWCARD_RECORDING_KEY });
-        for (const key of recordingKeys.keys) {
-          const room = key.name.replace(CONSTANTS.LOWCARD_RECORDING_KEY, '');
-          const status = await this.env.QUESTIONS.get(key.name);
-          if (status === 'true') {
-            this.cacheManager.recordingStatus.set(room, true);
-          }
-        }
-        
-        const winnerKeys = await this.env.QUESTIONS.list({ prefix: CONSTANTS.LOWCARD_WINNER_KEY });
-        for (const key of winnerKeys.keys) {
-          const room = key.name.replace(CONSTANTS.LOWCARD_WINNER_KEY, '');
-          const winners = await this.env.QUESTIONS.get(key.name, 'json');
-          if (winners && Object.keys(winners).length > 0) {
-            this.cacheManager.winnersCache.set(room, { winners });
-          }
-        }
-        
-        const dicePoints = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json');
-        if (dicePoints && Object.keys(dicePoints).length > 0) {
-          await this.diceGameSystem.pointsCache.setPoints(dicePoints, this.env);
-          await this.diceGameSystem.getPoints();
-        }
-        
-        const lastWeekWinner = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
-        if (lastWeekWinner && lastWeekWinner.username) {
-          this._cachedLastWeekWinner = lastWeekWinner;
-          console.log(`✅ Loaded weekly winner: ${lastWeekWinner.username} with ${lastWeekWinner.score} points`);
-        } else {
-          this._cachedLastWeekWinner = null;
-          console.log('ℹ️ No weekly winner found');
-        }
-      }
-      
-      await this._saveAllCache();
+      await this._loadAllData();
       
       if (!this.closing && !this.isDestroyed) {
         await this.alarmScheduler.restoreAlarms();
       }
       
       return true;
-    } catch(e) {
-      console.error('Deploy reset error:', e);
-      return false;
-    }
+    } catch(e) { return false; }
   }
 
   // ============================================================
-  // SAVE ALL CACHE KE STORAGE
+  // SAVE ALL CACHE KE STORAGE (Legacy)
   // ============================================================
   async _saveAllCache() {
-    try {
-      const recordingStatusMap = {};
-      let hasRecordingData = false;
-      for (const [room, status] of this.cacheManager.recordingStatus) {
-        if (status === true) {
-          hasRecordingData = true;
-        }
-        recordingStatusMap[room] = status;
-      }
-      if (hasRecordingData) {
-        await this.ctx.storage.put('recordingStatusMap', recordingStatusMap);
-      } else {
-        await this.ctx.storage.delete('recordingStatusMap');
-      }
-      
-      const winnersMap = {};
-      let hasWinnersData = false;
-      for (const [room, data] of this.cacheManager.winnersCache) {
-        if (data && Object.keys(data.winners).length > 0) {
-          hasWinnersData = true;
-        }
-        winnersMap[room] = data.winners;
-      }
-      if (hasWinnersData) {
-        await this.ctx.storage.put('winnersMap', winnersMap);
-      } else {
-        await this.ctx.storage.delete('winnersMap');
-      }
-      
-      const points = this.diceGameSystem.pointsCache.getPoints();
-      if (points && Object.keys(points).length > 0) {
-        await this.ctx.storage.put('dicePointsBackup', points);
-      } else {
-        await this.ctx.storage.delete('dicePointsBackup');
-      }
-      
-      if (this._cachedLastWeekWinner) {
-        await this.ctx.storage.put('cachedLastWeekWinner', this._cachedLastWeekWinner);
-      } else {
-        await this.ctx.storage.delete('cachedLastWeekWinner');
-      }
-      
-    } catch(e) {
-      console.error('Failed to save cache:', e);
-    }
+    return await this._saveAllData();
   }
 
   // ============================================================
   // RESTORE ALL CACHE
   // ============================================================
   async _restoreAllCache() {
+    if (this._deployResetDone) return true;
+    
     try {
-      if (this._deployResetDone) {
-        return true;
-      }
-      
       const webSockets = this.ctx.getWebSockets();
       for (const ws of webSockets) {
         try {
@@ -867,34 +946,7 @@ export class GameServer {
         } catch(e) {}
       }
       
-      const recordingStatusMap = await this.ctx.storage.get('recordingStatusMap');
-      if (recordingStatusMap && Object.keys(recordingStatusMap).length > 0) {
-        for (const [room, status] of Object.entries(recordingStatusMap)) {
-          this.cacheManager.recordingStatus.set(room, status);
-        }
-      }
-      
-      const winnersMap = await this.ctx.storage.get('winnersMap');
-      if (winnersMap && Object.keys(winnersMap).length > 0) {
-        for (const [room, winners] of Object.entries(winnersMap)) {
-          if (Object.keys(winners).length > 0) {
-            this.cacheManager.winnersCache.set(room, { winners });
-          }
-        }
-      }
-      
-      const dicePoints = await this.ctx.storage.get('dicePointsBackup');
-      if (dicePoints && Object.keys(dicePoints).length > 0) {
-        await this.diceGameSystem.pointsCache.setPoints(dicePoints, this.env);
-        await this.diceGameSystem.getPoints();
-      }
-      
-      const lastWeekWinner = await this.ctx.storage.get('cachedLastWeekWinner');
-      if (lastWeekWinner && lastWeekWinner.username) {
-        this._cachedLastWeekWinner = lastWeekWinner;
-      } else {
-        this._cachedLastWeekWinner = null;
-      }
+      await this._loadAllData();
       
       if (!this.closing && !this.isDestroyed) {
         const existingAlarm = await this.ctx.storage.getAlarm();
@@ -904,11 +956,7 @@ export class GameServer {
       }
       
       return true;
-      
-    } catch(e) {
-      console.error('Restore cache error:', e);
-      return false;
-    }
+    } catch(e) { return false; }
   }
 
   // ============================================================
@@ -952,7 +1000,6 @@ export class GameServer {
       this.env?.QUESTIONS?.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json').then((data) => {
         if (data && data.username) {
           this._cachedLastWeekWinner = data;
-          console.log(`✅ Loaded weekly winner: ${data.username}`);
         }
       }).catch(() => {});
       
@@ -976,19 +1023,12 @@ export class GameServer {
 
   _checkAndStartCurrentSession() {
     try {
-      if (!this.alarmScheduler.isDiceTime()) {
-        return;
-      }
+      if (!this.alarmScheduler.isDiceTime()) return;
       
       this.diceAutoEnabled = true;
       
-      if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
-        return;
-      }
-      
-      if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) {
-        return;
-      }
+      if (this.currentDiceRoll && this._canSubmitDiceAnswer) return;
+      if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) return;
       
       const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
       if (clients && clients.size > 0) {
@@ -998,7 +1038,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // CLEANUP GAME TIMERS - FIXED
+  // CLEANUP GAME TIMERS
   // ============================================================
   _cleanupGameTimers(game) {
     if (!game) return;
@@ -1017,7 +1057,6 @@ export class GameServer {
       }
     }
     
-    // CLEANUP NOTIFICATION TIMERS - FIXED
     if (game._notificationTimers) {
       for (const timer of game._notificationTimers) {
         this._clearTimer(timer);
@@ -1046,7 +1085,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // ALARM - FIXED WEEKLY RESET
+  // ALARM
   // ============================================================
   async alarm() {
     if (this.closing || this.isDestroyed) return;
@@ -1059,19 +1098,14 @@ export class GameServer {
         try {
           switch(alarm.name) {
             case CONSTANTS.WEEKLY_RESET_ALARM:
-              console.log('🔄 Weekly reset alarm triggered!');
               await this._handleWeeklyReset();
               break;
               
             case 'dice_session_start':
               if (this.alarmScheduler.isDiceTime()) {
                 this.diceAutoEnabled = true;
-                if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
-                  break;
-                }
-                if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) {
-                  break;
-                }
+                if (this.currentDiceRoll && this._canSubmitDiceAnswer) break;
+                if (this._isShowingDice || this._diceLock || this._diceTimeUpCooldown) break;
                 const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
                 if (clients && clients.size > 0) {
                   this._startDiceFast();
@@ -1088,21 +1122,11 @@ export class GameServer {
           }
           
           await this.alarmScheduler.processAlarm(alarm.name);
-        } catch(e) {
-          console.error(`Alarm ${alarm.name} error:`, e);
-        }
+        } catch(e) {}
       }
       
       await this.alarmScheduler.scheduleAlarms();
-      
-    } catch(e) {
-      console.error('Alarm processing error:', e);
-      try {
-        await this.alarmScheduler.scheduleAlarms();
-      } catch(err) {
-        console.error('Failed to reschedule alarms:', err);
-      }
-    }
+    } catch(e) {}
   }
 
   _getCurrentWeek() {
@@ -1115,17 +1139,12 @@ export class GameServer {
   }
 
   // ============================================================
-  // HANDLE WEEKLY RESET - FIXED
+  // HANDLE WEEKLY RESET - WITH STORAGE & KV
   // ============================================================
   async _handleWeeklyReset() {
     try {
-      console.log('🔄 Running weekly reset...');
-      
-      // 1. Get current points
       const points = this.diceGameSystem.pointsCache.getPoints() || {};
-      console.log(`📊 Total players: ${Object.keys(points).length}`);
       
-      // 2. Find winner with highest score
       let winner = null;
       let highestScore = 0;
       
@@ -1137,9 +1156,6 @@ export class GameServer {
         }
       }
       
-      console.log(`🏆 Winner found: ${winner} with ${highestScore} points`);
-      
-      // 3. Save winner to KV
       const currentWeek = this._getCurrentWeek();
       
       if (winner && highestScore > 0) {
@@ -1150,33 +1166,24 @@ export class GameServer {
           timestamp: Date.now() 
         };
         
-        // Save to KV
-        await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_WEEK_WINNER, JSON.stringify(winnerData));
         this._cachedLastWeekWinner = winnerData;
-        
-        // Broadcast to all clients
+        await this._saveToStorage(CONSTANTS.STORAGE_WINNER_KEY, winnerData);
+        await this._saveToKV(CONSTANTS.DICE_LAST_WEEK_WINNER, winnerData);
         this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceLastWeekWinner", winner, highestScore, currentWeek]);
         this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", `🏆 Weekly Winner: ${winner} with ${highestScore} points!`]);
-        
-        console.log(`✅ Winner saved: ${winner}`);
       } else {
-        console.log('❌ No winner found, skipping save');
         this._cachedLastWeekWinner = null;
-        await this.env.QUESTIONS.delete(CONSTANTS.DICE_LAST_WEEK_WINNER);
+        await this._saveToStorage(CONSTANTS.STORAGE_WINNER_KEY, null);
+        await this._saveToKV(CONSTANTS.DICE_LAST_WEEK_WINNER, null);
       }
       
-      // 4. Reset points for new week
       await this.diceGameSystem.resetPoints();
       this.diceGameSystem.clearCache();
       
-      // 5. Save all cache
-      await this._saveAllCache();
+      await this._saveToStorage(CONSTANTS.STORAGE_POINTS_KEY, {});
+      await this._saveToKV(CONSTANTS.DICE_POINT_KEY, {});
       
-      console.log('✅ Weekly reset completed successfully');
-      
-    } catch(e) {
-      console.error('❌ Weekly reset error:', e);
-    }
+    } catch(e) {}
   }
 
   _trackTimer(timer) {
@@ -1208,7 +1215,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // FETCH - WITH ADMIN ENDPOINTS
+  // FETCH - WITH ADMIN ENDPOINTS & STORAGE STATUS
   // ============================================================
   async fetch(req) {
     try {
@@ -1242,12 +1249,8 @@ export class GameServer {
       
       const url = new URL(req.url);
       
-      // ===== ADMIN ENDPOINTS =====
-      
-      // Force weekly reset - simpan pemenang sekarang
       if (url.pathname === "/admin/force-weekly-winner" && req.method === "POST") {
         try {
-          // Cari pemenang dari data dice_points
           const points = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
           
           let winner = null;
@@ -1270,20 +1273,18 @@ export class GameServer {
               timestamp: Date.now() 
             };
             
-            // Simpan ke KV
-            await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_WEEK_WINNER, JSON.stringify(winnerData));
             this._cachedLastWeekWinner = winnerData;
+            await this._saveToStorage(CONSTANTS.STORAGE_WINNER_KEY, winnerData);
+            await this._saveToKV(CONSTANTS.DICE_LAST_WEEK_WINNER, winnerData);
             
-            // Broadcast ke semua client
             this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceLastWeekWinner", winner, highestScore, currentWeek]);
             this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", `🏆 Weekly Winner: ${winner} with ${highestScore} points!`]);
             
-            // Reset points untuk minggu baru
             await this.env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify({}));
             this.diceGameSystem.pointsCache.setPoints({}, this.env);
             this.diceGameSystem.userScores.clear();
             
-            await this._saveAllCache();
+            await this._saveAllData();
             
             return new Response(JSON.stringify({ 
               success: true, 
@@ -1312,7 +1313,6 @@ export class GameServer {
         }
       }
       
-      // Cek pemenang saat ini
       if (url.pathname === "/admin/current-winner") {
         try {
           const winner = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
@@ -1321,7 +1321,8 @@ export class GameServer {
           return new Response(JSON.stringify({ 
             winner: winner || null,
             currentPoints: points,
-            totalPlayers: Object.keys(points).length
+            totalPlayers: Object.keys(points).length,
+            storageWinner: this._cachedLastWeekWinner || null
           }), {
             headers: { 'Content-Type': 'application/json' }
           });
@@ -1333,7 +1334,6 @@ export class GameServer {
         }
       }
       
-      // Cek status server
       if (url.pathname === "/admin/status") {
         return new Response(JSON.stringify({
           status: "running",
@@ -1346,7 +1346,6 @@ export class GameServer {
         });
       }
       
-      // ===== WEBSOCKET =====
       if (url.pathname === "/game/ws") {
         const upgrade = req.headers.get("Upgrade");
         if (upgrade !== "websocket") {
@@ -1395,7 +1394,7 @@ export class GameServer {
         });
       }
       
-      return new Response("Game Server v6.8.0", { status: 200 });
+      return new Response("Game Server v6.9.0", { status: 200 });
       
     } catch(e) {
       this._handleError('fetch', e);
@@ -1443,9 +1442,7 @@ export class GameServer {
       if (Array.isArray(data) && data.length > 0) {
         await this._processWithTimeout(ws, data);
       }
-    } catch(e) {
-      console.error('WebSocket message error:', e);
-    }
+    } catch(e) {}
   }
 
   async webSocketClose(ws, code, reason, wasClean) {
@@ -1655,7 +1652,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // PROCESS EVENT - WITH DICE LEADERBOARD FIX
+  // PROCESS EVENT
   // ============================================================
   
   async _processWithTimeout(ws, data, timeoutMs = 500) {
@@ -1722,7 +1719,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // GET LEADERBOARD WITH WINNER - FIXED
+  // GET LEADERBOARD WITH WINNER
   // ============================================================
   getLeaderboardWithWinner(limit = 10) {
     try {
@@ -1731,7 +1728,6 @@ export class GameServer {
         .sort((a, b) => b[1] - a[1])
         .slice(0, limit);
       
-      // Tambahkan pemenang mingguan jika ada
       const lastWeekWinner = this._getLastWeekWinnerAndReset();
       if (lastWeekWinner && lastWeekWinner.username) {
         return {
@@ -1786,14 +1782,11 @@ export class GameServer {
             this.diceGameSystem = new DiceGameSystem(this);
           }
           
-          // Gunakan fungsi baru untuk ambil leaderboard + winner
           const result = this.getLeaderboardWithWinner(limit);
           const leaderboardData = result.leaderboard.map(([u, s]) => `${u}|${s}`);
           
-          // Kirim data leaderboard
           this._safeSend(ws, ["diceLeaderboard", leaderboardData]);
           
-          // Jika ada pemenang mingguan, kirim juga
           if (result.weeklyWinner) {
             this._safeSend(ws, ["diceLastWeekWinner", 
               result.weeklyWinner.username, 
@@ -1823,6 +1816,57 @@ export class GameServer {
           this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "Last week winner deleted"]);
         } catch(e) { 
           this._safeSend(ws, ["diceLastWeekWinnerDeleted", false, e.message]); 
+        }
+        return;
+      }
+
+      if (evt === "forceWeeklyWinner") {
+        try {
+          const points = this.diceGameSystem.pointsCache.getPoints() || {};
+          
+          let winner = null;
+          let highestScore = 0;
+          
+          for (const [username, score] of Object.entries(points)) {
+            const numericScore = typeof score === 'number' ? score : parseInt(score, 10) || 0;
+            if (numericScore > highestScore) {
+              highestScore = numericScore;
+              winner = username;
+            }
+          }
+          
+          if (winner && highestScore > 0) {
+            const currentWeek = this._getCurrentWeek();
+            const winnerData = { 
+              username: winner, 
+              score: highestScore, 
+              week: currentWeek,
+              timestamp: Date.now() 
+            };
+            
+            this._cachedLastWeekWinner = winnerData;
+            await this._saveToStorage(CONSTANTS.STORAGE_WINNER_KEY, winnerData);
+            await this._saveToKV(CONSTANTS.DICE_LAST_WEEK_WINNER, winnerData);
+            
+            this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceLastWeekWinner", winner, highestScore, currentWeek]);
+            this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", `🏆 Weekly Winner: ${winner} with ${highestScore} points!`]);
+            
+            this._safeSend(ws, ["forceWeeklyWinnerResult", { 
+              success: true, 
+              winner: winnerData,
+              message: `Winner ${winner} with ${highestScore} points saved!`
+            }]);
+          } else {
+            this._safeSend(ws, ["forceWeeklyWinnerResult", { 
+              success: false, 
+              message: "No winner found" 
+            }]);
+          }
+        } catch(e) {
+          this._safeSend(ws, ["forceWeeklyWinnerResult", { 
+            success: false, 
+            error: e.message 
+          }]);
         }
         return;
       }
@@ -1899,6 +1943,36 @@ export class GameServer {
         return;
       }
 
+      if (evt === "getStorageStatus") {
+        try {
+          const storageWinner = await this._getFromStorage(CONSTANTS.STORAGE_WINNER_KEY);
+          const storagePoints = await this._getFromStorage(CONSTANTS.STORAGE_POINTS_KEY);
+          
+          const kvWinner = await this._getFromKV(CONSTANTS.DICE_LAST_WEEK_WINNER);
+          const kvPoints = await this._getFromKV(CONSTANTS.DICE_POINT_KEY);
+          
+          const status = {
+            storageCache: {
+              winner: !!storageWinner,
+              points: !!storagePoints,
+              winnerData: storageWinner || null
+            },
+            kv: {
+              winner: !!kvWinner,
+              points: !!kvPoints,
+              winnerData: kvWinner || null
+            },
+            winner: this._cachedLastWeekWinner || null,
+            timestamp: Date.now()
+          };
+          
+          this._safeSend(ws, ["storageStatus", status]);
+        } catch(e) {
+          this._safeSend(ws, ["storageStatus", { error: e.message }]);
+        }
+        return;
+      }
+
       if (evt === "startGameWithRecording") {
         const [_, room, bet, username] = data;
         await this._startGameWithRecording(ws, room, bet, username);
@@ -1928,17 +2002,13 @@ export class GameServer {
   }
 
   // ============================================================
-  // GET LAST WEEK WINNER - FIXED
+  // GET LAST WEEK WINNER
   // ============================================================
   _getLastWeekWinnerAndReset() {
     try {
-      // Cek cache dulu
       if (this._cachedLastWeekWinner !== null && this._cachedLastWeekWinner !== undefined) {
         return this._cachedLastWeekWinner;
       }
-      
-      // Jika tidak ada di cache, coba ambil dari KV
-      // Ini akan di-load saat init
       return null;
     } catch(e) { 
       return null; 
@@ -1959,7 +2029,7 @@ export class GameServer {
       
       this.cacheManager.recordingStatus.set(roomName, true);
       await this._saveRecordingStatus(roomName, true);
-      await this._saveAllCache();
+      await this._saveAllData();
       this._broadcastToRoom(roomName, ["recordingStatus", true]);
       return true;
     } catch(e) { 
@@ -1981,7 +2051,7 @@ export class GameServer {
       this.cacheManager.winnersCache.delete(room);
       await this._saveRecordingStatus(room, false);
       await this._saveWinners(room, {});
-      await this._saveAllCache();
+      await this._saveAllData();
       this._broadcastToRoom(room, ["recordingStatus", false]);
       return true;
     } catch(e) { 
@@ -2003,7 +2073,7 @@ export class GameServer {
       roomWinners[username] = (count + 1) + "x";
       this.cacheManager.winnersCache.set(room, { winners: roomWinners });
       await this._saveWinners(room, roomWinners);
-      await this._saveAllCache();
+      await this._saveAllData();
       return true;
     } catch(e) { 
       return false; 
@@ -2459,7 +2529,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // START REGISTRATION - FIXED NOTIFICATIONS
+  // START REGISTRATION
   // ============================================================
   _startRegistration(room, game) {
     try {
@@ -2469,7 +2539,6 @@ export class GameServer {
         game._registrationTimer = null;
       }
       
-      // CLEANUP OLD NOTIFICATION TIMERS
       if (game._notificationTimers) {
         for (const timer of game._notificationTimers) {
           this._clearTimer(timer);
@@ -2479,7 +2548,6 @@ export class GameServer {
         game._notificationTimers = [];
       }
       
-      // KONSISTEN NOTIFICATIONS: 15s, 10s, 5s
       const notifications = [
         { delay: 5000, message: "15s" },
         { delay: 10000, message: "10s" },
@@ -2606,7 +2674,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // START DRAW COUNTDOWN - FIXED NOTIFICATIONS
+  // START DRAW COUNTDOWN
   // ============================================================
   _startDrawCountdown(room, game) {
     try {
@@ -2616,7 +2684,6 @@ export class GameServer {
         game._drawTimer = null;
       }
       
-      // CLEANUP OLD NOTIFICATION TIMERS
       if (game._drawNotificationTimers) {
         for (const timer of game._drawNotificationTimers) {
           this._clearTimer(timer);
@@ -2626,7 +2693,6 @@ export class GameServer {
         game._drawNotificationTimers = [];
       }
       
-      // KONSISTEN NOTIFICATIONS: 15s, 10s, 5s
       const notifications = [
         { delay: 5000, message: "15s" },
         { delay: 10000, message: "10s" },
@@ -2966,8 +3032,8 @@ export class GameServer {
           _isEvaluating: false, _createdAt: Date.now(), _drawPhaseStart: null, _endTime: null,
           playerWsId: new Map(),
           _startedByRecording: false, _startedBy: 'user',
-          _notificationTimers: [],  // FOR REGISTRATION NOTIFICATIONS
-          _drawNotificationTimers: []  // FOR DRAW NOTIFICATIONS
+          _notificationTimers: [],
+          _drawNotificationTimers: []
         };
         
         game.players.set(usernameClean, { id: usernameClean, name: usernameClean });
@@ -3257,8 +3323,8 @@ export class GameServer {
         _isEvaluating: false, _createdAt: Date.now(), _drawPhaseStart: null, _endTime: null,
         playerWsId: new Map(),
         _startedByRecording: true, _startedBy: 'recording',
-        _notificationTimers: [],  // FOR REGISTRATION NOTIFICATIONS
-        _drawNotificationTimers: []  // FOR DRAW NOTIFICATIONS
+        _notificationTimers: [],
+        _drawNotificationTimers: []
       };
       game.players.set(username, { id: username, name: username });
       game.playerWsId.set(username, wsId);
@@ -3792,7 +3858,7 @@ export class GameServer {
       this.isDestroyed = true;
       this.closing = true;
       
-      await this._saveAllCache();
+      await this._saveAllData();
       
       for (const timer of this._allTimers) {
         try { clearTimeout(timer); clearInterval(timer); } catch(e) {}
