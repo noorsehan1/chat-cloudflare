@@ -1,5 +1,5 @@
-// ==================== INDEX.JS - CONNECTION ONLY ====================
-// VERSION: 3.3.3 - NO HEALTH CHECK
+// ==================== INDEX.JS - FULL ROUTER ====================
+// VERSION: 4.0.0 - WITH ADMIN ENDPOINTS
 
 import { ChatServer } from "./chat-server.js";
 import { GameServer } from "./game-server.js";
@@ -18,21 +18,16 @@ export default {
       }
       
       // ========== GAME SERVER ==========
-      if (pathname === "/game/ws") {
+      if (pathname === "/game/ws" || 
+          pathname.startsWith("/admin/") || 
+          pathname === "/game/health") {
         const id = env.GAME_SERVER.idFromName("game");
         const obj = env.GAME_SERVER.get(id);
         return obj.fetch(request);
       }
       
-      // ❌ HAPUS BAGIAN INI
-      // if (pathname === "/game/health") {
-      //   const id = env.GAME_SERVER.idFromName("game");
-      //   const obj = env.GAME_SERVER.get(id);
-      //   return obj.fetch(request);
-      // }
-      
       // ========== ROOT ==========
-      return new Response("Server running", { 
+      return new Response("Server running v4.0.0 - Full Admin", { 
         status: 200,
         headers: { 'Content-Type': 'text/plain' }
       });
