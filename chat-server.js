@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER-HIBERNATION-NO-PING.JS ====================
-// VERSION: 9.3.6 - AUTO RESET STORAGE & CACHE ON START + CLEANUP ON WS CLOSE/ERROR
+// VERSION: 9.3.7 - FIXED UPDATE POINT & ATTACHMENT ISSUES
 
 const C = {
   MAX_SEATS: 45,
@@ -122,6 +122,11 @@ export class ChatServer {
             username = attachment.username;
             ws._cachedRoom = room;
             ws._cachedUsername = username;
+            // Pastikan properti utama juga di-set
+            ws.username = username;
+            ws.room = room;
+            ws.roomname = room;
+            ws.idtarget = username;
           }
         }
         
@@ -513,23 +518,32 @@ export class ChatServer {
     await this.ctx.storage.put("onlineUsers", Array.from(this._onlineUsers));
     await this._updateUserCounts();
     
-    ws.serializeAttachment({
+    // ============ FIX: SIMPAN ATTACHMENT DENGAN BENAR ============
+    const attachmentData = {
       username: username,
       room: roomName,
       seat: seat,
       isMulti: false,
       seatInfo: seatInfo
-    });
+    };
     
-    ws._cachedRoom = roomName;
-    ws._cachedUsername = username;
+    try {
+      ws.serializeAttachment(attachmentData);
+    } catch(e) {
+      // Jika serializeAttachment error, set properti langsung
+    }
+    
+    // Set semua properti yang diperlukan
     ws.username = username;
     ws.room = roomName;
     ws.roomname = roomName;
     ws.idtarget = username;
+    ws._cachedRoom = roomName;
+    ws._cachedUsername = username;
     ws._isMulti = false;
     ws._multiRoom = null;
     ws._multiSeat = null;
+    ws._closing = false;
     
     this._refreshRoomClients(true);
     
@@ -559,9 +573,7 @@ export class ChatServer {
       const username = ws.username || ws._cachedUsername;
       if (!username) return;
       
-      // HAPUS SEMUA DATA USER DARI CACHE DAN STORAGE
       await this._cleanupAllUserData(username);
-      
       this._refreshRoomClients(true);
       
     } catch(e) {}
@@ -791,6 +803,7 @@ export class ChatServer {
         attachment = ws.deserializeAttachment();
       } catch(e) {}
       
+      // ============ FIX: SELALU UPDATE USER DATA DARI ATTACHMENT ============
       if (attachment && attachment.username) {
         ws.username = attachment.username;
         ws.room = attachment.room;
@@ -805,6 +818,20 @@ export class ChatServer {
         if (attachment.seatInfo) {
           this._userSeatDataCache[attachment.username] = attachment.seatInfo;
         }
+      } else {
+        // Jika tidak ada attachment, coba gunakan properti yang tersimpan
+        if (ws.username && ws.room) {
+          // Sudah ada data di properti
+        }
+      }
+      
+      // ============ FIX: PASTIKAN ws.username DAN ws.room ADA ============
+      if (!ws.username || !ws.room) {
+        // Coba ambil dari _cached
+        if (ws._cachedUsername) ws.username = ws._cachedUsername;
+        if (ws._cachedRoom) ws.room = ws._cachedRoom;
+        if (ws._cachedRoom) ws.roomname = ws._cachedRoom;
+        if (ws.username) ws.idtarget = ws.username;
       }
       
       await this.handleMessage(ws, message);
@@ -816,7 +843,6 @@ export class ChatServer {
   async webSocketClose(ws, code, reason, wasClean) {
     if (!ws) return;
     try {
-      // HAPUS SEMUA DATA USER DARI CACHE DAN STORAGE
       await this._cleanupUserOnDisconnect(ws);
     } catch(e) {}
   }
@@ -826,7 +852,6 @@ export class ChatServer {
   async webSocketError(ws, error) {
     if (!ws) return;
     try {
-      // HAPUS SEMUA DATA USER DARI CACHE DAN STORAGE
       await this._cleanupUserOnDisconnect(ws);
     } catch(e) {}
   }
@@ -852,7 +877,9 @@ export class ChatServer {
     ws._cachedUsername = username;
     ws._cachedRoom = null;
     
-    ws.serializeAttachment({ username: username });
+    try {
+      ws.serializeAttachment({ username: username });
+    } catch(e) {}
     
     if (isNewUser) { 
       this.safeSend(ws, ["joinroomawal"]); 
@@ -989,7 +1016,7 @@ export class ChatServer {
           await this.ctx.storage.put("onlineUsers", Array.from(this._onlineUsers));
           await this._updateUserCounts();
           
-          ws.serializeAttachment({
+          const attachmentData = {
             username: multiUsername,
             room: multiRoomname,
             seat: seat,
@@ -997,17 +1024,22 @@ export class ChatServer {
             multiRoom: multiRoomname,
             multiSeat: seat,
             seatInfo: seatInfo
-          });
+          };
           
-          ws._cachedUsername = multiUsername;
-          ws._cachedRoom = multiRoomname;
+          try {
+            ws.serializeAttachment(attachmentData);
+          } catch(e) {}
+          
           ws.username = multiUsername;
           ws.idtarget = multiUsername;
           ws.room = multiRoomname;
           ws.roomname = multiRoomname;
+          ws._cachedUsername = multiUsername;
+          ws._cachedRoom = multiRoomname;
           ws._isMulti = true;
           ws._multiRoom = multiRoomname;
           ws._multiSeat = seat;
+          ws._closing = false;
           
           const webSockets = this._getActiveWebSockets();
           for (const wsKey of webSockets) {
@@ -1017,21 +1049,15 @@ export class ChatServer {
                             wsKey.username || 
                             wsKey.deserializeAttachment()?.username;
               if (uname === multiUsername && wsKey.readyState === 1) {
-                wsKey.serializeAttachment({
-                  username: multiUsername,
-                  room: multiRoomname,
-                  seat: seat,
-                  isMulti: true,
-                  multiRoom: multiRoomname,
-                  multiSeat: seat,
-                  seatInfo: seatInfo
-                });
-                wsKey._cachedUsername = multiUsername;
-                wsKey._cachedRoom = multiRoomname;
+                try {
+                  wsKey.serializeAttachment(attachmentData);
+                } catch(e) {}
                 wsKey.username = multiUsername;
                 wsKey.idtarget = multiUsername;
                 wsKey.room = multiRoomname;
                 wsKey.roomname = multiRoomname;
+                wsKey._cachedUsername = multiUsername;
+                wsKey._cachedRoom = multiRoomname;
                 wsKey._isMulti = true;
                 wsKey._multiRoom = multiRoomname;
                 wsKey._multiSeat = seat;
@@ -1102,7 +1128,7 @@ export class ChatServer {
                             wsKey.deserializeAttachment()?.username;
               
               if (uname === targetUsername && wsKey.readyState === 1) {
-                wsKey.serializeAttachment({
+                const attachmentData = {
                   username: targetUsername,
                   room: roomName,
                   seat: seatNumber,
@@ -1116,14 +1142,18 @@ export class ChatServer {
                     multiRoom: roomName,
                     multiSeat: seatNumber
                   }
-                });
+                };
                 
-                wsKey._cachedUsername = targetUsername;
-                wsKey._cachedRoom = roomName;
+                try {
+                  wsKey.serializeAttachment(attachmentData);
+                } catch(e) {}
+                
                 wsKey.username = targetUsername;
                 wsKey.idtarget = targetUsername;
                 wsKey.room = roomName;
                 wsKey.roomname = roomName;
+                wsKey._cachedUsername = targetUsername;
+                wsKey._cachedRoom = roomName;
                 wsKey._isMulti = true;
                 wsKey._multiRoom = roomName;
                 wsKey._multiSeat = seatNumber;
@@ -1175,10 +1205,12 @@ export class ChatServer {
                   wsKey.room = null;
                   wsKey.roomname = null;
                   wsKey.idtarget = null;
-                  wsKey.serializeAttachment({ 
-                    username: targetUsername,
-                    isMulti: false
-                  });
+                  try {
+                    wsKey.serializeAttachment({ 
+                      username: targetUsername,
+                      isMulti: false
+                    });
+                  } catch(e) {}
                   
                   this.safeSend(wsKey, ["exitMultiSuccess", targetUsername, null, null]);
                 }
@@ -1231,9 +1263,31 @@ export class ChatServer {
           break;
         }
         
+        // ============ FIX: UPDATE POINT - VALIDASI LEBIH KETAT ============
         case "updatePoint": {
           const [pointRoom, pointSeat, pointX, pointY, pointFast] = args;
           if (!pointRoom || typeof pointSeat !== 'number') break;
+          
+          // ============ FIX: PASTIKAN USER ADA DI ROOM YANG BENAR ============
+          const username = ws.username || ws._cachedUsername;
+          if (!username) {
+            break;
+          }
+          
+          const userSeat = this._userSeatDataCache[username];
+          if (!userSeat) {
+            break;
+          }
+          
+          // Pastikan user berada di room yang sama dengan pointRoom
+          if (userSeat.room !== pointRoom) {
+            break;
+          }
+          
+          // Pastikan seat yang diupdate adalah milik user
+          if (userSeat.seat !== pointSeat) {
+            break;
+          }
           
           const updated = await this._updatePoint(pointRoom, pointSeat, pointX, pointY, pointFast === 1);
           if (updated) {
@@ -1488,15 +1542,17 @@ export class ChatServer {
               ws._cachedUsername = attachment.username;
               ws._cachedRoom = roomName;
               
-              ws.serializeAttachment({
-                username: attachment.username,
-                room: roomName,
-                seat: seatNumber,
-                isMulti: isMulti,
-                multiRoom: attachment.multiRoom || roomName,
-                multiSeat: attachment.multiSeat || seatNumber,
-                seatInfo: userSeat
-              });
+              try {
+                ws.serializeAttachment({
+                  username: attachment.username,
+                  room: roomName,
+                  seat: seatNumber,
+                  isMulti: isMulti,
+                  multiRoom: attachment.multiRoom || roomName,
+                  multiSeat: attachment.multiSeat || seatNumber,
+                  seatInfo: userSeat
+                });
+              } catch(e) {}
               
               this._onlineUsers.add(attachment.username);
             }
@@ -1673,7 +1729,9 @@ export class ChatServer {
       server._cachedUsername = null;
       server._cachedRoom = null;
       
-      server.serializeAttachment({});
+      try {
+        server.serializeAttachment({});
+      } catch(e) {}
       
       this._refreshRoomClients(true);
       
