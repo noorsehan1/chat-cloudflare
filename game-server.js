@@ -1,5 +1,5 @@
 // ==================== GAME-SERVER-HIBERNATION-FULL-FIXED.js ====================
-// VERSION: 6.7.1 - FIXED NOTIFICATION CONSISTENCY
+// VERSION: 6.8.0 - FIXED WEEKLY RESET & LEADERBOARD
 
  const CONSTANTS = {
   MAX_LOWCARD_GAMES: 10,
@@ -49,7 +49,7 @@
   
   ALARM_STATE_KEY: 'alarm_state',
   
-  WEEKLY_RESET_DAY: 1,
+  WEEKLY_RESET_DAY: 1, // Monday
   WEEKLY_RESET_HOUR: 0,
   WEEKLY_RESET_ALARM: 'weekly_reset',
 };
@@ -69,7 +69,7 @@ function parseTime(timeStr) {
 }
 
 // ============================================================
-// ALARM SCHEDULER
+// ALARM SCHEDULER - FIXED
 // ============================================================
 class AlarmScheduler {
   constructor(env, state) {
@@ -154,12 +154,15 @@ class AlarmScheduler {
       
       const delayMs = resetTime.getTime() - now.getTime();
       
-      if (delayMs > 0) {
+      if (delayMs > 0 && delayMs < 7 * 24 * 60 * 60 * 1000) {
         await this._scheduleAlarm(CONSTANTS.WEEKLY_RESET_ALARM, delayMs);
+        console.log(`Weekly reset scheduled in ${Math.floor(delayMs/3600000)} hours`);
+        return true;
       }
       
-      return true;
+      return false;
     } catch(e) {
+      console.error('Schedule weekly reset error:', e);
       return false;
     }
   }
@@ -748,8 +751,12 @@ export class GameServer {
         }
         
         const lastWeekWinner = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
-        if (lastWeekWinner) {
+        if (lastWeekWinner && lastWeekWinner.username) {
           this._cachedLastWeekWinner = lastWeekWinner;
+          console.log(`✅ Loaded weekly winner: ${lastWeekWinner.username} with ${lastWeekWinner.score} points`);
+        } else {
+          this._cachedLastWeekWinner = null;
+          console.log('ℹ️ No weekly winner found');
         }
       }
       
@@ -761,6 +768,7 @@ export class GameServer {
       
       return true;
     } catch(e) {
+      console.error('Deploy reset error:', e);
       return false;
     }
   }
@@ -882,7 +890,7 @@ export class GameServer {
       }
       
       const lastWeekWinner = await this.ctx.storage.get('cachedLastWeekWinner');
-      if (lastWeekWinner) {
+      if (lastWeekWinner && lastWeekWinner.username) {
         this._cachedLastWeekWinner = lastWeekWinner;
       } else {
         this._cachedLastWeekWinner = null;
@@ -942,8 +950,9 @@ export class GameServer {
       }).catch(() => {});
       
       this.env?.QUESTIONS?.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json').then((data) => {
-        if (data) {
+        if (data && data.username) {
           this._cachedLastWeekWinner = data;
+          console.log(`✅ Loaded weekly winner: ${data.username}`);
         }
       }).catch(() => {});
       
@@ -1037,7 +1046,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // ALARM
+  // ALARM - FIXED WEEKLY RESET
   // ============================================================
   async alarm() {
     if (this.closing || this.isDestroyed) return;
@@ -1050,6 +1059,7 @@ export class GameServer {
         try {
           switch(alarm.name) {
             case CONSTANTS.WEEKLY_RESET_ALARM:
+              console.log('🔄 Weekly reset alarm triggered!');
               await this._handleWeeklyReset();
               break;
               
@@ -1104,12 +1114,21 @@ export class GameServer {
     return `${year}-W${String(week).padStart(2, '0')}`;
   }
 
+  // ============================================================
+  // HANDLE WEEKLY RESET - FIXED
+  // ============================================================
   async _handleWeeklyReset() {
     try {
-      const points = this.diceGameSystem.pointsCache.getPoints() || {};
+      console.log('🔄 Running weekly reset...');
       
+      // 1. Get current points
+      const points = this.diceGameSystem.pointsCache.getPoints() || {};
+      console.log(`📊 Total players: ${Object.keys(points).length}`);
+      
+      // 2. Find winner with highest score
       let winner = null;
       let highestScore = 0;
+      
       for (const [username, score] of Object.entries(points)) {
         const numericScore = typeof score === 'number' ? score : parseInt(score, 10) || 0;
         if (numericScore > highestScore) {
@@ -1118,6 +1137,9 @@ export class GameServer {
         }
       }
       
+      console.log(`🏆 Winner found: ${winner} with ${highestScore} points`);
+      
+      // 3. Save winner to KV
       const currentWeek = this._getCurrentWeek();
       
       if (winner && highestScore > 0) {
@@ -1128,20 +1150,33 @@ export class GameServer {
           timestamp: Date.now() 
         };
         
-        this._cachedLastWeekWinner = winnerData;
+        // Save to KV
         await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_WEEK_WINNER, JSON.stringify(winnerData));
+        this._cachedLastWeekWinner = winnerData;
+        
+        // Broadcast to all clients
         this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceLastWeekWinner", winner, highestScore, currentWeek]);
+        this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", `🏆 Weekly Winner: ${winner} with ${highestScore} points!`]);
+        
+        console.log(`✅ Winner saved: ${winner}`);
       } else {
+        console.log('❌ No winner found, skipping save');
         this._cachedLastWeekWinner = null;
         await this.env.QUESTIONS.delete(CONSTANTS.DICE_LAST_WEEK_WINNER);
       }
       
+      // 4. Reset points for new week
       await this.diceGameSystem.resetPoints();
       this.diceGameSystem.clearCache();
       
+      // 5. Save all cache
       await this._saveAllCache();
       
-    } catch(e) {}
+      console.log('✅ Weekly reset completed successfully');
+      
+    } catch(e) {
+      console.error('❌ Weekly reset error:', e);
+    }
   }
 
   _trackTimer(timer) {
@@ -1173,7 +1208,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // FETCH
+  // FETCH - WITH ADMIN ENDPOINTS
   // ============================================================
   async fetch(req) {
     try {
@@ -1207,6 +1242,111 @@ export class GameServer {
       
       const url = new URL(req.url);
       
+      // ===== ADMIN ENDPOINTS =====
+      
+      // Force weekly reset - simpan pemenang sekarang
+      if (url.pathname === "/admin/force-weekly-winner" && req.method === "POST") {
+        try {
+          // Cari pemenang dari data dice_points
+          const points = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
+          
+          let winner = null;
+          let highestScore = 0;
+          
+          for (const [username, score] of Object.entries(points)) {
+            const numericScore = typeof score === 'number' ? score : parseInt(score, 10) || 0;
+            if (numericScore > highestScore) {
+              highestScore = numericScore;
+              winner = username;
+            }
+          }
+          
+          if (winner && highestScore > 0) {
+            const currentWeek = this._getCurrentWeek();
+            const winnerData = { 
+              username: winner, 
+              score: highestScore, 
+              week: currentWeek,
+              timestamp: Date.now() 
+            };
+            
+            // Simpan ke KV
+            await this.env.QUESTIONS.put(CONSTANTS.DICE_LAST_WEEK_WINNER, JSON.stringify(winnerData));
+            this._cachedLastWeekWinner = winnerData;
+            
+            // Broadcast ke semua client
+            this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceLastWeekWinner", winner, highestScore, currentWeek]);
+            this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", `🏆 Weekly Winner: ${winner} with ${highestScore} points!`]);
+            
+            // Reset points untuk minggu baru
+            await this.env.QUESTIONS.put(CONSTANTS.DICE_POINT_KEY, JSON.stringify({}));
+            this.diceGameSystem.pointsCache.setPoints({}, this.env);
+            this.diceGameSystem.userScores.clear();
+            
+            await this._saveAllCache();
+            
+            return new Response(JSON.stringify({ 
+              success: true, 
+              winner: winnerData,
+              message: `Winner ${winner} with ${highestScore} points saved!`
+            }), {
+              headers: { 'Content-Type': 'application/json' }
+            });
+          } else {
+            return new Response(JSON.stringify({ 
+              success: false, 
+              message: "No winner found" 
+            }), {
+              status: 404,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+        } catch(e) {
+          return new Response(JSON.stringify({ 
+            success: false, 
+            error: e.message 
+          }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
+      
+      // Cek pemenang saat ini
+      if (url.pathname === "/admin/current-winner") {
+        try {
+          const winner = await this.env.QUESTIONS.get(CONSTANTS.DICE_LAST_WEEK_WINNER, 'json');
+          const points = await this.env.QUESTIONS.get(CONSTANTS.DICE_POINT_KEY, 'json') || {};
+          
+          return new Response(JSON.stringify({ 
+            winner: winner || null,
+            currentPoints: points,
+            totalPlayers: Object.keys(points).length
+          }), {
+            headers: { 'Content-Type': 'application/json' }
+          });
+        } catch(e) {
+          return new Response(JSON.stringify({ error: e.message }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
+      
+      // Cek status server
+      if (url.pathname === "/admin/status") {
+        return new Response(JSON.stringify({
+          status: "running",
+          activeGames: this.activeGames.size,
+          wsClients: this.wsMap.size,
+          diceActive: !!this.currentDiceRoll,
+          weeklyWinner: this._cachedLastWeekWinner
+        }), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      
+      // ===== WEBSOCKET =====
       if (url.pathname === "/game/ws") {
         const upgrade = req.headers.get("Upgrade");
         if (upgrade !== "websocket") {
@@ -1255,7 +1395,7 @@ export class GameServer {
         });
       }
       
-      return new Response("Game Server", { status: 200 });
+      return new Response("Game Server v6.8.0", { status: 200 });
       
     } catch(e) {
       this._handleError('fetch', e);
@@ -1515,7 +1655,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // PROCESS EVENT
+  // PROCESS EVENT - WITH DICE LEADERBOARD FIX
   // ============================================================
   
   async _processWithTimeout(ws, data, timeoutMs = 500) {
@@ -1581,6 +1721,34 @@ export class GameServer {
     } catch(e) {}
   }
 
+  // ============================================================
+  // GET LEADERBOARD WITH WINNER - FIXED
+  // ============================================================
+  getLeaderboardWithWinner(limit = 10) {
+    try {
+      const points = this.diceGameSystem.pointsCache.getPoints() || {};
+      const leaderboard = Object.entries(points)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, limit);
+      
+      // Tambahkan pemenang mingguan jika ada
+      const lastWeekWinner = this._getLastWeekWinnerAndReset();
+      if (lastWeekWinner && lastWeekWinner.username) {
+        return {
+          leaderboard: leaderboard,
+          weeklyWinner: lastWeekWinner
+        };
+      }
+      
+      return {
+        leaderboard: leaderboard,
+        weeklyWinner: null
+      };
+    } catch(e) {
+      return { leaderboard: [], weeklyWinner: null };
+    }
+  }
+
   async _handleEventInternal(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
@@ -1618,8 +1786,21 @@ export class GameServer {
             this.diceGameSystem = new DiceGameSystem(this);
           }
           
-          const leaderboard = this.diceGameSystem.getLeaderboard(limit);
-          this._safeSend(ws, ["diceLeaderboard", leaderboard.map(([u, s]) => `${u}|${s}`)]);
+          // Gunakan fungsi baru untuk ambil leaderboard + winner
+          const result = this.getLeaderboardWithWinner(limit);
+          const leaderboardData = result.leaderboard.map(([u, s]) => `${u}|${s}`);
+          
+          // Kirim data leaderboard
+          this._safeSend(ws, ["diceLeaderboard", leaderboardData]);
+          
+          // Jika ada pemenang mingguan, kirim juga
+          if (result.weeklyWinner) {
+            this._safeSend(ws, ["diceLastWeekWinner", 
+              result.weeklyWinner.username, 
+              result.weeklyWinner.score || 0, 
+              result.weeklyWinner.week || ""
+            ]);
+          }
         } catch(e) { 
           this._safeSend(ws, ["diceLeaderboard", []]); 
         }
@@ -1744,6 +1925,24 @@ export class GameServer {
         default: break;
       }
     } catch(e) {}
+  }
+
+  // ============================================================
+  // GET LAST WEEK WINNER - FIXED
+  // ============================================================
+  _getLastWeekWinnerAndReset() {
+    try {
+      // Cek cache dulu
+      if (this._cachedLastWeekWinner !== null && this._cachedLastWeekWinner !== undefined) {
+        return this._cachedLastWeekWinner;
+      }
+      
+      // Jika tidak ada di cache, coba ambil dari KV
+      // Ini akan di-load saat init
+      return null;
+    } catch(e) { 
+      return null; 
+    }
   }
 
   // ============================================================
@@ -2064,17 +2263,6 @@ export class GameServer {
       return { hours, minutes, totalMinutes: (hours * 60) + minutes };
     } catch(e) { 
       return { hours: 0, minutes: 0, totalMinutes: 0 }; 
-    }
-  }
-
-  _getLastWeekWinnerAndReset() {
-    try {
-      if (this._cachedLastWeekWinner !== null) {
-        return this._cachedLastWeekWinner;
-      }
-      return null;
-    } catch(e) { 
-      return null; 
     }
   }
 
