@@ -1,7 +1,7 @@
 // ==================== CHAT-SERVER-HIBERNATION-NO-PING.JS ====================
 // VERSION: 10.1.0 - HIBERNATION PROOF + MAP-BASED TRACKING
 
-const C = {
+ const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 5000,
