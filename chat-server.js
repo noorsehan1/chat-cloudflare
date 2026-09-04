@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER-HIBERNATION-NO-PING.JS ====================
-// VERSION: 10.1.0 - HIBERNATION PROOF + MAP-BASED TRACKING
+// VERSION: 10.2.0 - HIBERNATION PROOF + MAP-BASED TRACKING + ROOM CLEANUP
 
  const C = {
   MAX_SEATS: 45,
@@ -765,6 +765,52 @@ export class ChatServer {
     return true;
   }
 
+  // ============ CLEAN USER FROM ALL ROOMS ============
+
+  async _cleanUserFromAllRooms(username) {
+    if (!username) return 0;
+    
+    let cleaned = 0;
+    const userRooms = this._getUserRooms(username);
+    const roomsToClean = Object.keys(userRooms);
+    
+    for (const roomName of roomsToClean) {
+      const seat = this._getUserSeat(username, roomName);
+      if (seat === null) continue;
+      
+      const roomData = this._roomsDataCache[roomName];
+      if (roomData && roomData.seats && roomData.seats[seat]) {
+        // Hapus kursi
+        delete roomData.seats[seat];
+        // Hapus point
+        if (roomData.points) {
+          delete roomData.points[seat];
+        }
+        
+        // Broadcast ke room
+        this.broadcast(roomName, ['removeKursi', roomName, seat]);
+        await this.updateRoomCount(roomName);
+        await this._deleteRoomIfEmpty(roomName);
+        cleaned++;
+      }
+    }
+    
+    // Kosongkan semua data user
+    this._removeUserFromAllRooms(username);
+    this.userSeats.delete(username);
+    
+    // Jika user bukan multi, hapus dari onlineUsers
+    if (!this._isUserMulti(username)) {
+      this.onlineUsers.delete(username);
+    }
+    
+    if (cleaned > 0) {
+      await this._syncAllData();
+    }
+    
+    return cleaned;
+  }
+
   // ============ CLEANUP PHANTOM USERS ============
 
   async _cleanupPhantomUsers() {
@@ -904,7 +950,7 @@ export class ChatServer {
   async _checkAndResetOnDeploy() {
     try {
       const storedVersion = await this.ctx.storage.get('deployVersion');
-      const currentVersion = '10.1.0';
+      const currentVersion = '10.2.0';
 
       if (storedVersion !== currentVersion) {
         this._roomsDataCache = {};
@@ -965,6 +1011,7 @@ export class ChatServer {
     this._joinLocks.set(lockKey, Date.now());
 
     try {
+      // Cek apakah user sudah memiliki kursi di room ini
       const existingSeat = this._getUserSeat(username, roomName);
       if (existingSeat !== null) {
         const roomData = this._roomsDataCache[roomName];
@@ -1018,23 +1065,8 @@ export class ChatServer {
         }
       }
 
-      const userRooms = this._getUserRooms(username);
-      for (const [roomNameLoop, seat] of Object.entries(userRooms)) {
-        const roomData = this._roomsDataCache[roomNameLoop];
-        if (roomData && roomData.seats && roomData.seats[seat]) {
-          if (roomData.seats[seat].namauser === username) {
-            delete roomData.seats[seat];
-            if (roomData.points) {
-              delete roomData.points[seat];
-            }
-            this.broadcast(roomNameLoop, ['removeKursi', roomNameLoop, seat]);
-            await this.updateRoomCount(roomNameLoop);
-            await this._deleteRoomIfEmpty(roomNameLoop);
-          }
-        }
-      }
-
-      this._removeUserFromAllRooms(username);
+      // Bersihkan semua room sebelumnya
+      await this._cleanUserFromAllRooms(username);
       this.onlineUsers.delete(username);
 
       if (isMulti) {
@@ -1050,6 +1082,7 @@ export class ChatServer {
         await this._syncAllData();
       }
 
+      // Hapus data duplikat user di room yang sama
       const seatsToRemove = [];
       for (const [existingSeatNum, existingData] of Object.entries(roomData.seats)) {
         if (existingData && existingData.namauser === username) {
@@ -1156,6 +1189,29 @@ export class ChatServer {
         } catch (e) {}
       }, 1000);
 
+      // Validasi: Pastikan tidak ada data di room lain
+      setTimeout(async () => {
+        try {
+          const remainingRooms = this._getUserRooms(username);
+          for (const [roomNameLoop, seatLoop] of Object.entries(remainingRooms)) {
+            if (roomNameLoop !== roomName) {
+              const roomDataLoop = this._roomsDataCache[roomNameLoop];
+              if (roomDataLoop && roomDataLoop.seats && roomDataLoop.seats[seatLoop]) {
+                delete roomDataLoop.seats[seatLoop];
+                if (roomDataLoop.points) {
+                  delete roomDataLoop.points[seatLoop];
+                }
+                this.broadcast(roomNameLoop, ['removeKursi', roomNameLoop, seatLoop]);
+                await this.updateRoomCount(roomNameLoop);
+                await this._deleteRoomIfEmpty(roomNameLoop);
+              }
+              this._removeUserFromRoom(username, roomNameLoop);
+            }
+          }
+          await this._syncAllData();
+        } catch (e) {}
+      }, 100);
+
       return true;
 
     } finally {
@@ -1235,27 +1291,8 @@ export class ChatServer {
         return;
       }
 
-      for (const room of ROOMS) {
-        const roomData = this._roomsDataCache[room];
-        if (!roomData || !roomData.seats) continue;
-
-        const seatsToRemove = [];
-        for (const [seatNum, seatData] of Object.entries(roomData.seats)) {
-          if (seatData && seatData.namauser === multiUsername) {
-            seatsToRemove.push(parseInt(seatNum));
-          }
-        }
-
-        for (const seatNum of seatsToRemove) {
-          delete roomData.seats[seatNum];
-          if (roomData.points) {
-            delete roomData.points[seatNum];
-          }
-          this.broadcast(room, ['removeKursi', room, seatNum]);
-        }
-      }
-
-      this._removeUserFromAllRooms(multiUsername);
+      // Bersihkan semua room sebelumnya
+      await this._cleanUserFromAllRooms(multiUsername);
 
       let roomData = this._roomsDataCache[multiRoomname];
       if (!roomData) {
@@ -1264,6 +1301,7 @@ export class ChatServer {
         await this._syncAllData();
       }
 
+      // Hapus data duplikat user di room yang sama
       const seatsToRemove2 = [];
       for (const [existingSeatNum, existingData] of Object.entries(roomData.seats)) {
         if (existingData && existingData.namauser === multiUsername) {
@@ -1350,6 +1388,7 @@ export class ChatServer {
       this.userSeats.set(multiUsername, { room: multiRoomname, seat: seat });
       this.wsActiveMulti.set(ws, { username: multiUsername, room: multiRoomname });
 
+      // Update semua koneksi WebSocket lain dengan username yang sama
       const webSockets = this._getActiveWebSockets();
       for (const wsKey of webSockets) {
         if (wsKey === ws) continue;
@@ -1400,6 +1439,29 @@ export class ChatServer {
           }
         } catch (e) {}
       }, 500);
+
+      // Validasi: Pastikan tidak ada data di room lain
+      setTimeout(async () => {
+        try {
+          const remainingRooms = this._getUserRooms(multiUsername);
+          for (const [roomNameLoop, seatLoop] of Object.entries(remainingRooms)) {
+            if (roomNameLoop !== multiRoomname) {
+              const roomDataLoop = this._roomsDataCache[roomNameLoop];
+              if (roomDataLoop && roomDataLoop.seats && roomDataLoop.seats[seatLoop]) {
+                delete roomDataLoop.seats[seatLoop];
+                if (roomDataLoop.points) {
+                  delete roomDataLoop.points[seatLoop];
+                }
+                this.broadcast(roomNameLoop, ['removeKursi', roomNameLoop, seatLoop]);
+                await this.updateRoomCount(roomNameLoop);
+                await this._deleteRoomIfEmpty(roomNameLoop);
+              }
+              this._removeUserFromRoom(multiUsername, roomNameLoop);
+            }
+          }
+          await this._syncAllData();
+        } catch (e) {}
+      }, 100);
 
     } finally {
       this._multiJoinLock = false;
@@ -2052,18 +2114,6 @@ export class ChatServer {
           await this._handleJoin(ws, args[0]);
           break;
 
-        case 'cleanupPhantom': {
-          const cleaned = await this._cleanupPhantomUsers();
-          this.safeSend(ws, ['phantomCleanupResult', cleaned]);
-          break;
-        }
-
-        case 'validateData': {
-          const result = await this._validateDataConsistency();
-          this.safeSend(ws, ['validateDataResult', result]);
-          break;
-        }
-
         case 'multiJoin': {
           await this._handleMultiJoin(ws, args[0], args[1]);
           break;
@@ -2473,6 +2523,33 @@ export class ChatServer {
           break;
         }
 
+        case 'moveRoom': {
+          const [targetRoom] = args;
+          if (!targetRoom || !ROOMS_SET.has(targetRoom)) {
+            this.safeSend(ws, ['moveRoomError', 'Room tidak valid']);
+            break;
+          }
+          
+          const username = ws.username || ws._cachedUsername;
+          if (!username) {
+            this.safeSend(ws, ['moveRoomError', 'User tidak terdaftar']);
+            break;
+          }
+          
+          // Bersihkan semua room sebelumnya
+          const cleaned = await this._cleanUserFromAllRooms(username);
+          
+          // Join ke room baru
+          const joined = await this._handleJoin(ws, targetRoom);
+          
+          if (joined) {
+            this.safeSend(ws, ['moveRoomSuccess', targetRoom, cleaned]);
+          } else {
+            this.safeSend(ws, ['moveRoomError', 'Gagal join ke room']);
+          }
+          break;
+        }
+
         case 'onDestroy':
           break;
 
@@ -2567,30 +2644,6 @@ export class ChatServer {
         const result = await this.resetAllData();
         return new Response(JSON.stringify(result), {
           status: result.success ? 200 : 500,
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-
-      if (url.pathname === '/cleanup-phantom' && req.method === 'POST') {
-        const cleaned = await this._cleanupPhantomUsers();
-        return new Response(JSON.stringify({
-          success: true,
-          cleaned: cleaned,
-          message: `${cleaned} phantom users cleaned`
-        }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-
-      if (url.pathname === '/validate' && req.method === 'POST') {
-        const result = await this._validateDataConsistency();
-        return new Response(JSON.stringify({
-          success: true,
-          inconsistencies: result.inconsistencies,
-          fixed: result.fixed
-        }), {
-          status: 200,
           headers: { 'Content-Type': 'application/json' }
         });
       }
