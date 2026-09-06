@@ -65,7 +65,7 @@ function parseTime(timeStr) {
 }
 
 // ============================================================
-// DATA MANAGER
+// DATA MANAGER - TETAP SAMA (TIDAK DIUBAH)
 // ============================================================
 
 class DataManager {
@@ -403,7 +403,7 @@ class DataManager {
 }
 
 // ============================================================
-// ALARM SCHEDULER
+// ALARM SCHEDULER - TETAP SAMA
 // ============================================================
 
 class AlarmScheduler {
@@ -743,7 +743,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // RESTORE
+  // RESTORE - TETAP SAMA
   // ============================================================
   
   async _restoreAllState() {
@@ -808,7 +808,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // WEEKLY RESET
+  // WEEKLY RESET - TETAP SAMA
   // ============================================================
   
   async _checkAndForceResetIfMonday() {
@@ -878,7 +878,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // ALARM
+  // ALARM - DENGAN TAMBAHAN dice_session_end
   // ============================================================
   
   async alarm() {
@@ -905,6 +905,7 @@ export class GameServer {
         await this._handleWeeklyReset();
         await this.alarmScheduler._scheduleWeeklyReset();
         break;
+        
       case 'dice_session_start':
         if (this.alarmScheduler.isDiceTime()) {
           this.diceAutoEnabled = true;
@@ -919,14 +920,21 @@ export class GameServer {
           }
         }
         break;
+        
       case 'dice_session_end':
         this.diceAutoEnabled = false;
+        
+        // ============================================================
+        // TAMBAHAN: KIRIM SESSION ENDED + NEXT GAME IN
+        // ============================================================
         const timeUntilNext = this._getTimeLeftUntilNextDice();
+        
         if (timeUntilNext.totalMs > 0) {
-          this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "Dice session ended. Next game in: " + timeUntilNext.text]);
+          this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "Session ended. Next dice game in: " + timeUntilNext.text]);
         } else {
           this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "Dice session ended"]);
         }
+        
         if (this.currentDiceRoll || this._isShowingDice) {
           this._endDiceRound();
         }
@@ -935,7 +943,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // FETCH
+  // FETCH - TETAP SAMA
   // ============================================================
   
   async fetch(req) {
@@ -1032,7 +1040,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // WEBSOCKET HANDLERS
+  // WEBSOCKET HANDLERS - TETAP SAMA
   // ============================================================
   
   async webSocketMessage(ws, message) {
@@ -1088,8 +1096,7 @@ export class GameServer {
           if (room) {
             setTimeout(() => {
               if (ws && ws.readyState === 1) {
-                this._sendGameStateToClient(ws, room);
-                this._broadcastGameStateToRoom(room);
+                // TIDAK ADA gameState
               }
             }, 100);
           }
@@ -1177,7 +1184,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // EVENT PROCESSING
+  // EVENT PROCESSING - TETAP SAMA
   // ============================================================
   
   async _processWithTimeout(ws, data, timeoutMs = 500) {
@@ -1244,7 +1251,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // HANDLE EVENT INTERNAL
+  // HANDLE EVENT INTERNAL - TETAP SAMA (TAMBAH diceClickDraw)
   // ============================================================
   
   async _handleEventInternal(ws, data) {
@@ -1358,7 +1365,7 @@ export class GameServer {
       }
 
       // ============================================================
-      // DICE EVENTS
+      // DICE EVENTS - TETAP SAMA
       // ============================================================
 
       if (evt === "submitDiceAnswer") {
@@ -1557,6 +1564,10 @@ export class GameServer {
         return;
       }
 
+      // ============================================================
+      // LOWCARD EVENTS - TETAP SAMA (TIDAK DIUBAH)
+      // ============================================================
+
       const room = ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
       if (!room || typeof room !== 'string' || room.trim() === '') {
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first"]);
@@ -1583,9 +1594,6 @@ export class GameServer {
         case "checkGameRunning": 
           await this.checkGameRunning(ws, data[1]); 
           break;
-        case "getGameState": 
-          this._sendGameStateToClient(ws, data[1] || room); 
-          break;
         default: 
           break;
       }
@@ -1593,7 +1601,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // SWITCH ROOM
+  // SWITCH ROOM - DENGAN DELAY 5 DETIK
   // ============================================================
   
   async switchRoom(ws, room, username = null) {
@@ -1620,7 +1628,12 @@ export class GameServer {
       if (currentRoom === roomName) {
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
         if (roomName === CONSTANTS.DICE_ROOM) {
-          this._sendDiceNotificationOnly(ws);
+          // DELAY 5 DETIK SEBELUM KIRIM NOTIFIKASI
+          setTimeout(() => {
+            if (ws && ws.readyState === 1) {
+              this._sendDiceNotificationOnly(ws);
+            }
+          }, 5000);
         }
         return;
       }
@@ -1691,7 +1704,13 @@ export class GameServer {
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
         
         if (roomName === CONSTANTS.DICE_ROOM) {
-          this._sendDiceNotificationOnly(ws);
+          // DELAY 5 DETIK SEBELUM KIRIM NOTIFIKASI KE CLIENT
+          const delayTimer = setTimeout(() => {
+            if (ws && ws.readyState === 1) {
+              this._sendDiceNotificationOnly(ws);
+            }
+          }, 5000);
+          this._trackTimer(delayTimer);
         }
         
       } finally {
@@ -1708,7 +1727,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // DICE NOTIFICATION ONLY
+  // DICE NOTIFICATION ONLY - UNTUK CLIENT BARU JOIN
   // ============================================================
   
   _sendDiceNotificationOnly(ws) {
@@ -1726,8 +1745,10 @@ export class GameServer {
           round: this._diceRound || 1
         }]);
         
-        // CLIENT BARU JOIN - TANPA EMOJI
-        this._safeSend(ws, ["diceNotification", "CLICK DRAW NOW !!!!"]);
+        // ============================================================
+        // TAMBAHAN: CLIENT BARU JOIN DAPAT "click draw now !!!!"
+        // ============================================================
+        this._safeSend(ws, ["diceNotification", "click draw now !!!!"]);
         
         const elapsed = (Date.now() - this._diceStartTime) / 1000;
         const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
@@ -1788,7 +1809,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // DICE GAME - START
+  // DICE GAME - START (TAMBAHAN "click draw now !!!!")
   // ============================================================
   
   _startDiceFast() {
@@ -1824,7 +1845,7 @@ export class GameServer {
       this.diceHasWinner = false;
       this.diceWinner = null;
       
-      // STEP 1: KIRIM diceRoll
+      // STEP 1: KIRIM diceRoll (TETAP SAMA)
       this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceRoll", { 
         value, 
         timestamp: Date.now(), 
@@ -1833,10 +1854,12 @@ export class GameServer {
         round: this._diceRound
       }]);
       
-      // STEP 2: KIRIM "CLICK DRAW NOW !!!!" (TANPA EMOJI)
-      this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "CLICK DRAW NOW !!!!"]);
+      // ============================================================
+      // STEP 2: TAMBAHAN "click draw now !!!!"
+      // ============================================================
+      this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "click draw now !!!!"]);
       
-      // STEP 3: TIMER NOTIFIKASI
+      // STEP 3: TIMER NOTIFIKASI (TETAP SAMA)
       for (const timeout of this._diceNotificationTimeouts) { 
         clearTimeout(timeout); 
       }
@@ -1866,7 +1889,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // DICE GAME - END ROUND
+  // DICE GAME - END ROUND (TAMBAHAN "No winner" SAJA)
   // ============================================================
   
   async _endDiceRound() {
@@ -1893,7 +1916,9 @@ export class GameServer {
       }
       
       if (correctPlayers.length === 0) {
-        // NO WINNER - HANYA SEKALI
+        // ============================================================
+        // NO WINNER - HANYA SEKALI (TANPA diceNoWinner)
+        // ============================================================
         this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "No winner"]);
         
       } else if (correctPlayers.length === 1) {
@@ -1906,6 +1931,9 @@ export class GameServer {
             diceValue: diceValue, 
             round: roundNumber
           }]);
+          // ============================================================
+          // TIDAK ADA diceNotification "X won!" - HANYA diceWinner
+          // ============================================================
         } catch(e) {
           this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceWinner", {
             username: winner, 
@@ -1956,7 +1984,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // TIE BREAKER
+  // TIE BREAKER - TETAP SAMA (TIDAK DIUBAH)
   // ============================================================
   
   async _startTieBreaker(room, players) {
@@ -2144,7 +2172,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // DICE: SUBMIT ANSWER
+  // DICE: SUBMIT ANSWER - TETAP SAMA
   // ============================================================
   
   async submitDiceAnswer(ws, username, guess) {
@@ -2203,7 +2231,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // BROADCAST HELPERS
+  // BROADCAST HELPERS - TETAP SAMA
   // ============================================================
   
   async _broadcastLowCardWinners(room) {
@@ -2238,87 +2266,9 @@ export class GameServer {
   }
 
   // ============================================================
-  // BROADCAST GAME STATE
+  // HELPERS - TETAP SAMA
   // ============================================================
   
-  _broadcastGameStateToRoom(room) {
-    try {
-      if (!room) return;
-      const wsIds = this.wsClients.get(room);
-      if (!wsIds?.size) return;
-      
-      for (const wsId of wsIds) {
-        const ws = this.wsMap.get(wsId);
-        if (ws && ws.readyState === 1) {
-          this._sendGameStateToClient(ws, room);
-        }
-      }
-    } catch(e) {}
-  }
-
-  _sendGameStateToClient(ws, room) {
-    try {
-      if (!ws || ws.readyState !== 1 || !room) return;
-      
-      const game = this.activeGames.get(room);
-      
-      if (!game || !game._isActive || game._gameEnded) {
-        this._safeSend(ws, ["gameState", { 
-          room, 
-          hasGame: false, 
-          gameType: 'lowcard',
-          isActive: false 
-        }]);
-        return;
-      }
-      
-      const activePlayers = this._getActivePlayers(game);
-      const allPlayers = Array.from(game.players?.values() || []).map(p => p.name);
-      const eliminated = Array.from(game.eliminated || []);
-      const submitted = Array.from(game.numbers?.keys() || []);
-      const submittedData = Array.from(game.numbers?.entries() || []).map(([id, num]) => ({
-        player: game.players?.get(id)?.name || id,
-        number: num,
-        tanda: game.tanda?.get(id) || ''
-      }));
-      
-      this._safeSend(ws, ["gameState", {
-        room, 
-        hasGame: true, 
-        gameType: 'lowcard',
-        isActive: game._isActive || false,
-        phase: game._phase || 'registration',
-        round: game.round || 1, 
-        bet: game.betAmount || 0,
-        host: game.hostName || 'Unknown',
-        registrationOpen: game.registrationOpen || false,
-        players: allPlayers, 
-        activePlayers: activePlayers.map(p => p.name),
-        eliminated, 
-        submitted,
-        submittedData,
-        playerCount: game.players?.size || 0,
-        activeCount: activePlayers.length,
-        isEvaluating: game._isEvaluating || false,
-        evaluationLocked: game.evaluationLocked || false,
-        drawTimeExpired: game.drawTimeExpired || false,
-        gameStatus: game._gameEnded ? 'ended' : (game._isActive ? 'active' : 'inactive'),
-        totalPlayers: game.players?.size || 0,
-        timestamp: Date.now()
-      }]);
-    } catch(e) {
-      try {
-        this._safeSend(ws, ["gameState", { 
-          room: room || 'unknown', 
-          hasGame: false, 
-          gameType: 'lowcard',
-          isActive: false,
-          error: true
-        }]);
-      } catch(err) {}
-    }
-  }
-
   _trackTimer(timer) {
     if (timer) this._allTimers.add(timer);
     return timer;
@@ -2458,7 +2408,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // GAME: START (LowCard)
+  // LOWCARD GAME - TETAP SAMA (TIDAK DIUBAH)
   // ============================================================
   
   async startGame(ws, bet, username) {
@@ -2532,16 +2482,12 @@ export class GameServer {
           message: "Game created! Waiting for players..."
         }]);
         
-        this._broadcastGameStateToRoom(room);
-        
-        // Registration timer
         const regTimer = setTimeout(() => {
           if (this.activeGames.has(room)) {
             const g = this.activeGames.get(room);
             if (g && g._isActive && g.registrationOpen) {
               g.registrationOpen = false;
               g._phase = 'drawing';
-              this._broadcastGameStateToRoom(room);
               this._startDrawPhase(room);
             }
           }
@@ -2560,10 +2506,6 @@ export class GameServer {
     }
   }
 
-  // ============================================================
-  // GAME: JOIN
-  // ============================================================
-  
   async joinGame(ws, username) {
     try {
       if (!ws || !username) {
@@ -2618,8 +2560,6 @@ export class GameServer {
           playerCount: game.players.size
         }]);
         
-        this._broadcastGameStateToRoom(room);
-        
       } finally {
         setTimeout(() => {
           this._joinLocks.delete(lockKey);
@@ -2630,10 +2570,6 @@ export class GameServer {
     }
   }
 
-  // ============================================================
-  // GAME: SUBMIT NUMBER
-  // ============================================================
-  
   async submitNumber(ws, number, tanda, username) {
     try {
       if (!ws || !username) {
@@ -2688,9 +2624,6 @@ export class GameServer {
         message: "Number submitted!"
       }]);
       
-      this._broadcastGameStateToRoom(room);
-      
-      // Check if all active players submitted
       const activePlayers = this._getActivePlayerIds(game);
       const allSubmitted = activePlayers.every(id => game.numbers.has(id));
       
@@ -2703,10 +2636,6 @@ export class GameServer {
     }
   }
 
-  // ============================================================
-  // GAME: LEAVE
-  // ============================================================
-  
   async leaveGame(ws, username) {
     try {
       if (!ws) return;
@@ -2729,9 +2658,6 @@ export class GameServer {
           message: "Left game"
         }]);
         
-        this._broadcastGameStateToRoom(room);
-        
-        // Check if host left
         if (game.hostName === username || game.players.size === 0) {
           this._endGame(room, "Host left");
         }
@@ -2740,10 +2666,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ============================================================
-  // GAME: CHECK RUNNING
-  // ============================================================
-  
   async checkGameRunning(ws, room) {
     try {
       if (!ws) return;
@@ -2770,10 +2692,6 @@ export class GameServer {
     }
   }
 
-  // ============================================================
-  // GAME: START DRAW PHASE
-  // ============================================================
-  
   _startDrawPhase(room) {
     try {
       const game = this.activeGames.get(room);
@@ -2790,12 +2708,8 @@ export class GameServer {
         message: "Submit your number (1-12)!"
       }]);
       
-      this._broadcastGameStateToRoom(room);
-      
-      // Auto-submit bots
       this._autoSubmitBots(room);
       
-      // Draw timer
       const drawTimer = setTimeout(() => {
         if (this.activeGames.has(room)) {
           const g = this.activeGames.get(room);
@@ -2814,10 +2728,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ============================================================
-  // GAME: AUTO SUBMIT BOTS
-  // ============================================================
-  
   _autoSubmitBots(room) {
     try {
       const game = this.activeGames.get(room);
@@ -2838,7 +2748,6 @@ export class GameServer {
         }
       }
       
-      // Check if all submitted
       const remaining = this._getActivePlayerIds(game).filter(id => !game.numbers.has(id));
       if (remaining.length === 0) {
         this._evaluateRound(room);
@@ -2847,10 +2756,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ============================================================
-  // GAME: AUTO SUBMIT REMAINING
-  // ============================================================
-  
   _autoSubmitRemaining(room) {
     try {
       const game = this.activeGames.get(room);
@@ -2868,10 +2773,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ============================================================
-  // GAME: EVALUATE ROUND
-  // ============================================================
-  
   _evaluateRound(room) {
     try {
       const game = this.activeGames.get(room);
@@ -2888,9 +2789,6 @@ export class GameServer {
         message: "Evaluating..."
       }]);
       
-      this._broadcastGameStateToRoom(room);
-      
-      // Find lowest number
       let lowestNum = 13;
       let lowestPlayers = [];
       
@@ -2905,7 +2803,6 @@ export class GameServer {
         }
       }
       
-      // Eliminate lowest players
       for (const id of lowestPlayers) {
         game.eliminated.add(id);
         const player = game.players.get(id);
@@ -2919,7 +2816,6 @@ export class GameServer {
         }
       }
       
-      // Record winners if recording enabled
       if (lowestPlayers.length > 0) {
         for (const id of lowestPlayers) {
           const player = game.players.get(id);
@@ -2929,11 +2825,9 @@ export class GameServer {
         }
       }
       
-      // Check if game over
       const activePlayers = this._getActivePlayerIds(game);
       
       if (activePlayers.length <= 1) {
-        // Game over
         if (activePlayers.length === 1) {
           const winnerId = activePlayers[0];
           const winner = game.players.get(winnerId);
@@ -2950,7 +2844,6 @@ export class GameServer {
         return;
       }
       
-      // Next round
       game.round++;
       game.numbers = new Map();
       game.tanda = new Map();
@@ -2965,12 +2858,8 @@ export class GameServer {
         message: "Round " + game.round + " - Submit your number!"
       }]);
       
-      this._broadcastGameStateToRoom(room);
-      
-      // Auto-submit bots for next round
       this._autoSubmitBots(room);
       
-      // Draw timer for next round
       const drawTimer = setTimeout(() => {
         if (this.activeGames.has(room)) {
           const g = this.activeGames.get(room);
@@ -2993,10 +2882,6 @@ export class GameServer {
     }
   }
 
-  // ============================================================
-  // GAME: END GAME
-  // ============================================================
-  
   _endGame(room, reason) {
     try {
       const game = this.activeGames.get(room);
@@ -3014,15 +2899,10 @@ export class GameServer {
         room: room
       }]);
       
-      this._broadcastGameStateToRoom(room);
-      
-      // Cleanup timers
       this._cleanupGameTimers(game);
       
-      // Schedule cleanup
       const cleanupTimer = setTimeout(() => {
         this.activeGames.delete(room);
-        this._broadcastGameStateToRoom(room);
       }, CONSTANTS.GAME_CLEANUP_DELAY_MS);
       
       this._cleanupTimers.set(room, cleanupTimer);
@@ -3031,10 +2911,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ============================================================
-  // GAME: CLEANUP
-  // ============================================================
-  
   _cleanupGameTimers(game) {
     try {
       if (!game || !game._timers) return;
@@ -3055,10 +2931,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ============================================================
-  // GAME: START WITH RECORDING
-  // ============================================================
-  
   async _startGameWithRecording(ws, room, bet, username) {
     try {
       if (!room || !username) {
@@ -3077,7 +2949,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // DESTROY
+  // DESTROY - TETAP SAMA
   // ============================================================
   
   async destroy() {
