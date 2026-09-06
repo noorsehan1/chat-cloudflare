@@ -1,6 +1,5 @@
 // ============================================================
-// GAME-SERVER-STORAGE-ONLY.js
-// VERSION: 9.0.3 - PERSISTENCE FIXED
+// GAME-SERVER-D1.js - LENGKAP (SEMUA userLeftRoom & userJoinedRoom DIHAPUS)
 // ============================================================
 
 // ============================================================
@@ -50,11 +49,11 @@ const CONSTANTS = {
 };
 
 const QUIZ_SCHEDULE = {
-  SESSIONS: [
-  
-  ],
+  SESSIONS: [],
   TIMEZONE_OFFSET: 8,
 };
+
+const TABLE_NAME = 'game_data';
 
 function parseTime(timeStr) {
   const [hours, minutes] = timeStr.split(':').map(Number);
@@ -62,384 +61,299 @@ function parseTime(timeStr) {
 }
 
 // ============================================================
-// DATA MANAGER - STORAGE ONLY
+// DATA MANAGER
 // ============================================================
 
 class DataManager {
-  constructor(state) {
-    this.state = state;
+  constructor(db) {
+    this.db = db;
+    this._cache = {
+      recordingStatusMap: {},
+      winnersMap: {},
+      dicePoints: {},
+      lastWeekWinner: null,
+      lastResetWeek: null,
+      scheduled_alarms: {}
+    };
+    this._cacheInitialized = false;
+    this._cacheLoading = false;
+    this._restored = false;
   }
 
-  // ============================================================
-  // RECORDING STATUS
-  // ============================================================
-  
-  async getRecordingStatus(room) {
+  async init() {
     try {
-      const map = await this.state.storage.get('recordingStatusMap');
-      return map && map[room] === true;
+      await this.db.prepare(`
+        CREATE TABLE IF NOT EXISTS ${TABLE_NAME} (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+      `).run();
+      return true;
     } catch(e) {
       return false;
     }
+  }
+
+  async loadAllData() {
+    if (this._cacheLoading) {
+      let waitCount = 0;
+      while (this._cacheLoading && waitCount < 50) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        waitCount++;
+      }
+      return this._cache;
+    }
+    
+    this._cacheLoading = true;
+    try {
+      const result = await this.db
+        .prepare(`SELECT key, value FROM ${TABLE_NAME}`)
+        .all();
+
+      const cache = {
+        recordingStatusMap: {},
+        winnersMap: {},
+        dicePoints: {},
+        lastWeekWinner: null,
+        lastResetWeek: null,
+        scheduled_alarms: {}
+      };
+
+      for (const row of result.results) {
+        const key = row.key;
+        const value = JSON.parse(row.value);
+
+        switch(key) {
+          case 'recordingStatusMap':
+            cache.recordingStatusMap = value;
+            break;
+          case 'winnersMap':
+            cache.winnersMap = value;
+            break;
+          case 'dicePoints':
+            cache.dicePoints = value;
+            break;
+          case 'lastWeekWinner':
+            cache.lastWeekWinner = value;
+            break;
+          case 'lastResetWeek':
+            cache.lastResetWeek = value;
+            break;
+          case 'scheduled_alarms':
+            cache.scheduled_alarms = value;
+            break;
+        }
+      }
+
+      this._cache = cache;
+      this._cacheInitialized = true;
+      this._restored = true;
+      return this._cache;
+
+    } catch(e) {
+      this._cache = {
+        recordingStatusMap: {},
+        winnersMap: {},
+        dicePoints: {},
+        lastWeekWinner: null,
+        lastResetWeek: null,
+        scheduled_alarms: {}
+      };
+      this._cacheInitialized = true;
+      this._restored = true;
+      return this._cache;
+    } finally {
+      this._cacheLoading = false;
+    }
+  }
+
+  async _ensureCacheInitialized() {
+    if (this._cacheInitialized && this._cache) {
+      return this._cache;
+    }
+    return await this.loadAllData();
+  }
+
+  async _save(key, value) {
+    if (value === null || value === undefined || 
+        (typeof value === 'object' && Object.keys(value).length === 0) ||
+        (Array.isArray(value) && value.length === 0)) {
+      await this.db
+        .prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`)
+        .bind(key)
+        .run();
+      return;
+    }
+    
+    await this.db
+      .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+      .bind(key, JSON.stringify(value))
+      .run();
+  }
+
+  async getRecordingStatus(room) {
+    await this._ensureCacheInitialized();
+    return this._cache.recordingStatusMap[room] === true;
   }
 
   async setRecordingStatus(room, enabled) {
-    try {
-      const map = await this.state.storage.get('recordingStatusMap') || {};
-      if (enabled) {
-        map[room] = true;
-      } else {
-        delete map[room];
-      }
-      await this.state.storage.put('recordingStatusMap', map);
-      return true;
-    } catch(e) {
-      return false;
+    await this._ensureCacheInitialized();
+    if (enabled) {
+      this._cache.recordingStatusMap[room] = true;
+    } else {
+      delete this._cache.recordingStatusMap[room];
     }
+    await this._save('recordingStatusMap', this._cache.recordingStatusMap);
+    return true;
   }
 
   async getAllRecordingStatus() {
-    try {
-      return await this.state.storage.get('recordingStatusMap') || {};
-    } catch(e) {
-      return {};
-    }
+    await this._ensureCacheInitialized();
+    return this._cache.recordingStatusMap;
   }
 
-  // ============================================================
-  // WINNERS
-  // ============================================================
-  
   async getWinners(room) {
-    try {
-      const map = await this.state.storage.get('winnersMap');
-      return map && map[room] ? map[room] : {};
-    } catch(e) {
-      return {};
-    }
+    await this._ensureCacheInitialized();
+    return this._cache.winnersMap[room] || {};
   }
 
   async setWinners(room, winners) {
-    try {
-      const map = await this.state.storage.get('winnersMap') || {};
-      if (winners && Object.keys(winners).length > 0) {
-        map[room] = winners;
-      } else {
-        delete map[room];
-      }
-      await this.state.storage.put('winnersMap', map);
-      return true;
-    } catch(e) {
-      return false;
+    await this._ensureCacheInitialized();
+    if (winners && Object.keys(winners).length > 0) {
+      this._cache.winnersMap[room] = winners;
+    } else {
+      delete this._cache.winnersMap[room];
     }
+    await this._save('winnersMap', this._cache.winnersMap);
+    return true;
   }
 
   async addWinner(room, username) {
-    try {
-      const winners = await this.getWinners(room);
-      let count = parseInt(String(winners[username] || "0").replace("x", "")) || 0;
-      winners[username] = (count + 1) + "x";
-      await this.setWinners(room, winners);
-      return true;
-    } catch(e) {
-      return false;
-    }
+    await this._ensureCacheInitialized();
+    const winners = await this.getWinners(room);
+    let count = parseInt(String(winners[username] || "0").replace("x", "")) || 0;
+    winners[username] = (count + 1) + "x";
+    await this.setWinners(room, winners);
+    return true;
   }
 
   async deleteAllWinners(room) {
-    return await this.setWinners(room, {});
+    await this._ensureCacheInitialized();
+    delete this._cache.winnersMap[room];
+    await this._save('winnersMap', this._cache.winnersMap);
+    return true;
   }
 
   async getAllWinners() {
-    try {
-      return await this.state.storage.get('winnersMap') || {};
-    } catch(e) {
-      return {};
-    }
+    await this._ensureCacheInitialized();
+    return this._cache.winnersMap;
   }
 
-  // ============================================================
-  // DICE POINTS
-  // ============================================================
-  
   async getDicePoints() {
-    try {
-      const points = await this.state.storage.get('dicePoints');
-      return points || {};
-    } catch(e) {
-      return {};
-    }
+    await this._ensureCacheInitialized();
+    return this._cache.dicePoints;
   }
 
   async setDicePoints(points) {
-    try {
-      const cleanPoints = {};
-      for (const [username, score] of Object.entries(points || {})) {
-        if (username && typeof username === 'string') {
-          const numericScore = typeof score === 'number' ? score : parseInt(score, 10) || 0;
-          if (numericScore > 0) {
-            cleanPoints[username] = numericScore;
-          }
+    await this._ensureCacheInitialized();
+    const cleanPoints = {};
+    for (const [username, score] of Object.entries(points || {})) {
+      if (username && typeof username === 'string') {
+        const numericScore = typeof score === 'number' ? score : parseInt(score, 10) || 0;
+        if (numericScore > 0) {
+          cleanPoints[username] = numericScore;
         }
       }
-      
-      if (Object.keys(cleanPoints).length > 0) {
-        await this.state.storage.put('dicePoints', cleanPoints);
-      } else {
-        await this.state.storage.delete('dicePoints');
-      }
-      return true;
-    } catch(e) {
-      return false;
     }
+    this._cache.dicePoints = cleanPoints;
+    await this._save('dicePoints', this._cache.dicePoints);
+    return true;
   }
 
   async addDicePoint(username) {
-    try {
-      const points = await this.getDicePoints();
-      points[username] = (points[username] || 0) + 1;
-      await this.setDicePoints(points);
-      return points;
-    } catch(e) {
-      return null;
-    }
+    await this._ensureCacheInitialized();
+    const points = await this.getDicePoints();
+    points[username] = (points[username] || 0) + 1;
+    await this.setDicePoints(points);
+    return points;
   }
 
   async resetDicePoints() {
-    try {
-      await this.state.storage.delete('dicePoints');
-      return true;
-    } catch(e) {
-      return false;
-    }
+    await this._ensureCacheInitialized();
+    this._cache.dicePoints = {};
+    await this._save('dicePoints', this._cache.dicePoints);
+    return true;
   }
 
   async getLeaderboard(limit = 10) {
-    try {
-      const points = await this.getDicePoints();
-      if (!points || Object.keys(points).length === 0) {
-        return [];
-      }
-      
-      const safeLimit = Math.min(
-        Math.max(limit, CONSTANTS.MIN_LEADERBOARD_LIMIT),
-        CONSTANTS.MAX_LEADERBOARD_LIMIT
-      );
-      
-      const sorted = Object.entries(points)
-        .filter(([username, score]) => username && score > 0)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, safeLimit);
-      
-      return sorted.map(([u, s]) => `${u}|${s}`);
-    } catch(e) {
-      return [];
-    }
+    await this._ensureCacheInitialized();
+    const points = this._cache.dicePoints;
+    if (!points || Object.keys(points).length === 0) return [];
+    
+    const safeLimit = Math.min(
+      Math.max(limit, CONSTANTS.MIN_LEADERBOARD_LIMIT),
+      CONSTANTS.MAX_LEADERBOARD_LIMIT
+    );
+    
+    const sorted = Object.entries(points)
+      .filter(([username, score]) => username && score > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, safeLimit);
+    
+    return sorted.map(([u, s]) => `${u}|${s}`);
   }
 
-  // ============================================================
-  // LAST WEEK WINNER
-  // ============================================================
-  
   async getLastWeekWinner() {
-    try {
-      return await this.state.storage.get('lastWeekWinner') || null;
-    } catch(e) {
-      return null;
-    }
+    await this._ensureCacheInitialized();
+    return this._cache.lastWeekWinner;
   }
 
   async setLastWeekWinner(winnerData) {
-    try {
-      if (winnerData && winnerData.username) {
-        await this.state.storage.put('lastWeekWinner', winnerData);
-      } else {
-        await this.state.storage.delete('lastWeekWinner');
-      }
-      return true;
-    } catch(e) {
-      return false;
-    }
+    await this._ensureCacheInitialized();
+    this._cache.lastWeekWinner = winnerData;
+    await this._save('lastWeekWinner', this._cache.lastWeekWinner);
+    return true;
   }
 
   async deleteLastWeekWinner() {
-    try {
-      await this.state.storage.delete('lastWeekWinner');
-      return true;
-    } catch(e) {
-      return false;
-    }
+    await this._ensureCacheInitialized();
+    this._cache.lastWeekWinner = null;
+    await this._save('lastWeekWinner', this._cache.lastWeekWinner);
+    return true;
   }
 
-  // ============================================================
-  // RESET WEEK TRACKING
-  // ============================================================
-  
   async getLastResetWeek() {
-    try {
-      return await this.state.storage.get('lastResetWeek') || null;
-    } catch(e) {
-      return null;
-    }
+    await this._ensureCacheInitialized();
+    return this._cache.lastResetWeek;
   }
 
   async setLastResetWeek(week) {
-    try {
-      await this.state.storage.put('lastResetWeek', week);
-      return true;
-    } catch(e) {
-      return false;
-    }
+    await this._ensureCacheInitialized();
+    this._cache.lastResetWeek = week;
+    await this._save('lastResetWeek', this._cache.lastResetWeek);
+    return true;
   }
 
-  // ============================================================
-  // ALARMS
-  // ============================================================
-  
   async getAlarms() {
-    try {
-      return await this.state.storage.get('scheduled_alarms') || {};
-    } catch(e) {
-      return {};
-    }
+    await this._ensureCacheInitialized();
+    return this._cache.scheduled_alarms;
   }
 
   async setAlarms(alarms) {
-    try {
-      await this.state.storage.put('scheduled_alarms', alarms);
-      return true;
-    } catch(e) {
-      return false;
-    }
+    await this._ensureCacheInitialized();
+    this._cache.scheduled_alarms = alarms;
+    await this._save('scheduled_alarms', this._cache.scheduled_alarms);
+    return true;
   }
 
   async deleteAlarms() {
-    try {
-      await this.state.storage.delete('scheduled_alarms');
-      return true;
-    } catch(e) {
-      return false;
-    }
+    await this._ensureCacheInitialized();
+    this._cache.scheduled_alarms = {};
+    await this._save('scheduled_alarms', this._cache.scheduled_alarms);
+    return true;
   }
 
-  // ============================================================
-  // ACTIVE GAMES - PERSISTENCE
-  // ============================================================
-  
-  async saveGameState(room, game) {
-    try {
-      if (!room || !game) return;
-      
-      const allGames = await this.state.storage.get('activeGames') || {};
-      
-      allGames[room] = {
-        room: game.room,
-        round: game.round || 1,
-        betAmount: game.betAmount || 0,
-        hostName: game.hostName,
-        hostId: game.hostId,
-        registrationOpen: game.registrationOpen || false,
-        _isActive: game._isActive || false,
-        _gameEnded: game._gameEnded || false,
-        _phase: game._phase || 'registration',
-        _createdAt: game._createdAt || Date.now(),
-        _startedByRecording: game._startedByRecording || false,
-        _startedBy: game._startedBy || 'user',
-        players: Array.from(game.players?.entries() || []),
-        botPlayers: Array.from(game.botPlayers?.entries() || []),
-        eliminated: Array.from(game.eliminated || []),
-        numbers: Array.from(game.numbers || []),
-        tanda: Array.from(game.tanda || []),
-        _botsAdded: game._botsAdded || false,
-        useBots: game.useBots || false,
-        evaluationLocked: game.evaluationLocked || false,
-        drawTimeExpired: game.drawTimeExpired || false,
-        _isEvaluating: game._isEvaluating || false,
-        playerWsId: Array.from(game.playerWsId?.entries() || []),
-        _drawPhaseStart: game._drawPhaseStart,
-        _endTime: game._endTime || Date.now()
-      };
-      
-      await this.state.storage.put('activeGames', allGames);
-      return true;
-    } catch(e) {
-      return false;
-    }
-  }
-
-  async loadAllGames() {
-    try {
-      return await this.state.storage.get('activeGames') || {};
-    } catch(e) {
-      return {};
-    }
-  }
-
-  async removeGameFromStorage(room) {
-    try {
-      const allGames = await this.state.storage.get('activeGames') || {};
-      delete allGames[room];
-      if (Object.keys(allGames).length > 0) {
-        await this.state.storage.put('activeGames', allGames);
-      } else {
-        await this.state.storage.delete('activeGames');
-      }
-      return true;
-    } catch(e) {
-      return false;
-    }
-  }
-
-  async saveAllGames(gamesMap) {
-    try {
-      const allGames = {};
-      for (const [room, game] of gamesMap) {
-        if (game._isActive && !game._gameEnded) {
-          allGames[room] = {
-            room: game.room,
-            round: game.round || 1,
-            betAmount: game.betAmount || 0,
-            hostName: game.hostName,
-            hostId: game.hostId,
-            registrationOpen: game.registrationOpen || false,
-            _isActive: game._isActive || false,
-            _gameEnded: game._gameEnded || false,
-            _phase: game._phase || 'registration',
-            _createdAt: game._createdAt || Date.now(),
-            _startedByRecording: game._startedByRecording || false,
-            _startedBy: game._startedBy || 'user',
-            players: Array.from(game.players?.entries() || []),
-            botPlayers: Array.from(game.botPlayers?.entries() || []),
-            eliminated: Array.from(game.eliminated || []),
-            numbers: Array.from(game.numbers || []),
-            tanda: Array.from(game.tanda || []),
-            _botsAdded: game._botsAdded || false,
-            useBots: game.useBots || false,
-            evaluationLocked: game.evaluationLocked || false,
-            drawTimeExpired: game.drawTimeExpired || false,
-            _isEvaluating: game._isEvaluating || false,
-            playerWsId: Array.from(game.playerWsId?.entries() || []),
-            _drawPhaseStart: game._drawPhaseStart,
-            _endTime: game._endTime || Date.now()
-          };
-        }
-      }
-      
-      if (Object.keys(allGames).length > 0) {
-        await this.state.storage.put('activeGames', allGames);
-      } else {
-        await this.state.storage.delete('activeGames');
-      }
-      return true;
-    } catch(e) {
-      return false;
-    }
-  }
-
-  // ============================================================
-  // UTILITY
-  // ============================================================
-  
   getCurrentWeek() {
     const now = new Date();
     const year = now.getUTCFullYear();
@@ -450,49 +364,50 @@ class DataManager {
   }
 
   async clearAllData() {
-    try {
-      await this.state.storage.delete('recordingStatusMap');
-      await this.state.storage.delete('winnersMap');
-      await this.state.storage.delete('dicePoints');
-      await this.state.storage.delete('lastWeekWinner');
-      await this.state.storage.delete('lastResetWeek');
-      await this.state.storage.delete('scheduled_alarms');
-      await this.state.storage.delete('activeGames');
-      return true;
-    } catch(e) {
-      return false;
-    }
+    await this._ensureCacheInitialized();
+    this._cache = {
+      recordingStatusMap: {},
+      winnersMap: {},
+      dicePoints: {},
+      lastWeekWinner: null,
+      lastResetWeek: null,
+      scheduled_alarms: {}
+    };
+    await this.db.prepare(`DELETE FROM ${TABLE_NAME}`).run();
+    this._cacheInitialized = true;
+    return true;
   }
 
   async getStorageSize() {
     try {
-      const keys = await this.state.storage.list();
-      let totalSize = 0;
-      for (const key of keys.keys) {
-        const value = await this.state.storage.get(key.name);
-        totalSize += JSON.stringify(value).length;
-      }
+      const result = await this.db
+        .prepare(`SELECT COUNT(*) as count, SUM(LENGTH(value)) as size FROM ${TABLE_NAME}`)
+        .first();
       return {
-        keyCount: keys.keys.length,
-        totalSizeBytes: totalSize,
-        totalSizeKB: (totalSize / 1024).toFixed(2),
-        keys: keys.keys.map(k => k.name)
+        keyCount: result?.count || 0,
+        totalSizeBytes: result?.size || 0,
+        totalSizeKB: ((result?.size || 0) / 1024).toFixed(2)
       };
     } catch(e) {
       return { error: e.message };
     }
   }
+
+  isRestored() {
+    return this._restored;
+  }
 }
 
 // ============================================================
-// ALARM SCHEDULER - STORAGE ONLY
+// ALARM SCHEDULER
 // ============================================================
 
 class AlarmScheduler {
-  constructor(state) {
-    this.state = state;
+  constructor(db, ctx) {
+    this.db = db;
+    this.ctx = ctx;
+    this.dataManager = new DataManager(db);
     this._alarms = new Map();
-    this._alarmsKey = 'scheduled_alarms';
   }
 
   async scheduleAlarms() {
@@ -598,23 +513,13 @@ class AlarmScheduler {
       };
       
       this._alarms.set(name, alarm);
-      await this._saveAlarms();
+      await this.dataManager.setAlarms(Object.fromEntries(this._alarms));
       await this._scheduleNearestAlarm();
       
       return true;
     } catch(e) { 
       return false; 
     }
-  }
-
-  async _saveAlarms() {
-    try {
-      const data = {};
-      for (const [name, alarm] of this._alarms) {
-        data[name] = alarm;
-      }
-      await this.state.storage.put(this._alarmsKey, data);
-    } catch(e) {}
   }
 
   async _scheduleNearestAlarm() {
@@ -630,7 +535,7 @@ class AlarmScheduler {
       if (nearestTime < Infinity) {
         const delay = nearestTime - Date.now();
         if (delay > 0) {
-          await this.state.storage.setAlarm(Date.now() + delay);
+          await this.ctx.storage.setAlarm(Date.now() + delay);
         }
       }
     } catch(e) {}
@@ -639,8 +544,8 @@ class AlarmScheduler {
   async _clearAllAlarms() {
     try {
       this._alarms.clear();
-      await this.state.storage.delete(this._alarmsKey);
-      await this.state.storage.deleteAlarm();
+      await this.dataManager.deleteAlarms();
+      await this.ctx.storage.deleteAlarm();
     } catch(e) {}
   }
 
@@ -665,7 +570,7 @@ class AlarmScheduler {
       }
       
       if (expired.length > 0) {
-        await this._saveAlarms();
+        await this.dataManager.setAlarms(Object.fromEntries(this._alarms));
       }
       
       return pending;
@@ -684,7 +589,7 @@ class AlarmScheduler {
       }
       
       this._alarms.delete(name);
-      await this._saveAlarms();
+      await this.dataManager.setAlarms(Object.fromEntries(this._alarms));
       await this._scheduleNearestAlarm();
       
       return alarm || this._alarms.get(name);
@@ -695,7 +600,7 @@ class AlarmScheduler {
 
   async restoreAlarms() {
     try {
-      const stored = await this.state.storage.get(this._alarmsKey);
+      const stored = await this.dataManager.getAlarms();
       if (stored && typeof stored === 'object') {
         this._alarms.clear();
         for (const [name, data] of Object.entries(stored)) {
@@ -734,7 +639,7 @@ class AlarmScheduler {
 }
 
 // ============================================================
-// GAME SERVER - STORAGE WITH PERSISTENCE
+// GAME SERVER
 // ============================================================
 
 export class GameServer {
@@ -748,13 +653,12 @@ export class GameServer {
       this._initialized = false;
       this._startTime = Date.now();
       this._wsIdCounter = 0;
+      this._restored = false;
       
-      // Data Manager
-      this.dataManager = new DataManager(state);
+      this.db = env.DB;
+      this.dataManager = new DataManager(this.db);
+      this.alarmScheduler = new AlarmScheduler(this.db, this.ctx);
       
-      this.alarmScheduler = new AlarmScheduler(state);
-      
-      // Game state
       this.activeGames = new Map();
       this.wsMap = new Map();
       this.wsClients = new Map();
@@ -764,11 +668,8 @@ export class GameServer {
       this._allTimers = new Set();
       this._lastNotifTime = {};
       this._lastWinnerRequestTime = new Map();
-      
-      // Notification timers
       this._notificationTimers = new Set();
       
-      // Dice state
       this.currentDiceRoll = null;
       this._diceLock = false;
       this._tieActive = false;
@@ -796,7 +697,6 @@ export class GameServer {
       this._canSubmitDiceAnswer = false;
       this._diceRound = 0;
       
-      // Tie breaker state
       this._tieBreakers = new Map();
       this._tieRound = 0;
       this._tiePlayers = [];
@@ -806,7 +706,6 @@ export class GameServer {
       this._tieLock = false;
       this._tieNotificationTimeouts = [];
       
-      // Locks
       this._gameLocks = new Map();
       this._joinLocks = new Map();
       this._cleanupTimers = new Map();
@@ -817,7 +716,6 @@ export class GameServer {
       this._drawLocks = new Map();
       this._cleanupLocks = new Map();
       
-      // Rate limiting
       this._requestCount = 0;
       this._lastResetTime = Date.now();
       this._circuitOpen = false;
@@ -827,34 +725,29 @@ export class GameServer {
       
       this.DICE_ROOM = CONSTANTS.DICE_ROOM;
       
-      // Save interval
-      this._saveInterval = setInterval(() => {
-        if (!this.closing && !this.isDestroyed) {
-          this._saveAllGamesState().catch(() => {});
-        }
-      }, 30000);
-      this._trackTimer(this._saveInterval);
-      
-      // Init
-      this._init();
+      this._restoreAllState().then(() => {
+        this._restored = true;
+      }).catch(() => {
+        this._restored = true;
+      });
       
     } catch(e) {
-      console.error('Constructor error:', e);
+      this._restored = true;
     }
   }
 
   // ============================================================
-  // INIT - WITH PERSISTENCE LOAD
+  // RESTORE
   // ============================================================
-  async _init() {
+  
+  async _restoreAllState() {
     try {
+      await this.dataManager.init();
+      await this.dataManager.loadAllData();
       await this.alarmScheduler.restoreAlarms();
       await this.alarmScheduler.scheduleAlarms();
       await this._checkAndForceResetIfMonday();
-      
-      // 🔥 LOAD GAME STATE DARI STORAGE
-      await this._loadAllGamesFromStorage();
-      
+      await this._restoreWebSockets();
       this._initialized = true;
       
       if (this.alarmScheduler.isDiceTime()) {
@@ -863,105 +756,53 @@ export class GameServer {
           this._startDiceFast();
         }
       }
-    } catch(e) {
-      console.error('Init error:', e);
-      this._initialized = true;
-    }
-  }
-
-  // ============================================================
-  // GAME STATE PERSISTENCE - LOAD
-  // ============================================================
-  async _loadAllGamesFromStorage() {
-    try {
-      const allGames = await this.dataManager.loadAllGames();
       
-      for (const [room, gameData] of Object.entries(allGames)) {
-        // Cek apakah game masih valid (tidak terlalu lama)
-        const elapsed = Date.now() - (gameData._createdAt || 0);
-        if (elapsed > 300000) { // 5 menit
-          await this.dataManager.removeGameFromStorage(room);
-          continue;
-        }
-        
-        // Rekonstruksi game
-        const game = {
-          room: gameData.room,
-          players: new Map(gameData.players || []),
-          botPlayers: new Map(gameData.botPlayers || []),
-          round: gameData.round || 1,
-          numbers: new Map(gameData.numbers || []),
-          tanda: new Map(gameData.tanda || []),
-          eliminated: new Set(gameData.eliminated || []),
-          betAmount: gameData.betAmount || 0,
-          hostId: gameData.hostId,
-          hostName: gameData.hostName,
-          useBots: gameData.useBots || false,
-          evaluationLocked: gameData.evaluationLocked || false,
-          drawTimeExpired: gameData.drawTimeExpired || false,
-          _isActive: gameData._isActive || false,
-          _gameEnded: gameData._gameEnded || false,
-          _phase: gameData._phase || 'registration',
-          _botTimeouts: new Set(),
-          _botsAdded: gameData._botsAdded || false,
-          _registrationTimer: null,
-          _drawTimer: null,
-          _evalTimer: null,
-          _safetyTimer: null,
-          _isEvaluating: gameData._isEvaluating || false,
-          _createdAt: gameData._createdAt || Date.now(),
-          _drawPhaseStart: gameData._drawPhaseStart,
-          _endTime: gameData._endTime,
-          playerWsId: new Map(gameData.playerWsId || []),
-          _startedByRecording: gameData._startedByRecording || false,
-          _startedBy: gameData._startedBy || 'user',
-          _notificationTimers: [],
-          _drawNotificationTimers: [],
-          registrationOpen: gameData.registrationOpen || false
-        };
-        
-        // Jika game masih aktif tapi tidak ada timer, restart timernya
-        if (game._isActive && !game._gameEnded) {
-          this.activeGames.set(room, game);
-          
-          // Restart phase berdasarkan state
-          if (game._phase === 'registration' && game.registrationOpen) {
-            this._startRegistration(room, game);
-          } else if (game._phase === 'draw' && !game.drawTimeExpired && !game.evaluationLocked) {
-            this._startDrawPhase(room, game);
-          } else if (game.evaluationLocked && !game._gameEnded) {
-            // Jika sedang evaluasi, evaluasi ulang
-            setTimeout(() => {
-              this._evaluateRound(room, game);
-            }, 1000);
-          }
-          
-          // Broadcast state ke semua client di room
-          setTimeout(() => {
-            this._broadcastGameStateToRoom(room);
-          }, 500);
-        } else {
-          // Game sudah selesai, hapus dari storage
-          await this.dataManager.removeGameFromStorage(room);
-        }
+      if (!this.closing && !this.isDestroyed) {
+        this.ctx.storage.setAlarm(Date.now() + 60000);
       }
+      
     } catch(e) {
-      console.error('Load games error:', e);
+      throw e;
     }
   }
 
-  // ============================================================
-  // SAVE ALL GAMES STATE
-  // ============================================================
-  async _saveAllGamesState() {
+  async _restoreWebSockets() {
     try {
-      await this.dataManager.saveAllGames(this.activeGames);
+      const webSockets = this.ctx.getWebSockets();
+      for (const ws of webSockets) {
+        try {
+          const attachment = ws.deserializeAttachment();
+          if (attachment && attachment.username && attachment.room) {
+            ws.username = attachment.username;
+            ws.room = attachment.room;
+            ws.roomname = attachment.room;
+            ws._wsId = attachment.wsId || ++this._wsIdCounter;
+            ws._closing = false;
+            
+            const roomClients = this.wsClients.get(attachment.room);
+            if (roomClients) {
+              roomClients.add(ws._wsId);
+            } else {
+              this.wsClients.set(attachment.room, new Set([ws._wsId]));
+            }
+            
+            this.wsMap.set(ws._wsId, ws);
+            
+            let conn = this.userConnections.get(attachment.username);
+            if (!conn) {
+              conn = { wsId: ws._wsId, ws: ws, room: attachment.room, timestamp: Date.now() };
+              this.userConnections.set(attachment.username, conn);
+            }
+          }
+        } catch(e) {}
+      }
     } catch(e) {}
   }
 
   // ============================================================
   // WEEKLY RESET
   // ============================================================
+  
   async _checkAndForceResetIfMonday() {
     try {
       const now = new Date();
@@ -1022,7 +863,6 @@ export class GameServer {
       await this.dataManager.resetDicePoints();
       return true;
     } catch(e) {
-      console.error('Weekly reset error:', e);
       const currentWeek = this.dataManager.getCurrentWeek();
       await this.dataManager.setLastResetWeek(currentWeek);
       return false;
@@ -1030,8 +870,9 @@ export class GameServer {
   }
 
   // ============================================================
-  // ALARM HANDLER
+  // ALARM
   // ============================================================
+  
   async alarm() {
     if (this.closing || this.isDestroyed) return;
     
@@ -1050,9 +891,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ============================================================
-  // PROCESS ALARM
-  // ============================================================
   async _processAlarm(name) {
     switch(name) {
       case CONSTANTS.WEEKLY_RESET_ALARM:
@@ -1071,14 +909,12 @@ export class GameServer {
         break;
       case 'dice_session_end':
         this.diceAutoEnabled = false;
-        
         const timeUntilNext = this._getTimeLeftUntilNextDice();
         if (timeUntilNext.totalMs > 0) {
           this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", `⏰ Dice session ended. Next game in: ${timeUntilNext.text}`]);
         } else {
           this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "⏰ Dice session ended"]);
         }
-        
         if (this.currentDiceRoll || this._isShowingDice) {
           this._endDiceRound();
         }
@@ -1087,8 +923,9 @@ export class GameServer {
   }
 
   // ============================================================
-  // FETCH / WEBSOCKET
+  // FETCH
   // ============================================================
+  
   async fetch(req) {
     try {
       if (this._circuitOpen) {
@@ -1185,8 +1022,21 @@ export class GameServer {
   // ============================================================
   // WEBSOCKET HANDLERS
   // ============================================================
+  
   async webSocketMessage(ws, message) {
     if (!ws || ws._closing || this.closing || this.isDestroyed) return;
+    
+    if (!this._restored) {
+      let wait = 0;
+      while (!this._restored && wait < 30) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        wait++;
+      }
+      if (!this._restored) {
+        try { ws.send(JSON.stringify(["restoreError", "Server is still restoring"])); } catch(e) {}
+        return;
+      }
+    }
     
     try {
       let attachment = null;
@@ -1202,12 +1052,16 @@ export class GameServer {
         ws._createdAt = attachment.createdAt || Date.now();
         
         if (attachment.username && attachment.room) {
-          this.userConnections.set(attachment.username, {
-            wsId: attachment.wsId,
-            ws: ws,
-            room: attachment.room,
-            timestamp: Date.now()
-          });
+          let conn = this.userConnections.get(attachment.username);
+          if (!conn) {
+            conn = { wsId: attachment.wsId, ws: ws, room: attachment.room, timestamp: Date.now() };
+            this.userConnections.set(attachment.username, conn);
+          } else {
+            conn.wsId = attachment.wsId;
+            conn.ws = ws;
+            conn.room = attachment.room;
+            conn.timestamp = Date.now();
+          }
         }
       }
       
@@ -1242,9 +1096,10 @@ export class GameServer {
       
       if (username) {
         this.userConnections.delete(username);
-        if (room) {
-          this._broadcastToRoom(room, ["userLeftRoom", username, room]);
-        }
+        // ❌ HAPUS - Tidak ada userLeftRoom
+        // if (room) {
+        //   this._broadcastToRoom(room, ["userLeftRoom", username, room]);
+        // }
       }
       
       if (room && wsId) {
@@ -1284,9 +1139,10 @@ export class GameServer {
       
       if (username) {
         this.userConnections.delete(username);
-        if (room) {
-          this._broadcastToRoom(room, ["userLeftRoom", username, room]);
-        }
+        // ❌ HAPUS - Tidak ada userLeftRoom
+        // if (room) {
+        //   this._broadcastToRoom(room, ["userLeftRoom", username, room]);
+        // }
       }
       
       if (room && wsId) {
@@ -1319,6 +1175,7 @@ export class GameServer {
   // ============================================================
   // EVENT PROCESSING
   // ============================================================
+  
   async _processWithTimeout(ws, data, timeoutMs = 500) {
     try {
       const timeoutPromise = new Promise((_, reject) => {
@@ -1383,20 +1240,19 @@ export class GameServer {
   }
 
   // ============================================================
-  // HANDLE EVENT INTERNAL - ALL EVENTS
+  // HANDLE EVENT INTERNAL
   // ============================================================
+  
   async _handleEventInternal(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
       const evt = data[0];
 
-      // SWITCH ROOM
       if (evt === "switchRoom") {
         await this.switchRoom(ws, data[1], data[2]);
         return;
       }
 
-      // RECORDING - STORAGE ONLY
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
         if (!roomName || typeof roomName !== 'string' || roomName.trim() === '') {
@@ -1436,7 +1292,6 @@ export class GameServer {
         return;
       }
 
-      // WINNERS - STORAGE ONLY
       if (evt === "addLowCardWinner") {
         const { room, username } = data[1] || {};
         if (!room || !username || typeof room !== 'string' || typeof username !== 'string') {
@@ -1498,13 +1353,11 @@ export class GameServer {
         return;
       }
 
-      // DICE ANSWER
       if (evt === "submitDiceAnswer") {
         await this.submitDiceAnswer(ws, data[1], data[2]);
         return;
       }
 
-      // GET DICE LAST WEEK WINNER
       if (evt === "getDiceLastWeekWinner") {
         try {
           const wsId = ws._wsId;
@@ -1542,7 +1395,6 @@ export class GameServer {
         return;
       }
 
-      // GET DICE LEADERBOARD
       if (evt === "getDiceLeaderboard") {
         try {
           let limit = CONSTANTS.DEFAULT_LEADERBOARD_LIMIT;
@@ -1558,7 +1410,6 @@ export class GameServer {
         return;
       }
 
-      // GET DICE POINTS
       if (evt === "getDicePoints") {
         try {
           const points = await this.dataManager.getDicePoints();
@@ -1610,7 +1461,6 @@ export class GameServer {
         return;
       }
 
-      // LOW CARD GAME
       const room = ws.room || ws.roomname || this.clientRooms.get(ws._wsId);
       if (!room || typeof room !== 'string' || room.trim() === '') {
         this._safeSend(ws, ["gameLowCardError", "Please switch to a room first"]);
@@ -1647,8 +1497,9 @@ export class GameServer {
   }
 
   // ============================================================
-  // ROOM SWITCHING
+  // SWITCH ROOM - HANYA switchRoomSuccess SAJA
   // ============================================================
+  
   async switchRoom(ws, room, username = null) {
     try {
       if (this.isDestroyed) {
@@ -1670,16 +1521,8 @@ export class GameServer {
       
       const currentRoom = ws.room || ws.roomname || this.clientRooms.get(wsId);
       
-      // Jika sudah di room yang sama, kirim state
       if (currentRoom === roomName) {
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
-        this._sendGameStateToClient(ws, roomName);
-        this._broadcastGameStateToRoom(roomName);
-        
-        if (roomName === CONSTANTS.DICE_ROOM) {
-          this._sendDiceNotificationOnSwitch(ws, wsId);
-          this._checkAndStartDiceIfNeeded(ws);
-        }
         return;
       }
       
@@ -1693,16 +1536,7 @@ export class GameServer {
           return;
         }
         this._switchRetries.set(lockKey, retryCount + 1);
-        
-        // Kirim state untuk room yang diminta
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
-        this._sendGameStateToClient(ws, roomName);
-        this._broadcastGameStateToRoom(roomName);
-        
-        if (roomName === CONSTANTS.DICE_ROOM) {
-          this._sendDiceNotificationOnSwitch(ws, wsId);
-          this._checkAndStartDiceIfNeeded(ws);
-        }
         return;
       }
       
@@ -1710,6 +1544,7 @@ export class GameServer {
       this._switchRetries.set(lockKey, 0);
       
       try {
+        // Hapus dari room lama
         if (currentRoom) {
           const clients = this.wsClients.get(currentRoom);
           if (clients) {
@@ -1720,12 +1555,14 @@ export class GameServer {
           }
         }
         
+        // Tambah ke room baru
         if (!this.wsClients.has(roomName)) {
           this.wsClients.set(roomName, new Set());
         }
         this.wsClients.get(roomName).add(wsId);
         this.clientRooms.set(wsId, roomName);
         
+        // Update WebSocket
         ws.room = roomName;
         ws.roomname = roomName;
         if (username) ws.username = username;
@@ -1755,19 +1592,12 @@ export class GameServer {
           }
         }
         
+        // ✅ HANYA INI YANG DIKIRIM
         this._safeSend(ws, ["switchRoomSuccess", roomName]);
-        this._sendGameStateToClient(ws, roomName);
-        this._broadcastGameStateToRoom(roomName);
         
-        if (roomName === CONSTANTS.DICE_ROOM) {
-          this._sendDiceNotificationOnSwitch(ws, wsId);
-          this._checkAndStartDiceIfNeeded(ws);
-        }
-        
-        this._broadcastToRoom(roomName, ["userJoinedRoom", username, roomName]);
-        if (currentRoom && currentRoom !== roomName) {
-          this._broadcastToRoom(currentRoom, ["userLeftRoom", username, currentRoom]);
-        }
+        // ❌ HAPUS - Client Java tidak pakai
+        // this._broadcastToRoom(roomName, ["userJoinedRoom", username, roomName]);
+        // this._broadcastToRoom(currentRoom, ["userLeftRoom", username, currentRoom]);
         
       } finally {
         setTimeout(() => {
@@ -1775,12 +1605,17 @@ export class GameServer {
           this._switchRetries.delete(lockKey);
         }, 2000);
       }
-    } catch(e) {}
+    } catch(e) {
+      this._safeSend(ws, ["switchRoomError", e.message || "Switch failed"]);
+      this._switchLocks.delete(`switch_${ws._wsId}`);
+      this._switchRetries.delete(`switch_${ws._wsId}`);
+    }
   }
 
   // ============================================================
   // GAME: START
   // ============================================================
+  
   async startGame(ws, bet, username) {
     try {
       if (this.isDestroyed) {
@@ -1853,10 +1688,6 @@ export class GameServer {
         this._broadcastToRoom(room, ["gameLowCardStartSuccess", usernameClean, betAmount]);
         this._startRegistration(room, game);
         
-        // Save game state
-        await this.dataManager.saveGameState(room, game);
-        
-        // Broadcast state ke semua client
         setTimeout(() => {
           this._broadcastGameStateToRoom(room);
         }, 100);
@@ -1905,9 +1736,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ============================================================
-  // GAME: CLOSE REGISTRATION
-  // ============================================================
   _closeRegistration(room, game) {
     try {
       if (!this._isGameActuallyRunning(game) || !game.registrationOpen) return;
@@ -1926,15 +1754,9 @@ export class GameServer {
       }
       if (this._isGameActuallyRunning(game) && game.players.size >= 2) {
         this._startDrawPhase(room, game);
-        
-        // Save game state
-        this.dataManager.saveGameState(room, game);
-        
-        // Kirim state ke semua client di room
         setTimeout(() => {
           this._broadcastGameStateToRoom(room);
         }, 500);
-        
       } else {
         game._gameEnded = true;
         game._isActive = false;
@@ -1970,6 +1792,7 @@ export class GameServer {
   // ============================================================
   // GAME: DRAW PHASE
   // ============================================================
+  
   async _startDrawPhase(room, game) {
     const lockKey = `startDraw_${room}`;
     if (this._gameOperationLocks.has(lockKey)) return;
@@ -2033,10 +1856,6 @@ export class GameServer {
       if (game.botPlayers?.size > 0 && this._isGameActuallyRunning(game)) {
         this._startBotDraws(room, game);
       }
-      
-      // Save game state
-      await this.dataManager.saveGameState(room, game);
-      
     } catch(e) {
       this._releaseLock(this._gameOperationLocks, lockKey);
     }
@@ -2142,6 +1961,7 @@ export class GameServer {
   // ============================================================
   // GAME: CLOSE DRAW PHASE
   // ============================================================
+  
   async _closeDrawPhase(room, game) {
     const drawLockKey = `draw_${room}`;
     if (this._drawLocks.has(drawLockKey)) return;
@@ -2216,10 +2036,6 @@ export class GameServer {
         } catch(e) {}
       }, CONSTANTS.EVALUATION_DELAY_MS));
       game._evalTimer = evalTimer;
-      
-      // Save game state
-      await this.dataManager.saveGameState(room, game);
-      
     } catch(e) {
       this._releaseLock(this._drawLocks, drawLockKey);
     }
@@ -2228,6 +2044,7 @@ export class GameServer {
   // ============================================================
   // GAME: EVALUATE ROUND
   // ============================================================
+  
   async _evaluateRound(room, game) {
     const evalLockKey = `eval_${room}`;
     if (this._evaluationLocks.has(evalLockKey)) return;
@@ -2370,10 +2187,6 @@ export class GameServer {
       if (this._isGameActuallyRunning(game) && !game._gameEnded) {
         this._startDrawPhase(room, game);
       }
-      
-      // Save game state
-      await this.dataManager.saveGameState(room, game);
-      
     } catch(e) {
       if (game) { game._isEvaluating = false; }
       this._releaseLock(this._evaluationLocks, `eval_${room}`);
@@ -2383,6 +2196,7 @@ export class GameServer {
   // ============================================================
   // GAME: JOIN
   // ============================================================
+  
   async joinGame(ws, username) {
     try {
       if (this.isDestroyed) {
@@ -2436,15 +2250,9 @@ export class GameServer {
         this._addClient(room, ws, usernameClean);
         game.playerWsId.set(usernameClean, wsId);
         this._broadcastToRoom(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
-        
-        // Save game state
-        await this.dataManager.saveGameState(room, game);
-        
-        // Broadcast state ke semua client
         setTimeout(() => {
           this._broadcastGameStateToRoom(room);
         }, 100);
-        
       } finally {
         setTimeout(() => { this._joinLocks.delete(lockKey); }, 2000);
       }
@@ -2454,6 +2262,7 @@ export class GameServer {
   // ============================================================
   // GAME: SUBMIT NUMBER
   // ============================================================
+  
   async submitNumber(ws, number, tanda, username) {
     try {
       if (this.isDestroyed) {
@@ -2518,16 +2327,13 @@ export class GameServer {
         }, CONSTANTS.EVALUATION_DELAY_MS));
         game._evalTimer = evalTimer;
       }
-      
-      // Save game state
-      await this.dataManager.saveGameState(room, game);
-      
     } catch(e) {}
   }
 
   // ============================================================
   // GAME: LEAVE
   // ============================================================
+  
   async leaveGame(ws, username) {
     try {
       if (this.isDestroyed) {
@@ -2554,15 +2360,9 @@ export class GameServer {
         return;
       }
       this._removePlayerFromGame(usernameClean, room);
-      
-      // Save game state
-      await this.dataManager.saveGameState(room, game);
-      
-      // Broadcast state ke semua client
       setTimeout(() => {
         this._broadcastGameStateToRoom(room);
       }, 100);
-      
     } catch(e) {}
   }
 
@@ -2626,6 +2426,7 @@ export class GameServer {
   // ============================================================
   // GAME: CHECK GAME RUNNING
   // ============================================================
+  
   async checkGameRunning(ws, roomname) {
     try {
       if (this.isDestroyed) {
@@ -2670,6 +2471,7 @@ export class GameServer {
   // ============================================================
   // GAME: START WITH RECORDING
   // ============================================================
+  
   async _startGameWithRecording(ws, room, bet, username) {
     try {
       if (!room || !username || typeof room !== 'string' || typeof username !== 'string') {
@@ -2718,15 +2520,9 @@ export class GameServer {
       this._broadcastToRoom(room, ["gameLowCardStart", betAmount]);
       this._broadcastToRoom(room, ["gameLowCardStartSuccess", username, betAmount]);
       this._startRegistration(room, game);
-      
-      // Save game state
-      await this.dataManager.saveGameState(room, game);
-      
-      // Broadcast state ke semua client
       setTimeout(() => {
         this._broadcastGameStateToRoom(room);
       }, 100);
-      
     } catch(e) {
       this._safeSend(ws, ["gameLowCardError", "Failed to start game"]);
     }
@@ -2735,6 +2531,7 @@ export class GameServer {
   // ============================================================
   // DICE GAME
   // ============================================================
+  
   _startDiceFast() {
     try {
       if (this._diceLock || this.currentDiceRoll || this._isShowingDice) return;
@@ -2839,6 +2636,7 @@ export class GameServer {
   // ============================================================
   // TIE BREAKER
   // ============================================================
+  
   async _startTieBreaker(room, players) {
     if (this._tieLock) return;
     this._tieLock = true;
@@ -3022,6 +2820,7 @@ export class GameServer {
   // ============================================================
   // DICE: SUBMIT ANSWER
   // ============================================================
+  
   async submitDiceAnswer(ws, username, guess) {
     try {
       if (!ws || !username) return;
@@ -3080,6 +2879,7 @@ export class GameServer {
   // ============================================================
   // DICE: NOTIFICATION HELPERS
   // ============================================================
+  
   _sendDiceNotificationOnSwitch(ws, wsId) {
     try {
       if (!ws || ws.readyState !== 1) return;
@@ -3161,6 +2961,7 @@ export class GameServer {
   // ============================================================
   // BROADCAST HELPERS
   // ============================================================
+  
   async _broadcastLowCardWinners(room) {
     try {
       if (!room || typeof room !== 'string' || room.trim() === '') return;
@@ -3193,8 +2994,9 @@ export class GameServer {
   }
 
   // ============================================================
-  // BROADCAST GAME STATE TO ROOM
+  // BROADCAST GAME STATE
   // ============================================================
+  
   _broadcastGameStateToRoom(room) {
     try {
       if (!room) return;
@@ -3210,9 +3012,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ============================================================
-  // SEND GAME STATE TO CLIENT
-  // ============================================================
   _sendGameStateToClient(ws, room) {
     try {
       if (!ws || ws.readyState !== 1 || !room) return;
@@ -3417,6 +3216,7 @@ export class GameServer {
   // ============================================================
   // CLIENT MANAGEMENT
   // ============================================================
+  
   _addClient(room, ws, username = null) {
     try {
       if (!ws) return;
@@ -3463,6 +3263,7 @@ export class GameServer {
   // ============================================================
   // GAME: CLEANUP
   // ============================================================
+  
   _scheduleGameCleanup(room, game) {
     try {
       if (!room || !game) return;
@@ -3560,10 +3361,6 @@ export class GameServer {
         this._cleanupTimers.delete(room);
       }
       
-      // Remove from storage
-      await this.dataManager.removeGameFromStorage(room);
-      
-      // Broadcast state kosong
       this._broadcastToRoom(room, ["gameLowCardEnd", []]);
       this._broadcastGameStateToRoom(room);
       
@@ -3576,6 +3373,7 @@ export class GameServer {
   // ============================================================
   // LOCK HELPERS
   // ============================================================
+  
   _acquireLock(lockMap, key, timeoutMs = 5000) {
     if (lockMap.has(key)) return false;
     lockMap.set(key, Date.now());
@@ -3593,14 +3391,12 @@ export class GameServer {
   // ============================================================
   // DESTROY
   // ============================================================
+  
   async destroy() {
     try {
       if (this.isDestroyed) return;
       this.isDestroyed = true;
       this.closing = true;
-      
-      // Save all games before destroy
-      await this._saveAllGamesState();
       
       if (this._notificationTimers) {
         for (const timer of this._notificationTimers) {
@@ -3613,11 +3409,6 @@ export class GameServer {
         try { clearTimeout(timer); } catch(e) {}
       }
       this._allTimers.clear();
-      
-      if (this._saveInterval) {
-        clearInterval(this._saveInterval);
-        this._saveInterval = null;
-      }
       
       if (this._diceTimeout) { clearTimeout(this._diceTimeout); this._diceTimeout = null; }
       if (this._diceCooldownTimer) { clearTimeout(this._diceCooldownTimer); this._diceCooldownTimer = null; }
