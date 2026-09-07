@@ -15,7 +15,7 @@ bindings = [
   { name = "GAME_SERVER", class_name = "GameServer" }
 ]
 
-# Migrations
+# Migrations - FIXED for free plan
 [[migrations]]
 tag = "v1"
-new_classes = ["ChatServer", "GameServer"]
+new_sqlite_classes = ["ChatServer", "GameServer"]
