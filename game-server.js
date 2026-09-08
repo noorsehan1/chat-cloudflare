@@ -1,6 +1,6 @@
 // ============================================================
 // GAME-SERVER-D1.js
-// VERSION: 12.3.0 - FINAL
+// VERSION: 12.3.1 - FIXED
 // ============================================================
 
 // ============================================================
@@ -651,7 +651,7 @@ class AlarmScheduler {
 }
 
 // ============================================================
-// GAME SERVER - FULL CLASS
+// GAME SERVER - FULL CLASS (FIXED)
 // ============================================================
 
 export class GameServer {
@@ -751,7 +751,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // RESTORE ALL STATE
+  // RESTORE ALL STATE (FIXED)
   // ============================================================
   
   async _restoreAllState() {
@@ -766,12 +766,16 @@ export class GameServer {
       
       this._syncAllRooms();
       
+      // ✅ FIX: Jika sudah waktu quiz, aktifkan session dan start
       if (this.alarmScheduler.isDiceTime()) {
         this._diceSessionActive = true;
         this._diceSessionEnded = false;
-        const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
-        if (clients && clients.size > 0) {
+        
+        // Start dice langsung tanpa cek client
+        if (!this.currentDiceRoll && !this._isShowingDice && !this._diceLock && !this._diceTimeUpCooldown) {
+          this._diceStartedByUser = true;
           this._startDiceFast();
+          this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "🎲 Quiz Started!"]);
         }
       }
       
@@ -780,6 +784,7 @@ export class GameServer {
       }
       
     } catch(e) {
+      console.error("Error restoring state:", e);
       throw e;
     }
   }
@@ -1068,7 +1073,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // ALARM
+  // ALARM (FIXED)
   // ============================================================
   
   async alarm() {
@@ -1084,12 +1089,16 @@ export class GameServer {
         try {
           await this._processAlarm(alarm.name);
           await this.alarmScheduler.processAlarm(alarm.name);
-        } catch(e) {}
+        } catch(e) {
+          console.error("Error processing alarm:", e);
+        }
       }
       
       await this.alarmScheduler.scheduleAlarms();
       
-    } catch(e) {}
+    } catch(e) {
+      console.error("Error in alarm:", e);
+    }
   }
 
   async _processAlarm(name) {
@@ -1097,31 +1106,33 @@ export class GameServer {
       case CONSTANTS.WEEKLY_RESET_ALARM:
         await this._handleWeeklyReset();
         break;
+        
       case 'dice_session_start':
+        // ✅ FIX: Cek apakah sudah waktunya quiz
         if (this.alarmScheduler.isDiceTime()) {
           this.diceAutoEnabled = true;
           this._diceSessionActive = true;
           this._diceSessionEnded = false;
           
-          const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
-          if (clients && clients.size > 0) {
-            if (!this.currentDiceRoll && !this._isShowingDice && !this._diceLock && !this._diceTimeUpCooldown) {
-              this._diceStartedByUser = true;
-              this._startDiceFast();
-            }
-          } else {
-            this._diceStartedByUser = false;
-            this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "Dice session started. Waiting for players..."]);
+          // ✅ FIX: Start langsung tanpa cek client
+          if (!this.currentDiceRoll && !this._isShowingDice && !this._diceLock && !this._diceTimeUpCooldown) {
+            this._diceStartedByUser = true;
+            this._startDiceFast();
+            this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "🎲 Quiz Started!"]);
+          } else if (this._diceTimeUpCooldown) {
+            // ✅ Jika cooldown, beri tahu
+            this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "⏳ Quiz will start after cooldown..."]);
           }
         }
         break;
+        
       case 'dice_session_end':
         this.diceAutoEnabled = false;
         this._diceSessionActive = false;
         this._diceSessionEnded = true;
         this._diceStartedByUser = false;
         
-        this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "Dice session ended"]);
+        this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "⏹️ Quiz session ended"]);
         this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceSessionEnded", true]);
         
         if (this.currentDiceRoll || this._isShowingDice) {
@@ -1138,16 +1149,26 @@ export class GameServer {
         this.diceWinner = null;
         this._diceRound = 0;
         
-        if (this._diceTimeout) { clearTimeout(this._diceTimeout); this._diceTimeout = null; }
-        if (this._diceCooldownTimer) { clearTimeout(this._diceCooldownTimer); this._diceCooldownTimer = null; }
-        if (this._diceTimeUpCooldownTimer) { clearTimeout(this._diceTimeUpCooldownTimer); this._diceTimeUpCooldownTimer = null; }
-        for (const timeout of this._diceNotificationTimeouts) { clearTimeout(timeout); }
+        if (this._diceTimeout) { 
+          clearTimeout(this._diceTimeout); 
+          this._diceTimeout = null; 
+        }
+        if (this._diceCooldownTimer) { 
+          clearTimeout(this._diceCooldownTimer); 
+          this._diceCooldownTimer = null; 
+        }
+        if (this._diceTimeUpCooldownTimer) { 
+          clearTimeout(this._diceTimeUpCooldownTimer); 
+          this._diceTimeUpCooldownTimer = null; 
+        }
+        for (const timeout of this._diceNotificationTimeouts) { 
+          clearTimeout(timeout); 
+        }
         this._diceNotificationTimeouts = [];
         
         if (this._tieActive) {
           this._resetTieBreakerState(null);
         }
-        
         break;
     }
   }
@@ -1187,6 +1208,49 @@ export class GameServer {
       }, CONSTANTS.RATE_LIMIT_WINDOW_MS);
       
       const url = new URL(req.url);
+      
+      // ✅ FIX: Endpoint untuk cek status dice
+      if (url.pathname === "/game/dice/status") {
+        const clients = this.wsClients?.get(CONSTANTS.DICE_ROOM);
+        
+        return new Response(JSON.stringify({
+          isDiceTime: this.alarmScheduler.isDiceTime(),
+          isActive: this.currentDiceRoll && this._canSubmitDiceAnswer,
+          sessionActive: this._diceSessionActive,
+          sessionEnded: this._diceSessionEnded,
+          isLocked: this._diceLock,
+          isCooldown: this._diceTimeUpCooldown,
+          isShowing: this._isShowingDice,
+          currentRoll: this.currentDiceRoll,
+          round: this._diceRound,
+          clientsInRoom: clients ? clients.size : 0,
+          totalClients: this.wsMap.size,
+          nextSession: this._getTimeLeftUntilNextDice()
+        }), { 
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      
+      // ✅ FIX: Endpoint untuk force start dice
+      if (url.pathname === "/game/dice/forceStart") {
+        const started = this._checkAndStartDice();
+        if (started) {
+          this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "🎲 Quiz Forced Start!"]);
+          return new Response(JSON.stringify({ success: true, message: "Quiz started" }), { 
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        } else {
+          return new Response(JSON.stringify({ 
+            success: false, 
+            message: "Cannot start quiz. Check if it's quiz time or cooldown active." 
+          }), { 
+            status: 400,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+      }
       
       if (url.pathname === "/game/ws") {
         const upgrade = req.headers.get("Upgrade");
@@ -1719,7 +1783,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // SWITCH ROOM
+  // SWITCH ROOM (FIXED)
   // ============================================================
   
   async switchRoom(ws, room, username = null) {
@@ -1803,11 +1867,19 @@ export class GameServer {
       
       this._sendRoomStateToUser(ws, roomName);
       
+      // ✅ FIX: Jika room Quiz, cek dan start langsung
       if (roomName === CONSTANTS.DICE_ROOM) {
-        this._sendDiceNotificationOnSwitch(ws, wsId);
+        const started = this._checkAndStartDice();
+        if (started) {
+          this._safeSend(ws, ["diceNotification", "🎲 Quiz Started!"]);
+        } else {
+          // Kirim notifikasi status
+          this._sendDiceNotificationOnSwitch(ws, wsId);
+        }
       }
       
     } catch(e) {
+      console.error("Switch room error:", e);
       this._safeSend(ws, ["switchRoomError", e.message || "Switch failed"]);
     }
   }
@@ -1823,62 +1895,117 @@ export class GameServer {
     } catch(e) {}
   }
 
+  // ============================================================
+  // SEND DICE NOTIFICATION ON SWITCH (FIXED)
+  // ============================================================
+  
   _sendDiceNotificationOnSwitch(ws, wsId) {
     try {
       if (!ws || ws.readyState !== 1) return;
       
-      if (this._diceSessionEnded) {
-        setTimeout(() => {
-          if (ws && ws.readyState === 1) {
-            this._safeSend(ws, ["diceNotification", "Dice session ended. Next session soon..."]);
-          }
-        }, 5000);
-        return;
-      }
-      
-      const isGameActive = this.currentDiceRoll && this._canSubmitDiceAnswer;
+      // ✅ CEK APAKAH SUDAH WAKTU QUIZ
       const isDiceTime = this.alarmScheduler.isDiceTime();
-      const timeLeft = this._getTimeLeftUntilNextDice();
+      const isGameActive = this.currentDiceRoll && this._canSubmitDiceAnswer;
+      const isCooldown = this._diceTimeUpCooldown || this._diceLock || this._isShowingDice;
       
-      if (!isDiceTime && !isGameActive && timeLeft && timeLeft.totalMs > 0) {
-        const hours = timeLeft.hours;
-        const minutes = timeLeft.minutes;
-        let timeText = "";
-        if (hours > 0 && minutes > 0) {
-          timeText = hours + "h " + minutes + "m";
-        } else if (hours > 0) {
-          timeText = hours + "h";
-        } else if (minutes > 0) {
-          timeText = minutes + "m";
-        } else {
-          timeText = "less than a minute";
-        }
+      // ✅ JIKA SUDAH WAKTU DAN GAME BELUM AKTIF, START LANGSUNG!
+      if (isDiceTime && !isGameActive && !isCooldown) {
+        // Set session active
+        this._diceSessionActive = true;
+        this._diceSessionEnded = false;
+        this._diceStartedByUser = true;
         
-        setTimeout(() => {
-          if (ws && ws.readyState === 1) {
-            this._safeSend(ws, ["diceNotification", "Next dice game in: " + timeText]);
-          }
-        }, 5000);
+        // START DICE LANGSUNG
+        this._startDiceFast();
+        
+        // Kirim notifikasi ke user
+        this._safeSend(ws, ["diceNotification", "🎲 Quiz Started!"]);
+        
+        // Broadcast ke semua di room
+        this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "🎲 Quiz Started!"]);
         return;
       }
       
-      if (this._diceSessionActive && !this._diceSessionEnded && !isGameActive) {
-        if (!this._diceLock && !this._isShowingDice && !this._diceTimeUpCooldown) {
-          setTimeout(() => {
-            if (ws && ws.readyState === 1) {
-              this._safeSend(ws, ["diceNotification", "Dice game starting soon..."]);
-            }
-          }, 5000);
-          
-          if (!this.currentDiceRoll && this._diceSessionActive && !this._diceSessionEnded) {
-            this._diceStartedByUser = true;
-            this._startDiceFast();
+      // ✅ JIKA SUDAH WAKTU TAPI COOLDOWN, KASIH TAU
+      if (isDiceTime && isCooldown) {
+        this._safeSend(ws, ["diceNotification", "⏳ Quiz will start after cooldown..."]);
+        return;
+      }
+      
+      // ✅ JIKA GAME SEDANG AKTIF
+      if (isGameActive) {
+        const elapsed = (Date.now() - this._diceStartTime) / 1000;
+        const totalTime = CONSTANTS.DICE_TOTAL_TIME_MS / 1000;
+        const remaining = Math.max(0, totalTime - elapsed);
+        this._safeSend(ws, ["diceNotification", Math.floor(remaining) + "s remaining"]);
+        return;
+      }
+      
+      // ✅ JIKA TIDAK WAKTU QUIZ
+      if (!isDiceTime && !this._diceSessionEnded) {
+        const timeLeft = this._getTimeLeftUntilNextDice();
+        if (timeLeft && timeLeft.totalMs > 0) {
+          const hours = timeLeft.hours;
+          const minutes = timeLeft.minutes;
+          let timeText = "";
+          if (hours > 0 && minutes > 0) {
+            timeText = hours + "h " + minutes + "m";
+          } else if (hours > 0) {
+            timeText = hours + "h";
+          } else if (minutes > 0) {
+            timeText = minutes + "m";
+          } else {
+            timeText = "less than a minute";
           }
+          this._safeSend(ws, ["diceNotification", "Next quiz in: " + timeText]);
+        } else {
+          this._safeSend(ws, ["diceNotification", "Waiting for next quiz session..."]);
         }
-        return;
       }
       
-    } catch(e) {}
+    } catch(e) {
+      console.error("Error in _sendDiceNotificationOnSwitch:", e);
+    }
+  }
+
+  // ============================================================
+  // CHECK AND START DICE (NEW METHOD)
+  // ============================================================
+  
+  _checkAndStartDice() {
+    try {
+      // ✅ CEK APAKAH SUDAH WAKTU
+      if (!this.alarmScheduler.isDiceTime()) {
+        return false;
+      }
+      
+      // ✅ CEK APAKAH SESSION ACTIVE
+      if (this._diceSessionEnded) {
+        return false;
+      }
+      
+      // ✅ CEK APAKAH GAME SEDANG BERJALAN
+      if (this.currentDiceRoll && this._canSubmitDiceAnswer) {
+        return true;
+      }
+      
+      // ✅ CEK APAKAH COOLDOWN
+      if (this._diceTimeUpCooldown || this._diceLock || this._isShowingDice) {
+        return false;
+      }
+      
+      // ✅ START DICE
+      this._diceSessionActive = true;
+      this._diceSessionEnded = false;
+      this._diceStartedByUser = true;
+      this._startDiceFast();
+      this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "🎲 Quiz Started!"]);
+      
+      return true;
+    } catch(e) {
+      console.error("Error in _checkAndStartDice:", e);
+      return false;
+    }
   }
 
   // ============================================================
@@ -2767,21 +2894,35 @@ export class GameServer {
   }
 
   // ============================================================
-  // DICE GAME - START DICE FAST
+  // DICE GAME - START DICE FAST (FIXED)
   // ============================================================
   
   _startDiceFast() {
     try {
-      if (!this._diceSessionActive || this._diceSessionEnded) {
+      // ✅ CEK APAKAH SUDAH WAKTU QUIZ
+      if (!this.alarmScheduler.isDiceTime()) {
+        console.log("Not dice time, skipping start");
         return;
       }
       
+      // ✅ JIKA SESSION SUDAH ENDED, TIDAK START
+      if (this._diceSessionEnded) {
+        console.log("Dice session ended, skipping start");
+        return;
+      }
+      
+      // ✅ JIKA SEDANG LOCK ATAU COOLDOWN, SKIP
       if (this._diceLock || this.currentDiceRoll || this._isShowingDice) {
+        console.log("Dice already running or locked");
         return;
       }
       
+      // ✅ SET SESSION ACTIVE
+      this._diceSessionActive = true;
       this._diceLock = true;
       this._isShowingDice = true;
+      
+      // GENERATE DICE VALUE
       const value = Math.floor(Math.random() * 6) + 1;
       this._diceRound = (this._diceRound || 0) + 1;
       this.currentDiceRoll = { value, timestamp: Date.now(), round: this._diceRound };
@@ -2793,31 +2934,47 @@ export class GameServer {
       this.diceHasWinner = false;
       this.diceWinner = null;
       
+      // BROADCAST KE SEMUA USER DI ROOM QUIZ
       this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceRoll", { 
-        value, timestamp: Date.now(), answerTime: 20, canAnswerNow: true, round: this._diceRound
+        value, 
+        timestamp: Date.now(), 
+        answerTime: 20, 
+        canAnswerNow: true, 
+        round: this._diceRound
       }]);
-      this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "clik draw"]);
+      this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "🎲 Draw your card!"]);
       
-      for (const timeout of this._diceNotificationTimeouts) { clearTimeout(timeout); }
+      // NOTIFICATIONS
+      for (const timeout of this._diceNotificationTimeouts) { 
+        clearTimeout(timeout); 
+      }
       this._diceNotificationTimeouts = [];
+      
       this._diceNotificationTimeouts.push(setTimeout(() => {
         this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "15s remaining"]);
       }, 5000));
+      
       this._diceNotificationTimeouts.push(setTimeout(() => {
         this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "10s remaining"]);
       }, 10000));
+      
       this._diceNotificationTimeouts.push(setTimeout(() => {
         this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "5s remaining"]);
       }, 15000));
+      
       this._diceNotificationTimeouts.push(setTimeout(() => {
         this._broadcastToRoom(CONSTANTS.DICE_ROOM, ["diceNotification", "3s remaining"]);
       }, 17000));
       
+      // END ROUND AFTER 20s
       this._diceTimeout = this._trackTimer(setTimeout(() => { 
         this._endDiceRound(); 
       }, 20000));
       
+      console.log("Dice started successfully!");
+      
     } catch(e) {
+      console.error("Error in _startDiceFast:", e);
       this._diceLock = false;
       this._isShowingDice = false;
     }
