@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 13.1.0 - FINAL CLEAN VERSION
+// VERSION: 13.1.2 - WITH ONDESTROY CASE
 
  const C = {
   MAX_SEATS: 45,
@@ -1089,9 +1089,6 @@ export class ChatServer {
         } catch(e) {}
       }
       
-      // HANYA UPDATE CACHE - TIDAK ADA BROADCAST APAPUN
-      // Data akan diambil user saat melakukan event/action
-      
       this._restored = true;
       this._restoreDone = true;
       this._restoreFailed = false;
@@ -1266,7 +1263,12 @@ export class ChatServer {
       if (!Array.isArray(data) || !data.length) return;
       const [evt, ...args] = data;
       
+      // ============ CASE ONDESTROY ============
       if (evt === "onDestroy") {
+        // Kirim balasan onDestroy ke client
+        this.safeSend(ws, ["onDestroy"]);
+        
+        // Sama persis seperti webSocketClose / webSocketError
         if (!ws._username && ws.username) {
           ws._username = ws.username;
         }
@@ -1274,6 +1276,7 @@ export class ChatServer {
           ws._room = ws.room || ws.roomname;
         }
         
+        const state = _wsCleanupState.get(ws);
         if (state && state.cleanupDone) {
           return;
         }
@@ -1281,6 +1284,7 @@ export class ChatServer {
         await this._cleanupUserCompletely(ws);
         return;
       }
+      // ============ END CASE ONDESTROY ============
       
       if (evt === "chat" || evt === "updatePoint" || evt === "gift" || evt === "rollangak") {
         const room = args[0];
