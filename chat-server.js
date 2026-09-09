@@ -13,7 +13,7 @@
 };
 
 const ROOMS = [
-  "LowCard", "Quiz", "Gacor", "General", "LOVE BIRDS", "Birthday Party",
+  "LowCard", "Quiz", "Gacor", "General", "LOVE BIRDS", "Relax & Chat",
   "Sweet Memories", "Lounge Talk", "Noxxeliverothcifsa", "BESTIES",
   "Happy Vibes", "The Chatter Room"
 ];
