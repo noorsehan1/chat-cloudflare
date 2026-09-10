@@ -1,6 +1,6 @@
 // ============================================================
 // GAME-SERVER-D1-DIRECT.js
-// VERSION: 15.0.0 - DIRECT D1 ACCESS (NO CACHE)
+// VERSION: 15.0.0 - DIRECT D1 ACCESS + SCHEDULE-ONLY ALARM
 // ============================================================
 
 // ============================================================
@@ -92,8 +92,6 @@ class DataManager {
     }
   }
 
-  // ==================== DIRECT D1 GET ====================
-  
   async _get(key) {
     try {
       const result = await this.db
@@ -113,8 +111,6 @@ class DataManager {
     }
   }
 
-  // ==================== DIRECT D1 SET ====================
-  
   async _set(key, value) {
     try {
       if (value === null || value === undefined || 
@@ -282,7 +278,7 @@ class DataManager {
     return true;
   }
 
-  // ==================== GET ALL DATA ====================
+  // ==================== GET ALL / DELETE ALL ====================
   
   async getAllData() {
     try {
@@ -305,8 +301,6 @@ class DataManager {
     }
   }
 
-  // ==================== DELETE ALL DATA ====================
-  
   async deleteAllData() {
     try {
       await this.db.prepare(`DELETE FROM ${TABLE_NAME}`).run();
@@ -329,7 +323,7 @@ class DataManager {
 }
 
 // ============================================================
-// ALARM SCHEDULER
+// ALARM SCHEDULER - SCHEDULE ONLY (NO 60s ALARM)
 // ============================================================
 
 class AlarmScheduler {
@@ -349,6 +343,7 @@ class AlarmScheduler {
       await this._clearAllAlarms();
       await this._scheduleWeeklyResetUTC();
       
+      // Cek apakah sedang dalam sesi dice
       let currentSession = null;
       for (const session of QUIZ_SCHEDULE.SESSIONS) {
         const startTotal = parseTime(session.start);
@@ -360,14 +355,17 @@ class AlarmScheduler {
       }
       
       if (currentSession) {
+        // Sedang dalam sesi → set alarm untuk akhir sesi
         const endDelay = (currentSession.endTotal - currentTotal) * 60 * 1000;
         if (endDelay > 0) {
           await this._scheduleAlarm('dice_session_end', endDelay);
         }
+        // Mulai game dice sekarang
         await this._scheduleAlarm('dice_session_start_immediate', 1000);
         return true;
       }
       
+      // Cari sesi berikutnya
       let nextSession = null;
       let minDiff = Infinity;
       for (const session of QUIZ_SCHEDULE.SESSIONS) {
@@ -376,7 +374,12 @@ class AlarmScheduler {
         if (diff < 0) diff += 24 * 60;
         if (diff < minDiff) {
           minDiff = diff;
-          nextSession = { ...session, startTotal, status: 'upcoming' };
+          nextSession = { 
+            ...session, 
+            startTotal, 
+            endTotal: parseTime(session.end), 
+            status: 'upcoming' 
+          };
         }
       }
       
@@ -384,9 +387,11 @@ class AlarmScheduler {
         let startDelay = minDiff * 60 * 1000;
         if (startDelay < 0) startDelay = 0;
         await this._scheduleAlarm('dice_session_start', startDelay);
-        const endTotal = parseTime(nextSession.end);
-        const endDelay = (endTotal - currentTotal) * 60 * 1000;
-        if (endDelay > 0) await this._scheduleAlarm('dice_session_end', endDelay);
+        
+        const sessionDuration = (nextSession.endTotal - nextSession.startTotal) * 60 * 1000;
+        if (sessionDuration > 0) {
+          await this._scheduleAlarm('dice_session_end', startDelay + sessionDuration);
+        }
       }
       return true;
     } catch(e) { return false; }
@@ -572,7 +577,7 @@ class AlarmScheduler {
 }
 
 // ============================================================
-// GAME SERVER - DIRECT D1 ACCESS
+// GAME SERVER - FULL CLASS
 // ============================================================
 
 export class GameServer {
@@ -684,14 +689,14 @@ export class GameServer {
   }
 
   // ============================================================
-  // INIT - DIRECT D1
+  // INIT - SCHEDULE-ONLY ALARM (NO 60s ALARM)
   // ============================================================
   
   async _init() {
     try {
       await this.dataManager.init();
       await this.alarmScheduler.restoreAlarms();
-      await this.alarmScheduler.scheduleAlarms();
+      await this.alarmScheduler.scheduleAlarms();  // ✅ Hanya schedule sesuai jadwal
       await this._checkAndForceResetIfMondayUTC();
       await this._initWebSockets();
       this._syncAllRooms();
@@ -712,9 +717,7 @@ export class GameServer {
         this._diceGameStarted = false;
       }
       
-      if (!this.closing && !this.isDestroyed) {
-        this.ctx.storage.setAlarm(Date.now() + 60000);
-      }
+      // ✅ TIDAK ADA setAlarm(Date.now() + 60000) - HANYA SCHEDULE
       
       await this._processPendingEvents();
       
@@ -1058,6 +1061,19 @@ export class GameServer {
     } catch(e) { return false; }
   }
 
+  _safeSend(ws, message) {
+    try {
+      if (!ws || ws.readyState !== 1) return false;
+      const msg = typeof message === 'string' ? message : JSON.stringify(message);
+      ws.send(msg);
+      return true;
+    } catch(e) { return false; }
+  }
+
+  _sendToUser(ws, message) {
+    return this._safeSend(ws, message);
+  }
+
   // ============================================================
   // DICE ROOM STATE
   // ============================================================
@@ -1273,6 +1289,10 @@ export class GameServer {
       this._diceGameStarted = false;
     }
   }
+
+  // ============================================================
+  // TIE BREAKER
+  // ============================================================
 
   async _startTieBreaker(room, players) {
     if (this._tieLock) return;
@@ -1642,7 +1662,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // RECORDING HELPERS - DIRECT D1
+  // RECORDING HELPERS
   // ============================================================
   
   async _broadcastLowCardWinners(room) {
@@ -1746,7 +1766,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // ALARM
+  // ALARM - SCHEDULE ONLY (NO 60s ALARM)
   // ============================================================
   
   async alarm() {
@@ -1761,6 +1781,7 @@ export class GameServer {
           await this.alarmScheduler.processAlarm(alarm.name);
         } catch(e) {}
       }
+      // ✅ Set alarm berikutnya sesuai jadwal (bukan 60 detik)
       await this.alarmScheduler.scheduleAlarms();
     } catch(e) {}
   }
@@ -2132,10 +2153,6 @@ export class GameServer {
     } catch(e) {}
   }
 
-  // ============================================================
-  // HANDLE EVENT INTERNAL - DIRECT D1
-  // ============================================================
-  
   async _handleEventInternal(ws, data) {
     try {
       if (this.isDestroyed || !ws || !data || !data[0]) return;
@@ -2190,7 +2207,7 @@ export class GameServer {
         return;
       }
 
-      // ==================== RECORDING WINNERS - DIRECT D1 ====================
+      // ==================== RECORDING WINNERS ====================
       
       if (evt === "startRecordingWinners") {
         const roomName = data[1];
@@ -2893,7 +2910,7 @@ export class GameServer {
   }
 
   // ============================================================
-  // LOWCARD GAME METHODS (SIMPLIFIED)
+  // LOWCARD GAME METHODS
   // ============================================================
   
   async startGame(ws, bet, username) {
@@ -3980,19 +3997,6 @@ export class GameServer {
   _releaseLock(lockMap, key) {
     if (lockMap.has(key)) { lockMap.delete(key); return true; }
     return false;
-  }
-
-  _safeSend(ws, message) {
-    try {
-      if (!ws || ws.readyState !== 1) return false;
-      const msg = typeof message === 'string' ? message : JSON.stringify(message);
-      ws.send(msg);
-      return true;
-    } catch(e) { return false; }
-  }
-
-  _sendToUser(ws, message) {
-    return this._safeSend(ws, message);
   }
 
   _handleError(type, error) {
