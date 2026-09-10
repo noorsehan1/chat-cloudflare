@@ -1,5 +1,6 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 14.2.0 - 100% ANTI CRASH
+// VERSION: 14.6.0 - NO RACE CONDITION, D1 DELETE FIRST
+// ⚠️ MULTI BEHAVIOR UNCHANGED
 
 const C = {
   MAX_SEATS: 45,
@@ -30,7 +31,6 @@ const ROOMS = [
 const ROOMS_SET = new Set(ROOMS);
 const TABLE_NAME = 'chat_data';
 
-// WeakMap untuk tracking state WebSocket
 const _wsCleanupState = new WeakMap();
 
 export class ChatServer {
@@ -49,7 +49,6 @@ export class ChatServer {
       this._restoreStartTime = Date.now();
       this._restoreAttempts = 0;
       
-      // ============ PENDING EVENTS QUEUE ============
       this._pendingEvents = [];
       this._isRestoring = false;
       this._eventQueue = [];
@@ -68,7 +67,6 @@ export class ChatServer {
       this.currentNumber = 1;
       this._isNumberUpdating = false;
       
-      // ============ ANTI CRASH ============
       this._requestCount = 0;
       this._lastResetTime = Date.now();
       this._circuitOpen = false;
@@ -77,7 +75,6 @@ export class ChatServer {
       this._reconnectAttempts = new Map();
       this._allTimers = new Set();
       
-      // ✅ FIX #1: CEK env.DB
       if (!env || !env.DB) {
         this.db = null;
         this._storageCache = { roomsData: {}, currentNumber: 1 };
@@ -85,7 +82,6 @@ export class ChatServer {
         this._restored = true;
         this._restoreDone = true;
         this._restoreFailed = true;
-        // Inisialisasi room clients tetap jalan
         for (const room of ROOMS) {
           this.roomClients.set(room, new Set());
         }
@@ -103,15 +99,12 @@ export class ChatServer {
       this._cacheLoadingPromise = null;
       this._cacheLoadAttempts = 0;
       
-      // Inisialisasi room clients
       for (const room of ROOMS) {
         this.roomClients.set(room, new Set());
       }
       
-      // Mulai restore dengan retry mechanism
       this._restorePromise = this._restoreWithRetry();
       
-      // Set timeout untuk restore
       const restoreTimeout = setTimeout(() => {
         if (!this._restoreDone) {
           this._restored = true;
@@ -150,7 +143,6 @@ export class ChatServer {
         });
         
     } catch(e) {
-      // ❌ ANTI CRASH: Jika constructor error, tetap set state aman
       this._restored = true;
       this._restoreDone = true;
       this._isRestoring = false;
@@ -167,14 +159,12 @@ export class ChatServer {
       this._pendingEvents = [];
       this._eventQueue = [];
       this.db = null;
-      // Inisialisasi room clients
       for (const room of ROOMS) {
         this.roomClients.set(room, new Set());
       }
     }
   }
 
-  // ============ RESTORE WITH RETRY ============
   async _restoreWithRetry() {
     let attempts = 0;
     let lastError = null;
@@ -196,7 +186,6 @@ export class ChatServer {
       }
     }
     
-    // ❌ ANTI CRASH: Jika semua attempt gagal, set state aman
     this._restored = true;
     this._restoreDone = true;
     this._restoreFailed = true;
@@ -208,7 +197,6 @@ export class ChatServer {
     throw lastError;
   }
 
-  // ============ LOAD FROM D1 - DENGAN ERROR HANDLING ============
   async _loadFromStorage() {
     try {
       if (!this.db) {
@@ -314,7 +302,6 @@ export class ChatServer {
     }
   }
 
-  // ============ SAVE KE D1 - DENGAN ERROR HANDLING ============
   async _saveSeat(roomName, seatNumber, seatData) {
     try {
       if (!this.db) return;
@@ -370,11 +357,107 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ============ DELETE SEAT + POINT ============
+  // ============ 🔥 FORCE DELETE FROM D1 - PALING PERTAMA ============
+  // Dipanggil PALING PERTAMA saat cleanup user NORMAL
+  // - Query D1 LANGSUNG (bypass cache)
+  // - 3 lapis fallback cari seat
+  // - Guard multi: TOLAK hapus seat multi
+  async _forceDeleteFromD1(roomName, seatNumber, username) {
+    try {
+      if (!this.db) return false;
+      
+      let seat = seatNumber;
+      let room = roomName;
+      
+      // LAPIS 1: Cari seat via SELECT jika room diketahui tapi seat tidak
+      if (!seat && room && username) {
+        try {
+          const result = await this.db
+            .prepare(`SELECT key, value FROM ${TABLE_NAME} WHERE key LIKE ?`)
+            .bind(`seat_${room}_%`)
+            .all();
+          
+          const rows = result?.results || [];
+          for (const row of rows) {
+            try {
+              const val = JSON.parse(row.value);
+              if (val?.namauser === username && val.isMulti !== true) {
+                const parts = row.key.split('_');
+                seat = parseInt(parts[2]);
+                break;
+              }
+            } catch(e) {}
+          }
+        } catch(e) {}
+      }
+      
+      // LAPIS 2: Kalau room & seat masih tidak ketemu, cari di SEMUA room
+      if (!seat && username) {
+        try {
+          const result = await this.db
+            .prepare(`SELECT key, value FROM ${TABLE_NAME} WHERE key LIKE ?`)
+            .bind(`seat_%`)
+            .all();
+          
+          const rows = result?.results || [];
+          for (const row of rows) {
+            try {
+              const val = JSON.parse(row.value);
+              if (val?.namauser === username && val.isMulti !== true) {
+                const parts = row.key.split('_');
+                if (parts.length >= 3) {
+                  const foundRoom = parts[1];
+                  const foundSeat = parseInt(parts[2]);
+                  if (!isNaN(foundSeat)) {
+                    room = foundRoom;
+                    seat = foundSeat;
+                    break;
+                  }
+                }
+              }
+            } catch(e) {}
+          }
+        } catch(e) {}
+      }
+      
+      if (!seat || !room) return false;
+      
+      // LAPIS 3: GUARD MULTI - cek dulu sebelum hapus
+      try {
+        const check = await this.db
+          .prepare(`SELECT value FROM ${TABLE_NAME} WHERE key = ?`)
+          .bind(`seat_${room}_${seat}`)
+          .first();
+        
+        if (check?.value) {
+          const val = JSON.parse(check.value);
+          // 🛡️ JIKA MULTI, TOLAK HAPUS
+          if (val?.isMulti === true) return false;
+          // 🛡️ JIKA USERNAME BEDA, TOLAK HAPUS
+          if (username && val?.namauser && val.namauser !== username) return false;
+        }
+      } catch(e) {}
+      
+      // 🔥 EKSEKUSI HAPUS
+      await this.db
+        .prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`)
+        .bind(`seat_${room}_${seat}`)
+        .run();
+      
+      await this.db
+        .prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`)
+        .bind(`point_${room}_${seat}`)
+        .run();
+      
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
   async _deleteSeatInRoom(roomName, seatNumber) {
     try {
       const roomBucket = await this._getRoomBucket(roomName);
-      // ✅ FIX #2: CEK roomBucket null
       if (!roomBucket) return false;
       
       if (roomBucket.seat) delete roomBucket.seat[seatNumber];
@@ -397,7 +480,6 @@ export class ChatServer {
     }
   }
 
-  // ============ BUCKET ROOM ============
   async _getRoomBucket(roomName) {
     try {
       await this._ensureCacheInitialized();
@@ -413,11 +495,9 @@ export class ChatServer {
     }
   }
 
-  // ============ UPDATE SEAT ============
   async _updateSeatInRoom(roomName, seatNumber, seatData) {
     try {
       const roomBucket = await this._getRoomBucket(roomName);
-      // ✅ FIX #3: CEK roomBucket null
       if (!roomBucket) return false;
       
       if (!seatData || !seatData.namauser || seatData.namauser.trim() === '') {
@@ -434,7 +514,6 @@ export class ChatServer {
     }
   }
 
-  // ============ UPDATE POINT ============
   async _updatePointInRoom(roomName, seatNumber, pointData) {
     try {
       const roomBucket = await this._getRoomBucket(roomName);
@@ -454,7 +533,6 @@ export class ChatServer {
     }
   }
 
-  // ============ UPDATE MUTE ============
   async _updateMuteInRoom(roomName, muted) {
     try {
       const roomBucket = await this._getRoomBucket(roomName);
@@ -467,7 +545,6 @@ export class ChatServer {
     }
   }
 
-  // ============ GET DATA ============
   async _getRoomData(roomName) {
     try {
       await this._ensureCacheInitialized();
@@ -503,7 +580,6 @@ export class ChatServer {
     }
   }
 
-  // ============ FIND USER ============
   async _findUserInAnyRoom(username) {
     try {
       if (!username) return null;
@@ -523,7 +599,6 @@ export class ChatServer {
     }
   }
 
-  // ============ CACHE ============
   async _ensureCacheInitialized() {
     try {
       if (this._cacheInitialized && this._storageCache) {
@@ -586,7 +661,6 @@ export class ChatServer {
     }
   }
 
-  // ============ LOCK SYSTEM ============
   async _withLock(lockMap, key, fn, timeout = C.LOCK_TIMEOUT) {
     try {
       if (!lockMap) return await fn();
@@ -616,7 +690,6 @@ export class ChatServer {
     }
   }
 
-  // ============ UPDATE KURSI ============
   async _updateKursi(roomName, seat, data) {
     try {
       if (!roomName || !ROOMS_SET.has(roomName)) {
@@ -659,7 +732,6 @@ export class ChatServer {
     }
   }
 
-  // ============ UPDATE POINT DIRECT ============
   async _updatePointDirect(roomName, seat, x, y, fast) {
     try {
       await this._ensureCacheInitialized();
@@ -678,7 +750,6 @@ export class ChatServer {
     }
   }
 
-  // ============ REMOVE USER ============
   async _removeUserFromRoom(username, roomName) {
     try {
       if (!username || !roomName) return false;
@@ -701,7 +772,6 @@ export class ChatServer {
     }
   }
 
-  // ============ JOIN ROOM ============
   async _handleJoin(ws, roomName) {
     try {
       if (!ws?.username || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) {
@@ -832,7 +902,7 @@ export class ChatServer {
     }
   }
 
-  // ============ MULTI JOIN ============
+  // ============ MULTI - ⚠️ TIDAK DIUBAH ============
   async _handleMultiJoin(ws, multiUsername, multiRoomname) {
     try {
       if (!multiUsername || !multiRoomname || !ROOMS_SET.has(multiRoomname)) return false;
@@ -889,7 +959,11 @@ export class ChatServer {
     }
   }
 
-  // ============ WEBSOCKET CLEANUP ============
+  // ============ 🔥 CLEANUP - TANPA RACE CONDITION ============
+  // - Guard HANYA cleanupDone (tidak ada guard cleaning)
+  // - Cleanup bisa jalan paralel, semua operasi idempotent
+  // - D1 dihapus PALING PERTAMA
+  // - Tidak ada loop tak berujung
   async _cleanupUserCompletely(ws) {
     try {
       if (!ws) return;
@@ -897,30 +971,30 @@ export class ChatServer {
       let state = _wsCleanupState.get(ws);
       if (!state) {
         state = {
-          cleaning: false,
           cleanupDone: false,
           cleanupStart: null
         };
         try { _wsCleanupState.set(ws, state); } catch(e) {}
       }
       
+      // ✅ HANYA cek cleanupDone - TIDAK ADA guard cleaning
+      // Ini mencegah race condition
       if (state.cleanupDone) return;
       
-      if (state.cleanupStart && Date.now() - state.cleanupStart > 10000) {
-        state.cleaning = false;
-      }
-      
-      if (state.cleaning) {
-        return;
-      }
-      
-      state.cleaning = true;
       state.cleanupStart = Date.now();
       
       try {
         const username = ws.username || ws._username;
         const roomName = ws.room || ws.roomname || ws._room;
         const isMulti = this.wsActiveMulti?.has(ws) || false;
+        
+        // Kalau tidak ada username & bukan multi → tidak ada yang dibersihkan
+        if (!username && !isMulti) {
+          if (this.wsSet) try { this.wsSet.delete(ws); } catch(e) {}
+          state.cleanupDone = true;
+          state.cleanupStart = null;
+          return;
+        }
         
         let actualRoom = roomName;
         let actualSeat = null;
@@ -956,6 +1030,7 @@ export class ChatServer {
         } catch(e) {}
         
         if (isMulti) {
+          // ⚠️ MULTI - TIDAK DIUBAH SAMA SEKALI
           if (username) {
             const connections = this.userConnections?.get(username);
             if (connections) {
@@ -971,111 +1046,165 @@ export class ChatServer {
             if (roomClients) try { roomClients.delete(ws); } catch(e) {}
           }
         } else {
-          if (actualRoom && username) {
-            try {
+          // ============ USER NORMAL - URUTAN: D1 DULU ============
+          
+          // 🛡️ GUARD MULTI: cek dulu apakah ini multi
+          let isActuallyMulti = false;
+          try {
+            if (this.wsActiveMulti?.has(ws)) {
+              isActuallyMulti = true;
+            }
+            if (username && actualRoom) {
               const roomBucket = await this._getRoomBucket(actualRoom);
               if (roomBucket?.seat) {
-                let seatToRemove = actualSeat;
-                
-                if (!seatToRemove) {
-                  for (const [seat, data] of Object.entries(roomBucket.seat)) {
-                    if (data?.namauser === username) {
-                      seatToRemove = parseInt(seat);
+                for (const [s, data] of Object.entries(roomBucket.seat)) {
+                  if (data?.namauser === username && data.isMulti === true) {
+                    isActuallyMulti = true;
+                    break;
+                  }
+                }
+              }
+            }
+          } catch(e) {}
+          
+          if (isActuallyMulti) {
+            // Kalau ternyata multi, jangan hapus kursi
+            if (username) {
+              const connections = this.userConnections?.get(username);
+              if (connections) {
+                try { connections.delete(ws); } catch(e) {}
+                if (connections.size === 0) {
+                  try { this.userConnections.delete(username); } catch(e) {}
+                }
+              }
+            }
+            if (actualRoom) {
+              const roomClients = this.roomClients?.get(actualRoom);
+              if (roomClients) try { roomClients.delete(ws); } catch(e) {}
+            }
+          } else {
+            // ✅ USER NORMAL
+            
+            let roomToClean = actualRoom;
+            let seatToClean = actualSeat;
+            
+            // Cari room & seat dari CACHE (cepat)
+            if (!roomToClean && username) {
+              try {
+                const found = await this._findUserInAnyRoom(username);
+                if (found && found.isMulti !== true) {
+                  roomToClean = found.room;
+                  seatToClean = found.seat;
+                }
+              } catch(e) {}
+            }
+            
+            if (roomToClean && !seatToClean) {
+              try {
+                const roomBucket = await this._getRoomBucket(roomToClean);
+                if (roomBucket?.seat) {
+                  for (const [s, data] of Object.entries(roomBucket.seat)) {
+                    if (data?.namauser === username && data.isMulti !== true) {
+                      seatToClean = parseInt(s);
                       break;
                     }
                   }
                 }
-                
-                if (seatToRemove) {
-                  if (roomBucket.seat) delete roomBucket.seat[seatToRemove];
-                  if (roomBucket.point) delete roomBucket.point[seatToRemove];
-                  
-                  if (this.db) {
-                    try {
-                      await this.db
-                        .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
-                        .bind(`seat_${actualRoom}_${seatToRemove}`, `point_${actualRoom}_${seatToRemove}`)
-                        .run();
-                    } catch(e) {}
-                  }
-                  
-                  this.broadcast(actualRoom, ["removeKursi", actualRoom, seatToRemove]);
-                  await this.updateRoomCount(actualRoom);
+              } catch(e) {}
+            }
+            
+            // ============================================
+            // 🔥 STEP 1: HAPUS D1 PALING PERTAMA (WAJIB)
+            // ============================================
+            // Method ini punya fallback berlapis:
+            // - Kalau room & seat ada → hapus langsung
+            // - Kalau tidak → cari via SELECT di D1 (semua room)
+            // - Guard multi → TOLAK hapus user multi
+            // - Idempotent → aman dijalankan 2x paralel
+            await this._forceDeleteFromD1(roomToClean, seatToClean, username);
+            
+            // ============================================
+            // STEP 2: Hapus dari CACHE (setelah D1 bersih)
+            // ============================================
+            if (roomToClean && seatToClean) {
+              try {
+                const roomBucket = await this._getRoomBucket(roomToClean);
+                if (roomBucket?.seat) delete roomBucket.seat[seatToClean];
+                if (roomBucket?.point) delete roomBucket.point[seatToClean];
+              } catch(e) {}
+            }
+            
+            // ============================================
+            // STEP 3: Hapus dari userConnections
+            // ============================================
+            if (username) {
+              const connections = this.userConnections?.get(username);
+              if (connections) {
+                try { connections.delete(ws); } catch(e) {}
+                if (connections.size === 0) {
+                  try { this.userConnections.delete(username); } catch(e) {}
                 }
               }
-            } catch(e) {
+            }
+            
+            // ============================================
+            // STEP 4: Hapus dari roomClients
+            // ============================================
+            if (roomToClean) {
+              const roomClients = this.roomClients?.get(roomToClean);
+              if (roomClients) try { roomClients.delete(ws); } catch(e) {}
+            } else if (username) {
               try {
-                await this._removeUserFromRoom(username, actualRoom);
-              } catch(e2) {}
+                const found = await this._findUserInAnyRoom(username);
+                if (found) {
+                  const roomClients = this.roomClients?.get(found.room);
+                  if (roomClients) try { roomClients.delete(ws); } catch(e) {}
+                }
+              } catch(e) {}
             }
-          } else if (username) {
-            try {
-              const found = await this._findUserInAnyRoom(username);
-              if (found) {
-                await this._removeUserFromRoom(username, found.room);
-                await this.updateRoomCount(found.room);
-              }
-            } catch(e) {}
-          }
-          
-          if (username) {
-            const connections = this.userConnections?.get(username);
-            if (connections) {
-              try { connections.delete(ws); } catch(e) {}
-              if (connections.size === 0) {
-                try { this.userConnections.delete(username); } catch(e) {}
-              }
+            
+            // ============================================
+            // STEP 5: Hapus dari wsSet & wsActiveMulti
+            // ============================================
+            if (this.wsSet) try { this.wsSet.delete(ws); } catch(e) {}
+            if (this.wsActiveMulti) try { this.wsActiveMulti.delete(ws); } catch(e) {}
+            
+            // ============================================
+            // STEP 6: Broadcast removeKursi (paling akhir)
+            // ============================================
+            if (roomToClean && seatToClean) {
+              this.broadcast(roomToClean, ["removeKursi", roomToClean, seatToClean]);
+              await this.updateRoomCount(roomToClean);
             }
-          }
-          
-          if (actualRoom) {
-            const roomClients = this.roomClients?.get(actualRoom);
-            if (roomClients) try { roomClients.delete(ws); } catch(e) {}
-          } else if (username) {
-            try {
-              const found = await this._findUserInAnyRoom(username);
-              if (found) {
-                const roomClients = this.roomClients?.get(found.room);
-                if (roomClients) try { roomClients.delete(ws); } catch(e) {}
-              }
-            } catch(e) {}
           }
         }
         
-        if (this.wsSet) try { this.wsSet.delete(ws); } catch(e) {}
-        if (this.wsActiveMulti) try { this.wsActiveMulti.delete(ws); } catch(e) {}
+        // Bersihkan wsSet untuk multi
+        if (isMulti) {
+          if (this.wsSet) try { this.wsSet.delete(ws); } catch(e) {}
+          if (this.wsActiveMulti) try { this.wsActiveMulti.delete(ws); } catch(e) {}
+        }
         
+        // ✅ JANGAN reset username/room - biarkan tersimpan
         try {
-          ws.serializeAttachment({});
-          ws.username = null;
-          ws.room = null;
-          ws.roomname = null;
-          ws.idtarget = null;
           ws._closing = false;
           ws._cleaning = false;
-          ws._username = null;
-          ws._room = null;
         } catch(e) {}
         
       } catch(e) {} finally {
-        state.cleaning = false;
         state.cleanupDone = true;
         state.cleanupStart = null;
       }
     } catch(e) {}
   }
 
-  // ============ WEB SOCKET EVENT HANDLERS ============
+  // ============ WEB SOCKET CLOSE - NO RETRY ============
   async webSocketClose(ws) {
     try {
       if (!ws || this.isDestroyed) return;
       
-      if (!ws._username && ws.username) {
-        ws._username = ws.username;
-      }
-      if (!ws._room && (ws.room || ws.roomname)) {
-        ws._room = ws.room || ws.roomname;
-      }
+      if (!ws._username && ws.username) ws._username = ws.username;
+      if (!ws._room && (ws.room || ws.roomname)) ws._room = ws.room || ws.roomname;
       
       const state = _wsCleanupState.get(ws);
       if (state && state.cleanupDone) return;
@@ -1084,16 +1213,13 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ============ WEB SOCKET ERROR - NO RETRY ============
   async webSocketError(ws) {
     try {
       if (!ws || this.isDestroyed) return;
       
-      if (!ws._username && ws.username) {
-        ws._username = ws.username;
-      }
-      if (!ws._room && (ws.room || ws.roomname)) {
-        ws._room = ws.room || ws.roomname;
-      }
+      if (!ws._username && ws.username) ws._username = ws.username;
+      if (!ws._room && (ws.room || ws.roomname)) ws._room = ws.room || ws.roomname;
       
       const state = _wsCleanupState.get(ws);
       if (state && state.cleanupDone) return;
@@ -1102,12 +1228,10 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ============ WEB SOCKET MESSAGE - DENGAN QUEUE ============
   async webSocketMessage(ws, msg) {
     try {
       if (!ws || ws._closing || this.closing || this.isDestroyed || ws._cleaning) return;
       
-      // ✅ FIX #4: CEK deserializeAttachment ERROR
       let attachment = null;
       try {
         attachment = ws.deserializeAttachment ? ws.deserializeAttachment() : null;
@@ -1115,7 +1239,6 @@ export class ChatServer {
         attachment = null;
       }
       
-      // ✅ CEK RESTORE - QUEUE EVENT
       if (!this._restored || this._isRestoring) {
         if (!this._pendingEvents) this._pendingEvents = [];
         
@@ -1137,7 +1260,6 @@ export class ChatServer {
         return;
       }
       
-      // ✅ SERVER SUDAH BANGUN - PROSES LANGSUNG
       try {
         await this.handleMessage(ws, msg);
       } catch(e) {
@@ -1148,7 +1270,6 @@ export class ChatServer {
     }
   }
 
-  // ============ PROCESS PENDING EVENTS ============
   async _processPendingEvents() {
     try {
       if (!this._pendingEvents || this._pendingEvents.length === 0) return;
@@ -1160,7 +1281,6 @@ export class ChatServer {
         try {
           let ws = evt.ws;
           
-          // Cek WS masih aktif
           if (!ws || ws.readyState !== 1) {
             const wsId = evt.wsId;
             if (wsId) {
@@ -1180,7 +1300,6 @@ export class ChatServer {
           
           if (!ws || ws.readyState !== 1 || ws._closing || ws._cleaning) continue;
           
-          // Restore attachment jika ada
           try {
             if (evt.attachment) {
               ws.serializeAttachment(evt.attachment);
@@ -1195,7 +1314,6 @@ export class ChatServer {
             }
           } catch(e) {}
           
-          // Proses event
           try {
             await this.handleMessage(ws, evt.message);
           } catch(e) {
@@ -1210,7 +1328,6 @@ export class ChatServer {
     }
   }
 
-  // ============ EVENT QUEUE PROCESSING ============
   async _processEventQueue() {
     try {
       if (this._processingQueue || this._eventQueue.length === 0) return;
@@ -1244,7 +1361,6 @@ export class ChatServer {
     }
   }
 
-  // ============ BROADCAST ============
   broadcast(room, msg) {
     try {
       if (this.closing || this.isDestroyed || !room || !msg) return 0;
@@ -1386,7 +1502,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ============ ALARM ============
   async alarm() {
     try {
       if (this.closing || this.isDestroyed) return;
@@ -1430,7 +1545,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ============ RESTORE - DENGAN PROCESS PENDING ============
   async _restoreAllState() {
     try {
       this._isRestoring = true;
@@ -1459,12 +1573,10 @@ export class ChatServer {
           try {
             const state = _wsCleanupState.get(ws);
             if (state) {
-              state.cleaning = false;
               state.cleanupDone = false;
               state.cleanupStart = null;
             } else {
               _wsCleanupState.set(ws, {
-                cleaning: false,
                 cleanupDone: false,
                 cleanupStart: null
               });
@@ -1499,7 +1611,6 @@ export class ChatServer {
       this._restoreFailed = false;
       this._isRestoring = false;
       
-      // ✅ PROCESS PENDING EVENTS SETELAH RESTORE SELESAI
       await this._processPendingEvents();
       
       return true;
@@ -1519,7 +1630,6 @@ export class ChatServer {
         } catch(e2) {}
       }
       
-      // ✅ TETAP PROCESS PENDING EVENTS WALAUPUN ERROR
       await this._processPendingEvents();
       
       throw e;
@@ -1559,12 +1669,10 @@ export class ChatServer {
       
       const state = _wsCleanupState.get(ws);
       if (state) {
-        state.cleaning = false;
         state.cleanupDone = false;
         state.cleanupStart = null;
       } else {
         _wsCleanupState.set(ws, {
-          cleaning: false,
           cleanupDone: false,
           cleanupStart: null
         });
@@ -1598,7 +1706,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ============ HANDLE MESSAGE ============
   async _handleSetId(ws, username, isNewUser) {
     try {
       if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
@@ -1642,7 +1749,6 @@ export class ChatServer {
     }
   }
 
-  // ============ HANDLE MESSAGE ============
   async handleMessage(ws, raw) {
     try {
       if (!ws) return;
@@ -1656,7 +1762,6 @@ export class ChatServer {
         return;
       }
       
-      // ✅ CEK RESTORE - JIKA BELUM RESTORE, TUNGGU
       if (!this._restored && this._restorePromise) {
         try {
           await Promise.race([
@@ -1714,7 +1819,6 @@ export class ChatServer {
     }
   }
 
-  // ============ EVENT INTERNAL ============
   async _handleEventInternal(ws, data) {
     try {
       if (!ws || !data || !data[0]) return;
@@ -2227,14 +2331,12 @@ export class ChatServer {
     }
   }
 
-  // ============ FETCH ============
   async fetch(req) {
     try {
       if (this.closing || this.isDestroyed) {
         return new Response("Shutting down", { status: 503 });
       }
       
-      // ✅ ANTI CRASH: Circuit breaker
       if (this._circuitOpen) {
         const now = Date.now();
         if (now - this._lastResetTime > 60000) {
@@ -2317,7 +2419,6 @@ export class ChatServer {
         
         try {
           _wsCleanupState.set(server, {
-            cleaning: false,
             cleanupDone: false,
             cleanupStart: null
           });
@@ -2336,7 +2437,6 @@ export class ChatServer {
     }
   }
 
-  // ============ ERROR HANDLER ============
   _handleError(type, error) {
     try {
       const now = Date.now();
@@ -2352,7 +2452,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ============ DESTROY ============
   async destroy() {
     try {
       if (this.isDestroyed) return;
@@ -2365,7 +2464,6 @@ export class ChatServer {
       if (this._pendingEvents) this._pendingEvents = [];
       if (this._eventQueue) this._eventQueue = [];
       
-      // Clear all timers
       for (const timer of (this._allTimers || new Set())) {
         try { clearTimeout(timer); } catch(e) {}
       }
