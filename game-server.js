@@ -1,6 +1,6 @@
 // ============================================================
 // GAME-SERVER.JS
-// VERSION: 16.9.1 - NO LEFT GAME NAME
+// VERSION: 16.9.2 - CEK WS MATI SAAT RESTORE (SILENT)
 // ============================================================
 
 const CONSTANTS = {
@@ -565,9 +565,26 @@ export class GameServer {
         this.userConnections.clear();
 
         let restoredCount = 0;
+        let deadCount = 0;
+
         for (const ws of webSockets) {
           try {
-            if (!ws || ws.readyState !== 1) continue;
+            // 🔥 CEK WS MATI — kalau mati, tandai cleanup done & skip
+            if (!ws || ws.readyState !== 1) {
+              deadCount++;
+              try {
+                const st = _wsCleanupState.get(ws);
+                if (st) {
+                  st.cleanupDone = true;
+                  st.cleaning = false;
+                } else {
+                  _wsCleanupState.set(ws, { cleanupDone: true, cleaning: false, cleanupStart: null });
+                }
+              } catch(e) {}
+              try { this.wsSet.delete(ws); } catch(e) {}
+              continue;
+            }
+
             await this._restoreSingleWebSocket(ws);
             restoredCount++;
           } catch(e) {
@@ -575,7 +592,7 @@ export class GameServer {
           }
         }
 
-        console.log(`[RESTORE] Restored ${restoredCount} WS`);
+        console.log(`[RESTORE] Restored ${restoredCount} live WS, skipped ${deadCount} dead WS`);
         for (const [room, clients] of this.roomClients) {
           console.log(`[RESTORE]   Room "${room}": ${clients.size} clients`);
         }
@@ -2629,7 +2646,6 @@ export class GameServer {
       const submittedIds = new Set(numbers.keys());
       const activeIds = this._getActivePlayerIds(game);
       
-      // ✅ Player yang tidak submit (time up) -> hanya di-eliminate, TIDAK diubah namanya
       for (const id of activeIds) { 
         if (!submittedIds.has(id)) eliminated.add(id); 
       }
@@ -2741,7 +2757,6 @@ export class GameServer {
         return;
       }
       
-      // ✅ Nama di Round Result SELALU pakai nama asli dari players.get(id).name
       const numbersArr = entries.map(([id, n]) => `${players.get(id)?.name || id}:${n}${tanda.get(id) ? `(${tanda.get(id)})` : ''}`);
       const loserNames = [...losers].map(id => players.get(id)?.name || id);
       const remainingNames = remaining.map(id => players.get(id)?.name || id);
@@ -2784,7 +2799,6 @@ export class GameServer {
           
           const player = game.players.get(usernameClean);
           if (player) {
-            // ✅ PASTIKAN nama tetap nama asli (tidak berubah jadi "left game")
             player.name = usernameClean;
             player._left = false;
             player._leftAt = null;
@@ -2879,7 +2893,6 @@ export class GameServer {
       
       const player = game.players.get(usernameClean);
       if (player) {
-        // ✅ PASTIKAN nama tetap nama asli
         player.name = usernameClean;
         player._left = false;
         player._leftAt = null;
