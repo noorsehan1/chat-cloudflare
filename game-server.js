@@ -1,6 +1,6 @@
 // ============================================================
 // GAME-SERVER.JS
-// VERSION: 16.9.2 - CEK WS MATI SAAT RESTORE (SILENT)
+// VERSION: 16.9.3 - NOTIF NEXT DICE SEKALI SAJA
 // ============================================================
 
 const CONSTANTS = {
@@ -470,6 +470,11 @@ export class GameServer {
       this._maxDiceLoops = 10;
       this.DICE_ROOM = CONSTANTS.DICE_ROOM;
 
+      // ===== FIX #1: notif "Next dice game" sekali saja =====
+      this._nextSessionNotifiedFor = null;
+      this._roomEntryNotified = new Set();
+      // =====================================================
+
       this.db = env.DB;
       this.dataManager = new DataManager(this.db);
       this.alarmScheduler = new AlarmScheduler(this.db, this.ctx);
@@ -569,7 +574,6 @@ export class GameServer {
 
         for (const ws of webSockets) {
           try {
-            // 🔥 CEK WS MATI — kalau mati, tandai cleanup done & skip
             if (!ws || ws.readyState !== 1) {
               deadCount++;
               try {
@@ -681,7 +685,21 @@ export class GameServer {
       }
 
       if (room === CONSTANTS.DICE_ROOM) {
-        try { this._sendDiceRoomState(ws); } catch(e) {}
+        // ===== FIX #7: JANGAN kirim notif "Next dice game" saat restore =====
+        try {
+          const isDiceTime = this.alarmScheduler.isDiceTime();
+          const isGameRunning = this.currentDiceRoll && this._canSubmitDiceAnswer;
+          if (isDiceTime && isGameRunning) {
+            this.safeSend(ws, ["diceRoll", {
+              value: this.currentDiceRoll.value,
+              timestamp: this.currentDiceRoll.timestamp,
+              answerTime: 20,
+              canAnswerNow: true,
+              round: this._diceRound
+            }]);
+          }
+        } catch(e) {}
+        // ==================================================================
       }
     } catch(e) {
       console.error('[RESTORE] _restoreSingleWebSocket error:', e);
@@ -1244,12 +1262,10 @@ export class GameServer {
       if (!game.players.has(username)) return;
       if (game.eliminated?.has(username)) return;
 
-      // ✅ HANYA set flag _left, JANGAN UBAH player.name
       const player = game.players.get(username);
       if (player) {
         player._left = true;
         player._leftAt = Date.now();
-        // ❌ TIDAK ADA: player.name = "left game";
       }
 
       game.numbers?.delete(username);
@@ -1290,6 +1306,31 @@ export class GameServer {
   // DICE ROOM
   // ============================================================
 
+  // ===== FIX #2: helper notif "Next dice game" sekali saja =====
+  _sendNextDiceNotificationOnce(source, targetWs = null) {
+    try {
+      const timeInfo = this.alarmScheduler._getTimeLeftUntilNextDice();
+      if (!timeInfo || !timeInfo.text) return;
+
+      const now = new Date();
+      const dateKey = now.toISOString().slice(0, 10);
+      const sessionKey = timeInfo.nextSession?.start || 'none';
+      const key = `${sessionKey}_${dateKey}_${source}`;
+
+      if (this._nextSessionNotifiedFor === key) return;
+      this._nextSessionNotifiedFor = key;
+
+      const msg = ["diceNotification", `Next dice game in: ${timeInfo.text}`];
+
+      if (targetWs) {
+        this.safeSend(targetWs, msg);
+      } else {
+        this.broadcast(CONSTANTS.DICE_ROOM, msg);
+      }
+    } catch(e) {}
+  }
+  // ==========================================================
+
   _sendDiceRoomState(ws) {
     try {
       if (!ws || ws.readyState !== 1) return;
@@ -1309,23 +1350,8 @@ export class GameServer {
             round: this._diceRound
           }]);
         }
-      } else {
-        if (!ws._nextSessionSent) {
-          ws._nextSessionSent = true;
-          const timer = setTimeout(() => {
-            try {
-              if (!ws || ws.readyState !== 1 || ws._closing) return;
-              const timeInfo = this.alarmScheduler._getTimeLeftUntilNextDice();
-              if (timeInfo && timeInfo.text) {
-                this.safeSend(ws, ["diceNotification", 
-                  `Next dice game in: ${timeInfo.text}`
-                ]);
-              }
-            } catch(e) {}
-          }, 5000);
-          this._trackTimer(timer);
-        }
       }
+      // ===== FIX #3: blok else DIHAPUS — notif "Next dice game" sekarang di switchRoom =====
     } catch(e) {}
   }
 
@@ -1792,15 +1818,15 @@ export class GameServer {
           this._diceSessionActive = true;
           this._diceSessionEnded = false;
           this._diceGameStarted = false;
+
+          // ===== FIX #6: reset flag agar sesi berikutnya bisa notif lagi =====
+          this._nextSessionNotifiedFor = null;
+          this._roomEntryNotified.clear();
+          // ==================================================================
+
           this.broadcast(CONSTANTS.DICE_ROOM, ["diceNotification", "Dice session started!"]);
-          
+
           const clients = this.roomClients?.get(CONSTANTS.DICE_ROOM);
-          if (clients) {
-            for (const ws of clients) {
-              try { ws._nextSessionSent = false; } catch(e) {}
-            }
-          }
-          
           if (clients && clients.size > 0) {
             if (!this.currentDiceRoll && !this._isShowingDice && !this._diceLock && !this._diceTimeUpCooldown) {
               this._diceStartedByUser = true;
@@ -1819,25 +1845,11 @@ export class GameServer {
         this._diceStartedByUser = false;
         this._diceGameStarted = false;
         this.broadcast(CONSTANTS.DICE_ROOM, ["diceNotification", "Dice session ended"]);
-        
-        try {
-          const timeInfo = this.alarmScheduler._getTimeLeftUntilNextDice();
-          if (timeInfo && timeInfo.text) {
-            this.broadcast(CONSTANTS.DICE_ROOM, ["diceNotification", 
-              `Next dice game in: ${timeInfo.text}`
-            ]);
-          }
-        } catch(e) {}
-        
-        {
-          const clients = this.roomClients?.get(CONSTANTS.DICE_ROOM);
-          if (clients) {
-            for (const ws of clients) {
-              try { ws._nextSessionSent = false; } catch(e) {}
-            }
-          }
-        }
-        
+
+        // ===== FIX #5: notif "Next dice game" SEKALI saja per sesi =====
+        this._sendNextDiceNotificationOnce('session_end');
+        // ===============================================================
+
         if (this.currentDiceRoll || this._isShowingDice) this._endDiceRound();
         this.currentDiceRoll = null;
         this._diceLock = false;
@@ -2169,6 +2181,20 @@ export class GameServer {
       if (currentRoom === roomName) {
         if (roomName === CONSTANTS.DICE_ROOM) {
           this._sendDiceRoomState(ws);
+
+          // ===== FIX #4: notif "Next dice game" SEKALI per user saat masuk room Quiz =====
+          const userKey = `${wsId}_${roomName}`;
+          if (!this._roomEntryNotified.has(userKey)) {
+            this._roomEntryNotified.add(userKey);
+            const timer = setTimeout(() => {
+              try {
+                if (!ws || ws.readyState !== 1 || ws._closing) return;
+                this._sendNextDiceNotificationOnce('room_entry', ws);
+              } catch(e) {}
+            }, 1000);
+            this._trackTimer(timer);
+          }
+          // =============================================================================
         }
         this.safeSend(ws, ["switchRoomSuccess", roomName]);
         return;
@@ -2205,6 +2231,21 @@ export class GameServer {
       this.safeSend(ws, ["switchRoomSuccess", roomName]);
       if (roomName === CONSTANTS.DICE_ROOM) {
         this._sendDiceRoomState(ws);
+
+        // ===== FIX #4: notif "Next dice game" SEKALI per user saat masuk room Quiz =====
+        const userKey = `${wsId}_${roomName}`;
+        if (!this._roomEntryNotified.has(userKey)) {
+          this._roomEntryNotified.add(userKey);
+          const timer = setTimeout(() => {
+            try {
+              if (!ws || ws.readyState !== 1 || ws._closing) return;
+              this._sendNextDiceNotificationOnce('room_entry', ws);
+            } catch(e) {}
+          }, 1000);
+          this._trackTimer(timer);
+        }
+        // =============================================================================
+
         if (this.alarmScheduler.isDiceTime() && !this._diceGameStarted && !this.currentDiceRoll) this._startDiceGameIfNotStarted();
       }
     } catch(e) { this.safeSend(ws, ["gameLowCardError", e.message || "Switch failed"]); }
