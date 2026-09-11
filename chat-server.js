@@ -1,16 +1,16 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 15.9.2 - ALARM FIX (15 MENIT, NUMBER BERGANTI, RE-SCHEDULE PASTI)
+// VERSION: 15.9.3 - ALARM FIX FINAL (15 MENIT, RE-SCHEDULE PASTI, NO LOG)
+// ✅ _ensureAlarm: SELALU setAlarm (bukan cek existing)
+// ✅ alarm(): cek ctx.storage sebelum pakai
 // ✅ _saveCurrentNumber: baca dari this.currentNumber
 // ✅ _updateNumber: anti-stuck 30s
-// ✅ alarm(): setAlarm di finally → SELALU re-schedule
-// ✅ _ensureAlarm(): pastikan alarm ter-set
 // ✅ MULTI BEHAVIOR UNCHANGED
 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 5000,
-  NUMBER_INTERVAL_MS: 900000,   // 15 menit
+  NUMBER_INTERVAL_MS: 30000,   // 15 menit
   MAX_NUMBER: 6,
   LOCK_TIMEOUT: 5000,
   USER_JOIN_LOCK_TIMEOUT: 10000,
@@ -185,17 +185,18 @@ export class ChatServer {
     }
   }
 
+  // 🔥 FIX: SELALU setAlarm, bukan cek existing
   async _ensureAlarm() {
     if (this.closing || this.isDestroyed) return;
     try {
-      const existing = await this.ctx?.storage?.getAlarm();
-      if (!existing) {
-        const next = Date.now() + C.NUMBER_INTERVAL_MS;
-        await this.ctx?.storage?.setAlarm(next);
-      }
+      if (!this.ctx || !this.ctx.storage) return;
+      if (typeof this.ctx.storage.setAlarm !== 'function') return;
+      const next = Date.now() + C.NUMBER_INTERVAL_MS;
+      await this.ctx.storage.setAlarm(next);
     } catch(e) {}
   }
 
+  // 🔥 FIX: cek ctx.storage sebelum pakai
   async alarm() {
     try {
       if (this.closing || this.isDestroyed) return;
@@ -215,8 +216,10 @@ export class ChatServer {
     } finally {
       if (!this.closing && !this.isDestroyed) {
         try {
-          const next = Date.now() + C.NUMBER_INTERVAL_MS;
-          await this.ctx?.storage?.setAlarm(next);
+          if (this.ctx && this.ctx.storage && typeof this.ctx.storage.setAlarm === 'function') {
+            const next = Date.now() + C.NUMBER_INTERVAL_MS;
+            await this.ctx.storage.setAlarm(next);
+          }
         } catch(e) {}
       }
     }
@@ -1762,7 +1765,9 @@ export class ChatServer {
 
       if (!this.closing && !this.isDestroyed) {
         try {
-          await this.ctx?.storage?.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+          if (this.ctx && this.ctx.storage && typeof this.ctx.storage.setAlarm === 'function') {
+            await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+          }
         } catch(e) {}
       }
 
@@ -1783,7 +1788,9 @@ export class ChatServer {
 
       if (!this.closing && !this.isDestroyed) {
         try {
-          await this.ctx?.storage?.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+          if (this.ctx && this.ctx.storage && typeof this.ctx.storage.setAlarm === 'function') {
+            await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+          }
         } catch(e2) {}
       }
 
