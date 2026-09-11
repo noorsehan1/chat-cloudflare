@@ -1,16 +1,16 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 15.9.1 - FIX POINT D1 + REMOVEKURSI SAMPAI
-// ✅ _forceDeleteFromD1: SELECT dulu → DELETE point → DELETE seat (fix point tidak terhapus di D1)
-// ✅ _restoreRemovedSeats: broadcast removeKursi di loop TERAKHIR _restoreAllState
-// ✅ Loop yang SAMA dengan updateRoomCount → PASTI sampai ke user
-// ✅ Multi user (isMulti:true) TIDAK PERNAH dihapus
-// ⚠️ MULTI BEHAVIOR UNCHANGED
+// VERSION: 15.9.2 - ALARM FIX (15 MENIT, NUMBER BERGANTI, RE-SCHEDULE PASTI)
+// ✅ _saveCurrentNumber: baca dari this.currentNumber
+// ✅ _updateNumber: anti-stuck 30s
+// ✅ alarm(): setAlarm di finally → SELALU re-schedule
+// ✅ _ensureAlarm(): pastikan alarm ter-set
+// ✅ MULTI BEHAVIOR UNCHANGED
 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 5000,
-  NUMBER_INTERVAL_MS: 900000,
+  NUMBER_INTERVAL_MS: 900000,   // 15 menit
   MAX_NUMBER: 6,
   LOCK_TIMEOUT: 5000,
   USER_JOIN_LOCK_TIMEOUT: 10000,
@@ -59,7 +59,6 @@ export class ChatServer {
       this._processingQueue = false;
       this._processingPending = false;
 
-      // 🔥 REMOVED SEATS selama restore — broadcast setelah restore selesai
       this._restoreRemovedSeats = [];
 
       this.wsSet = new Set();
@@ -74,6 +73,7 @@ export class ChatServer {
 
       this.currentNumber = 1;
       this._isNumberUpdating = false;
+      this._numberUpdateStart = null;
 
       this._requestCount = 0;
       this._lastResetTime = Date.now();
@@ -130,9 +130,7 @@ export class ChatServer {
             this._cacheInitialized = true;
           }
           if (!this.closing) {
-            try {
-              this.ctx?.storage?.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
-            } catch(e) {}
+            this._ensureAlarm().catch(() => {});
           }
         }
       }, C.CACHE_LOAD_TIMEOUT);
@@ -144,6 +142,7 @@ export class ChatServer {
           this._restoreDone = true;
           this._isRestoring = false;
           this._restoreFailed = false;
+          this._ensureAlarm().catch(() => {});
         })
         .catch(() => {
           clearTimeout(restoreTimeout);
@@ -155,6 +154,7 @@ export class ChatServer {
             this._storageCache = this._storageCache || { roomsData: {}, currentNumber: 1 };
             this._cacheInitialized = true;
           }
+          this._ensureAlarm().catch(() => {});
         });
 
     } catch(e) {
@@ -183,6 +183,81 @@ export class ChatServer {
         this.roomClients.set(room, new Set());
       }
     }
+  }
+
+  async _ensureAlarm() {
+    if (this.closing || this.isDestroyed) return;
+    try {
+      const existing = await this.ctx?.storage?.getAlarm();
+      if (!existing) {
+        const next = Date.now() + C.NUMBER_INTERVAL_MS;
+        await this.ctx?.storage?.setAlarm(next);
+      }
+    } catch(e) {}
+  }
+
+  async alarm() {
+    try {
+      if (this.closing || this.isDestroyed) return;
+
+      if (!this._restored && this._restorePromise) {
+        try {
+          await Promise.race([
+            this._restorePromise,
+            new Promise(resolve => setTimeout(resolve, C.CACHE_LOAD_TIMEOUT))
+          ]);
+        } catch(e) {}
+      }
+
+      await this._updateNumber();
+    } catch(e) {
+      this._handleError('alarm', e);
+    } finally {
+      if (!this.closing && !this.isDestroyed) {
+        try {
+          const next = Date.now() + C.NUMBER_INTERVAL_MS;
+          await this.ctx?.storage?.setAlarm(next);
+        } catch(e) {}
+      }
+    }
+  }
+
+  async _updateNumber() {
+    try {
+      if (this.closing || this.isDestroyed) return;
+
+      if (this._isNumberUpdating) {
+        if (this._numberUpdateStart && Date.now() - this._numberUpdateStart > 30000) {
+          this._isNumberUpdating = false;
+        } else {
+          return;
+        }
+      }
+
+      this._isNumberUpdating = true;
+      this._numberUpdateStart = Date.now();
+
+      try {
+        this.currentNumber = (this.currentNumber < C.MAX_NUMBER) ? (this.currentNumber + 1) : 1;
+
+        if (this._storageCache) {
+          this._storageCache.currentNumber = this.currentNumber;
+        }
+
+        await this._saveCurrentNumber();
+
+        for (const [room, clients] of (this.roomClients || new Map())) {
+          if (clients?.size > 0) {
+            this.broadcast(room, ["currentNumber", this.currentNumber]);
+          }
+        }
+      } catch(e) {
+        this._handleError('_updateNumber', e);
+      } finally {
+        this._isNumberUpdating = false;
+        this._numberUpdateStart = null;
+      }
+    } catch(e) {}
   }
 
   async _restoreWithRetry() {
@@ -374,26 +449,22 @@ export class ChatServer {
   async _saveCurrentNumber() {
     try {
       if (!this.db) return;
+      const n = (typeof this.currentNumber === 'number' && this.currentNumber >= 1)
+        ? this.currentNumber
+        : 1;
       await this.db
         .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-        .bind('current_number', String(this._storageCache?.currentNumber || 1))
+        .bind('current_number', String(n))
         .run();
     } catch(e) {}
   }
 
-  // ============================================================
-  // 🔥🔥🔥 _forceDeleteFromD1 — FIXED
-  // STEP 1: SELECT kursi DULU (untuk tahu point mana yang harus dihapus)
-  // STEP 2: DELETE point untuk setiap kursi non-multi user ini
-  // STEP 3: Baru DELETE kursi (seat) — filter isMulti
-  // ============================================================
   async _forceDeleteFromD1(username) {
     if (!this.db) return true;
     if (!username) return true;
 
     const u = String(username);
 
-    // 🔥 STEP 1: SELECT dulu kursi non-multi user ini
     let seatRows = [];
     try {
       const rows = await this.db
@@ -402,7 +473,6 @@ export class ChatServer {
         .all();
       seatRows = rows?.results || [];
     } catch(e) {
-      // Fallback: LIKE tanpa json_extract
       try {
         const rows = await this.db
           .prepare(`SELECT key, value FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' AND value LIKE ?`)
@@ -420,7 +490,6 @@ export class ChatServer {
       }
     }
 
-    // 🔥 STEP 2: Hapus point untuk setiap kursi non-multi user ini
     for (const r of seatRows) {
       let isMultiRow = false;
       try {
@@ -439,7 +508,6 @@ export class ChatServer {
       }
     }
 
-    // 🔥 STEP 3: Baru hapus kursi (seat) — filter isMulti
     try {
       await this.db
         .prepare(`DELETE FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' AND json_extract(value, '$.namauser') = ? AND json_extract(value, '$.isMulti') IS NOT 1`)
@@ -970,11 +1038,6 @@ export class ChatServer {
     }
   }
 
-  // ============================================================
-  // 🔥 CLEANUP — SAMA untuk close/error/onDestroy/restore
-  // Return { removedSeats }
-  // 🔥 Kalau _isRestoring, catat juga ke _restoreRemovedSeats
-  // ============================================================
   async _cleanupUserCompletely(ws, options = {}) {
     const result = { removedSeats: [] };
 
@@ -991,7 +1054,6 @@ export class ChatServer {
     state.cleaning = true;
 
     try {
-      // 4 lapis fallback username & room
       let username = ws.username || ws._username;
       let roomName = ws.room || ws.roomname || ws._room;
 
@@ -1048,7 +1110,6 @@ export class ChatServer {
         }
       }
 
-      // Multi user → hanya hapus dari Set/Map
       const isMulti = this.wsActiveMulti?.has(ws) || false;
       if (isMulti) {
         if (username) {
@@ -1070,12 +1131,10 @@ export class ChatServer {
         return result;
       }
 
-      // STEP 1: hapus D1 (SELECT dulu → DELETE point → DELETE seat)
       if (username) {
         try { await this._forceDeleteFromD1(username); } catch (e) {}
       }
 
-      // STEP 2: hapus memory + kumpulkan removedSeats
       if (username) {
         try { await this._ensureCacheInitialized(); } catch (e) {}
         const roomsData = this._storageCache?.roomsData || {};
@@ -1089,8 +1148,6 @@ export class ChatServer {
 
               result.removedSeats.push({ room: rName, seat: seatNum, username: username });
 
-              // 🔥 Kalau sedang restore, catat ke _restoreRemovedSeats
-              // akan di-broadcast di loop TERAKHIR _restoreAllState
               if (this._isRestoring) {
                 if (!this._restoreRemovedSeats) this._restoreRemovedSeats = [];
                 this._restoreRemovedSeats.push({ room: rName, seat: seatNum });
@@ -1143,9 +1200,6 @@ export class ChatServer {
     return result;
   }
 
-  // ============================================================
-  // 3 TRIGGER
-  // ============================================================
   async webSocketClose(ws) {
     try {
       if (!ws) return;
@@ -1503,52 +1557,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  async alarm() {
-    try {
-      if (this.closing || this.isDestroyed) return;
-
-      if (!this._restored && this._restorePromise) {
-        try {
-          await Promise.race([
-            this._restorePromise,
-            new Promise(resolve => setTimeout(resolve, C.CACHE_LOAD_TIMEOUT))
-          ]);
-        } catch(e) {}
-      }
-
-      await this._updateNumber();
-      try {
-        this.ctx?.storage?.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
-      } catch(e) {}
-    } catch(e) {
-      this._handleError('alarm', e);
-    }
-  }
-
-  async _updateNumber() {
-    try {
-      if (this._isNumberUpdating || this.closing || this.isDestroyed) return;
-      this._isNumberUpdating = true;
-      try {
-        this.currentNumber = this.currentNumber < C.MAX_NUMBER ? this.currentNumber + 1 : 1;
-        if (this._storageCache) {
-          this._storageCache.currentNumber = this.currentNumber;
-        }
-        await this._saveCurrentNumber();
-        for (const [room, clients] of (this.roomClients || new Map())) {
-          if (clients?.size > 0) {
-            this.broadcast(room, ["currentNumber", this.currentNumber]);
-          }
-        }
-      } catch(e) {} finally {
-        this._isNumberUpdating = false;
-      }
-    } catch(e) {}
-  }
-
-  // ============================================================
-  // VERIFIKASI KURSI D1 — BROADCAST LANGSUNG
-  // ============================================================
   async _verifyAndCleanupOrphanSeats(liveWsList) {
     try {
       await this._ensureCacheInitialized();
@@ -1610,13 +1618,11 @@ export class ChatServer {
             } catch(e) {}
           }
 
-          // 🔥 Catat ke _restoreRemovedSeats (kalau sedang restore)
           if (this._isRestoring) {
             if (!this._restoreRemovedSeats) this._restoreRemovedSeats = [];
             this._restoreRemovedSeats.push({ room, seat });
           }
 
-          // Broadcast langsung (kalau roomClients sudah terisi)
           const msg = JSON.stringify(["removeKursi", room, seat]);
           const sentTo = new Set();
 
@@ -1664,21 +1670,10 @@ export class ChatServer {
     }
   }
 
-  // ============================================================
-  // 🔥🔥🔥 RESTORE — 4 FASE
-  // FASE 1: Kumpulkan WS hidup & mati
-  // FASE 2: RESTORE WS hidup DULU → roomClients terisi lengkap
-  // FASE 3: Cleanup WS mati (skipBroadcast) → catat ke _restoreRemovedSeats
-  // FASE 4: Verifikasi orphan D1 → catat ke _restoreRemovedSeats
-  // 🔥 LOOP TERAKHIR: broadcast removeKursi dari _restoreRemovedSeats
-  //                   → loop yang SAMA dengan updateRoomCount
-  //                   → PASTI sampai ke user
-  // ============================================================
   async _restoreAllState() {
     try {
       this._isRestoring = true;
 
-      // Reset _restoreRemovedSeats di awal restore
       this._restoreRemovedSeats = [];
 
       try {
@@ -1695,7 +1690,6 @@ export class ChatServer {
       try {
         const webSockets = this.ctx?.getWebSockets?.() || [];
 
-        // FASE 1
         const deadWebSockets = [];
         const liveWebSockets = [];
 
@@ -1711,7 +1705,6 @@ export class ChatServer {
           }
         }
 
-        // FASE 2: RESTORE WS HIDUP DULU
         const batchSize = 10;
         for (let i = 0; i < liveWebSockets.length; i += batchSize) {
           const batch = liveWebSockets.slice(i, i + batchSize);
@@ -1720,7 +1713,6 @@ export class ChatServer {
           );
         }
 
-        // FASE 3: Cleanup WS MATI
         for (const ws of deadWebSockets) {
           try {
             try {
@@ -1743,20 +1735,14 @@ export class ChatServer {
           } catch(e) {}
         }
 
-        // FASE 4: Verifikasi orphan D1
         try {
           await this._verifyAndCleanupOrphanSeats(liveWebSockets);
         } catch(e) {}
 
-        // Bersihkan userConnections kosong
         for (const [user, conns] of this.userConnections) {
           if (conns.size === 0) this.userConnections.delete(user);
         }
 
-        // ============================================================
-        // 🔥🔥🔥 LOOP TERAKHIR — SAMA SEPERTI updateRoomCount
-        // Broadcast removeKursi dari _restoreRemovedSeats
-        // ============================================================
         if (this._restoreRemovedSeats?.length) {
           for (const item of this._restoreRemovedSeats) {
             const { room, seat } = item;
@@ -1767,7 +1753,6 @@ export class ChatServer {
           this._restoreRemovedSeats = [];
         }
 
-        // Refresh count ke semua room yang ada client
         for (const [room, clients] of this.roomClients) {
           if (clients && clients.size > 0) {
             try { await this.updateRoomCount(room); } catch(e) {}
@@ -2599,12 +2584,19 @@ export class ChatServer {
 
       await this._ensureCacheInitialized();
 
+      // 🔥 Pastikan alarm selalu ter-set
+      this._ensureAlarm().catch(() => {});
+
       try {
         const upgrade = req.headers.get("Upgrade");
         if (upgrade !== "websocket") {
-          return new Response("Chat Server", {
+          return new Response(JSON.stringify({
+            currentNumber: this.currentNumber,
+            alarmActive: !!(await this.ctx?.storage?.getAlarm().catch(() => null)),
+            intervalMin: C.NUMBER_INTERVAL_MS / 60000
+          }), {
             status: 200,
-            headers: { "Cache-Control": "no-cache" }
+            headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" }
           });
         }
 
