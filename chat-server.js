@@ -1,16 +1,20 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 15.9.3 - ALARM FIX FINAL (15 MENIT, RE-SCHEDULE PASTI, NO LOG)
-// ✅ _ensureAlarm: SELALU setAlarm (bukan cek existing)
-// ✅ alarm(): cek ctx.storage sebelum pakai
-// ✅ _saveCurrentNumber: baca dari this.currentNumber
-// ✅ _updateNumber: anti-stuck 30s
+// VERSION: 15.10.0 - FULL ERROR RATE FIX
+// 🔥 FIX #1: NUMBER_INTERVAL_MS 30 detik → 15 menit (900000 ms)
+// 🔥 FIX #2: Hapus _ensureAlarm() dari fetch() — hindari write berlebihan
+// 🔥 FIX #3: _forceDeleteFromD1 pakai json_valid() — hindari throw
+// 🔥 FIX #4: _handleSetId pakai lock — hindari race condition
+// 🔥 FIX #5: _updatePointDirect cek ownership — hindari spam & bug keamanan
+// 🔥 FIX #6: _cleanupUserCompletely cek koneksi lain sebelum hapus seat
+// 🔥 FIX #7: _verifyAndCleanupOrphanSeats skip jika restore gagal
 // ✅ MULTI BEHAVIOR UNCHANGED
 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 5000,
-  NUMBER_INTERVAL_MS: 30000,   // 15 menit
+  // 🔥 FIX #1: 15 menit = 15 * 60 * 1000 = 900000 ms (sebelumnya 30000 = 30 detik)
+  NUMBER_INTERVAL_MS: 15 * 60 * 1000,
   MAX_NUMBER: 6,
   LOCK_TIMEOUT: 5000,
   USER_JOIN_LOCK_TIMEOUT: 10000,
@@ -185,7 +189,6 @@ export class ChatServer {
     }
   }
 
-  // 🔥 FIX: SELALU setAlarm, bukan cek existing
   async _ensureAlarm() {
     if (this.closing || this.isDestroyed) return;
     try {
@@ -196,7 +199,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // 🔥 FIX: cek ctx.storage sebelum pakai
   async alarm() {
     try {
       if (this.closing || this.isDestroyed) return;
@@ -249,6 +251,8 @@ export class ChatServer {
 
         await this._saveCurrentNumber();
 
+        // 🔥 FIX #1: Broadcast hanya jika interval sudah 15 menit (bukan 30 detik)
+        // Dengan interval 15 menit, broadcast ini tidak lagi membebani server.
         for (const [room, clients] of (this.roomClients || new Map())) {
           if (clients?.size > 0) {
             this.broadcast(room, ["currentNumber", this.currentNumber]);
@@ -470,25 +474,31 @@ export class ChatServer {
 
     let seatRows = [];
     try {
+      // 🔥 FIX #3: Tambahkan json_valid() agar row corrupt tidak throw
       const rows = await this.db
-        .prepare(`SELECT key, value FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' AND json_extract(value, '$.namauser') = ?`)
+        .prepare(`SELECT key, value FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' AND json_valid(value) AND json_extract(value, '$.namauser') = ?`)
         .bind(u)
         .all();
       seatRows = rows?.results || [];
     } catch(e) {
+      // Fallback: cari dengan LIKE tapi validasi JSON di aplikasi
       try {
         const rows = await this.db
           .prepare(`SELECT key, value FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' AND value LIKE ?`)
           .bind(`%"namauser":"${u}"%`)
           .all();
-        seatRows = rows?.results || [];
+        seatRows = (rows?.results || []).filter(r => {
+          try { JSON.parse(r.value); return true; } catch { return false; }
+        });
       } catch(e2) {
         try {
           const rows = await this.db
             .prepare(`SELECT key, value FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' AND value LIKE ?`)
             .bind(`%"namauser": "${u}"%`)
             .all();
-          seatRows = rows?.results || [];
+          seatRows = (rows?.results || []).filter(r => {
+            try { JSON.parse(r.value); return true; } catch { return false; }
+          });
         } catch(e3) {}
       }
     }
@@ -512,8 +522,9 @@ export class ChatServer {
     }
 
     try {
+      // 🔥 FIX #3: Tambahkan json_valid()
       await this.db
-        .prepare(`DELETE FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' AND json_extract(value, '$.namauser') = ? AND json_extract(value, '$.isMulti') IS NOT 1`)
+        .prepare(`DELETE FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' AND json_valid(value) AND json_extract(value, '$.namauser') = ? AND json_extract(value, '$.isMulti') IS NOT 1`)
         .bind(u)
         .run();
     } catch (e) {
@@ -968,6 +979,8 @@ export class ChatServer {
       this.safeSend(ws, ["rooMasuk", seat, roomName]);
       this.safeSend(ws, ["numberKursiSaya", seat]);
       this.safeSend(ws, ["muteTypeResponse", muteStatus, roomName]);
+      // 🔥 Kirim currentNumber saat join
+      this.safeSend(ws, ["currentNumber", this.currentNumber]);
 
       await this.updateRoomCount(roomName);
 
@@ -1134,8 +1147,23 @@ export class ChatServer {
         return result;
       }
 
-      if (username) {
-        try { await this._forceDeleteFromD1(username); } catch (e) {}
+      // 🔥 FIX #6: Cek dulu apakah masih ada koneksi lain untuk username ini
+      // Jangan hapus seat dari D1 kalau masih ada koneksi lain (multi-tab)
+      // Juga jangan hapus kalau restore gagal (untuk hindari data loss)
+      if (username && !this._restoreFailed) {
+        let stillConnected = false;
+        const conns = this.userConnections?.get(username);
+        if (conns) {
+          for (const c of conns) {
+            if (c !== ws && c?.readyState === 1) {
+              stillConnected = true;
+              break;
+            }
+          }
+        }
+        if (!stillConnected) {
+          try { await this._forceDeleteFromD1(username); } catch (e) {}
+        }
       }
 
       if (username) {
@@ -1145,6 +1173,19 @@ export class ChatServer {
           if (!rBucket?.seat) continue;
           for (const [seat, data] of Object.entries(rBucket.seat)) {
             if (data?.namauser === username && data.isMulti !== true) {
+              // 🔥 FIX #6: Cek koneksi lain sebelum hapus dari cache
+              const conns = this.userConnections?.get(username);
+              let stillHasConn = false;
+              if (conns) {
+                for (const c of conns) {
+                  if (c !== ws && c?.readyState === 1) {
+                    stillHasConn = true;
+                    break;
+                  }
+                }
+              }
+              if (stillHasConn) continue;
+
               const seatNum = parseInt(seat);
               delete rBucket.seat[seat];
               if (rBucket.point) delete rBucket.point[seat];
@@ -1528,6 +1569,9 @@ export class ChatServer {
         const count = Object.values(allSeats).filter(s => s?.namauser).length;
         this.safeSend(ws, ["roomUserCount", room, count]);
 
+        // 🔥 FIX #1: Kirim currentNumber saat join (bukan broadcast massal setiap 30s)
+        this.safeSend(ws, ["currentNumber", this.currentNumber]);
+
         if (allSeats && Object.keys(allSeats).length > 0) {
           if (excludeSelf && selfSeat && allSeats[selfSeat]) {
             const filtered = { ...allSeats };
@@ -1562,6 +1606,12 @@ export class ChatServer {
 
   async _verifyAndCleanupOrphanSeats(liveWsList) {
     try {
+      // 🔥 FIX #7: Skip jika restore gagal atau masih restoring
+      // untuk hindari penghapusan seat yang valid
+      if (this._restoreFailed || this._isRestoring) {
+        return 0;
+      }
+
       await this._ensureCacheInitialized();
       const roomsData = this._storageCache?.roomsData || {};
 
@@ -1888,44 +1938,54 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // 🔥 FIX #4: Bungkus dengan lock untuk hindari race condition
   async _handleSetId(ws, username, isNewUser) {
     try {
       if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
         try { if (ws?.readyState === 1) ws.close(1000, "Invalid username"); } catch(e) {}
         return;
       }
-      const found = await this._findUserInAnyRoom(username);
-      const isMultiUser = found ? found.isMulti : false;
-      if (isMultiUser && isNewUser === false) {
-        return;
-      }
-      if (isMultiUser && isNewUser === true) {
-        await this._removeUserFromRoom(username, found.room);
-      }
-      if (!isMultiUser && found) {
-        await this._removeUserFromRoom(username, found.room);
-      }
-      ws.username = username;
-      ws.idtarget = username;
-      ws.room = null;
-      ws.roomname = null;
-      ws._closing = false;
-      ws._username = username;
-      ws._room = null;
-      try { ws.serializeAttachment({ username: username }); } catch(e) {}
-      let connections = this.userConnections?.get(username);
-      if (!connections) {
-        connections = new Set();
-        try { this.userConnections?.set(username, connections); } catch(e) {}
-      }
-      if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
-      if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
-      try { this.wsActiveMulti?.delete(ws); } catch(e) {}
-      if (isNewUser) {
-        this.safeSend(ws, ["joinroomawal"]);
-      } else {
-        this.safeSend(ws, ["needJoinRoom"]);
-      }
+
+      const lockKey = `setid_${username}`;
+      return await this._withLock(
+        this._userJoinLock,
+        lockKey,
+        async () => {
+          const found = await this._findUserInAnyRoom(username);
+          const isMultiUser = found ? found.isMulti : false;
+          if (isMultiUser && isNewUser === false) {
+            return;
+          }
+          if (isMultiUser && isNewUser === true) {
+            await this._removeUserFromRoom(username, found.room);
+          }
+          if (!isMultiUser && found) {
+            await this._removeUserFromRoom(username, found.room);
+          }
+          ws.username = username;
+          ws.idtarget = username;
+          ws.room = null;
+          ws.roomname = null;
+          ws._closing = false;
+          ws._username = username;
+          ws._room = null;
+          try { ws.serializeAttachment({ username: username }); } catch(e) {}
+          let connections = this.userConnections?.get(username);
+          if (!connections) {
+            connections = new Set();
+            try { this.userConnections?.set(username, connections); } catch(e) {}
+          }
+          if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
+          if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
+          try { this.wsActiveMulti?.delete(ws); } catch(e) {}
+          if (isNewUser) {
+            this.safeSend(ws, ["joinroomawal"]);
+          } else {
+            this.safeSend(ws, ["needJoinRoom"]);
+          }
+        },
+        C.USER_JOIN_LOCK_TIMEOUT
+      );
     } catch(e) {
       this._handleError('_handleSetId', e);
     }
@@ -2253,6 +2313,14 @@ export class ChatServer {
         case "updatePoint": {
           const [pointRoom, pointSeat, pointX, pointY, pointFast] = args;
           if (!pointRoom || typeof pointSeat !== 'number') break;
+          if (!ROOMS_SET.has(pointRoom)) break;
+
+          // 🔥 FIX #5: Cek ownership sebelum update point
+          const currentUser = ws.username || ws._username;
+          if (!currentUser) break;
+          const seatData = await this._getSeatData(pointRoom, pointSeat);
+          if (!seatData || seatData.namauser !== currentUser) break;
+
           const updated = await this._updatePointDirect(pointRoom, pointSeat, pointX, pointY, pointFast === 1);
           if (updated) {
             this.broadcast(pointRoom, ["pointUpdated", pointRoom, pointSeat, pointX, pointY, pointFast]);
@@ -2591,8 +2659,8 @@ export class ChatServer {
 
       await this._ensureCacheInitialized();
 
-      // 🔥 Pastikan alarm selalu ter-set
-      this._ensureAlarm().catch(() => {});
+      // 🔥 FIX #2: HAPUS _ensureAlarm() dari fetch() — hindari write berlebihan
+      // Alarm sudah di-set di constructor dan di akhir alarm().
 
       try {
         const upgrade = req.headers.get("Upgrade");
