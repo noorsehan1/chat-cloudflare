@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 16.0.5 - FIX restore: ws multi yang masih hidup jangan dihapus, daftarkan ulang ke wsActiveMulti
+// VERSION: 16.0.6 - FIX exitMulti: hapus SEMUA data user, tapi WS JANGAN dihapus dari wsSet
 // ✅ FIX #1: _verifyAndCleanupOrphanSeats — jalan saat restore
 // ✅ FIX #2: _deleteSeatInRoom — skip broadcast saat restore
 // ✅ FIX #3: _restoreRemovedSeats — reset di finally
@@ -13,6 +13,9 @@
 // ✅ FIX #11: _forceRemoveSeat — hapus seat multi lama saat pindah room via joinRoom
 // ✅ FIX #12: exitMulti — JANGAN hapus ws dari wsSet (biarkan webSocketClose/webSocketError)
 // ✅ FIX #13: _restoreLiveWebSocket — ws multi yang masih hidup: daftarkan ulang ke wsActiveMulti + isMulti tetap true
+// ✅ FIX #14: exitMulti — WAJIB hapus SEMUA data user (seat, point, D1, index, connections, roomClients, wsActiveMulti)
+// ✅ FIX #15: _findMultiSeatByUsername — cari seat multi spesifik (bukan sembarang seat)
+// ✅ FIX #16: _forceDeleteFromD1(username, includeMulti) — param baru untuk hapus seat multi di D1
 // ✅ SEMUA LOGIKA UI & JOIN ROOM TIDAK DIUBAH
 
 const C = {
@@ -281,7 +284,6 @@ export class ChatServer {
     }
   }
 
-  // 🔥 FIX #9: Broadcast currentNumber ke SEMUA room
   async _updateNumber() {
     try {
       if (this.closing || this.isDestroyed) return;
@@ -306,7 +308,6 @@ export class ChatServer {
 
         await this._saveCurrentNumber();
 
-        // 🔥 FIX #9: Broadcast currentNumber ke SEMUA room yang ada client
         if (!this._isRestoring) {
           for (const [room, clients] of (this.roomClients || new Map())) {
             if (clients?.size > 0) {
@@ -529,12 +530,17 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  async _forceDeleteFromD1(username) {
+  // 🔥 FIX #16: tambah param includeMulti
+  async _forceDeleteFromD1(username, includeMulti = false) {
     if (!this.db) return true;
     if (!username) return true;
 
     const u = String(username);
+    const multiClause = includeMulti
+      ? ''
+      : `AND json_extract(value, '$.isMulti') IS NOT 1`;
 
+    // Hapus point dulu
     try {
       await this.db.prepare(`
         DELETE FROM ${TABLE_NAME}
@@ -544,11 +550,12 @@ export class ChatServer {
           WHERE key LIKE 'seat_%'
           AND json_valid(value)
           AND json_extract(value, '$.namauser') = ?
-          AND json_extract(value, '$.isMulti') IS NOT 1
+          ${multiClause}
         )
       `).bind(u).run();
     } catch(e) {
       try {
+        const notMulti = includeMulti ? '' : `AND value NOT LIKE '%"isMulti":true%'`;
         await this.db.prepare(`
           DELETE FROM ${TABLE_NAME}
           WHERE key LIKE 'point_%'
@@ -556,27 +563,29 @@ export class ChatServer {
             SELECT 'point_' || substr(key, 6) FROM ${TABLE_NAME}
             WHERE key LIKE 'seat_%'
             AND value LIKE ?
-            AND value NOT LIKE '%"isMulti":true%'
+            ${notMulti}
           )
         `).bind(`%"namauser":"${u}"%`).run();
       } catch(e2) {}
     }
 
+    // Hapus seat
     try {
       await this.db.prepare(`
         DELETE FROM ${TABLE_NAME}
         WHERE key LIKE 'seat_%'
         AND json_valid(value)
         AND json_extract(value, '$.namauser') = ?
-        AND json_extract(value, '$.isMulti') IS NOT 1
+        ${multiClause}
       `).bind(u).run();
     } catch(e) {
       try {
+        const notMulti = includeMulti ? '' : `AND value NOT LIKE '%"isMulti":true%'`;
         await this.db.prepare(`
           DELETE FROM ${TABLE_NAME}
           WHERE key LIKE 'seat_%'
           AND value LIKE ?
-          AND value NOT LIKE '%"isMulti":true%'
+          ${notMulti}
         `).bind(`%"namauser":"${u}"%`).run();
       } catch(e2) {}
     }
@@ -617,7 +626,7 @@ export class ChatServer {
     }
   }
 
-  // 🔥 FIX #11: hapus seat paksa (termasuk seat multi) — untuk pindah room
+  // 🔥 FIX #11: hapus seat paksa (termasuk seat multi)
   async _forceRemoveSeat(roomName, seatNumber, username) {
     try {
       if (!roomName || !seatNumber) return false;
@@ -628,18 +637,15 @@ export class ChatServer {
       const seatData = roomBucket.seat[seatNumber];
       if (!seatData) return false;
 
-      // pastikan seat itu milik username yang dimaksud
       if (username && seatData.namauser !== username) return false;
 
       const removedUsername = seatData.namauser;
 
-      // hapus dari cache (tanpa guard isMulti)
       delete roomBucket.seat[seatNumber];
       if (roomBucket.point) delete roomBucket.point[seatNumber];
 
       if (removedUsername) this._removeUserIndex(removedUsername);
 
-      // hapus dari D1
       if (this.db) {
         try {
           await this.db
@@ -649,7 +655,6 @@ export class ChatServer {
         } catch(e) {}
       }
 
-      // broadcast kalau bukan saat restore
       if (!this._isRestoring) {
         this.broadcast(roomName, ["removeKursi", roomName, seatNumber]);
         await this.updateRoomCount(roomName);
@@ -792,6 +797,27 @@ export class ChatServer {
             const seatNum = parseInt(seat);
             this._setUserIndex(username, roomName, seatNum, data.isMulti);
             return { room: roomName, seat: seatNum, isMulti: data.isMulti || false };
+          }
+        }
+      }
+      return null;
+    } catch(e) {
+      return null;
+    }
+  }
+
+  // 🔥 FIX #15: cari seat multi spesifik
+  async _findMultiSeatByUsername(username) {
+    try {
+      if (!username) return null;
+      await this._ensureCacheInitialized();
+      const roomsData = this._storageCache?.roomsData || {};
+      for (const [roomName, roomBucket] of Object.entries(roomsData)) {
+        if (!roomBucket?.seat) continue;
+        for (const [seatStr, seatData] of Object.entries(roomBucket.seat)) {
+          if (seatData?.namauser === username && seatData.isMulti === true) {
+            const seatNum = parseInt(seatStr);
+            if (!isNaN(seatNum)) return { room: roomName, seat: seatNum };
           }
         }
       }
@@ -995,19 +1021,15 @@ export class ChatServer {
     }
   }
 
-  // 🔥 FIX #10 + FIX #11: multi tetap isMulti:true, normal tetap isMulti:false
-  //                      + hapus seat multi lama saat pindah room via joinRoom
   async _joinInternal(ws, roomName, username) {
     try {
       const existing = await this._findUserInAnyRoom(username);
       if (existing && existing.room !== roomName) {
-        // 🔥 FIX #11: hapus paksa seat lama (termasuk seat multi) saat pindah room
         await this._forceRemoveSeat(existing.room, existing.seat, username);
       }
 
       await this._ensureCacheInitialized();
 
-      // 🔥 FIX #10: tentukan status multi user (multi tetap multi, normal tetap normal)
       const isMultiUser = (existing?.isMulti === true) || (this.wsActiveMulti?.has(ws) === true);
 
       let roomBucket = this._storageCache?.roomsData?.[roomName];
@@ -1021,7 +1043,6 @@ export class ChatServer {
 
       let seat = null;
       for (const [s, data] of Object.entries(roomBucket.seat)) {
-        // 🔥 FIX #10: cocokkan username DAN status multi yang sesuai
         if (data?.namauser === username && (data.isMulti === true) === isMultiUser) {
           seat = parseInt(s);
           break;
@@ -1047,7 +1068,6 @@ export class ChatServer {
           return false;
         }
 
-        // 🔥 FIX #10: isMulti mengikuti status user, bukan selalu false
         const newSeat = {
           noimageUrl: "",
           namauser: username,
@@ -1086,7 +1106,6 @@ export class ChatServer {
         try { roomClients.add(ws); } catch(e) {}
       }
 
-      // 🔥 FIX #10: hanya hapus dari wsActiveMulti kalau user normal
       if (!isMultiUser) {
         this.wsActiveMulti.delete(ws);
       }
@@ -1257,6 +1276,7 @@ export class ChatServer {
 
       const isMulti = this.wsActiveMulti?.has(ws) || false;
       if (isMulti) {
+        // 🔥 FIX: untuk MULTI — HANYA WS yang dihapus, kursi tetap hidup
         if (username) {
           const conns = this.userConnections?.get(username);
           if (conns) {
@@ -1946,7 +1966,6 @@ export class ChatServer {
     }
   }
 
-  // 🔥 FIX #13: ws multi yang masih hidup — daftarkan ulang ke wsActiveMulti, isMulti tetap true
   async _restoreLiveWebSocket(ws) {
     try {
       if (!ws) return;
@@ -1967,7 +1986,6 @@ export class ChatServer {
 
       let finalRoom = found?.room;
       let finalSeat = found?.seat;
-      // 🔥 FIX #13: deteksi status multi user
       let isMultiUser = found?.isMulti === true;
 
       if (!finalRoom) {
@@ -1983,7 +2001,6 @@ export class ChatServer {
                 try { ws.close(1000, "User not in seat"); } catch(e) {}
                 return;
               }
-              // 🔥 FIX #13: ambil status multi dari seatData
               isMultiUser = seatData.isMulti === true;
             }
           } catch(e) {}
@@ -2031,13 +2048,11 @@ export class ChatServer {
         try { this.wsSet?.add(ws); } catch(e) {}
       }
 
-      // 🔥 FIX #13: daftarkan ulang ke wsActiveMulti kalau multi
       if (isMultiUser) {
         try { this.wsActiveMulti?.set(ws, { username: attachment.username, room: finalRoom }); } catch(e) {}
       }
 
       if (finalRoom && finalSeat) {
-        // 🔥 FIX #13: pakai isMultiUser, bukan hardcode false
         this._setUserIndex(attachment.username, finalRoom, finalSeat, isMultiUser);
       }
 
@@ -2217,29 +2232,36 @@ export class ChatServer {
           break;
         }
 
-        // 🔥 FIX #12: exitMulti — JANGAN hapus ws dari wsSet
+        // 🔥 FIX #12 + #14: exitMulti hapus SEMUA data user, WS JANGAN dihapus dari wsSet
         case "exitMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
           try {
-            const found = await this._findUserInAnyRoom(targetUsername);
+            // 1) Cari seat MULTI saja
+            const found = await this._findMultiSeatByUsername(targetUsername);
             const roomName = found?.room;
             const seatNumber = found?.seat;
+
+            // 2) Hapus seat + point dari cache & D1 (tanpa guard isMulti)
+            //    _forceRemoveSeat sudah broadcast "removeKursi" di dalamnya
             if (roomName && seatNumber) {
-              await this._removeUserFromRoom(targetUsername, roomName);
+              await this._forceRemoveSeat(roomName, seatNumber, targetUsername);
             }
+
+            // 3) Hapus SEMUA sisa data di D1 termasuk multi
+            try { await this._forceDeleteFromD1(targetUsername, true); } catch(e) {}
+
+            // 4) Hapus dari index
             this._removeUserIndex(targetUsername);
+
+            // 5) Bersihkan userConnections (semua WS milik username)
+            //    ⚠️ JANGAN hapus dari wsSet di sini
             const connections = this.userConnections?.get(targetUsername);
             if (connections) {
               const toRemove = Array.from(connections);
               for (const conn of toRemove) {
-                if (conn.room) {
-                  const rc = this.roomClients?.get(conn.room);
-                  if (rc) try { rc.delete(conn); } catch(e) {}
-                }
-                if (roomName) {
-                  const rc = this.roomClients?.get(roomName);
-                  if (rc) try { rc.delete(conn); } catch(e) {}
+                for (const [, clients] of (this.roomClients || new Map())) {
+                  try { clients.delete(conn); } catch(e) {}
                 }
                 try { this.wsActiveMulti?.delete(conn); } catch(e) {}
                 try {
@@ -2256,17 +2278,18 @@ export class ChatServer {
                     this.safeSend(conn, ["forceExit", "You have been exited"]);
                   }
                 } catch(e) {}
-                // 🔥 FIX #12: JANGAN hapus ws dari wsSet — biarkan webSocketClose/webSocketError
+                // 🔥 FIX #12: JANGAN this.wsSet.delete(conn)
               }
               try { this.userConnections?.delete(targetUsername); } catch(e) {}
             }
+
+            // 6) Sapu bersih wsActiveMulti yang username-nya target
             const toDelete = [];
             for (const [wsKey, data] of (this.wsActiveMulti || new Map())) {
               if (data?.username === targetUsername) {
                 toDelete.push(wsKey);
-                if (data.room) {
-                  const rc = this.roomClients?.get(data.room);
-                  if (rc) try { rc.delete(wsKey); } catch(e) {}
+                for (const [, clients] of (this.roomClients || new Map())) {
+                  try { clients.delete(wsKey); } catch(e) {}
                 }
                 try {
                   wsKey.serializeAttachment({});
@@ -2282,14 +2305,15 @@ export class ChatServer {
                     this.safeSend(wsKey, ["forceExit", "You have been exited"]);
                   }
                 } catch(e) {}
-                // 🔥 FIX #12: JANGAN hapus ws dari wsSet — biarkan webSocketClose/webSocketError
+                // 🔥 FIX #12: JANGAN this.wsSet.delete(wsKey)
               }
             }
             for (const wsKey of toDelete) {
               try { this.wsActiveMulti?.delete(wsKey); } catch(e) {}
             }
+
+            // 7) Update room count (removeKursi sudah dari _forceRemoveSeat)
             if (roomName) {
-              this.broadcast(roomName, ["removeKursi", roomName, seatNumber]);
               await this.updateRoomCount(roomName);
             }
           } catch(e) {}
