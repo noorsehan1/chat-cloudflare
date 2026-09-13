@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 16.0.3 - FIX _joinInternal (multi tetap multi) + hapus seat multi lama saat pindah room
+// VERSION: 16.0.5 - FIX restore: ws multi yang masih hidup jangan dihapus, daftarkan ulang ke wsActiveMulti
 // ✅ FIX #1: _verifyAndCleanupOrphanSeats — jalan saat restore
 // ✅ FIX #2: _deleteSeatInRoom — skip broadcast saat restore
 // ✅ FIX #3: _restoreRemovedSeats — reset di finally
@@ -11,6 +11,8 @@
 // ✅ FIX #9: _updateNumber — broadcast currentNumber ke SEMUA room (tiap berubah)
 // ✅ FIX #10: _joinInternal — multi tetap isMulti:true, normal tetap isMulti:false
 // ✅ FIX #11: _forceRemoveSeat — hapus seat multi lama saat pindah room via joinRoom
+// ✅ FIX #12: exitMulti — JANGAN hapus ws dari wsSet (biarkan webSocketClose/webSocketError)
+// ✅ FIX #13: _restoreLiveWebSocket — ws multi yang masih hidup: daftarkan ulang ke wsActiveMulti + isMulti tetap true
 // ✅ SEMUA LOGIKA UI & JOIN ROOM TIDAK DIUBAH
 
 const C = {
@@ -1944,6 +1946,7 @@ export class ChatServer {
     }
   }
 
+  // 🔥 FIX #13: ws multi yang masih hidup — daftarkan ulang ke wsActiveMulti, isMulti tetap true
   async _restoreLiveWebSocket(ws) {
     try {
       if (!ws) return;
@@ -1964,6 +1967,8 @@ export class ChatServer {
 
       let finalRoom = found?.room;
       let finalSeat = found?.seat;
+      // 🔥 FIX #13: deteksi status multi user
+      let isMultiUser = found?.isMulti === true;
 
       if (!finalRoom) {
         const attRoom = attachment.seatInfo?.room || attachment.room;
@@ -1978,6 +1983,8 @@ export class ChatServer {
                 try { ws.close(1000, "User not in seat"); } catch(e) {}
                 return;
               }
+              // 🔥 FIX #13: ambil status multi dari seatData
+              isMultiUser = seatData.isMulti === true;
             }
           } catch(e) {}
         }
@@ -2024,8 +2031,14 @@ export class ChatServer {
         try { this.wsSet?.add(ws); } catch(e) {}
       }
 
+      // 🔥 FIX #13: daftarkan ulang ke wsActiveMulti kalau multi
+      if (isMultiUser) {
+        try { this.wsActiveMulti?.set(ws, { username: attachment.username, room: finalRoom }); } catch(e) {}
+      }
+
       if (finalRoom && finalSeat) {
-        this._setUserIndex(attachment.username, finalRoom, finalSeat, false);
+        // 🔥 FIX #13: pakai isMultiUser, bukan hardcode false
+        this._setUserIndex(attachment.username, finalRoom, finalSeat, isMultiUser);
       }
 
       try {
@@ -2204,6 +2217,7 @@ export class ChatServer {
           break;
         }
 
+        // 🔥 FIX #12: exitMulti — JANGAN hapus ws dari wsSet
         case "exitMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
@@ -2242,7 +2256,7 @@ export class ChatServer {
                     this.safeSend(conn, ["forceExit", "You have been exited"]);
                   }
                 } catch(e) {}
-                try { this.wsSet?.delete(conn); } catch(e) {}
+                // 🔥 FIX #12: JANGAN hapus ws dari wsSet — biarkan webSocketClose/webSocketError
               }
               try { this.userConnections?.delete(targetUsername); } catch(e) {}
             }
@@ -2268,7 +2282,7 @@ export class ChatServer {
                     this.safeSend(wsKey, ["forceExit", "You have been exited"]);
                   }
                 } catch(e) {}
-                try { this.wsSet?.delete(wsKey); } catch(e) {}
+                // 🔥 FIX #12: JANGAN hapus ws dari wsSet — biarkan webSocketClose/webSocketError
               }
             }
             for (const wsKey of toDelete) {
