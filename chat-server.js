@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 16.0.2 - FIX _joinInternal: multi tetap multi, normal tetap normal
+// VERSION: 16.0.3 - FIX _joinInternal (multi tetap multi) + hapus seat multi lama saat pindah room
 // ✅ FIX #1: _verifyAndCleanupOrphanSeats — jalan saat restore
 // ✅ FIX #2: _deleteSeatInRoom — skip broadcast saat restore
 // ✅ FIX #3: _restoreRemovedSeats — reset di finally
@@ -10,6 +10,7 @@
 // ✅ FIX #8: _restoreAllState — _restoreFailed hanya di catch
 // ✅ FIX #9: _updateNumber — broadcast currentNumber ke SEMUA room (tiap berubah)
 // ✅ FIX #10: _joinInternal — multi tetap isMulti:true, normal tetap isMulti:false
+// ✅ FIX #11: _forceRemoveSeat — hapus seat multi lama saat pindah room via joinRoom
 // ✅ SEMUA LOGIKA UI & JOIN ROOM TIDAK DIUBAH
 
 const C = {
@@ -614,6 +615,50 @@ export class ChatServer {
     }
   }
 
+  // 🔥 FIX #11: hapus seat paksa (termasuk seat multi) — untuk pindah room
+  async _forceRemoveSeat(roomName, seatNumber, username) {
+    try {
+      if (!roomName || !seatNumber) return false;
+      await this._ensureCacheInitialized();
+      const roomBucket = this._storageCache?.roomsData?.[roomName];
+      if (!roomBucket?.seat) return false;
+
+      const seatData = roomBucket.seat[seatNumber];
+      if (!seatData) return false;
+
+      // pastikan seat itu milik username yang dimaksud
+      if (username && seatData.namauser !== username) return false;
+
+      const removedUsername = seatData.namauser;
+
+      // hapus dari cache (tanpa guard isMulti)
+      delete roomBucket.seat[seatNumber];
+      if (roomBucket.point) delete roomBucket.point[seatNumber];
+
+      if (removedUsername) this._removeUserIndex(removedUsername);
+
+      // hapus dari D1
+      if (this.db) {
+        try {
+          await this.db
+            .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
+            .bind(`seat_${roomName}_${seatNumber}`, `point_${roomName}_${seatNumber}`)
+            .run();
+        } catch(e) {}
+      }
+
+      // broadcast kalau bukan saat restore
+      if (!this._isRestoring) {
+        this.broadcast(roomName, ["removeKursi", roomName, seatNumber]);
+        await this.updateRoomCount(roomName);
+      }
+
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
   async _getRoomBucket(roomName) {
     try {
       await this._ensureCacheInitialized();
@@ -948,12 +993,14 @@ export class ChatServer {
     }
   }
 
-  // 🔥 FIX #10: multi tetap isMulti:true, normal tetap isMulti:false
+  // 🔥 FIX #10 + FIX #11: multi tetap isMulti:true, normal tetap isMulti:false
+  //                      + hapus seat multi lama saat pindah room via joinRoom
   async _joinInternal(ws, roomName, username) {
     try {
       const existing = await this._findUserInAnyRoom(username);
       if (existing && existing.room !== roomName) {
-        await this._removeUserFromRoom(username, existing.room);
+        // 🔥 FIX #11: hapus paksa seat lama (termasuk seat multi) saat pindah room
+        await this._forceRemoveSeat(existing.room, existing.seat, username);
       }
 
       await this._ensureCacheInitialized();
