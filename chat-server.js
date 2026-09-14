@@ -264,7 +264,6 @@ export class ChatServer {
     }
   }
 
-  // 🔥 FIX #9: Broadcast currentNumber ke SEMUA room
   async _updateNumber() {
     try {
       if (this.closing || this.isDestroyed) return;
@@ -289,7 +288,6 @@ export class ChatServer {
 
         await this._saveCurrentNumber();
 
-        // 🔥 FIX #9: Broadcast currentNumber ke SEMUA room yang ada client
         if (!this._isRestoring) {
           for (const [room, clients] of (this.roomClients || new Map())) {
             if (clients?.size > 0) {
@@ -567,10 +565,7 @@ export class ChatServer {
     return true;
   }
 
-  // ============================================================
-  // 🔥 PERUBAHAN: tambah parameter `force` agar seat multi bisa dihapus
-  // saat user pindah room. Default tetap false = perilaku lama.
-  // ============================================================
+  // 🔥 force=true agar seat multi ikut terhapus (dipakai saat pindah room / exitMulti)
   async _deleteSeatInRoom(roomName, seatNumber, force = false) {
     try {
       const roomBucket = await this._getRoomBucket(roomName);
@@ -892,7 +887,7 @@ export class ChatServer {
     }
   }
 
-  async _removeUserFromRoom(username, roomName) {
+  async _removeUserFromRoom(username, roomName, force = false) {
     try {
       if (!username || !roomName) return false;
       await this._ensureCacheInitialized();
@@ -907,17 +902,12 @@ export class ChatServer {
         }
       }
       if (!seat) return false;
-      await this._deleteSeatInRoom(roomName, seat);
-      return true;
+      return await this._deleteSeatInRoom(roomName, seat, force);
     } catch(e) {
       return false;
     }
   }
 
-  // ============================================================
-  // Helper: bersihkan wsActiveMulti + roomClients untuk username
-  // yang pindah room (menghindari sisa entry di memory).
-  // ============================================================
   _cleanupMultiTracking(username, oldRoom, keepWs = null) {
     try {
       if (!username) return;
@@ -960,14 +950,11 @@ export class ChatServer {
 
   async _joinInternal(ws, roomName, username) {
     try {
-      // 🔥 PERUBAHAN: hapus seat lama (normal) saat pindah room.
-      // Pakai _deleteSeatInRoom force=true agar point + D1 + broadcast + count
-      // semuanya ikut terhapus.
+      // Pindah room: hapus seat lama (memory + D1 + broadcast removeKursi + updateRoomCount)
       const existing = await this._findUserInAnyRoom(username);
       if (existing && existing.room !== roomName) {
         await this._deleteSeatInRoom(existing.room, existing.seat, true);
         this._removeUserIndex(username);
-        // Bersihkan sisa tracking multi lama (jika ada) di room lama
         this._cleanupMultiTracking(username, existing.room, ws);
       }
 
@@ -1090,13 +1077,11 @@ export class ChatServer {
       if (!multiUsername || !multiRoomname || !ROOMS_SET.has(multiRoomname)) return false;
       await this._ensureCacheInitialized();
 
-      // 🔥 PERUBAHAN: hapus seat lama (baik normal maupun multi) saat
-      // multi user pindah room. force=true agar multi seat ikut terhapus.
+      // Pindah room: hapus seat lama (baik normal maupun multi)
       const existing = await this._findUserInAnyRoom(multiUsername);
       if (existing && existing.room !== multiRoomname) {
         await this._deleteSeatInRoom(existing.room, existing.seat, true);
         this._removeUserIndex(multiUsername);
-        // Bersihkan sisa tracking multi lama di memory
         this._cleanupMultiTracking(multiUsername, existing.room, ws);
       }
 
@@ -2169,6 +2154,7 @@ export class ChatServer {
           break;
         }
 
+        // 🔥 exitMulti: HANYA jalankan 1–5. Poin 6 (hapus ws) DILEWATI.
         case "exitMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
@@ -2176,73 +2162,17 @@ export class ChatServer {
             const found = await this._findUserInAnyRoom(targetUsername);
             const roomName = found?.room;
             const seatNumber = found?.seat;
+
+            // 1–5: hapus seat dari memory + D1 + _userIndex + broadcast removeKursi + updateRoomCount
             if (roomName && seatNumber) {
-              await this._removeUserFromRoom(targetUsername, roomName);
+              await this._deleteSeatInRoom(roomName, seatNumber, true);
             }
             this._removeUserIndex(targetUsername);
-            const connections = this.userConnections?.get(targetUsername);
-            if (connections) {
-              const toRemove = Array.from(connections);
-              for (const conn of toRemove) {
-                if (conn.room) {
-                  const rc = this.roomClients?.get(conn.room);
-                  if (rc) try { rc.delete(conn); } catch(e) {}
-                }
-                if (roomName) {
-                  const rc = this.roomClients?.get(roomName);
-                  if (rc) try { rc.delete(conn); } catch(e) {}
-                }
-                try { this.wsActiveMulti?.delete(conn); } catch(e) {}
-                try {
-                  conn.serializeAttachment({});
-                  conn.username = null;
-                  conn.room = null;
-                  conn.roomname = null;
-                  conn.idtarget = null;
-                  conn._username = null;
-                  conn._room = null;
-                } catch(e) {}
-                try {
-                  if (conn.readyState === 1) {
-                    this.safeSend(conn, ["forceExit", "You have been exited"]);
-                  }
-                } catch(e) {}
-                try { this.wsSet?.delete(conn); } catch(e) {}
-              }
-              try { this.userConnections?.delete(targetUsername); } catch(e) {}
-            }
-            const toDelete = [];
-            for (const [wsKey, data] of (this.wsActiveMulti || new Map())) {
-              if (data?.username === targetUsername) {
-                toDelete.push(wsKey);
-                if (data.room) {
-                  const rc = this.roomClients?.get(data.room);
-                  if (rc) try { rc.delete(wsKey); } catch(e) {}
-                }
-                try {
-                  wsKey.serializeAttachment({});
-                  wsKey.username = null;
-                  wsKey.room = null;
-                  wsKey.roomname = null;
-                  wsKey.idtarget = null;
-                  wsKey._username = null;
-                  wsKey._room = null;
-                } catch(e) {}
-                try {
-                  if (wsKey.readyState === 1) {
-                    this.safeSend(wsKey, ["forceExit", "You have been exited"]);
-                  }
-                } catch(e) {}
-                try { this.wsSet?.delete(wsKey); } catch(e) {}
-              }
-            }
-            for (const wsKey of toDelete) {
-              try { this.wsActiveMulti?.delete(wsKey); } catch(e) {}
-            }
-            if (roomName) {
-              this.broadcast(roomName, ["removeKursi", roomName, seatNumber]);
-              await this.updateRoomCount(roomName);
-            }
+
+            // ❌ 6 TIDAK dilakukan:
+            // - ws tidak dihapus dari userConnections / wsActiveMulti / roomClients / wsSet
+            // - attachment & properti ws tidak direset
+            // - tidak ada forceExit / close ws
           } catch(e) {}
           break;
         }
