@@ -565,7 +565,6 @@ export class ChatServer {
     return true;
   }
 
-  // 🔥 PATCH: parameter force
   async _deleteSeatInRoom(roomName, seatNumber, force = false) {
     try {
       const roomBucket = await this._getRoomBucket(roomName);
@@ -573,7 +572,6 @@ export class ChatServer {
 
       const seatData = roomBucket.seat?.[seatNumber];
 
-      // 🔥 PATCH: izinkan hapus seat multi kalau force = true
       if (seatData?.isMulti === true && !force) return false;
 
       const removedUsername = seatData?.namauser;
@@ -741,7 +739,6 @@ export class ChatServer {
     }
   }
 
-  // 🔥 PATCH: cari SEMUA seat milik user
   async _findAllSeatsOfUser(username) {
     try {
       if (!username) return [];
@@ -917,7 +914,6 @@ export class ChatServer {
     }
   }
 
-  // 🔥 PATCH: parameter force
   async _removeUserFromRoom(username, roomName, force = false) {
     try {
       if (!username || !roomName) return false;
@@ -934,7 +930,6 @@ export class ChatServer {
       }
       if (!seat) return false;
 
-      // 🔥 PATCH: teruskan force
       await this._deleteSeatInRoom(roomName, seat, force);
       return true;
     } catch(e) {
@@ -968,7 +963,6 @@ export class ChatServer {
 
   async _joinInternal(ws, roomName, username) {
     try {
-      // 🔥 PATCH: tolak user multi lewat joinRoom normal
       const existing = await this._findUserInAnyRoom(username);
       if (existing) {
         if (existing.isMulti === true) {
@@ -1093,13 +1087,11 @@ export class ChatServer {
     }
   }
 
-  // 🔥 PATCH: hapus SEMUA seat lama user (normal + multi) di semua room
   async _handleMultiJoin(ws, multiUsername, multiRoomname) {
     try {
       if (!multiUsername || !multiRoomname || !ROOMS_SET.has(multiRoomname)) return false;
       await this._ensureCacheInitialized();
 
-      // 🔥 PATCH: hapus SEMUA seat lama (normal + multi) di semua room
       const existingSeats = await this._findAllSeatsOfUser(multiUsername);
       for (const ex of existingSeats) {
         await this._removeUserFromRoom(multiUsername, ex.room, true);
@@ -1914,7 +1906,6 @@ export class ChatServer {
     }
   }
 
-  // 🔥 PATCH: pulihkan status multi
   async _restoreLiveWebSocket(ws) {
     try {
       if (!ws) return;
@@ -1997,12 +1988,10 @@ export class ChatServer {
         try { this.wsSet?.add(ws); } catch(e) {}
       }
 
-      // 🔥 PATCH: pulihkan status multi
       if (isMulti) {
         try { this.wsActiveMulti?.set(ws, { username: attachment.username, room: finalRoom }); } catch(e) {}
       }
 
-      // 🔥 PATCH: set _userIndex dengan isMulti yang benar
       if (finalRoom && finalSeat) {
         this._setUserIndex(attachment.username, finalRoom, finalSeat, isMulti);
       }
@@ -2056,6 +2045,49 @@ export class ChatServer {
       }
     } catch(e) {
       this._handleError('_handleSetId', e);
+    }
+  }
+
+  // 🔥 PATCH: case "setIdTarget" untuk client Java
+  async _handleSetIdTarget(ws, id, roomname) {
+    try {
+      if (!ws || !id) return;
+      if (this.closing || this.isDestroyed) return;
+
+      ws.username = id;
+      ws._username = id;
+      ws.idtarget = id;
+      if (roomname) {
+        ws.room = roomname;
+        ws._room = roomname;
+        ws.roomname = roomname;
+      }
+
+      try {
+        ws.serializeAttachment({
+          username: id,
+          seatInfo: { room: roomname || ws.room || "", seat: null }
+        });
+      } catch(e) {}
+
+      let conns = this.userConnections?.get(id);
+      if (!conns) {
+        conns = new Set();
+        try { this.userConnections?.set(id, conns); } catch(e) {}
+      }
+      if (!conns.has(ws)) try { conns.add(ws); } catch(e) {}
+
+      if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
+
+      // kalau roomname ada, daftarkan ke roomClients
+      if (roomname && ROOMS_SET.has(roomname)) {
+        const roomClients = this.roomClients?.get(roomname);
+        if (roomClients && !roomClients.has(ws)) {
+          try { roomClients.add(ws); } catch(e) {}
+        }
+      }
+    } catch(e) {
+      this._handleError('_handleSetIdTarget', e);
     }
   }
 
@@ -2147,11 +2179,15 @@ export class ChatServer {
           await this._handleSetId(ws, args[0], args[1]);
           break;
 
+        // 🔥 PATCH: setIdTarget untuk client Java
+        case "setIdTarget":
+          await this._handleSetIdTarget(ws, args[0], args[1]);
+          break;
+
         case "joinRoom":
           await this._handleJoin(ws, args[0]);
           break;
 
-        // 🔥 PATCH: multiJoin pakai lock + hapus semua seat lama
         case "multiJoin": {
           const multiUsername = args[0];
           const multiRoomname = args[1];
@@ -2205,7 +2241,6 @@ export class ChatServer {
             }
             this._removeUserIndex(targetUsername);
 
-            // 🔥 hapus flag multi di wsActiveMulti, tapi ws tetap hidup
             for (const [wsKey, wsData] of (this.wsActiveMulti || new Map())) {
               if (wsData?.username === targetUsername) {
                 try { this.wsActiveMulti?.delete(wsKey); } catch(e) {}
@@ -2226,13 +2261,15 @@ export class ChatServer {
           break;
         }
 
-        // 🔥 PATCH: setActiveMulti hanya ke ws pengirim
+        // 🔥 PATCH: setActiveMulti kirim activeChangedMulti + userActiveChanged
         case "setActiveMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
           const found = await this._findUserInAnyRoom(targetUsername);
           if (!found) break;
 
+          // kirim ke ws pengirim — dua event supaya client Java bisa handle keduanya
+          this.safeSend(ws, ["activeChangedMulti", targetUsername, found.seat]);
           this.safeSend(ws, ["userActiveChanged", targetUsername, found.seat]);
           break;
         }
@@ -2532,9 +2569,41 @@ export class ChatServer {
           break;
         }
 
+        // 🔥 PATCH: resetRoom handle client kirim tanpa room
         case "resetRoom": {
           const resetRoomName = args[0];
-          if (resetRoomName && ROOMS_SET.has(resetRoomName)) {
+
+          // kalau client tidak kirim room → reset semua room
+          if (!resetRoomName) {
+            await this._ensureCacheInitialized();
+            const roomsData = this._storageCache?.roomsData || {};
+            for (const room of ROOMS) {
+              const roomBucket = roomsData[room];
+              if (!roomBucket) continue;
+              for (const seatStr in roomBucket.seat) {
+                const uname = roomBucket.seat[seatStr]?.namauser;
+                if (uname) this._removeUserIndex(uname);
+              }
+              roomBucket.seat = {};
+              roomBucket.point = {};
+              roomBucket.mute = false;
+            }
+            if (this.db) {
+              try {
+                await this.db
+                  .prepare(`DELETE FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' OR key LIKE 'point_%' OR key LIKE 'mute_%'`)
+                  .run();
+              } catch(e) {}
+            }
+            for (const room of ROOMS) {
+              this.broadcast(room, ["resetRoom", room]);
+              await this.updateRoomCount(room);
+            }
+            break;
+          }
+
+          // kalau client kirim room → reset room itu saja
+          if (ROOMS_SET.has(resetRoomName)) {
             await this._ensureCacheInitialized();
             const roomBucket = this._storageCache?.roomsData?.[resetRoomName];
             if (roomBucket) {
