@@ -550,7 +550,6 @@ export class ChatServer {
 
       this._rebuildUserIndex();
 
-      // 👇 load number dari chat_multy
       try {
         const rowNum = await this.db
           .prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = 'number'`)
@@ -576,7 +575,6 @@ export class ChatServer {
     }
   }
 
-  // ================= INIT TABLE chat_multy =================
   async _initTableMulty() {
     try {
       if (!this.db) return false;
@@ -591,7 +589,6 @@ export class ChatServer {
     } catch(e) { return false; }
   }
 
-  // ================= SIMPAN number =================
   async _saveMultyNumber(numberNext) {
     try {
       if (!this.db) return false;
@@ -603,7 +600,6 @@ export class ChatServer {
     } catch(e) { return false; }
   }
 
-  // ================= SIMPAN chat_multy (JSON array) =================
   async _saveMultyChat(chatArray) {
     try {
       if (!this.db) return false;
@@ -615,7 +611,6 @@ export class ChatServer {
     } catch(e) { return false; }
   }
 
-  // ================= AMBIL number =================
   async _getMultyNumber() {
     try {
       if (!this.db) return 1;
@@ -628,7 +623,6 @@ export class ChatServer {
     } catch(e) { return 1; }
   }
 
-  // ================= AMBIL chat_multy =================
   async _getMultyChat() {
     try {
       if (!this.db) return [];
@@ -640,7 +634,6 @@ export class ChatServer {
     } catch(e) { return []; }
   }
 
-  // ================= LOAD JSON PERCAKAPAN =================
   async _loadMultyChat(jsonArray, room) {
     try {
       if (!Array.isArray(jsonArray)) return false;
@@ -658,7 +651,6 @@ export class ChatServer {
     } catch(e) { return false; }
   }
 
-  // ================= JALAN 1 LANGKAH =================
   async _nextMultyChat(room) {
     try {
       if (!this._multyRunning) return false;
@@ -675,16 +667,13 @@ export class ChatServer {
       const chat = this._multyChatList[this._multyIndex];
       const numberNext = this._multyNumberNext;
 
-      // 👇 simpan number
       await this._saveMultyNumber(numberNext);
 
-      // 👇 simpan chat_multy (append)
       let arr = await this._getMultyChat();
       if (!Array.isArray(arr)) arr = [];
       arr.push(chat);
       await this._saveMultyChat(arr);
 
-      // broadcast
       if (room) {
         this.broadcast(room, ["chat", room, "", chat.sender, chat.text, "7", "1"]);
         this.broadcast(room, ["multyNumber", numberNext]);
@@ -2577,7 +2566,6 @@ export class ChatServer {
 
           this.broadcast(chatRoom, ["chat", chatRoom, chatNoimg, username, chatMsg, chatColor, chatTextColor]);
 
-          // simpan manual ke chat_multy (key: chat_multy, value: array)
           let arr = await this._getMultyChat();
           if (!Array.isArray(arr)) arr = [];
           arr.push({ sender: username, text: chatMsg });
