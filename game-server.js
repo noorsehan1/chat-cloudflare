@@ -1,6 +1,6 @@
 // ============================================================
 // GAME-SERVER.JS
-// VERSION: 16.9.8 - 100% BEBAS LOG
+// VERSION: 16.9.9 - 100% BEBAS LOG
 // ✅ FIX #1: _restoreAllState — batch processing (10 WS paralel)
 // ✅ FIX #2: _restoreAllState — batasi 100 WS
 // ✅ FIX #3: _restoreAllState — hapus console.log di loop
@@ -11,6 +11,7 @@
 // ✅ FIX #8: _isRestoring — reset di finally
 // ✅ FIX #9: HAPUS SEMUA console.log & console.error (100% BEBAS LOG)
 // ✅ FIX #10: scheduleAlarms — fallback ke _scheduleNearestAlarm jika gagal
+// ✅ FIX #11: gameLowCardJoin — guard "already join" (error + sinkron state)
 // ✅ SEMUA LOGIKA GAME TIDAK DIUBAH
 // ============================================================
 
@@ -2119,7 +2120,30 @@ export class GameServer {
 
       switch (evt) {
         case "gameLowCardStart": await this.startGame(ws, data[1], data[2]); break;
-        case "gameLowCardJoin": await this.joinGame(ws, data[1]); break;
+        case "gameLowCardJoin": {
+          // ✅ FIX #11: Guard "already join" — cek dulu sebelum masuk joinGame
+          const joinUsername = typeof data[1] === 'string' ? data[1].trim() : '';
+          if (joinUsername) {
+            const joinRoom = ws.room || ws.roomname || ws._room;
+            if (joinRoom) {
+              const existingGame = this.activeGames.get(joinRoom);
+              if (existingGame?._isActive && !existingGame._gameEnded && existingGame.players?.has(joinUsername)) {
+                if (!existingGame.eliminated?.has(joinUsername)) {
+                  // User sudah join & belum eliminated — tolak dengan "already join"
+                  this.safeSend(ws, ["gameLowCardError", "You are already joined"]);
+                  // Sinkronkan state agar UI client tetap konsisten
+                  this.safeSend(ws, ["gameLowCardJoinSuccess", joinUsername, existingGame.betAmount]);
+                  if (existingGame.numbers?.has(joinUsername)) {
+                    this.safeSend(ws, ["gameLowCardPlayerDraw", joinUsername, existingGame.numbers.get(joinUsername), existingGame.tanda.get(joinUsername) || ""]);
+                  }
+                  return;
+                }
+              }
+            }
+          }
+          await this.joinGame(ws, data[1]);
+          break;
+        }
         case "gameLowCardNumber": await this.submitNumber(ws, data[1], data[2] || "", data[3]); break;
         case "gameLowCardLeave": await this.leaveGame(ws, data[1]); break;
       }
@@ -2790,11 +2814,16 @@ export class GameServer {
         const game = this.activeGames.get(room);
         if (!game?._isActive || game._gameEnded || !game.players) { this.safeSend(ws, ["gameLowCardError", "No active game in this room"]); return; }
 
+        // ✅ FIX #11 (guard kedua): Jika sudah join & belum eliminated, tolak dengan "already join"
         if (game.players.has(usernameClean)) {
           if (game.eliminated?.has(usernameClean)) {
             this.safeSend(ws, ["gameLowCardError", "You have been eliminated"]);
             return;
           }
+
+          // Sudah join — kirim error "already join" + sinkronkan state
+          this.safeSend(ws, ["gameLowCardError", "You are already joined"]);
+          this.safeSend(ws, ["gameLowCardJoinSuccess", usernameClean, game.betAmount]);
 
           const player = game.players.get(usernameClean);
           if (player) {
@@ -2821,22 +2850,9 @@ export class GameServer {
 
           game.playerWsId.set(usernameClean, wsId);
 
-          this.broadcast(room, ["gameLowCardJoin", usernameClean, game.betAmount]);
-          this.safeSend(ws, ["gameLowCardJoinSuccess", usernameClean, game.betAmount]);
-
-          this.safeSend(ws, ["gameLowCardPlayerRejoin", {
-            username: usernameClean,
-            room: room,
-            round: game.round,
-            phase: game._phase,
-            betAmount: game.betAmount,
-            hasSubmitted: game.numbers?.has(usernameClean) || false
-          }]);
-
           if (game.numbers?.has(usernameClean)) {
             this.safeSend(ws, ["gameLowCardPlayerDraw", usernameClean, game.numbers.get(usernameClean), game.tanda.get(usernameClean) || ""]);
           }
-
           return;
         }
 
