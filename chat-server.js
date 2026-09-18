@@ -1334,8 +1334,8 @@ export class ChatServer {
 
       if (!this._isRestoring) {
         this.broadcast(roomName, ["removeKursi", roomName, seatNumber]);
-        await this.updateRoomCount(roomName);
       }
+      await this.updateRoomCount(roomName);
       return true;
     } catch(e) {
       return false;
@@ -1509,10 +1509,6 @@ export class ChatServer {
       }
 
       await this._saveSeat(roomName, seatNumber, finalSeatData);
-
-      this._roomCountsCache = null;
-      this._roomCountsCacheTime = 0;
-
       return true;
     } catch(e) {
       return false;
@@ -1575,6 +1571,7 @@ export class ChatServer {
       await this._ensureCacheInitialized();
       const roomBucket = this._storageCache?.roomsData?.[roomName];
       if (!roomBucket || !roomBucket.seat) return 0;
+
       const seen = new Set();
       for (const seat in roomBucket.seat) {
         const uname = roomBucket.seat[seat]?.namauser;
@@ -1583,35 +1580,6 @@ export class ChatServer {
       return seen.size;
     } catch(e) {
       return 0;
-    }
-  }
-
-  async _getRoomCountLive(roomName) {
-    try {
-      if (!this.db) return await this._getRoomCount(roomName);
-      const result = await this.db
-        .prepare(`SELECT value FROM ${TABLE_NAME} WHERE key LIKE ?`)
-        .bind(`seat_${roomName}_%`)
-        .all();
-
-      const rows = result?.results || [];
-      const seen = new Set();
-      let count = 0;
-
-      for (const row of rows) {
-        try {
-          const data = JSON.parse(row.value);
-          if (data?.namauser) {
-            if (!seen.has(data.namauser)) {
-              seen.add(data.namauser);
-              count++;
-            }
-          }
-        } catch(e) {}
-      }
-      return count;
-    } catch(e) {
-      return await this._getRoomCount(roomName);
     }
   }
 
@@ -1974,12 +1942,7 @@ export class ChatServer {
         this.safeSend(ws, ["multyNumber", st.numberNext, roomName]);
       }
 
-      if (!this._isRestoring) {
-        await this.updateRoomCount(roomName);
-      }
-
-      const liveCount = await this._getRoomCount(roomName);
-      this.safeSend(ws, ["roomUserCount", roomName, liveCount]);
+      await this.updateRoomCount(roomName);
 
       try {
         const att = ws.deserializeAttachment?.() || {};
@@ -2594,20 +2557,6 @@ export class ChatServer {
       if (this._isRestoring) return count;
 
       this.broadcast(room, ["roomUserCount", room, count]);
-
-      for (const [otherRoom, clients] of this.roomClients) {
-        if (otherRoom === room) continue;
-        if (!clients || clients.size === 0) continue;
-        const msgStr = JSON.stringify(["roomUserCount", room, count]);
-        for (const ws of clients) {
-          try {
-            if (ws.readyState === 1 && !ws._closing && !ws._cleaning) {
-              ws.send(msgStr);
-            }
-          } catch(e) {}
-        }
-      }
-
       return count;
     } catch(e) {
       return 0;
@@ -2642,13 +2591,11 @@ export class ChatServer {
           }
         }
 
-        const uniqUsers = new Set();
-        for (const seat in allSeats) {
-          const uname = allSeats[seat]?.namauser;
-          if (uname) uniqUsers.add(uname);
+        const uniqueUsers = new Set();
+        for (const s of Object.values(allSeats)) {
+          if (s?.namauser) uniqueUsers.add(s.namauser);
         }
-        const count = uniqUsers.size;
-        this.safeSend(ws, ["roomUserCount", room, count]);
+        this.safeSend(ws, ["roomUserCount", room, uniqueUsers.size]);
 
         if (allSeats && Object.keys(allSeats).length > 0) {
           if (excludeSelf && selfSeat && allSeats[selfSeat]) {
@@ -2906,21 +2853,6 @@ export class ChatServer {
               const count = await this._getRoomCount(room);
               this.broadcast(room, ["roomUserCount", room, count]);
             } catch(e) {}
-          }
-
-          const counts = {};
-          for (const room of ROOMS) {
-            counts[room] = await this._getRoomCount(room);
-          }
-          const entries = Object.entries(counts);
-          for (const [rName, clients] of this.roomClients) {
-            for (const ws of clients) {
-              try {
-                if (ws.readyState === 1) {
-                  this.safeSend(ws, ["allRoomsUserCount", entries]);
-                }
-              } catch(e) {}
-            }
           }
         }
 
@@ -3931,31 +3863,42 @@ export class ChatServer {
           const seen = new Set();
           await this._ensureCacheInitialized();
           const roomsData = this._storageCache?.roomsData || {};
+
+          const userMap = new Map();
           for (const [roomName, roomBucket] of Object.entries(roomsData)) {
             if (!roomBucket?.seat) continue;
             for (const [seat, data] of Object.entries(roomBucket.seat)) {
-              if (data?.namauser) {
-                const username = data.namauser;
-                if (seen.has(username)) continue;
-                let isOnline = false;
-                if (data.isMulti === true) {
-                  isOnline = true;
-                } else {
-                  const connections = this.userConnections?.get(username);
-                  if (connections) {
-                    for (const conn of connections) {
-                      if (conn?.readyState === 1) {
-                        isOnline = true;
-                        break;
-                      }
-                    }
+              const username = data?.namauser;
+              if (!username) continue;
+
+              const prev = userMap.get(username);
+              if (!prev || (data.isMulti === true && prev.isMulti !== true)) {
+                userMap.set(username, { isMulti: data.isMulti === true });
+              }
+            }
+          }
+
+          for (const [username, info] of userMap) {
+            if (seen.has(username)) continue;
+
+            let isOnline = false;
+            if (info.isMulti === true) {
+              isOnline = true;
+            } else {
+              const connections = this.userConnections?.get(username);
+              if (connections) {
+                for (const conn of connections) {
+                  if (conn?.readyState === 1) {
+                    isOnline = true;
+                    break;
                   }
                 }
-                if (isOnline) {
-                  users.push(username);
-                  seen.add(username);
-                }
               }
+            }
+
+            if (isOnline) {
+              users.push(username);
+              seen.add(username);
             }
           }
 
@@ -3968,7 +3911,7 @@ export class ChatServer {
 
         case "getAllRoomsUserCount": {
           const now = Date.now();
-          if (this._roomCountsCache && (now - this._roomCountsCacheTime) < 1000) {
+          if (this._roomCountsCache && (now - this._roomCountsCacheTime) < 3000) {
             this.safeSend(ws, ["allRoomsUserCount", this._roomCountsCache]);
             break;
           }
@@ -3977,18 +3920,14 @@ export class ChatServer {
           const counts = {};
           for (const room of ROOMS) {
             const roomBucket = this._storageCache?.roomsData?.[room];
-            let count = 0;
+            const seen = new Set();
             if (roomBucket?.seat) {
-              const seen = new Set();
               for (const seat in roomBucket.seat) {
                 const uname = roomBucket.seat[seat]?.namauser;
-                if (uname && !seen.has(uname)) {
-                  seen.add(uname);
-                  count++;
-                }
+                if (uname) seen.add(uname);
               }
             }
-            counts[room] = count;
+            counts[room] = seen.size;
           }
 
           const entries = Object.entries(counts);
