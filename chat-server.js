@@ -1,4 +1,4 @@
- const C = {
+const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 500000,
@@ -337,7 +337,7 @@ export class ChatServer {
   }
 
   async _ensureAlarm() {
-    if (this.closing || this.isDestroyed) return;
+    if (this.isDestroyed) return;
     try {
       if (!this.ctx || !this.ctx.storage) return;
       if (typeof this.ctx.storage.setAlarm !== 'function') return;
@@ -356,7 +356,7 @@ export class ChatServer {
 
   async alarm() {
     try {
-      if (this.closing || this.isDestroyed) return;
+      if (this.isDestroyed) return;
 
       this._isNumberUpdating = false;
       this._numberUpdateStart = null;
@@ -374,20 +374,22 @@ export class ChatServer {
     } catch(e) {
       this._handleError('alarm', e);
     } finally {
-      if (!this.closing && !this.isDestroyed) {
+      try {
+        if (this.ctx && this.ctx.storage && typeof this.ctx.storage.setAlarm === 'function') {
+          const next = Date.now() + C.NUMBER_INTERVAL_MS;
+          await this.ctx.storage.setAlarm(next);
+        }
+      } catch(e) {
         try {
-          if (this.ctx && this.ctx.storage && typeof this.ctx.storage.setAlarm === 'function') {
-            const next = Date.now() + C.NUMBER_INTERVAL_MS;
-            await this.ctx.storage.setAlarm(next);
-          }
-        } catch(e) {}
+          await this.ctx.storage.setAlarm(Date.now() + 60000);
+        } catch(e2) {}
       }
     }
   }
 
   async _updateNumber() {
     try {
-      if (this.closing || this.isDestroyed) return;
+      if (this.isDestroyed) return;
 
       if (this._isNumberUpdating) {
         if (this._numberUpdateStart && Date.now() - this._numberUpdateStart > 30000) {
@@ -1420,7 +1422,7 @@ export class ChatServer {
 
           if (!this._isRestoring) {
             this.broadcast(item.room, ["removeKursi", item.room, item.seat]);
-            this.updateRoomCount(item.room).catch(() => {});
+            try { await this.updateRoomCount(item.room); } catch(e) {}
           }
 
           removed++;
@@ -2064,6 +2066,8 @@ export class ChatServer {
         }
       } catch(e) {}
 
+      try { await this.updateRoomCount(multiRoomname); } catch(e) {}
+
       return { room: multiRoomname, seat: seat };
     } catch(e) {
       return false;
@@ -2205,7 +2209,7 @@ export class ChatServer {
 
               if (!skipBroadcast && !this._isRestoring) {
                 this.broadcast(rName, ["removeKursi", rName, seatNum]);
-                this.updateRoomCount(rName).catch(() => {});
+                try { await this.updateRoomCount(rName); } catch(e) {}
               }
             }
           }
@@ -2927,7 +2931,7 @@ export class ChatServer {
         }
       } catch(e) {}
 
-      if (!this.closing && !this.isDestroyed) {
+      if (!this.isDestroyed) {
         try {
           if (this.ctx && this.ctx.storage && typeof this.ctx.storage.setAlarm === 'function') {
             const existing = typeof this.ctx.storage.getAlarm === 'function'
@@ -2958,7 +2962,7 @@ export class ChatServer {
       this._restoreRemovedSeats = [];
       this._hasBroadcastRemoveKursi = new Set();
 
-      if (!this.closing && !this.isDestroyed) {
+      if (!this.isDestroyed) {
         try {
           if (this.ctx && this.ctx.storage && typeof this.ctx.storage.setAlarm === 'function') {
             const existing = typeof this.ctx.storage.getAlarm === 'function'
