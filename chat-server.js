@@ -145,9 +145,6 @@ export class ChatServer {
             this._storageCache = this._storageCache || { roomsData: {}, currentNumber: 1 };
             this._cacheInitialized = true;
           }
-          if (!this.closing) {
-            this._ensureAlarm().catch(() => {});
-          }
         }
       }, C.CACHE_LOAD_TIMEOUT);
 
@@ -158,7 +155,6 @@ export class ChatServer {
           this._restoreDone = true;
           this._isRestoring = false;
           this._restoreFailed = false;
-          this._ensureAlarm().catch(() => {});
         })
         .catch(() => {
           clearTimeout(restoreTimeout);
@@ -170,7 +166,6 @@ export class ChatServer {
             this._storageCache = this._storageCache || { roomsData: {}, currentNumber: 1 };
             this._cacheInitialized = true;
           }
-          this._ensureAlarm().catch(() => {});
         });
 
     } catch(e) {
@@ -363,6 +358,9 @@ export class ChatServer {
     try {
       if (this.closing || this.isDestroyed) return;
 
+      this._isNumberUpdating = false;
+      this._numberUpdateStart = null;
+
       if (!this._restored && this._restorePromise) {
         try {
           await Promise.race([
@@ -394,6 +392,7 @@ export class ChatServer {
       if (this._isNumberUpdating) {
         if (this._numberUpdateStart && Date.now() - this._numberUpdateStart > 30000) {
           this._isNumberUpdating = false;
+          this._numberUpdateStart = null;
         } else {
           return;
         }
@@ -403,7 +402,10 @@ export class ChatServer {
       this._numberUpdateStart = Date.now();
 
       try {
-        this.currentNumber = (this.currentNumber < C.MAX_NUMBER) ? (this.currentNumber + 1) : 1;
+        const max = C.MAX_NUMBER;
+        let next = this.currentNumber + 1;
+        if (next > max) next = 1;
+        this.currentNumber = next;
 
         if (this._storageCache) {
           this._storageCache.currentNumber = this.currentNumber;
@@ -2928,7 +2930,12 @@ export class ChatServer {
       if (!this.closing && !this.isDestroyed) {
         try {
           if (this.ctx && this.ctx.storage && typeof this.ctx.storage.setAlarm === 'function') {
-            await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+            const existing = typeof this.ctx.storage.getAlarm === 'function'
+              ? await this.ctx.storage.getAlarm().catch(() => null)
+              : null;
+            if (existing === null || existing === undefined) {
+              await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+            }
           }
         } catch(e) {}
       }
@@ -2954,7 +2961,12 @@ export class ChatServer {
       if (!this.closing && !this.isDestroyed) {
         try {
           if (this.ctx && this.ctx.storage && typeof this.ctx.storage.setAlarm === 'function') {
-            await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+            const existing = typeof this.ctx.storage.getAlarm === 'function'
+              ? await this.ctx.storage.getAlarm().catch(() => null)
+              : null;
+            if (existing === null || existing === undefined) {
+              await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
+            }
           }
         } catch(e2) {}
       }
