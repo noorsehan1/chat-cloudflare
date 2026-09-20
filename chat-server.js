@@ -3916,7 +3916,8 @@ export class ChatServer {
           this._onlineUsersCache = users;
           this._onlineUsersCacheTime = now;
 
-          this.safeSend(ws, ["allOnlineUsers", users]);
+          const usersStr = users.join(",");
+          this.safeSend(ws, ["allOnlineUsers", usersStr]);
           break;
         }
 
@@ -3935,11 +3936,17 @@ export class ChatServer {
             counts[room] = seen.size;
           }
 
-          const entries = Object.entries(counts);
-          this._roomCountsCache = entries;
+          const parts = [];
+          for (const room of ROOMS) {
+            parts.push(room);
+            parts.push(String(counts[room]));
+          }
+          const countStr = parts.join(",");
+
+          this._roomCountsCache = countStr;
           this._roomCountsCacheTime = Date.now();
 
-          this.safeSend(ws, ["allRoomsUserCount", entries]);
+          this.safeSend(ws, ["allRoomsUserCount", countStr]);
           break;
         }
 
