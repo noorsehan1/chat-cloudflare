@@ -1490,7 +1490,7 @@ export class ChatServer {
 
           if (!this._isRestoring) {
             this.broadcast(rName, ["removeKursi", rName, sNum]);
-            this.updateRoomCount(rName).catch(() => {});
+            try { await this.updateRoomCount(rName); } catch(e) {}
           }
         }
       }
@@ -1513,6 +1513,11 @@ export class ChatServer {
       }
 
       await this._saveSeat(roomName, seatNumber, finalSeatData);
+
+      if (!this._isRestoring) {
+        try { await this.updateRoomCount(roomName); } catch(e) {}
+      }
+
       return true;
     } catch(e) {
       return false;
@@ -3926,29 +3931,17 @@ export class ChatServer {
         }
 
         case "getAllRoomsUserCount": {
-          const now = Date.now();
-          if (this._roomCountsCache && (now - this._roomCountsCacheTime) < 3000) {
-            this.safeSend(ws, ["allRoomsUserCount", this._roomCountsCache]);
-            break;
-          }
-
           await this._ensureCacheInitialized();
+
           const counts = {};
           for (const room of ROOMS) {
-            const roomBucket = this._storageCache?.roomsData?.[room];
-            const seen = new Set();
-            if (roomBucket?.seat) {
-              for (const seat in roomBucket.seat) {
-                const uname = roomBucket.seat[seat]?.namauser;
-                if (uname) seen.add(uname);
-              }
-            }
-            counts[room] = seen.size;
+            counts[room] = await this._getRoomCount(room);
           }
 
-          const entries = Object.entries(counts);
-          this._roomCountsCache = entries;
-          this._roomCountsCacheTime = now;
+          const entries = Object.entries(counts).map(([roomName, userCount]) => ({
+            roomName,
+            userCount
+          }));
 
           this.safeSend(ws, ["allRoomsUserCount", entries]);
           break;
