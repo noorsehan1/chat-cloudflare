@@ -1490,7 +1490,7 @@ export class ChatServer {
 
           if (!this._isRestoring) {
             this.broadcast(rName, ["removeKursi", rName, sNum]);
-            try { await this.updateRoomCount(rName); } catch(e) {}
+            this.updateRoomCount(rName).catch(() => {});
           }
         }
       }
@@ -1513,11 +1513,6 @@ export class ChatServer {
       }
 
       await this._saveSeat(roomName, seatNumber, finalSeatData);
-
-      if (!this._isRestoring) {
-        try { await this.updateRoomCount(roomName); } catch(e) {}
-      }
-
       return true;
     } catch(e) {
       return false;
@@ -3875,11 +3870,6 @@ export class ChatServer {
 
         case "getOnlineUsers": {
           const now = Date.now();
-          if (this._onlineUsersCache && (now - this._onlineUsersCacheTime) < 5000) {
-            this.safeSend(ws, ["allOnlineUsers", this._onlineUsersCache]);
-            break;
-          }
-
           const users = [];
           const seen = new Set();
           await this._ensureCacheInitialized();
@@ -3932,16 +3922,22 @@ export class ChatServer {
 
         case "getAllRoomsUserCount": {
           await this._ensureCacheInitialized();
-
           const counts = {};
           for (const room of ROOMS) {
-            counts[room] = await this._getRoomCount(room);
+            const roomBucket = this._storageCache?.roomsData?.[room];
+            const seen = new Set();
+            if (roomBucket?.seat) {
+              for (const seat in roomBucket.seat) {
+                const uname = roomBucket.seat[seat]?.namauser;
+                if (uname) seen.add(uname);
+              }
+            }
+            counts[room] = seen.size;
           }
 
-          const entries = Object.entries(counts).map(([roomName, userCount]) => ({
-            roomName,
-            userCount
-          }));
+          const entries = Object.entries(counts);
+          this._roomCountsCache = entries;
+          this._roomCountsCacheTime = Date.now();
 
           this.safeSend(ws, ["allRoomsUserCount", entries]);
           break;
