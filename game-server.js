@@ -1,6 +1,6 @@
 // ============================================================
 // GAME-SERVER.JS
-// VERSION: 17.0.0 - FINAL (BEBAS LOG, RACE-CONDITION FREE)
+// VERSION: 17.0.1 - FINAL (BEBAS LOG, RACE-CONDITION FREE, TIE-BREAKER SAFE)
 // ✅ FIX #1: Bot hanya muncul jika human <= 1 di round 1
 // ✅ FIX #2: Tidak ada draw sesama user → game berakhir
 // ✅ FIX #3: Semua tereliminasi → game berakhir
@@ -9,6 +9,7 @@
 // ✅ FIX #6: Timer tie breaker dibersihkan sebelum round baru
 // ✅ FIX #7: Timer lowcard dibersihkan sebelum round baru
 // ✅ FIX #8: 100% BEBAS LOG
+// ✅ FIX #9: Tie breaker TIDAK boleh di-interupsi roll number dari server
 // ============================================================
 
 const CONSTANTS = {
@@ -1289,7 +1290,7 @@ export class GameServer {
 
       if (isDiceTime) {
         const isGameRunning = this.currentDiceRoll && this._canSubmitDiceAnswer;
-        if (!this._diceGameStarted && !this.currentDiceRoll && !this._diceLock) {
+        if (!this._tieActive && !this._diceGameStarted && !this.currentDiceRoll && !this._diceLock) {
           this._startDiceGameIfNotStarted();
         }
         if (isGameRunning) {
@@ -1309,6 +1310,7 @@ export class GameServer {
     try {
       if (this._diceGameStarted) return;
       if (!this.alarmScheduler.isDiceTime()) return;
+      if (this._tieActive) return;
       if (this.currentDiceRoll || this._isShowingDice || this._diceLock) return;
       if (this._diceTimeUpCooldown) return;
       const clients = this.roomClients?.get(CONSTANTS.DICE_ROOM);
@@ -1324,6 +1326,7 @@ export class GameServer {
   _startDiceFast() {
     try {
       if (this._diceGameStarted && this.currentDiceRoll) return;
+      if (this._tieActive) { this._diceLock = false; this._isShowingDice = false; this._diceGameStarted = false; return; }
       const clients = this.roomClients?.get(CONSTANTS.DICE_ROOM);
       if (!clients || clients.size === 0) { this._diceLock = false; this._isShowingDice = false; this._diceGameStarted = false; return; }
       if (!this._diceSessionActive || this._diceSessionEnded) { this._diceLock = false; this._isShowingDice = false; this._diceGameStarted = false; return; }
@@ -1386,7 +1389,6 @@ export class GameServer {
           this.broadcast(CONSTANTS.DICE_ROOM, ["diceWinner", { username: winner, totalPoints: 0, diceValue, round: roundNumber }]);
         }
       } else if (correctPlayers.length > 1 && !this._tieActive) {
-        // ✅ Eliminate yang jawab salah SEBELUM masuk tie breaker
         const eliminatedBeforeTie = Array.from(this.diceAnswered).filter(p => this._playerAnswers.get(p) !== diceValue);
         if (eliminatedBeforeTie.length > 0) {
           this.broadcast(CONSTANTS.DICE_ROOM, ["diceEliminated", eliminatedBeforeTie]);
@@ -1397,7 +1399,6 @@ export class GameServer {
         return;
       }
 
-      // ✅ SELALU eliminate yang jawabannya TIDAK sama dengan dice value
       const eliminated = Array.from(this.diceAnswered).filter(p => this._playerAnswers.get(p) !== diceValue);
       if (eliminated.length > 0) {
         this.broadcast(CONSTANTS.DICE_ROOM, ["diceEliminated", eliminated]);
@@ -1415,6 +1416,7 @@ export class GameServer {
         this._diceLoopCounter = 0;
         this._diceGameStarted = false;
         if (this._diceSessionActive && !this._diceSessionEnded) {
+          if (this._tieActive) return;
           const clients = this.roomClients?.get(CONSTANTS.DICE_ROOM);
           if (clients && clients.size > 0 && !this.currentDiceRoll && !this._isShowingDice && !this._diceLock) {
             this._startDiceGameIfNotStarted();
@@ -1478,7 +1480,7 @@ export class GameServer {
         this._tieNotificationTimeouts = [];
         const tieId = this._getActiveTieBreakerId();
         if (tieId) { this._processTieResults(room, tieId, players); }
-        else { this._resetTieBreakerState(null); this._startCooldownAfterTieBreaker(); }
+        else { this._resetTieBreakerState(null, true); this._startCooldownAfterTieBreaker(); }
       }
     }, (timeLimit * 1000) + 2000));
   }
@@ -1505,7 +1507,7 @@ export class GameServer {
 
     if (answeredCount === 0) {
       this.broadcast(CONSTANTS.DICE_ROOM, ["diceNotification", `No one answered in Round ${this._tieRound} - Tie breaker ended`]);
-      this._resetTieBreakerState(id);
+      this._resetTieBreakerState(id, true);
       this._startCooldownAfterTieBreaker();
       return;
     }
@@ -1520,12 +1522,11 @@ export class GameServer {
       } catch(e) {
         this.broadcast(CONSTANTS.DICE_ROOM, ["diceWinner", { username: winner, totalPoints: 0, diceValue: answer, round: this._diceRound || 1, isTieBreaker: true, tieBreakerRound: this._tieRound, finalWinner: true, totalTieRounds: this._tieRound }]);
       }
-      this._resetTieBreakerState(id);
+      this._resetTieBreakerState(id, true);
       this._startCooldownAfterTieBreaker();
       return;
     }
 
-    // Semua nilai sama → tidak ada yang terbesar unik → lanjut round tanpa eliminate
     if (highestPlayers.length === players.length) {
       this.broadcast(CONSTANTS.DICE_ROOM, ["diceNotification", `All answered same value: ${highest} - Tie again!`]);
       this._tiePlayers = [...players];
@@ -1535,19 +1536,17 @@ export class GameServer {
       const nextTimer = setTimeout(async () => {
         if (this._tieActive && this._tiePlayers.length > 1) { await this._runTieRound(room, id, this._tiePlayers); }
         else if (this._tiePlayers.length === 1) { await this._processSingleWinner(room, id, this._tiePlayers[0]); }
-        else { this.broadcast(CONSTANTS.DICE_ROOM, ["diceNotification", "No players remaining"]); this._resetTieBreakerState(id); this._startCooldownAfterTieBreaker(); }
+        else { this.broadcast(CONSTANTS.DICE_ROOM, ["diceNotification", "No players remaining"]); this._resetTieBreakerState(id, true); this._startCooldownAfterTieBreaker(); }
       }, 3000);
       this._trackTimer(nextTimer);
       return;
     }
 
-    // ✅ HANYA yang TERBESAR yang lolos, sisanya di-eliminate
     const eliminatedThisRound = players.filter(p => !highestPlayers.includes(p));
     if (eliminatedThisRound.length > 0) {
       this.broadcast(CONSTANTS.DICE_ROOM, ["diceEliminated", eliminatedThisRound]);
     }
 
-    // Sisa 1 → pemenang final (tidak eliminate lagi)
     if (highestPlayers.length === 1) {
       const winner = highestPlayers[0];
       this.broadcast(CONSTANTS.DICE_ROOM, ["diceNotification", `${winner} wins with highest value: ${highest}`]);
@@ -1557,12 +1556,11 @@ export class GameServer {
       } catch(e) {
         this.broadcast(CONSTANTS.DICE_ROOM, ["diceWinner", { username: winner, totalPoints: 0, diceValue: highest, round: this._diceRound || 1, isTieBreaker: true, tieBreakerRound: this._tieRound, finalWinner: true, totalTieRounds: this._tieRound }]);
       }
-      this._resetTieBreakerState(id);
+      this._resetTieBreakerState(id, true);
       this._startCooldownAfterTieBreaker();
       return;
     }
 
-    // Masih >1 → lanjut round tie berikutnya dengan survivor (yang tertinggi)
     if (highestPlayers.length > 1) {
       this.broadcast(CONSTANTS.DICE_ROOM, ["diceNotification", `Tie again! Round ${this._tieRound + 1} between: ${highestPlayers.join(', ')}`]);
       this._tiePlayers = [...highestPlayers];
@@ -1572,18 +1570,18 @@ export class GameServer {
       const nextTimer = setTimeout(async () => {
         if (this._tieActive && this._tiePlayers.length > 1) { await this._runTieRound(room, id, this._tiePlayers); }
         else if (this._tiePlayers.length === 1) { await this._processSingleWinner(room, id, this._tiePlayers[0]); }
-        else { this.broadcast(CONSTANTS.DICE_ROOM, ["diceNotification", "No players remaining"]); this._resetTieBreakerState(id); this._startCooldownAfterTieBreaker(); }
+        else { this.broadcast(CONSTANTS.DICE_ROOM, ["diceNotification", "No players remaining"]); this._resetTieBreakerState(id, true); this._startCooldownAfterTieBreaker(); }
       }, 3000);
       this._trackTimer(nextTimer);
       return;
     }
 
-    this._resetTieBreakerState(id);
+    this._resetTieBreakerState(id, true);
     this._startCooldownAfterTieBreaker();
   }
 
   async _processSingleWinner(room, id, winner) {
-    if (!winner) { this._resetTieBreakerState(id); this._startCooldownAfterTieBreaker(); return; }
+    if (!winner) { this._resetTieBreakerState(id, true); this._startCooldownAfterTieBreaker(); return; }
     try {
       const points = await this.dataManager.addDicePoint(winner);
       this.broadcast(CONSTANTS.DICE_ROOM, ["diceWinner", { username: winner, totalPoints: points[winner] || 0, diceValue: 'auto', round: this._diceRound || 1, isTieBreaker: true, tieBreakerRound: this._tieRound, finalWinner: true, totalTieRounds: this._tieRound }]);
@@ -1594,7 +1592,7 @@ export class GameServer {
     if (eliminated.length > 0) {
       this.broadcast(CONSTANTS.DICE_ROOM, ["diceEliminated", eliminated]);
     }
-    this._resetTieBreakerState(id);
+    this._resetTieBreakerState(id, true);
     this._startCooldownAfterTieBreaker();
   }
 
@@ -1624,9 +1622,11 @@ export class GameServer {
     }, CONSTANTS.TIE_BREAKER_COOLDOWN || 15000));
   }
 
-  _resetTieBreakerState(id) {
+  _resetTieBreakerState(id, keepTieActive = false) {
     if (id) this._tieBreakers.delete(id);
-    this._tieActive = false;
+    if (!keepTieActive) {
+      this._tieActive = false;
+    }
     this._tiePlayers = [];
     this._tieAnswers = new Map();
     this._tieRound = 0;
@@ -1670,7 +1670,7 @@ export class GameServer {
           if (this._tieInterval) { clearInterval(this._tieInterval); this._tieInterval = null; }
           const tieId = this._getActiveTieBreakerId();
           if (tieId) { setTimeout(async () => { await this._processTieResults(CONSTANTS.DICE_ROOM, tieId, this._tiePlayers); }, 500); }
-          else { this._resetTieBreakerState(null); this._startCooldownAfterTieBreaker(); }
+          else { this._resetTieBreakerState(null, true); this._startCooldownAfterTieBreaker(); }
         }
         return;
       }
@@ -1825,7 +1825,7 @@ export class GameServer {
 
           const clients = this.roomClients?.get(CONSTANTS.DICE_ROOM);
           if (clients && clients.size > 0) {
-            if (!this.currentDiceRoll && !this._isShowingDice && !this._diceLock && !this._diceTimeUpCooldown) {
+            if (!this.currentDiceRoll && !this._isShowingDice && !this._diceLock && !this._diceTimeUpCooldown && !this._tieActive) {
               this._diceStartedByUser = true;
               this._startDiceGameIfNotStarted();
             }
@@ -1860,7 +1860,7 @@ export class GameServer {
         if (this._diceTimeUpCooldownTimer) { clearTimeout(this._diceTimeUpCooldownTimer); this._diceTimeUpCooldownTimer = null; }
         for (const t of this._diceNotificationTimeouts) { clearTimeout(t); }
         this._diceNotificationTimeouts = [];
-        if (this._tieActive) this._resetTieBreakerState(null);
+        if (this._tieActive) this._resetTieBreakerState(null, false);
         break;
     }
   }
@@ -2257,7 +2257,7 @@ export class GameServer {
           this._trackTimer(timer);
         }
 
-        if (this.alarmScheduler.isDiceTime() && !this._diceGameStarted && !this.currentDiceRoll) this._startDiceGameIfNotStarted();
+        if (this.alarmScheduler.isDiceTime() && !this._diceGameStarted && !this.currentDiceRoll && !this._tieActive) this._startDiceGameIfNotStarted();
       }
     } catch(e) { this.safeSend(ws, ["gameLowCardError", e.message || "Switch failed"]); }
   }
