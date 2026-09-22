@@ -1576,12 +1576,12 @@ export class ChatServer {
       const roomBucket = this._storageCache?.roomsData?.[roomName];
       if (!roomBucket || !roomBucket.seat) return 0;
 
-      const seen = new Set();
+      let count = 0;
       for (const seat in roomBucket.seat) {
         const uname = roomBucket.seat[seat]?.namauser;
-        if (uname) seen.add(uname);
+        if (uname && String(uname).trim() !== '') count++;
       }
-      return seen.size;
+      return count;
     } catch(e) {
       return 0;
     }
@@ -1835,15 +1835,6 @@ export class ChatServer {
 
   async _joinInternal(ws, roomName, username) {
     try {
-      const existing = await this._findUserInAnyRoom(username);
-      const wasMulti = existing?.isMulti === true;
-
-      await this._removeAllSeatsForUser(username);
-
-      if (existing) {
-        this._cleanupMultiTracking(username, existing.room, ws);
-      }
-
       await this._ensureCacheInitialized();
 
       let roomBucket = this._storageCache?.roomsData?.[roomName];
@@ -1855,15 +1846,55 @@ export class ChatServer {
       if (!roomBucket.seat) roomBucket.seat = {};
       if (!roomBucket.point) roomBucket.point = {};
 
+      // === PATCH: Cek dulu apakah user sudah punya kursi di room ini ===
       let seat = null;
+      let isMultiUser = false;
+
       for (const [s, data] of Object.entries(roomBucket.seat)) {
         if (data?.namauser === username) {
           seat = parseInt(s);
+          isMultiUser = data.isMulti === true;
           break;
         }
       }
 
-      if (!seat) {
+      // Kalau sudah ada kursi di room ini → reuse (JANGAN hapus)
+      if (seat) {
+        // hapus kursi user di room LAIN saja
+        const allSeats = await this._findAllSeatsForUser(username);
+        for (const item of allSeats) {
+          if (item.room === roomName && item.seat === seat) continue;
+
+          try {
+            const otherBucket = this._storageCache?.roomsData?.[item.room];
+            if (otherBucket?.seat) delete otherBucket.seat[item.seat];
+            if (otherBucket?.point) delete otherBucket.point[item.seat];
+
+            if (this.db) {
+              try {
+                await this.db
+                  .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
+                  .bind(`seat_${item.room}_${item.seat}`, `point_${item.room}_${item.seat}`)
+                  .run();
+              } catch(e) {}
+            }
+
+            if (!this._isRestoring) {
+              this.broadcast(item.room, ["removeKursi", item.room, item.seat]);
+              try { await this.updateRoomCount(item.room); } catch(e) {}
+            }
+          } catch(e) {}
+        }
+
+        this._cleanupMultiTracking(username, roomName, ws);
+      } else {
+        // Belum punya kursi → hapus semua kursi lama di room lain
+        const existing = await this._findUserInAnyRoom(username);
+        if (existing) {
+          this._cleanupMultiTracking(username, existing.room, ws);
+        }
+        await this._removeAllSeatsForUser(username);
+
         const seatCount = Object.values(roomBucket.seat).filter(s => s?.namauser).length;
         if (seatCount >= C.MAX_SEATS) {
           this.safeSend(ws, ["roomFull", roomName]);
@@ -1890,7 +1921,7 @@ export class ChatServer {
           itematas: 0,
           vip: 0,
           viptanda: 0,
-          isMulti: wasMulti
+          isMulti: false
         };
 
         await this._updateSeatInRoom(roomName, seat, newSeat);
@@ -1920,7 +1951,7 @@ export class ChatServer {
         try { roomClients.add(ws); } catch(e) {}
       }
 
-      if (!wasMulti) {
+      if (!isMultiUser) {
         this.wsActiveMulti.delete(ws);
       }
 
@@ -1947,6 +1978,11 @@ export class ChatServer {
       }
 
       await this.updateRoomCount(roomName);
+
+      // Kirim state langsung (dari memory) supaya point langsung tampil
+      try {
+        await this.sendAllStateTo(ws, roomName, true);
+      } catch(e) {}
 
       try {
         const att = ws.deserializeAttachment?.() || {};
@@ -2181,11 +2217,11 @@ export class ChatServer {
         }
       }
 
-      if (username && !stillConnected && !this._restoreFailed) {
+      if (username && !stillConnected && !this._restoreFailed && !this._isRestoring) {
         try { await this._forceDeleteFromD1(username); } catch (e) {}
       }
 
-      if (username) {
+      if (username && !this._isRestoring) {
         try { await this._ensureCacheInitialized(); } catch (e) {}
         const roomsData = this._storageCache?.roomsData || {};
         for (const [rName, rBucket] of Object.entries(roomsData)) {
@@ -2201,11 +2237,6 @@ export class ChatServer {
               this._removeUserIndex(username);
 
               result.removedSeats.push({ room: rName, seat: seatNum, username: username });
-
-              if (this._isRestoring) {
-                if (!this._restoreRemovedSeats) this._restoreRemovedSeats = [];
-                this._restoreRemovedSeats.push({ room: rName, seat: seatNum });
-              }
 
               if (!skipBroadcast && !this._isRestoring) {
                 this.broadcast(rName, ["removeKursi", rName, seatNum]);
@@ -2553,14 +2584,16 @@ export class ChatServer {
     try {
       if (this.closing || this.isDestroyed || !room) return 0;
 
+      if (this._isRestoring) {
+        return await this._getRoomCount(room);
+      }
+
       this._roomCountsCache = null;
       this._roomCountsCacheTime = 0;
       this._onlineUsersCache = null;
       this._onlineUsersCacheTime = 0;
 
       const count = await this._getRoomCount(room);
-
-      if (this._isRestoring) return count;
 
       this.broadcast(room, ["roomUserCount", room, count]);
       return count;
@@ -2597,11 +2630,11 @@ export class ChatServer {
           }
         }
 
-        const uniqueUsers = new Set();
+        let count = 0;
         for (const s of Object.values(allSeats)) {
-          if (s?.namauser) uniqueUsers.add(s.namauser);
+          if (s?.namauser && String(s.namauser).trim() !== '') count++;
         }
-        this.safeSend(ws, ["roomUserCount", room, uniqueUsers.size]);
+        this.safeSend(ws, ["roomUserCount", room, count]);
 
         if (allSeats && Object.keys(allSeats).length > 0) {
           if (excludeSelf && selfSeat && allSeats[selfSeat]) {
@@ -2624,7 +2657,19 @@ export class ChatServer {
           }));
 
           if (excludeSelf && selfSeat) {
+            const selfPoint = allPoints[selfSeat];
             filteredPoints = filteredPoints.filter(p => p.seat !== selfSeat);
+
+            if (selfPoint) {
+              this.safeSend(ws, [
+                "pointUpdated",
+                room,
+                selfSeat,
+                selfPoint.x || 0,
+                selfPoint.y || 0,
+                selfPoint.fast ? 1 : 0
+              ]);
+            }
           }
 
           if (filteredPoints.length > 0) {
@@ -2638,6 +2683,14 @@ export class ChatServer {
   async _verifyAndCleanupOrphanSeats(liveWsList) {
     try {
       if (this._restoreFailed) {
+        return 0;
+      }
+
+      if (this._isRestoring) {
+        return 0;
+      }
+
+      if (!this._restoreDone) {
         return 0;
       }
 
@@ -2701,12 +2754,6 @@ export class ChatServer {
                 .run();
             } catch(e) {}
           }
-
-          if (this._isRestoring) {
-            if (!this._restoreRemovedSeats) this._restoreRemovedSeats = [];
-            this._restoreRemovedSeats.push({ room, seat });
-          }
-
         } catch(e) {}
       }
 
@@ -2810,6 +2857,15 @@ export class ChatServer {
           );
         }
 
+        for (const ws of liveWebSockets) {
+          try {
+            if (!ws || ws.readyState !== 1) continue;
+            const wsRoom = ws.room || ws.roomname || ws._room;
+            if (!wsRoom || !ROOMS_SET.has(wsRoom)) continue;
+            await this.sendAllStateTo(ws, wsRoom, false);
+          } catch(e) {}
+        }
+
         for (const ws of deadWebSockets) {
           try {
             try {
@@ -2831,10 +2887,6 @@ export class ChatServer {
             try { ws.serializeAttachment({}); } catch(e) {}
           } catch(e) {}
         }
-
-        try {
-          await this._verifyAndCleanupOrphanSeats(liveWebSockets);
-        } catch(e) {}
 
         for (const [user, conns] of this.userConnections) {
           if (conns.size === 0) this.userConnections.delete(user);
@@ -2908,6 +2960,8 @@ export class ChatServer {
         for (const dup of duplicates) {
           try {
             const rBucket = this._storageCache?.roomsData?.[dup.room];
+            const seatData = rBucket?.seat?.[dup.seat];
+            if (seatData?.isMulti === true) continue;
             if (rBucket?.seat) delete rBucket.seat[dup.seat];
             if (rBucket?.point) delete rBucket.point[dup.seat];
 
@@ -2918,10 +2972,6 @@ export class ChatServer {
                   .bind(`seat_${dup.room}_${dup.seat}`, `point_${dup.room}_${dup.seat}`)
                   .run();
               } catch(e) {}
-            }
-
-            if (!this._isRestoring) {
-              this.broadcast(dup.room, ["removeKursi", dup.room, dup.seat]);
             }
           } catch(e) {}
         }
@@ -3061,7 +3111,15 @@ export class ChatServer {
       }
 
       if (finalRoom && finalSeat) {
-        this._setUserIndex(attachment.username, finalRoom, finalSeat, false);
+        const foundInfo = await this._findUserInAnyRoom(attachment.username);
+        const isMultiUser = foundInfo?.isMulti === true;
+        this._setUserIndex(attachment.username, finalRoom, finalSeat, isMultiUser);
+
+        if (isMultiUser) {
+          try {
+            this.wsActiveMulti?.set(ws, { username: attachment.username, room: finalRoom });
+          } catch(e) {}
+        }
       }
 
       try {
@@ -3094,7 +3152,11 @@ export class ChatServer {
           const found = await this._findUserInAnyRoom(username);
           const isMultiUser = found ? found.isMulti : false;
 
-          if (isMultiUser && isNewUser === false) {
+          if (isMultiUser) {
+            return { skip: true };
+          }
+
+          if (this._isRestoring) {
             return { skip: true };
           }
 
@@ -3880,7 +3942,7 @@ export class ChatServer {
             if (!roomBucket?.seat) continue;
             for (const [seat, data] of Object.entries(roomBucket.seat)) {
               const username = data?.namauser;
-              if (!username) continue;
+              if (!username || String(username).trim() === '') continue;
 
               const prev = userMap.get(username);
               if (!prev || (data.isMulti === true && prev.isMulti !== true)) {
@@ -3925,14 +3987,14 @@ export class ChatServer {
           const counts = {};
           for (const room of ROOMS) {
             const roomBucket = this._storageCache?.roomsData?.[room];
-            const seen = new Set();
+            let count = 0;
             if (roomBucket?.seat) {
               for (const seat in roomBucket.seat) {
                 const uname = roomBucket.seat[seat]?.namauser;
-                if (uname) seen.add(uname);
+                if (uname && String(uname).trim() !== '') count++;
               }
             }
-            counts[room] = seen.size;
+            counts[room] = count;
           }
 
           const entries = Object.entries(counts);
