@@ -17,7 +17,7 @@ const C = {
   MAX_RESTORE_ATTEMPTS: 2,
   RESTORE_RETRY_DELAY_MS: 1500,
   MULTY_MIN_MS: 10 * 1000,
-  MULTY_MAX_MS: 30 * 1000,
+  MULTY_MAX_MS: 60 * 1000,
   MAX_MULTY_NUMBER: 9999,
   HISTORY_LIMIT: 100,
   HISTORY_MAX_AGE_MS: 3 * 60 * 60 * 1000,
@@ -942,6 +942,10 @@ export class ChatServer {
     }
   }
 
+  // ============================================================
+  // ✅ PERBAIKAN: _nextMultyChat — guard stop timer kalau index
+  //    melebihi / sama dengan panjang chatList.
+  // ============================================================
   async _nextMultyChat(room) {
     const r = room || DEFAULT_MULTY_ROOM;
     const st = this._getMultyState(r);
@@ -953,13 +957,15 @@ export class ChatServer {
         return false;
       }
 
-      if (st.index >= st.chatList.length) {
+      // ✅ GUARD BARU: kalau index sudah lewat / sama dengan panjang chat → STOP TOTAL
+      //    Jangan lanjut, stop timer, reset index, broadcast stop.
+      if (!Array.isArray(st.chatList) || st.chatList.length === 0 || st.index >= st.chatList.length) {
         st.running = false;
         st.index = 0;
         this._stopMultyLoop(r);
         this._saveMultyRunningToTable(r, false).catch(() => {});
-        this.broadcast(r, ["multyStop", r]);
         this._saveMultyIndexToTable(r, 0).catch(() => {});
+        this.broadcast(r, ["multyStop", r]);
         return false;
       }
 
@@ -1011,13 +1017,14 @@ export class ChatServer {
 
       this._saveMultyIndexToTable(r, st.index).catch(() => {});
 
+      // ✅ Guard kedua: setelah increment, kalau sudah habis → stop total
       if (st.index >= st.chatList.length) {
         st.running = false;
         st.index = 0;
         this._stopMultyLoop(r);
         this._saveMultyRunningToTable(r, false).catch(() => {});
-        this.broadcast(r, ["multyStop", r]);
         this._saveMultyIndexToTable(r, 0).catch(() => {});
+        this.broadcast(r, ["multyStop", r]);
         return false;
       }
 
@@ -3355,9 +3362,11 @@ export class ChatServer {
 
             const st = this._getMultyState(stopRoom);
             st.running = false;
+            st.index = 0;
             this._stopMultyLoop(stopRoom);
 
             this._saveMultyRunningToTable(stopRoom, false).catch(() => {});
+            this._saveMultyIndexToTable(stopRoom, 0).catch(() => {});
 
             this.broadcast(stopRoom, ["multyStop", stopRoom]);
             this.safeSend(ws, ["multyStatus", false, st.index, st.chatList.length, stopRoom]);
@@ -3446,7 +3455,6 @@ export class ChatServer {
             const st = this._getMultyState(room);
             st.chatList = valid;
             st.index = 0;
-            if (st.running) st.index = 0;
             this._saveMultyIndexToTable(room, 0).catch(() => {});
 
             this.safeSend(ws, ["multyChatReloaded", valid.length, room]);
