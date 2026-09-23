@@ -17,7 +17,7 @@ const C = {
   MAX_RESTORE_ATTEMPTS: 2,
   RESTORE_RETRY_DELAY_MS: 1500,
   MULTY_MIN_MS: 10 * 1000,
-  MULTY_MAX_MS: 30 * 1000,
+  MULTY_MAX_MS: 60 * 1000,
   MAX_MULTY_NUMBER: 9999,
   HISTORY_LIMIT: 100,
   HISTORY_MAX_AGE_MS: 3 * 60 * 60 * 1000,
@@ -270,12 +270,16 @@ export class ChatServer {
     try { this._userIndex.delete(username); } catch(e) {}
   }
 
+  // ============================================================
+  // NOIMG CACHE — key PERSIS sesuai inputan
+  // ============================================================
+
   async _saveUserNoimgCache() {
     try {
       if (!this.db) return false;
       const obj = {};
       for (const [username, noimg] of this._userNoimgCache) {
-        obj[username] = noimg;
+        obj[username] = noimg; // key PERSIS
       }
       await this.db.prepare(`
         INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
@@ -305,7 +309,7 @@ export class ChatServer {
       for (const [username, noimg] of Object.entries(obj)) {
         const n = parseInt(noimg);
         if (!isNaN(n) && n > 0) {
-          this._userNoimgCache.set(username, n);
+          this._userNoimgCache.set(username, n); // key PERSIS
         }
       }
       return true;
@@ -317,11 +321,12 @@ export class ChatServer {
   async _setUserNoimgCache(username, noimg) {
     if (!username) return;
     try {
+      const key = String(username); // PERSIS
       const n = parseInt(noimg);
       if (!isNaN(n) && n > 0) {
-        this._userNoimgCache.set(username, n);
+        this._userNoimgCache.set(key, n);
       } else {
-        this._userNoimgCache.delete(username);
+        this._userNoimgCache.delete(key);
       }
       this._saveUserNoimgCache().catch(() => {});
     } catch(e) {}
@@ -330,7 +335,7 @@ export class ChatServer {
   async _deleteUserNoimgCache(username) {
     if (!username) return;
     try {
-      if (this._userNoimgCache.delete(username)) {
+      if (this._userNoimgCache.delete(String(username))) {
         this._saveUserNoimgCache().catch(() => {});
       }
     } catch(e) {}
@@ -942,6 +947,9 @@ export class ChatServer {
     }
   }
 
+  // ============================================================
+  // NEXT MULTY CHAT — lookup cache nama → noimg, fallback 10000
+  // ============================================================
   async _nextMultyChat(room) {
     const r = room || DEFAULT_MULTY_ROOM;
     const st = this._getMultyState(r);
@@ -975,9 +983,10 @@ export class ChatServer {
       const chatColor = chat.color || "7";
       const chatTextColor = chat.textColor || "1";
 
-      let chatNoimg = 10000;
+      // === AMBIL DARI CACHE (hasil join multy), key PERSIS ===
+      let chatNoimg = 10000; // fallback
       try {
-        const cached = this._userNoimgCache?.get(username);
+        const cached = this._userNoimgCache?.get(String(username)); // PERSIS
         if (cached && cached > 0) {
           chatNoimg = cached;
         }
@@ -1988,14 +1997,17 @@ export class ChatServer {
     }
   }
 
-  async _handleMultiJoin(ws, multiUsername, multiRoomname) {
+  // ============================================================
+  // JOIN MULTY — terima noimg dari client, simpan cache nama
+  // ============================================================
+  async _handleMultiJoin(ws, multiUsername, multiRoomname, multiNoimg = null) {
     try {
       if (!multiUsername || !multiRoomname || !ROOMS_SET.has(multiRoomname)) return false;
 
       const result = await this._withLock(
         this._userJoinLock,
         `join_user_${multiUsername}`,
-        () => this._handleMultiJoinInternal(ws, multiUsername, multiRoomname),
+        () => this._handleMultiJoinInternal(ws, multiUsername, multiRoomname, multiNoimg),
         C.USER_JOIN_LOCK_TIMEOUT
       );
 
@@ -2009,7 +2021,7 @@ export class ChatServer {
     }
   }
 
-  async _handleMultiJoinInternal(ws, multiUsername, multiRoomname) {
+  async _handleMultiJoinInternal(ws, multiUsername, multiRoomname, multiNoimg = null) {
     try {
       await this._ensureCacheInitialized();
 
@@ -2033,6 +2045,13 @@ export class ChatServer {
         }
       }
 
+      // noimg final: prioritas dari client join multy, fallback dari seat lama
+      let finalNoimg = 0;
+      {
+        const n1 = parseInt(multiNoimg);
+        if (!isNaN(n1) && n1 > 0) finalNoimg = n1;
+      }
+
       if (!seat) {
         const seatCount = Object.values(roomBucket.seat).filter(s => s?.namauser).length;
         if (seatCount >= C.MAX_SEATS) return false;
@@ -2046,7 +2065,7 @@ export class ChatServer {
         if (!seat) return false;
 
         const newSeat = {
-          noimageUrl: "",
+          noimageUrl: finalNoimg > 0 ? String(finalNoimg) : "",
           namauser: multiUsername,
           color: "",
           itembawah: 0,
@@ -2056,17 +2075,28 @@ export class ChatServer {
           isMulti: true
         };
         await this._updateSeatInRoom(multiRoomname, seat, newSeat);
+      } else {
+        const currentSeat = roomBucket.seat[seat];
+        if (finalNoimg > 0) {
+          if (currentSeat && String(currentSeat.noimageUrl) !== String(finalNoimg)) {
+            const updatedSeat = {
+              ...currentSeat,
+              noimageUrl: String(finalNoimg),
+              isMulti: true
+            };
+            await this._updateSeatInRoom(multiRoomname, seat, updatedSeat);
+          }
+        } else {
+          const n2 = parseInt(currentSeat?.noimageUrl);
+          if (!isNaN(n2) && n2 > 0) finalNoimg = n2;
+        }
       }
 
-      try {
-        const currentSeat = roomBucket.seat?.[seat];
-        if (currentSeat?.namauser === multiUsername) {
-          const noimg = parseInt(currentSeat.noimageUrl);
-          if (!isNaN(noimg) && noimg > 0) {
-            await this._setUserNoimgCache(multiUsername, noimg);
-          }
-        }
-      } catch(e) {}
+      // === SIMPAN CACHE NAMA → NOIMG SAAT JOIN MULTY ===
+      if (multiUsername && finalNoimg > 0) {
+        this._userNoimgCache.set(String(multiUsername), finalNoimg); // key PERSIS
+        this._saveUserNoimgCache().catch(() => {});
+      }
 
       try {
         const st = this._getMultyState(multiRoomname);
@@ -2774,6 +2804,7 @@ export class ChatServer {
         this._multyRestored = false;
       }
 
+      // === LOAD NOIMG CACHE (hasil join multy) ===
       try {
         const loaded = await this._loadUserNoimgCache();
         if (!loaded) {
@@ -3558,26 +3589,37 @@ export class ChatServer {
           break;
         }
 
+        // ============================================================
+        // MULTI JOIN — args: [username, room, noimg]
+        // ============================================================
         case "multiJoin": {
           const multiUsername = args[0];
           const multiRoomname = args[1];
+          const multiNoimg = args[2]; // ← noimageUrl dari client
+
           if (!multiUsername || !multiRoomname) break;
-          const result = await this._handleMultiJoin(ws, multiUsername, multiRoomname);
+
+          const result = await this._handleMultiJoin(ws, multiUsername, multiRoomname, multiNoimg);
           if (!result) break;
+
           const { room, seat } = result;
+
           let connections = this.userConnections?.get(multiUsername);
           if (!connections) connections = new Set();
           if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
           try { this.userConnections?.set(multiUsername, connections); } catch(e) {}
+
           try {
             ws.serializeAttachment({
               username: multiUsername,
               seatInfo: { room: room, seat: seat }
             });
           } catch(e) {}
+
           ws._username = multiUsername;
           ws._room = room;
           try { this.wsActiveMulti?.set(ws, { username: multiUsername, room: room }); } catch(e) {}
+
           for (const [otherRoom, clients] of (this.roomClients || new Map())) {
             if (otherRoom !== room && clients) {
               try { clients.delete(ws); } catch(e) {}
@@ -3585,6 +3627,7 @@ export class ChatServer {
           }
           const roomClients = this.roomClients?.get(room);
           if (roomClients && !roomClients.has(ws)) try { roomClients.add(ws); } catch(e) {}
+
           this.safeSend(ws, ["rooMasukMulti", seat, room]);
           await this.updateRoomCount(room);
           break;
@@ -3614,7 +3657,7 @@ export class ChatServer {
           let found = allSeats.find(s => s.isMulti === true) || allSeats[0] || null;
 
           if (!found) {
-            const joined = await this._handleMultiJoin(ws, targetUsername, DEFAULT_MULTY_ROOM);
+            const joined = await this._handleMultiJoin(ws, targetUsername, DEFAULT_MULTY_ROOM, null);
             if (!joined) break;
             found = { room: joined.room, seat: joined.seat, isMulti: true };
           }
@@ -3731,6 +3774,14 @@ export class ChatServer {
                 const result = await this._updateKursi(kursiRoom, kursiSeat, updateData);
                 if (result.success) {
                   this.broadcast(kursiRoom, ["kursiBatchUpdate", kursiRoom, [[kursiSeat, result.data]]]);
+
+                  // user multy → update cache noimg
+                  if (result.data?.isMulti === true) {
+                    const n = parseInt(kursiNoimg);
+                    if (!isNaN(n) && n > 0) {
+                      this._setUserNoimgCache(result.data.namauser, n).catch(() => {});
+                    }
+                  }
                 }
                 return result;
               },
