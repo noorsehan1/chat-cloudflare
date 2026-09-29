@@ -3413,6 +3413,9 @@ export class ChatServer {
           await this._handleJoin(ws, args[0]);
           break;
 
+        // ============================================================
+        // ✅ startMulty — DIUBAH: lanjutkan dari index terakhir
+        // ============================================================
         case "startMulty": {
           try {
             const startRoom = args[0] || DEFAULT_MULTY_ROOM;
@@ -3428,6 +3431,22 @@ export class ChatServer {
               break;
             }
 
+            // ✅ Kalau state sudah punya chatList & index valid → LANJUTKAN dari posisi terakhir
+            if (Array.isArray(st.chatList) && st.chatList.length > 0
+                && typeof st.index === 'number' && st.index >= 0 && st.index < st.chatList.length) {
+
+              st.running = true;
+              this._saveMultyRunningToTable(startRoom, true).catch(() => {});
+
+              this.safeSend(ws, ["multyStatus", true, st.index, st.chatList.length, startRoom]);
+              this.safeSend(ws, ["multyNumber", st.numberNext, startRoom]);
+              this.safeSend(ws, ["multyRoom", startRoom]);
+
+              this._startMultyLoop(startRoom);
+              break;
+            }
+
+            // Fallback: load dari DB (kalau state kosong / sudah habis)
             const { chatList, numberNext, index } = await this._loadMultyFromTable(startRoom);
             if (!Array.isArray(chatList) || chatList.length === 0) {
               this.safeSend(ws, ["error", `Multy chat kosong untuk room ${startRoom}`]);
@@ -3454,6 +3473,9 @@ export class ChatServer {
           break;
         }
 
+        // ============================================================
+        // ✅ stopMulty — DIUBAH: jangan reset index, simpan posisi terakhir
+        // ============================================================
         case "stopMulty": {
           try {
             const stopRoom = args[0] || DEFAULT_MULTY_ROOM;
@@ -3464,11 +3486,12 @@ export class ChatServer {
 
             const st = this._getMultyState(stopRoom);
             st.running = false;
-            st.index = 0;
+            // ✅ JANGAN reset index — simpan posisi terakhir
             this._stopMultyLoop(stopRoom);
 
             this._saveMultyRunningToTable(stopRoom, false).catch(() => {});
-            this._saveMultyIndexToTable(stopRoom, 0).catch(() => {});
+            // ✅ Simpan index saat ini, bukan 0
+            this._saveMultyIndexToTable(stopRoom, st.index).catch(() => {});
 
             this.broadcast(stopRoom, ["multyStop", stopRoom]);
             this.safeSend(ws, ["multyStatus", false, st.index, st.chatList.length, stopRoom]);
