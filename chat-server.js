@@ -1506,6 +1506,9 @@ export class ChatServer {
     );
   }
 
+  // ============================================================
+  // UPDATE SEAT — dengan updateRoomCount setelah seat berubah
+  // ============================================================
   async _updateSeatInRoom(roomName, seatNumber, seatData) {
     return await this._withLock(
       this._roomWriteLocks,
@@ -1515,6 +1518,7 @@ export class ChatServer {
           const roomBucket = await this._getRoomBucket(roomName);
           if (!roomBucket) return false;
 
+          // === KOSONGKAN SEAT ===
           if (!seatData || !seatData.namauser || seatData.namauser.trim() === '') {
             const oldSeat = roomBucket.seat?.[seatNumber];
             const oldUser = oldSeat?.namauser;
@@ -1531,11 +1535,18 @@ export class ChatServer {
                 this._deleteUserNoimgCache(oldUser).catch(() => {});
               }
             }
+
+            // ✅ UPDATE ROOM COUNT setelah kosongkan seat
+            if (!this._isRestoring) {
+              try { await this.updateRoomCount(roomName); } catch(e) {}
+            }
+
             return true;
           }
 
           const username = seatData.namauser;
 
+          // === HAPUS USER DARI ROOM LAIN (pindah room) ===
           await this._ensureCacheInitialized();
           const roomsData = this._storageCache?.roomsData || {};
 
@@ -1569,6 +1580,7 @@ export class ChatServer {
             }
           }
 
+          // === SET SEAT BARU ===
           const oldSeat = roomBucket.seat?.[seatNumber];
           const finalSeatData = { ...seatData };
           if (oldSeat?.isMulti === true && finalSeatData.isMulti !== true) {
@@ -1586,6 +1598,11 @@ export class ChatServer {
             if (!isNaN(noimg) && noimg > 0) {
               await this._setUserNoimgCache(finalSeatData.namauser, noimg);
             }
+          }
+
+          // ✅ UPDATE ROOM COUNT setelah set seat baru
+          if (!this._isRestoring) {
+            try { await this.updateRoomCount(roomName); } catch(e) {}
           }
 
           return true;
@@ -2158,9 +2175,6 @@ export class ChatServer {
     }
   }
 
-  // ============================================================
-  // ✅ MULTI JOIN 2 — TANPA HAPUS SEAT LAMA
-  // ============================================================
   async _handleMultiJoin2(ws, multiUsername, multiRoomname) {
     try {
       if (!multiUsername || !multiRoomname || !ROOMS_SET.has(multiRoomname)) return false;
@@ -2179,8 +2193,6 @@ export class ChatServer {
   async _handleMultiJoin2Internal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
-
-      // ❌ TIDAK ada _removeAllSeatsForUser — seat lama tetap aman
 
       let roomBucket = this._storageCache?.roomsData?.[multiRoomname];
       if (!roomBucket) {
@@ -3704,16 +3716,13 @@ export class ChatServer {
 
           const { room, seat } = result2;
 
-          // === Set wsActiveMulti (LANGSUNG set active multi2) ===
           try { this.wsActiveMulti?.set(ws, { username: multiUsername2, room: room }); } catch(e) {}
 
-          // === userConnections ===
           let connections = this.userConnections?.get(multiUsername2);
           if (!connections) connections = new Set();
           if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
           try { this.userConnections?.set(multiUsername2, connections); } catch(e) {}
 
-          // === serializeAttachment ===
           try {
             ws.serializeAttachment({
               username: multiUsername2,
@@ -3721,7 +3730,6 @@ export class ChatServer {
             });
           } catch(e) {}
 
-          // === Set identity WS ===
           ws.username = multiUsername2;
           ws.idtarget = multiUsername2;
           ws.room = room;
@@ -3729,7 +3737,6 @@ export class ChatServer {
           ws._username = multiUsername2;
           ws._room = room;
 
-          // === Pindah roomClients ===
           for (const [otherRoom, clients] of (this.roomClients || new Map())) {
             if (otherRoom !== room && clients) {
               try { clients.delete(ws); } catch(e) {}
@@ -3738,10 +3745,8 @@ export class ChatServer {
           const roomClients = this.roomClients?.get(room);
           if (roomClients && !roomClients.has(ws)) try { roomClients.add(ws); } catch(e) {}
 
-          // === Pastikan wsSet ===
           if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
 
-          // === Kirim balasan ===
           this.safeSend(ws, ["rooMasukMulti2", seat, room]);
           await this.updateRoomCount(room);
           break;
