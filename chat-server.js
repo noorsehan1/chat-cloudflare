@@ -1,7 +1,7 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.4.1
+// VERSION: 4.4.2
 
- const C = {
+const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 500000,
@@ -27,7 +27,7 @@
   MAX_MULTY_NUMBER: 9999,
   HISTORY_LIMIT: 100,
   HISTORY_MAX_AGE_MS: 3 * 60 * 60 * 1000,
-  ORPHAN_CLEANUP_GRACE_MS: 60000, // ✅ grace period 60 detik
+  ORPHAN_CLEANUP_GRACE_MS: 60000,
 };
 
 const ROOMS = [
@@ -218,8 +218,68 @@ export class ChatServer {
   }
 
   // ============================================================
-  // HELPER: kelola multiUsers di attachment WS
+  // ✅ FIX: Helper sinkronisasi wsActiveMulti + roomClients saat pindah room
   // ============================================================
+  _syncMultiRoom(ws, newRoom) {
+    try {
+      if (!ws) return;
+      const targetRoom = newRoom || null;
+
+      // 1. Update wsActiveMulti
+      if (this.wsActiveMulti?.has(ws)) {
+        const info = this.wsActiveMulti.get(ws);
+        if (info) {
+          const oldRoom = info.room;
+          if (oldRoom && oldRoom !== targetRoom) {
+            // Hapus WS dari roomClients room lama
+            const oldClients = this.roomClients?.get(oldRoom);
+            if (oldClients) try { oldClients.delete(ws); } catch(e) {}
+          }
+          // Update room di wsActiveMulti
+          this.wsActiveMulti.set(ws, { username: info.username, room: targetRoom });
+        }
+      }
+
+      // 2. Update roomClients
+      if (targetRoom) {
+        // Hapus dari semua room lain
+        for (const [rName, clients] of (this.roomClients || new Map())) {
+          if (rName !== targetRoom && clients) {
+            try { clients.delete(ws); } catch(e) {}
+          }
+        }
+        // Tambah ke room target
+        let newClients = this.roomClients?.get(targetRoom);
+        if (!newClients) {
+          newClients = new Set();
+          this.roomClients?.set(targetRoom, newClients);
+        }
+        if (!newClients.has(ws)) try { newClients.add(ws); } catch(e) {}
+      } else {
+        // Kalau targetRoom null → hapus WS dari semua roomClients
+        for (const [, clients] of (this.roomClients || new Map())) {
+          if (clients) try { clients.delete(ws); } catch(e) {}
+        }
+      }
+
+      // 3. Update ws.room, ws.roomname, ws._room
+      ws.room = targetRoom;
+      ws.roomname = targetRoom;
+      ws._room = targetRoom;
+
+      // 4. Update attachment
+      try {
+        const att = this._getAttachment(ws);
+        if (targetRoom) {
+          att.room = targetRoom;
+        } else {
+          att.room = null;
+        }
+        this._setAttachment(ws, att);
+      } catch(e) {}
+    } catch(e) {}
+  }
+
   _getAttachment(ws) {
     try {
       return ws?.deserializeAttachment?.() || {};
@@ -2040,6 +2100,9 @@ export class ChatServer {
           try { this.wsActiveMulti.set(ws, { username, room: roomName }); } catch(e) {}
         }
 
+        // ✅ FIX: sinkronkan room
+        this._syncMultiRoom(ws, roomName);
+
         this.safeSend(ws, ["rooMasuk", existing.seat, roomName]);
         this.safeSend(ws, ["numberKursiSaya", existing.seat]);
         this.safeSend(ws, ["currentNumber", this.currentNumber]);
@@ -2135,15 +2198,8 @@ export class ChatServer {
         try { this.wsActiveMulti.set(ws, { username, room: roomName }); } catch(e) {}
       }
 
-      for (const [otherRoom, clients] of this.roomClients) {
-        if (otherRoom !== roomName && clients) {
-          try { clients.delete(ws); } catch(e) {}
-        }
-      }
-      const roomClients = this.roomClients.get(roomName);
-      if (roomClients && !roomClients.has(ws)) {
-        try { roomClients.add(ws); } catch(e) {}
-      }
+      // ✅ FIX: sinkronkan room
+      this._syncMultiRoom(ws, roomName);
 
       const muteStatus = roomBucket.mute || false;
 
@@ -3405,6 +3461,9 @@ export class ChatServer {
         att2.seatInfo = { room: finalRoom, seat: finalSeat };
         this._setAttachment(ws, att2);
       } catch(e) {}
+
+      // ✅ FIX: sinkronkan room setelah restore
+      this._syncMultiRoom(ws, finalRoom);
     } catch(e) {}
   }
 
@@ -3914,13 +3973,8 @@ export class ChatServer {
           ws._username = multiUsername;
           ws._room = room;
           try { this.wsActiveMulti?.set(ws, { username: multiUsername, room: room }); } catch(e) {}
-          for (const [otherRoom, clients] of (this.roomClients || new Map())) {
-            if (otherRoom !== room && clients) {
-              try { clients.delete(ws); } catch(e) {}
-            }
-          }
-          const roomClients = this.roomClients?.get(room);
-          if (roomClients && !roomClients.has(ws)) try { roomClients.add(ws); } catch(e) {}
+          // ✅ FIX: sinkronkan room
+          this._syncMultiRoom(ws, room);
           this.safeSend(ws, ["rooMasukMulti", seat, room]);
           await this.updateRoomCount(room);
           break;
@@ -3956,15 +4010,10 @@ export class ChatServer {
             this._setAttachment(ws, att2);
           } catch(e) {}
 
-          for (const [otherRoom, clients] of (this.roomClients || new Map())) {
-            if (otherRoom !== room && clients) {
-              try { clients.delete(ws); } catch(e) {}
-            }
-          }
-          const roomClients = this.roomClients?.get(room);
-          if (roomClients && !roomClients.has(ws)) try { roomClients.add(ws); } catch(e) {}
-
           if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
+
+          // ✅ FIX: sinkronkan room
+          this._syncMultiRoom(ws, room);
 
           this.safeSend(ws, ["rooMasukMulti2", seat, room]);
           await this.updateRoomCount(room);
@@ -4002,12 +4051,16 @@ export class ChatServer {
                   ws.idtarget = next;
                   att2.seatInfo = { room: nf.room, seat: nf.seat };
                   this.wsActiveMulti.set(ws, { username: next, room: nf.room });
+                  // ✅ FIX: sinkronkan room
+                  this._syncMultiRoom(ws, nf.room);
                 }
               } else {
                 this.wsActiveMulti.delete(ws);
                 ws.username = null;
                 ws._username = null;
                 att2.seatInfo = null;
+                // ✅ FIX: hapus WS dari semua room
+                this._syncMultiRoom(ws, null);
               }
             }
             this._setAttachment(ws, att2);
@@ -4046,12 +4099,16 @@ export class ChatServer {
                   ws.idtarget = next;
                   att2.seatInfo = { room: nf.room, seat: nf.seat };
                   this.wsActiveMulti.set(ws, { username: next, room: nf.room });
+                  // ✅ FIX: sinkronkan room
+                  this._syncMultiRoom(ws, nf.room);
                 }
               } else {
                 this.wsActiveMulti.delete(ws);
                 ws.username = null;
                 ws._username = null;
                 att2.seatInfo = null;
+                // ✅ FIX: hapus WS dari semua room
+                this._syncMultiRoom(ws, null);
               }
             }
             this._setAttachment(ws, att2);
@@ -4082,7 +4139,6 @@ export class ChatServer {
           // ✅ Validasi 3: WS harus berada di room yang sama dengan target
           const wsRoom = ws.room || ws.roomname || ws._room;
           if (!wsRoom || wsRoom !== roomName) {
-            // WS tidak berada di room target → tolak
             this.safeSend(ws, ["error", "Not in target room"]);
             break;
           }
@@ -4101,11 +4157,9 @@ export class ChatServer {
           }
           if (!targetInRoom) break;
 
-          // ✅ Validasi 5 (opsional): WS harus terdaftar sebagai koneksi targetUsername
-          //    Ini mencegah user lain memalsukan targetUsername
+          // ✅ Validasi 5: WS harus terdaftar sebagai koneksi targetUsername
           const targetConns = this.userConnections?.get(targetUsername);
           if (!targetConns || !targetConns.has(ws)) {
-            // Kalau WS bukan koneksi target, tapi wsOwner === targetUsername, izinkan
             if (wsOwner !== targetUsername) {
               this.safeSend(ws, ["error", "Unauthorized"]);
               break;
@@ -4124,21 +4178,12 @@ export class ChatServer {
           // ✅ Set wsActiveMulti HANYA untuk room ini
           try { this.wsActiveMulti?.set(ws, { username: targetUsername, room: roomName }); } catch(e) {}
 
-          // ✅ Pastikan WS hanya terdaftar di room ini (hapus dari room lain)
-          for (const [otherRoom, clients] of (this.roomClients || new Map())) {
-            if (otherRoom !== roomName && clients) {
-              try { clients.delete(ws); } catch(e) {}
-            }
-          }
-          const roomClients = this.roomClients?.get(roomName);
-          if (roomClients && !roomClients.has(ws)) try { roomClients.add(ws); } catch(e) {}
+          // ✅ FIX: sinkronkan room (hapus dari room lain, tambah ke room ini)
+          this._syncMultiRoom(ws, roomName);
 
           ws.username = targetUsername;
           ws.idtarget = targetUsername;
-          ws.room = roomName;
-          ws.roomname = roomName;
           ws._username = targetUsername;
-          ws._room = roomName;
 
           this._addMultiUserToAttachment(ws, targetUsername);
           try {
