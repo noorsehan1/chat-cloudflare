@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.4.0
+// VERSION: 4.4.1
 
  const C = {
   MAX_SEATS: 45,
@@ -1267,8 +1267,6 @@ export class ChatServer {
       let currentNumber = 1;
       const results = result?.results || [];
 
-      // ✅ userSeatMap hanya untuk tracking prioritas (multi > non-multi),
-      //    TIDAK untuk skip seat. Semua seat dimasukkan ke roomsData.
       const userSeatMap = new Map();
 
       for (const row of results) {
@@ -1313,10 +1311,8 @@ export class ChatServer {
               const uname = value.namauser;
               const isMulti = value.isMulti === true;
 
-              // ✅ Masukkan SEMUA seat, jangan skip seat kedua
               roomsData[roomName].seat[seatNumber] = value;
 
-              // track prioritas multi untuk _userIndex (multi > non-multi)
               const prev = userSeatMap.get(uname);
               if (!prev || (isMulti && !prev.isMulti)) {
                 userSeatMap.set(uname, {
@@ -2051,7 +2047,6 @@ export class ChatServer {
         return true;
       }
 
-      // PINDAH ROOM → hapus SEMUA seat (non-multi & multi) di room lama
       if (existing) {
         const oldRoom = existing.room;
 
@@ -2944,17 +2939,13 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ DIPERBAIKI: grace period + skip kalau liveWsList kosong
   async _verifyAndCleanupOrphanSeats(liveWsList) {
     try {
       if (this._isRestoring) return 0;
 
-      // ✅ 1. Jangan bersihkan kalau baru start (< grace period)
       const elapsed = Date.now() - this._startTime;
       if (elapsed < C.ORPHAN_CLEANUP_GRACE_MS) return 0;
 
-      // ✅ 2. Jangan bersihkan kalau tidak ada WS hidup sama sekali
-      //       (mungkin client belum reconnect / isolate baru hidup)
       const hasLiveWs = Array.isArray(liveWsList) && liveWsList.length > 0;
       if (!hasLiveWs) return 0;
 
@@ -3180,7 +3171,6 @@ export class ChatServer {
 
       this._rebuildUserIndex();
 
-      // ✅ Hitung ulang jumlah kursi per room & broadcast ke client
       for (const room of ROOMS) {
         try {
           const count = await this._getRoomCount(room);
@@ -3219,7 +3209,6 @@ export class ChatServer {
       this._restoreRemovedSeats = [];
       this._hasBroadcastRemoveKursi = new Set();
 
-      // ✅ tetap broadcast count walau restore gagal
       for (const room of ROOMS) {
         try {
           const count = await this._getRoomCount(room);
@@ -4070,22 +4059,60 @@ export class ChatServer {
           break;
         }
 
+        // ✅ DIPERBAIKI: setActiveMulti HANYA menerima update di room itu sendiri
         case "setActiveMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
 
-          const allSeats = await this._findAllSeatsForUser(targetUsername);
-          let found = allSeats.find(s => s.isMulti === true) || allSeats[0] || null;
+          // ✅ Validasi 1: WS harus punya identitas
+          const wsOwner = ws.username || ws._username;
+          if (!wsOwner) break;
 
-          if (!found) {
-            const joined = await this._handleMultiJoin(ws, targetUsername, DEFAULT_MULTY_ROOM);
-            if (!joined) break;
-            found = { room: joined.room, seat: joined.seat, isMulti: true };
-          }
+          // ✅ Validasi 2: Cari seat user target
+          const allSeats = await this._findAllSeatsForUser(targetUsername);
+          if (!allSeats || allSeats.length === 0) break;
+
+          const multiSeat = allSeats.find(s => s.isMulti === true);
+          const found = multiSeat || allSeats[0];
+          if (!found) break;
 
           const roomName = found.room;
           const seatNumber = found.seat;
 
+          // ✅ Validasi 3: WS harus berada di room yang sama dengan target
+          const wsRoom = ws.room || ws.roomname || ws._room;
+          if (!wsRoom || wsRoom !== roomName) {
+            // WS tidak berada di room target → tolak
+            this.safeSend(ws, ["error", "Not in target room"]);
+            break;
+          }
+
+          // ✅ Validasi 4: targetUsername harus terdaftar di room tsb
+          await this._ensureCacheInitialized();
+          const roomBucket = this._storageCache?.roomsData?.[roomName];
+          if (!roomBucket?.seat) break;
+
+          let targetInRoom = false;
+          for (const seatData of Object.values(roomBucket.seat)) {
+            if (seatData?.namauser === targetUsername) {
+              targetInRoom = true;
+              break;
+            }
+          }
+          if (!targetInRoom) break;
+
+          // ✅ Validasi 5 (opsional): WS harus terdaftar sebagai koneksi targetUsername
+          //    Ini mencegah user lain memalsukan targetUsername
+          const targetConns = this.userConnections?.get(targetUsername);
+          if (!targetConns || !targetConns.has(ws)) {
+            // Kalau WS bukan koneksi target, tapi wsOwner === targetUsername, izinkan
+            if (wsOwner !== targetUsername) {
+              this.safeSend(ws, ["error", "Unauthorized"]);
+              break;
+            }
+          }
+
+          // ✅ Hapus seat duplikat (jika ada) — HANYA di room yang sama
           if (allSeats.length > 1) {
             await this._lightDeleteAllSeatsForUser(targetUsername, {
               keepRoom: roomName,
@@ -4094,7 +4121,10 @@ export class ChatServer {
             });
           }
 
+          // ✅ Set wsActiveMulti HANYA untuk room ini
           try { this.wsActiveMulti?.set(ws, { username: targetUsername, room: roomName }); } catch(e) {}
+
+          // ✅ Pastikan WS hanya terdaftar di room ini (hapus dari room lain)
           for (const [otherRoom, clients] of (this.roomClients || new Map())) {
             if (otherRoom !== roomName && clients) {
               try { clients.delete(ws); } catch(e) {}
@@ -4102,6 +4132,7 @@ export class ChatServer {
           }
           const roomClients = this.roomClients?.get(roomName);
           if (roomClients && !roomClients.has(ws)) try { roomClients.add(ws); } catch(e) {}
+
           ws.username = targetUsername;
           ws.idtarget = targetUsername;
           ws.room = roomName;
@@ -4675,7 +4706,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ DIPERBAIKI: tidak hapus seat non-multi & point dari D1
   async destroy() {
     if (this.isDestroyed) return;
     this.closing = true;
@@ -4697,9 +4727,6 @@ export class ChatServer {
         }
       }
     }
-
-    // ✅ TIDAK hapus seat non-multi & point dari D1.
-    //    Biarkan _verifyAndCleanupOrphanSeats yang bersihkan (dengan grace period).
 
     if (this.userConnections) {
       for (const [username, conns] of this.userConnections) {
