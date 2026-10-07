@@ -1,7 +1,7 @@
 // ==================== CHAT-SERVER.JS ====================
 // VERSION: 4.5.0
 
-const C = {
+ const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 500000,
