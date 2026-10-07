@@ -1,7 +1,7 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.4.0
+// VERSION: 4.5.0
 
- const C = {
+const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 500000,
@@ -27,7 +27,7 @@
   MAX_MULTY_NUMBER: 9999,
   HISTORY_LIMIT: 100,
   HISTORY_MAX_AGE_MS: 3 * 60 * 60 * 1000,
-  ORPHAN_CLEANUP_GRACE_MS: 60000, // ✅ grace period 60 detik
+  ORPHAN_CLEANUP_GRACE_MS: 60000,
 };
 
 const ROOMS = [
@@ -1367,7 +1367,8 @@ export class ChatServer {
   async _savePoint(roomName, seatNumber, pointData) {
     if (!this.db) return;
     const key = `point_${roomName}_${seatNumber}`;
-    if (!pointData || (pointData.x === 0 && pointData.y === 0 && !pointData.fast)) {
+    // ✅ FIX: hapus hanya kalau pointData benar-benar null/undefined
+    if (pointData === null || pointData === undefined) {
       await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
       return;
     }
@@ -1401,6 +1402,298 @@ export class ChatServer {
       .run();
   }
 
+  // ============================================================
+  // ✅ PURGE UNIVERSAL — hapus seat + point di CACHE dan D1
+  // ============================================================
+
+  // Hapus 1 seat + point di 1 room (cache + D1 + broadcast + count)
+  async _purgeSeatAndPoint(roomName, seatNumber, options = {}) {
+    const { broadcast = true, updateCount = true, removeNoimgCache = true } = options;
+
+    if (!roomName || typeof seatNumber !== 'number') return false;
+
+    return await this._withLock(
+      this._roomWriteLocks,
+      `write_${roomName}`,
+      async () => {
+        try {
+          await this._ensureCacheInitialized();
+          const roomBucket = this._storageCache?.roomsData?.[roomName];
+          if (!roomBucket) return false;
+
+          const seatData = roomBucket.seat?.[seatNumber];
+          const username = seatData?.namauser || null;
+          const isMulti = seatData?.isMulti === true;
+
+          // 1. HAPUS DI D1 — seat + point (selalu, walau seat tidak ada di cache)
+          if (this.db) {
+            try {
+              await this.db
+                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
+                .bind(`seat_${roomName}_${seatNumber}`, `point_${roomName}_${seatNumber}`)
+                .run();
+            } catch (e) {}
+          }
+
+          // 2. HAPUS DI CACHE — seat + point
+          if (roomBucket.seat) delete roomBucket.seat[seatNumber];
+          if (roomBucket.point) delete roomBucket.point[seatNumber];
+
+          // 3. HAPUS USER INDEX
+          if (username) {
+            this._removeUserIndex(username);
+            if (isMulti && removeNoimgCache) {
+              this._deleteUserNoimgCache(username).catch(() => {});
+            }
+          }
+
+          // 4. BROADCAST
+          if (broadcast && !this._isRestoring) {
+            this.broadcast(roomName, ["removeKursi", roomName, seatNumber]);
+          }
+
+          // 5. UPDATE COUNT
+          if (updateCount) {
+            try { await this.updateRoomCount(roomName); } catch (e) {}
+          }
+
+          return true;
+        } catch (e) {
+          return false;
+        }
+      },
+      C.LOCK_TIMEOUT
+    );
+  }
+
+  // Hapus SEMUA seat + point milik 1 user di SEMUA room (cache + D1)
+  async _purgeAllSeatsOfUser(username, options = {}) {
+    const { includeMulti = true } = options;
+    if (!username) return 0;
+
+    let removedCount = 0;
+
+    try {
+      await this._ensureCacheInitialized();
+      const roomsData = this._storageCache?.roomsData || {};
+
+      // 1. KUMPULKAN SEMUA SEAT USER DARI CACHE
+      const toDelete = [];
+      for (const [roomName, roomBucket] of Object.entries(roomsData)) {
+        if (!roomBucket?.seat) continue;
+        for (const [seatStr, data] of Object.entries(roomBucket.seat)) {
+          if (data?.namauser !== username) continue;
+          if (!includeMulti && data.isMulti === true) continue;
+          const seatNum = parseInt(seatStr);
+          if (!isNaN(seatNum)) toDelete.push({ roomName, seatNum });
+        }
+      }
+
+      // 2. HAPUS DI D1 (by username, jaga-jaga kalau ada seat yatim)
+      if (this.db) {
+        try {
+          let q;
+          if (includeMulti) {
+            q = `
+              DELETE FROM ${TABLE_NAME}
+              WHERE key LIKE 'seat_%'
+              AND json_valid(value)
+              AND json_extract(value, '$.namauser') = ?
+            `;
+          } else {
+            q = `
+              DELETE FROM ${TABLE_NAME}
+              WHERE key LIKE 'seat_%'
+              AND json_valid(value)
+              AND json_extract(value, '$.namauser') = ?
+              AND (json_extract(value, '$.isMulti') IS NULL OR json_extract(value, '$.isMulti') != 1)
+            `;
+          }
+          await this.db.prepare(q).bind(String(username)).run();
+        } catch (e) {
+          // fallback LIKE
+          try {
+            let q2;
+            if (includeMulti) {
+              q2 = `DELETE FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' AND value LIKE ?`;
+            } else {
+              q2 = `DELETE FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' AND value LIKE ? AND value NOT LIKE '%"isMulti":true%'`;
+            }
+            await this.db.prepare(q2).bind(`%"namauser":"${username}"%`).run();
+          } catch (e2) {}
+        }
+      }
+
+      // 3. HAPUS DI CACHE + POINT + BROADCAST
+      const affectedRooms = new Set();
+      for (const { roomName, seatNum } of toDelete) {
+        const roomBucket = roomsData[roomName];
+        if (!roomBucket) continue;
+
+        // hapus point di D1 (point tidak punya namauser, harus by key)
+        if (this.db) {
+          try {
+            await this.db
+              .prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`)
+              .bind(`point_${roomName}_${seatNum}`)
+              .run();
+          } catch (e) {}
+        }
+
+        delete roomBucket.seat[seatNum];
+        if (roomBucket.point) delete roomBucket.point[seatNum];
+
+        if (!this._isRestoring) {
+          this.broadcast(roomName, ["removeKursi", roomName, seatNum]);
+        }
+        affectedRooms.add(roomName);
+        removedCount++;
+      }
+
+      // 4. UPDATE COUNT SEMUA ROOM TERDAMPAK
+      for (const roomName of affectedRooms) {
+        try { await this.updateRoomCount(roomName); } catch (e) {}
+      }
+
+      // 5. HAPUS INDEX & NOIMG CACHE
+      this._removeUserIndex(username);
+      if (includeMulti) {
+        this._deleteUserNoimgCache(username).catch(() => {});
+      }
+
+    } catch (e) {}
+
+    return removedCount;
+  }
+
+  // Hapus SEMUA seat + point di 1 room (cache + D1) — untuk resetRoom
+  async _purgeRoom(roomName) {
+    if (!roomName) return 0;
+    return await this._withLock(
+      this._roomWriteLocks,
+      `write_${roomName}`,
+      async () => {
+        try {
+          await this._ensureCacheInitialized();
+          const roomBucket = this._storageCache?.roomsData?.[roomName];
+          if (!roomBucket) return 0;
+
+          let count = 0;
+          const multiUsernames = [];
+          for (const seatStr in roomBucket.seat) {
+            const d = roomBucket.seat[seatStr];
+            if (d?.namauser) {
+              this._removeUserIndex(d.namauser);
+              if (d.isMulti === true) multiUsernames.push(d.namauser);
+              count++;
+            }
+          }
+
+          // HAPUS DI D1
+          if (this.db) {
+            try {
+              await this.db
+                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key LIKE ? OR key LIKE ? OR key = ?`)
+                .bind(`seat_${roomName}_%`, `point_${roomName}_%`, `mute_${roomName}`)
+                .run();
+            } catch (e) {}
+          }
+
+          // HAPUS DI CACHE
+          roomBucket.seat = {};
+          roomBucket.point = {};
+          roomBucket.mute = false;
+
+          // HAPUS NOIMG CACHE MULTI
+          for (const u of multiUsernames) {
+            this._userNoimgCache.delete(u);
+          }
+          if (multiUsernames.length > 0) {
+            this._saveUserNoimgCache().catch(() => {});
+          }
+
+          this.broadcast(roomName, ["resetRoom", roomName]);
+          await this.updateRoomCount(roomName);
+          return count;
+        } catch (e) {
+          return 0;
+        }
+      },
+      C.LOCK_TIMEOUT
+    );
+  }
+
+  // ============================================================
+  // Fungsi lama — sekarang delegasi ke purge universal
+  // ============================================================
+
+  async _deleteSeatInRoom(roomName, seatNumber, force = false) {
+    try {
+      await this._ensureCacheInitialized();
+      const roomBucket = this._storageCache?.roomsData?.[roomName];
+      const seatData = roomBucket?.seat?.[seatNumber];
+
+      // kalau bukan force dan seat multi → tolak
+      if (!force && seatData?.isMulti === true) return false;
+
+      return await this._purgeSeatAndPoint(roomName, seatNumber, {
+        broadcast: true,
+        updateCount: true,
+        removeNoimgCache: true
+      });
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async _lightDeleteAllSeatsForUser(username, options = {}) {
+    const forceMulti = options.forceMulti !== false;
+    const keepRoom = options.keepRoom || null;
+    const keepSeat = options.keepSeat || null;
+
+    if (!username) return 0;
+
+    // kalau ada keepRoom/keepSeat, pakai cara manual (per seat)
+    if (keepRoom && keepSeat) {
+      let count = 0;
+      try {
+        await this._ensureCacheInitialized();
+        const roomsData = this._storageCache?.roomsData || {};
+
+        for (const [roomName, roomBucket] of Object.entries(roomsData)) {
+          if (!roomBucket?.seat) continue;
+          for (const [seatStr, data] of Object.entries(roomBucket.seat)) {
+            if (data?.namauser !== username) continue;
+            const seatNum = parseInt(seatStr);
+            if (isNaN(seatNum)) continue;
+            if (roomName === keepRoom && seatNum === keepSeat) continue;
+            if (!forceMulti && data.isMulti === true) continue;
+
+            await this._purgeSeatAndPoint(roomName, seatNum, {
+              broadcast: true,
+              updateCount: false,
+              removeNoimgCache: true
+            });
+            count++;
+          }
+        }
+
+        // update count sekali untuk semua room terdampak
+        const affected = new Set();
+        for (const [roomName, roomBucket] of Object.entries(roomsData)) {
+          if (roomBucket?.seat) affected.add(roomName);
+        }
+        for (const r of affected) {
+          try { await this.updateRoomCount(r); } catch (e) {}
+        }
+      } catch (e) {}
+      return count;
+    }
+
+    // default: hapus semua
+    return await this._purgeAllSeatsOfUser(username, { includeMulti: forceMulti });
+  }
+
   async _forceDeleteFromD1(username) {
     if (!this.db) return true;
     if (!username) return true;
@@ -1413,7 +1706,6 @@ export class ChatServer {
         WHERE key LIKE 'seat_%'
         AND json_valid(value)
         AND json_extract(value, '$.namauser') = ?
-        AND (json_extract(value, '$.isMulti') IS NULL OR json_extract(value, '$.isMulti') != 1)
       `).bind(u).run();
     } catch(e) {
       try {
@@ -1421,110 +1713,11 @@ export class ChatServer {
           DELETE FROM ${TABLE_NAME}
           WHERE key LIKE 'seat_%'
           AND value LIKE ?
-          AND value NOT LIKE '%"isMulti":true%'
         `).bind(`%"namauser":"${u}"%`).run();
       } catch(e2) {}
     }
 
     return true;
-  }
-
-  async _lightDeleteAllSeatsForUser(username, options = {}) {
-    if (!username) return 0;
-
-    const keepRoom = options.keepRoom || null;
-    const keepSeat = options.keepSeat || null;
-    const forceMulti = options.forceMulti === true;
-
-    const seatsToDelete = [];
-
-    try {
-      const roomsData = this._storageCache?.roomsData || {};
-      for (const [roomName, roomBucket] of Object.entries(roomsData)) {
-        if (!roomBucket?.seat) continue;
-        for (const [seatStr, data] of Object.entries(roomBucket.seat)) {
-          if (data?.namauser !== username) continue;
-
-          const seatNum = parseInt(seatStr);
-          if (isNaN(seatNum)) continue;
-
-          if (keepRoom && keepSeat && roomName === keepRoom && seatNum === keepSeat) {
-            continue;
-          }
-
-          if (!forceMulti && data.isMulti === true) {
-            continue;
-          }
-
-          seatsToDelete.push({ roomName, seatNum, seatStr });
-        }
-      }
-
-      if (seatsToDelete.length === 0) return 0;
-
-      if (this.db) {
-        if (!keepRoom && !keepSeat) {
-          try {
-            await this.db.prepare(`
-              DELETE FROM ${TABLE_NAME}
-              WHERE key LIKE 'seat_%'
-              AND json_valid(value)
-              AND json_extract(value, '$.namauser') = ?
-              AND (json_extract(value, '$.isMulti') IS NULL OR json_extract(value, '$.isMulti') != 1)
-            `).bind(username).run();
-          } catch(e) {
-            try {
-              await this.db.prepare(`
-                DELETE FROM ${TABLE_NAME}
-                WHERE key LIKE 'seat_%'
-                AND value LIKE ?
-                AND value NOT LIKE '%"isMulti":true%'
-              `).bind(`%"namauser":"${username}"%`).run();
-            } catch(e2) {}
-          }
-        } else {
-          for (const item of seatsToDelete) {
-            try {
-              await this.db
-                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
-                .bind(`seat_${item.roomName}_${item.seatNum}`, `point_${item.roomName}_${item.seatNum}`)
-                .run();
-            } catch(e) {}
-          }
-        }
-      }
-
-      let removedCount = 0;
-      for (const item of seatsToDelete) {
-        const { roomName, seatNum, seatStr } = item;
-        const roomBucket = this._storageCache?.roomsData?.[roomName];
-        if (!roomBucket?.seat) continue;
-
-        delete roomBucket.seat[seatStr];
-        if (roomBucket.point) delete roomBucket.point[seatStr];
-
-        if (!this._isRestoring) {
-          this.broadcast(roomName, ["removeKursi", roomName, seatNum]);
-        }
-
-        removedCount++;
-      }
-
-      const affectedRooms = new Set(seatsToDelete.map(s => s.roomName));
-      for (const roomName of affectedRooms) {
-        try {
-          await this.updateRoomCount(roomName);
-        } catch(e) {}
-      }
-
-      if (removedCount > 0) {
-        this._removeUserIndex(username);
-      }
-
-      return removedCount;
-    } catch(e) {
-      return 0;
-    }
   }
 
   async _getRoomBucket(roomName) {
@@ -1570,53 +1763,6 @@ export class ChatServer {
     }
   }
 
-  async _deleteSeatInRoom(roomName, seatNumber, force = false) {
-    return await this._withLock(
-      this._roomWriteLocks,
-      `write_${roomName}`,
-      async () => {
-        try {
-          const roomBucket = await this._getRoomBucket(roomName);
-          if (!roomBucket) return false;
-
-          const seatData = roomBucket.seat?.[seatNumber];
-          if (!force && seatData?.isMulti === true) return false;
-
-          const removedUsername = seatData?.namauser;
-          const removedIsMulti = seatData?.isMulti === true;
-
-          if (this.db) {
-            try {
-              await this.db
-                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
-                .bind(`seat_${roomName}_${seatNumber}`, `point_${roomName}_${seatNumber}`)
-                .run();
-            } catch(e) {}
-          }
-
-          if (roomBucket.seat) delete roomBucket.seat[seatNumber];
-          if (roomBucket.point) delete roomBucket.point[seatNumber];
-
-          if (removedUsername) {
-            this._removeUserIndex(removedUsername);
-            if (removedIsMulti) {
-              await this._deleteUserNoimgCache(removedUsername);
-            }
-          }
-
-          if (!this._isRestoring) {
-            this.broadcast(roomName, ["removeKursi", roomName, seatNumber]);
-          }
-          await this.updateRoomCount(roomName);
-          return true;
-        } catch(e) {
-          return false;
-        }
-      },
-      C.LOCK_TIMEOUT
-    );
-  }
-
   async _updateSeatInRoom(roomName, seatNumber, seatData) {
     return await this._withLock(
       this._roomWriteLocks,
@@ -1627,11 +1773,14 @@ export class ChatServer {
           if (!roomBucket) return false;
 
           if (!seatData || !seatData.namauser || seatData.namauser.trim() === '') {
+            // seat kosong → hapus seat + point di D1 & cache
             const oldSeat = roomBucket.seat?.[seatNumber];
             const oldUser = oldSeat?.namauser;
             const oldIsMulti = oldSeat?.isMulti === true;
 
             try { await this._saveSeat(roomName, seatNumber, null); } catch(e) {}
+            // ✅ FIX: hapus point di D1 juga
+            try { await this._savePoint(roomName, seatNumber, null); } catch(e) {}
 
             if (roomBucket.seat) delete roomBucket.seat[seatNumber];
             if (roomBucket.point) delete roomBucket.point[seatNumber];
@@ -1650,6 +1799,7 @@ export class ChatServer {
           await this._ensureCacheInitialized();
           const roomsData = this._storageCache?.roomsData || {};
 
+          // hapus seat lama user ini di room lain (non-multi)
           for (const [rName, rBucket] of Object.entries(roomsData)) {
             if (!rBucket?.seat) continue;
 
@@ -1715,7 +1865,8 @@ export class ChatServer {
       const roomBucket = await this._getRoomBucket(roomName);
       if (!roomBucket) return false;
 
-      if (!pointData || (pointData.x === 0 && pointData.y === 0 && !pointData.fast)) {
+      // ✅ FIX: jangan hapus point hanya karena x=0, y=0
+      if (!pointData) {
         if (roomBucket.point) delete roomBucket.point[seatNumber];
         await this._savePoint(roomName, seatNumber, null);
         return true;
@@ -1942,15 +2093,21 @@ export class ChatServer {
       const roomBucket = this._storageCache?.roomsData?.[roomName];
       if (!roomBucket?.seat) return false;
 
-      let seat = null;
+      let count = 0;
       for (const [s, data] of Object.entries(roomBucket.seat)) {
-        if (data?.namauser === username) {
-          seat = parseInt(s);
-          break;
-        }
+        if (data?.namauser !== username) continue;
+        if (!force && data.isMulti === true) continue;
+        const seatNum = parseInt(s);
+        if (isNaN(seatNum)) continue;
+        await this._purgeSeatAndPoint(roomName, seatNum, {
+          broadcast: true,
+          updateCount: false,
+          removeNoimgCache: true
+        });
+        count++;
       }
-      if (!seat) return false;
-      return await this._deleteSeatInRoom(roomName, seat, force);
+      try { await this.updateRoomCount(roomName); } catch (e) {}
+      return count > 0;
     } catch(e) {
       return false;
     }
@@ -2011,7 +2168,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ FIX: keluarkan WS dari roomClients room lama SEBELUM _lightDeleteAllSeatsForUser
   async _joinInternal(ws, roomName, username) {
     try {
       const existing = await this._findUserInAnyRoom(username);
@@ -2052,23 +2208,21 @@ export class ChatServer {
       if (existing) {
         const oldRoom = existing.room;
 
-        // ✅ FIX: keluarkan WS dari roomClients room lama DULU,
-        //         supaya broadcast removeKursi / roomUserCount
-        //         TIDAK terkirim ke WS yang sedang pindah.
+        // ✅ keluarkan WS dari roomClients room lama DULU
         if (oldRoom && oldRoom !== roomName) {
           const oldClients = this.roomClients?.get(oldRoom);
           if (oldClients) {
             try { oldClients.delete(ws); } catch(e) {}
           }
         }
-        // juga keluarkan dari semua room lain (untuk keamanan)
         for (const [otherRoom, clients] of (this.roomClients || new Map())) {
           if (otherRoom !== roomName && clients) {
             try { clients.delete(ws); } catch(e) {}
           }
         }
 
-        await this._lightDeleteAllSeatsForUser(username, { forceMulti: true });
+        // ✅ HAPUS SEMUA SEAT LAMA (cache + D1) via purge universal
+        await this._purgeAllSeatsOfUser(username, { includeMulti: true });
 
         if (oldRoom && oldRoom !== roomName) {
           try { await this.updateRoomCount(oldRoom); } catch(e) {}
@@ -2133,6 +2287,11 @@ export class ChatServer {
         };
 
         await this._updateSeatInRoom(roomName, seat, newSeat);
+
+        // ✅ point default supaya seat terlihat
+        try {
+          await this._updatePointInRoom(roomName, seat, { x: 0, y: 0, fast: false });
+        } catch(e) {}
       }
 
       ws.username = username;
@@ -2229,21 +2388,19 @@ export class ChatServer {
     }
   }
 
-  // ✅ FIX: keluarkan WS dari roomClients SEBELUM _lightDeleteAllSeatsForUser
   async _handleMultiJoinInternal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
 
-      // ✅ FIX: keluarkan WS dari SEMUA roomClients DULU,
-      //         supaya broadcast removeKursi / roomUserCount
-      //         dari room lama TIDAK terkirim ke WS yang sedang pindah.
+      // keluarkan WS dari semua roomClients DULU
       for (const [otherRoom, clients] of (this.roomClients || new Map())) {
         if (clients) {
           try { clients.delete(ws); } catch(e) {}
         }
       }
 
-      await this._lightDeleteAllSeatsForUser(multiUsername, { forceMulti: true });
+      // ✅ HAPUS SEMUA SEAT LAMA (cache + D1) via purge universal
+      await this._purgeAllSeatsOfUser(multiUsername, { includeMulti: true });
 
       let roomBucket = this._storageCache?.roomsData?.[multiRoomname];
       if (!roomBucket) {
@@ -2252,6 +2409,7 @@ export class ChatServer {
         this._storageCache.roomsData[multiRoomname] = roomBucket;
       }
       if (!roomBucket.seat) roomBucket.seat = {};
+      if (!roomBucket.point) roomBucket.point = {};
 
       let seat = null;
       for (const [s, data] of Object.entries(roomBucket.seat)) {
@@ -2284,6 +2442,11 @@ export class ChatServer {
           isMulti: true
         };
         await this._updateSeatInRoom(multiRoomname, seat, newSeat);
+
+        // ✅ point default
+        try {
+          await this._updatePointInRoom(multiRoomname, seat, { x: 0, y: 0, fast: false });
+        } catch(e) {}
       }
 
       try {
@@ -2330,19 +2493,18 @@ export class ChatServer {
     }
   }
 
-  // ✅ FIX: keluarkan WS dari roomClients SEBELUM _lightDeleteAllSeatsForUser
   async _handleMultiJoin2Internal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
 
-      // ✅ FIX: keluarkan WS dari SEMUA roomClients DULU,
-      //         supaya broadcast removeKursi / roomUserCount
-      //         dari room lama TIDAK terkirim ke WS yang sedang pindah.
       for (const [otherRoom, clients] of (this.roomClients || new Map())) {
         if (clients) {
           try { clients.delete(ws); } catch(e) {}
         }
       }
+
+      // ✅ HAPUS SEMUA SEAT LAMA (cache + D1) via purge universal
+      await this._purgeAllSeatsOfUser(multiUsername, { includeMulti: true });
 
       let roomBucket = this._storageCache?.roomsData?.[multiRoomname];
       if (!roomBucket) {
@@ -2351,6 +2513,7 @@ export class ChatServer {
         this._storageCache.roomsData[multiRoomname] = roomBucket;
       }
       if (!roomBucket.seat) roomBucket.seat = {};
+      if (!roomBucket.point) roomBucket.point = {};
 
       let seat = null;
       for (const [s, data] of Object.entries(roomBucket.seat)) {
@@ -2383,6 +2546,11 @@ export class ChatServer {
           isMulti: true
         };
         await this._updateSeatInRoom(multiRoomname, seat, newSeat);
+
+        // ✅ point default
+        try {
+          await this._updatePointInRoom(multiRoomname, seat, { x: 0, y: 0, fast: false });
+        } catch(e) {}
       }
 
       try {
@@ -2545,8 +2713,10 @@ export class ChatServer {
       }
 
       if (username && !stillConnected && !this._isRestoring) {
-        try { await this._forceDeleteFromD1(username); } catch (e) {}
-        try { await this._lightDeleteAllSeatsForUser(username); } catch (e) {}
+        // ✅ HAPUS SEMUA SEAT (cache + D1) via purge universal
+        try {
+          await this._purgeAllSeatsOfUser(username, { includeMulti: true });
+        } catch (e) {}
       }
 
       if (this.userConnections && username) {
@@ -3035,22 +3205,13 @@ export class ChatServer {
       }
 
       for (const orphan of orphanSeats) {
-        const { room, seat, username } = orphan;
+        const { room, seat } = orphan;
         try {
-          if (this.db) {
-            try {
-              await this.db
-                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
-                .bind(`seat_${room}_${seat}`, `point_${room}_${seat}`)
-                .run();
-            } catch(e) {}
-          }
-
-          const roomBucket = this._storageCache?.roomsData?.[room];
-          if (roomBucket?.seat) delete roomBucket.seat[seat];
-          if (roomBucket?.point) delete roomBucket.point[seat];
-
-          if (username) this._removeUserIndex(username);
+          await this._purgeSeatAndPoint(room, seat, {
+            broadcast: false,
+            updateCount: false,
+            removeNoimgCache: false
+          });
         } catch(e) {}
       }
 
@@ -3477,7 +3638,8 @@ export class ChatServer {
             return { skip: true };
           }
 
-          await this._lightDeleteAllSeatsForUser(username);
+          // ✅ HAPUS SEMUA SEAT NON-MULTI (cache + D1) via purge universal
+          await this._purgeAllSeatsOfUser(username, { includeMulti: false });
 
           return { skip: false };
         },
@@ -4013,14 +4175,8 @@ export class ChatServer {
           const targetUsername = args[0];
           if (!targetUsername) break;
           try {
-            const found = await this._findUserInAnyRoom(targetUsername);
-            const roomName = found?.room;
-            const seatNumber = found?.seat;
-
-            if (roomName && seatNumber) {
-              await this._deleteSeatInRoom(roomName, seatNumber, true);
-            }
-            this._removeUserIndex(targetUsername);
+            // ✅ HAPUS SEMUA SEAT + POINT (cache + D1) via purge universal
+            await this._purgeAllSeatsOfUser(targetUsername, { includeMulti: true });
 
             this._removeMultiUserFromAttachment(ws, targetUsername);
 
@@ -4057,14 +4213,8 @@ export class ChatServer {
           const targetUsername2 = args[0];
           if (!targetUsername2) break;
           try {
-            const found = await this._findUserInAnyRoom(targetUsername2);
-            const roomName = found?.room;
-            const seatNumber = found?.seat;
-
-            if (roomName && seatNumber) {
-              await this._deleteSeatInRoom(roomName, seatNumber, true);
-            }
-            this._removeUserIndex(targetUsername2);
+            // ✅ HAPUS SEMUA SEAT + POINT (cache + D1) via purge universal
+            await this._purgeAllSeatsOfUser(targetUsername2, { includeMulti: true });
 
             this._removeMultiUserFromAttachment(ws, targetUsername2);
 
@@ -4276,6 +4426,7 @@ export class ChatServer {
             username = roomBucket.seat[removeSeat].namauser;
           }
           if (username) {
+            // ✅ hapus SEMUA seat user ini di room ini (cache + D1)
             await this._removeUserFromRoom(username, removeRoom);
           }
           break;
@@ -4461,41 +4612,8 @@ export class ChatServer {
         case "resetRoom": {
           const resetRoomName = args[0];
           if (resetRoomName && ROOMS_SET.has(resetRoomName)) {
-            await this._ensureCacheInitialized();
-            const roomBucket = this._storageCache?.roomsData?.[resetRoomName];
-            if (roomBucket) {
-              const removedMultiUsernames = [];
-              for (const seatStr in roomBucket.seat) {
-                const seatData = roomBucket.seat[seatStr];
-                const uname = seatData?.namauser;
-                const isMulti = seatData?.isMulti === true;
-                if (uname) {
-                  this._removeUserIndex(uname);
-                  if (isMulti) removedMultiUsernames.push(uname);
-                }
-              }
-              roomBucket.seat = {};
-              roomBucket.point = {};
-              roomBucket.mute = false;
-
-              if (removedMultiUsernames.length > 0) {
-                for (const u of removedMultiUsernames) {
-                  this._userNoimgCache.delete(u);
-                }
-                this._saveUserNoimgCache().catch(() => {});
-              }
-
-              if (this.db) {
-                try {
-                  await this.db
-                    .prepare(`DELETE FROM ${TABLE_NAME} WHERE key LIKE ? OR key LIKE ? OR key = ?`)
-                    .bind(`seat_${resetRoomName}_%`, `point_${resetRoomName}_%`, `mute_${resetRoomName}`)
-                    .run();
-                } catch(e) {}
-              }
-              this.broadcast(resetRoomName, ["resetRoom", resetRoomName]);
-              await this.updateRoomCount(resetRoomName);
-            }
+            // ✅ pakai purge universal
+            await this._purgeRoom(resetRoomName);
           }
           break;
         }
