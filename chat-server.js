@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.5.1
+// VERSION: 4.5.2
 
 const C = {
   MAX_SEATS: 45,
@@ -1407,8 +1407,9 @@ export class ChatServer {
     );
   }
 
+  // ✅ FIX: tambah opsi onlyMulti
   async _purgeAllSeatsOfUser(username, options = {}) {
-    const { includeMulti = true } = options;
+    const { includeMulti = true, onlyMulti = false } = options;
     if (!username) return 0;
 
     let removedCount = 0;
@@ -1422,6 +1423,8 @@ export class ChatServer {
         if (!roomBucket?.seat) continue;
         for (const [seatStr, data] of Object.entries(roomBucket.seat)) {
           if (data?.namauser !== username) continue;
+          // ✅ onlyMulti: skip yang bukan multi
+          if (onlyMulti && data.isMulti !== true) continue;
           if (!includeMulti && data.isMulti === true) continue;
           const seatNum = parseInt(seatStr);
           if (!isNaN(seatNum)) toDelete.push({ roomName, seatNum });
@@ -1431,7 +1434,15 @@ export class ChatServer {
       if (this.db) {
         try {
           let q;
-          if (includeMulti) {
+          if (onlyMulti) {
+            q = `
+              DELETE FROM ${TABLE_NAME}
+              WHERE key LIKE 'seat_%'
+              AND json_valid(value)
+              AND json_extract(value, '$.namauser') = ?
+              AND json_extract(value, '$.isMulti') = 1
+            `;
+          } else if (includeMulti) {
             q = `
               DELETE FROM ${TABLE_NAME}
               WHERE key LIKE 'seat_%'
@@ -1451,7 +1462,9 @@ export class ChatServer {
         } catch (e) {
           try {
             let q2;
-            if (includeMulti) {
+            if (onlyMulti) {
+              q2 = `DELETE FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' AND value LIKE ? AND value LIKE '%"isMulti":true%'`;
+            } else if (includeMulti) {
               q2 = `DELETE FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' AND value LIKE ?`;
             } else {
               q2 = `DELETE FROM ${TABLE_NAME} WHERE key LIKE 'seat_%' AND value LIKE ? AND value NOT LIKE '%"isMulti":true%'`;
@@ -1490,8 +1503,17 @@ export class ChatServer {
       }
 
       this._removeUserIndex(username);
-      if (includeMulti) {
+      if (includeMulti && !onlyMulti) {
         this._deleteUserNoimgCache(username).catch(() => {});
+      }
+      if (onlyMulti) {
+        // cek masih ada seat multi lain? kalau tidak ada baru hapus noimg
+        const stillHasMulti = await this._findAllSeatsForUser(username)
+          .then(list => list.some(s => s.isMulti === true))
+          .catch(() => false);
+        if (!stillHasMulti) {
+          this._deleteUserNoimgCache(username).catch(() => {});
+        }
       }
 
     } catch (e) {}
@@ -2379,19 +2401,16 @@ export class ChatServer {
       ws._room = multiRoomname;
       ws.idtarget = multiUsername;
 
-      // hapus dari semua roomClients lain (sekali lagi untuk memastikan)
       for (const [otherRoom, clients] of (this.roomClients || new Map())) {
         if (otherRoom !== multiRoomname && clients) {
           try { clients.delete(ws); } catch(e) {}
         }
       }
-      // tambahkan hanya ke roomClients multiRoomname
       const roomClients = this.roomClients?.get(multiRoomname);
       if (roomClients && !roomClients.has(ws)) {
         try { roomClients.add(ws); } catch(e) {}
       }
 
-      // reset cleanup state
       const stCleanup = _wsCleanupState.get(ws);
       if (stCleanup) {
         stCleanup.cleanupDone = false;
@@ -4138,11 +4157,23 @@ export class ChatServer {
           break;
         }
 
+        // ✅ FIX: exitMulti — hanya hapus seat multi, early-return kalau sudah tidak multi
         case "exitMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
           try {
-            await this._purgeAllSeatsOfUser(targetUsername, { includeMulti: true });
+            // Cek apakah user masih punya seat multi
+            const allSeats = await this._findAllSeatsForUser(targetUsername);
+            const hasMulti = allSeats.some(s => s.isMulti === true);
+
+            if (!hasMulti) {
+              // Sudah tidak multi → tidak ada yang perlu di-exit
+              this.safeSend(ws, ["exitMultiResult", targetUsername, false]);
+              break;
+            }
+
+            // ✅ Hanya hapus seat multi (bukan non-multi)
+            await this._purgeAllSeatsOfUser(targetUsername, { onlyMulti: true });
 
             this._removeMultiUserFromAttachment(ws, targetUsername);
 
@@ -4164,13 +4195,22 @@ export class ChatServer {
                   this.wsActiveMulti.set(ws, { username: next, room: nf.room });
                 }
               } else {
+                // ✅ RESET SEMUA properti + keluarkan dari roomClients
                 this.wsActiveMulti.delete(ws);
                 ws.username = null;
                 ws._username = null;
+                ws.room = null;
+                ws._room = null;
+                ws.roomname = null;
+                ws.idtarget = null;
                 att2.seatInfo = null;
+                for (const [, clients] of (this.roomClients || new Map())) {
+                  if (clients) try { clients.delete(ws); } catch(e) {}
+                }
               }
             }
             this._setAttachment(ws, att2);
+            this.safeSend(ws, ["exitMultiResult", targetUsername, true]);
           } catch(e) {}
           break;
         }
@@ -4179,7 +4219,15 @@ export class ChatServer {
           const targetUsername2 = args[0];
           if (!targetUsername2) break;
           try {
-            await this._purgeAllSeatsOfUser(targetUsername2, { includeMulti: true });
+            const allSeats = await this._findAllSeatsForUser(targetUsername2);
+            const hasMulti = allSeats.some(s => s.isMulti === true);
+
+            if (!hasMulti) {
+              this.safeSend(ws, ["exitMultiResult", targetUsername2, false]);
+              break;
+            }
+
+            await this._purgeAllSeatsOfUser(targetUsername2, { onlyMulti: true });
 
             this._removeMultiUserFromAttachment(ws, targetUsername2);
 
@@ -4204,10 +4252,18 @@ export class ChatServer {
                 this.wsActiveMulti.delete(ws);
                 ws.username = null;
                 ws._username = null;
+                ws.room = null;
+                ws._room = null;
+                ws.roomname = null;
+                ws.idtarget = null;
                 att2.seatInfo = null;
+                for (const [, clients] of (this.roomClients || new Map())) {
+                  if (clients) try { clients.delete(ws); } catch(e) {}
+                }
               }
             }
             this._setAttachment(ws, att2);
+            this.safeSend(ws, ["exitMultiResult", targetUsername2, true]);
           } catch(e) {}
           break;
         }
