@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.6.1
+// VERSION: 4.6.2
 
 const C = {
   MAX_SEATS: 45,
@@ -2996,14 +2996,24 @@ export class ChatServer {
         }
       }
 
+      const affectedRooms = new Set();
+
       for (const orphan of orphanSeats) {
         const { room, seat } = orphan;
         try {
-          await this._purgeSeatAndPoint(room, seat, {
+          const ok = await this._purgeSeatAndPoint(room, seat, {
             broadcast: false,
             updateCount: false,
             removeNoimgCache: false
           });
+          if (ok) affectedRooms.add(room);
+        } catch(e) {}
+      }
+
+      for (const room of affectedRooms) {
+        try {
+          const count = await this._getRoomCount(room);
+          this.broadcast(room, ["roomUserCount", room, count]);
         } catch(e) {}
       }
 
