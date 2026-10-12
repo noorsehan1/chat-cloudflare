@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.6.2
+// VERSION: 4.6.3
 
 const C = {
   MAX_SEATS: 45,
@@ -248,17 +248,6 @@ export class ChatServer {
       }
       this._setAttachment(ws, att);
     } catch (e) {}
-  }
-
-  _getMultiUsersFromAttachment(ws) {
-    try {
-      const att = this._getAttachment(ws);
-      if (Array.isArray(att.multiUsers)) return att.multiUsers;
-      if (att.username) return [att.username];
-      return [];
-    } catch (e) {
-      return [];
-    }
   }
 
   _removeWsFromAllRooms(ws) {
@@ -2200,12 +2189,12 @@ export class ChatServer {
     }
   }
 
+  // ✅ v4.6.3: multiJoin hanya TAMBAH seat multi, TIDAK ubah ws.username/room/wsActiveMulti
   async _handleMultiJoinInternal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
 
-      this._removeWsFromAllRooms(ws);
-
+      // Hapus seat multi lama user ini (kalau ada)
       await this._purgeAllSeatsOfUser(multiUsername, { includeMulti: true });
 
       let roomBucket = this._storageCache?.roomsData?.[multiRoomname];
@@ -2264,15 +2253,6 @@ export class ChatServer {
         }
       } catch(e) {}
 
-      ws.username = multiUsername;
-      ws._username = multiUsername;
-      ws.room = multiRoomname;
-      ws.roomname = multiRoomname;
-      ws._room = multiRoomname;
-      ws.idtarget = multiUsername;
-
-      this._setWsRoom(ws, multiRoomname);
-
       const stCleanup = _wsCleanupState.get(ws);
       if (stCleanup) {
         stCleanup.cleanupDone = false;
@@ -2280,6 +2260,9 @@ export class ChatServer {
       } else {
         try { _wsCleanupState.set(ws, { cleanupDone: false, cleaning: false }); } catch(e) {}
       }
+
+      // ✅ v4.6.3: TIDAK set ws.username/ws.room/wsActiveMulti di sini
+      // Multi aktif ditentukan oleh setActiveMulti
 
       try {
         const st = this._getMultyState(multiRoomname);
@@ -2315,11 +2298,10 @@ export class ChatServer {
     }
   }
 
+  // ✅ v4.6.3: multiJoin2 hanya TAMBAH seat multi, TIDAK ubah ws.username/room/wsActiveMulti
   async _handleMultiJoin2Internal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
-
-      this._removeWsFromAllRooms(ws);
 
       await this._purgeAllSeatsOfUser(multiUsername, { includeMulti: true });
 
@@ -2378,15 +2360,6 @@ export class ChatServer {
           }
         }
       } catch(e) {}
-
-      ws.username = multiUsername;
-      ws._username = multiUsername;
-      ws.room = multiRoomname;
-      ws.roomname = multiRoomname;
-      ws._room = multiRoomname;
-      ws.idtarget = multiUsername;
-
-      this._setWsRoom(ws, multiRoomname);
 
       const stCleanup = _wsCleanupState.get(ws);
       if (stCleanup) {
@@ -3908,41 +3881,54 @@ export class ChatServer {
           break;
         }
 
+        // ✅ v4.6.3: multiJoin hanya TAMBAH seat + tambah multiUsers, TIDAK pindah aktif
         case "multiJoin": {
           const multiUsername = args[0];
           const multiRoomname = args[1];
           if (!multiUsername || !multiRoomname) break;
+
           const result = await this._handleMultiJoin(ws, multiUsername, multiRoomname);
           if (!result) break;
+
           const { room, seat } = result;
+
+          // Tambah userConnections
           let connections = this.userConnections?.get(multiUsername);
           if (!connections) connections = new Set();
           if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
           try { this.userConnections?.set(multiUsername, connections); } catch(e) {}
 
+          // ✅ Tambah ke attachment.multiUsers
           this._addMultiUserToAttachment(ws, multiUsername);
-          try {
-            const att2 = this._getAttachment(ws);
+
+          // ✅ v4.6.3: Kalau WS BELUM punya multi aktif, otomatis melekat ke multi ini
+          const att2 = this._getAttachment(ws);
+          if (!att2.username) {
+            ws.username = multiUsername;
+            ws._username = multiUsername;
+            ws.room = room;
+            ws.roomname = room;
+            ws._room = room;
+            ws.idtarget = multiUsername;
+
             att2.username = multiUsername;
             att2.seatInfo = { room: room, seat: seat };
             this._setAttachment(ws, att2);
-          } catch(e) {}
 
-          ws._username = multiUsername;
-          ws._room = room;
-          ws.username = multiUsername;
-          ws.room = room;
-          ws.roomname = room;
-          ws.idtarget = multiUsername;
-          try { this.wsActiveMulti?.set(ws, { username: multiUsername, room: room }); } catch(e) {}
-
-          this._setWsRoom(ws, room);
+            try { this.wsActiveMulti?.set(ws, { username: multiUsername, room: room }); } catch(e) {}
+            this._setWsRoom(ws, room);
+          } else {
+            // Sudah ada aktif → cukup simpan seatInfo, tidak ubah ws.room
+            att2.seatInfo = att2.seatInfo || { room: room, seat: seat };
+            this._setAttachment(ws, att2);
+          }
 
           this.safeSend(ws, ["rooMasukMulti", seat, room]);
           await this.updateRoomCount(room);
           break;
         }
 
+        // ✅ v4.6.3: multiJoin2 sama seperti multiJoin
         case "multiJoin2": {
           const multiUsername2 = args[0];
           const multiRoomname2 = args[1];
@@ -3953,27 +3939,32 @@ export class ChatServer {
 
           const { room, seat } = result2;
 
-          ws._username = multiUsername2;
-          ws._room = room;
-          ws.username = multiUsername2;
-          ws.room = room;
-          ws.roomname = room;
-          ws.idtarget = multiUsername2;
-
           let connections = this.userConnections?.get(multiUsername2);
           if (!connections) connections = new Set();
           if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
           try { this.userConnections?.set(multiUsername2, connections); } catch(e) {}
 
           this._addMultiUserToAttachment(ws, multiUsername2);
-          try {
-            const att2 = this._getAttachment(ws);
+
+          const att2 = this._getAttachment(ws);
+          if (!att2.username) {
+            ws.username = multiUsername2;
+            ws._username = multiUsername2;
+            ws.room = room;
+            ws.roomname = room;
+            ws._room = room;
+            ws.idtarget = multiUsername2;
+
             att2.username = multiUsername2;
             att2.seatInfo = { room: room, seat: seat };
             this._setAttachment(ws, att2);
-          } catch(e) {}
 
-          this._setWsRoom(ws, room);
+            try { this.wsActiveMulti?.set(ws, { username: multiUsername2, room: room }); } catch(e) {}
+            this._setWsRoom(ws, room);
+          } else {
+            att2.seatInfo = att2.seatInfo || { room: room, seat: seat };
+            this._setAttachment(ws, att2);
+          }
 
           if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
 
@@ -3982,6 +3973,7 @@ export class ChatServer {
           break;
         }
 
+        // ✅ v4.6.3: exitMulti — reset total kalau target = username aktif
         case "exitMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
@@ -3999,51 +3991,30 @@ export class ChatServer {
             this._removeMultiUserFromAttachment(ws, targetUsername);
 
             const att2 = this._getAttachment(ws);
+
+            // ✅ v4.6.3: HANYA reset total kalau target = username aktif
             if (att2.username === targetUsername) {
-              const remaining = Array.isArray(att2.multiUsers) ? att2.multiUsers : [];
-              const next = remaining[0] || null;
-              att2.username = next;
-              if (next) {
-                const nf = await this._findUserInAnyRoom(next);
-                if (nf) {
-                  ws.username = next;
-                  ws._username = next;
-                  ws.room = nf.room;
-                  ws._room = nf.room;
-                  ws.roomname = nf.room;
-                  ws.idtarget = next;
-                  att2.seatInfo = { room: nf.room, seat: nf.seat };
-                  this.wsActiveMulti.set(ws, { username: next, room: nf.room });
-                  this._setWsRoom(ws, nf.room);
-                } else {
-                  this.wsActiveMulti.delete(ws);
-                  ws.username = null;
-                  ws._username = null;
-                  ws.room = null;
-                  ws._room = null;
-                  ws.roomname = null;
-                  ws.idtarget = null;
-                  att2.seatInfo = null;
-                  this._setWsRoom(ws, null);
-                }
-              } else {
-                this.wsActiveMulti.delete(ws);
-                ws.username = null;
-                ws._username = null;
-                ws.room = null;
-                ws._room = null;
-                ws.roomname = null;
-                ws.idtarget = null;
-                att2.seatInfo = null;
-                this._setWsRoom(ws, null);
-              }
+              // Reset total — WS jadi kosong
+              this.wsActiveMulti.delete(ws);
+              ws.username = null;
+              ws._username = null;
+              ws.room = null;
+              ws._room = null;
+              ws.roomname = null;
+              ws.idtarget = null;
+              att2.username = null;
+              att2.seatInfo = null;
+              this._setWsRoom(ws, null);
             }
+            // Kalau target ≠ username aktif → tidak ubah WS (multi tetap melekat)
+
             this._setAttachment(ws, att2);
             this.safeSend(ws, ["exitMultiResult", targetUsername, true]);
           } catch(e) {}
           break;
         }
 
+        // ✅ v4.6.3: exitMulti2 sama seperti exitMulti
         case "exitMulti2": {
           const targetUsername2 = args[0];
           if (!targetUsername2) break;
@@ -4061,51 +4032,28 @@ export class ChatServer {
             this._removeMultiUserFromAttachment(ws, targetUsername2);
 
             const att2 = this._getAttachment(ws);
+
             if (att2.username === targetUsername2) {
-              const remaining = Array.isArray(att2.multiUsers) ? att2.multiUsers : [];
-              const next = remaining[0] || null;
-              att2.username = next;
-              if (next) {
-                const nf = await this._findUserInAnyRoom(next);
-                if (nf) {
-                  ws.username = next;
-                  ws._username = next;
-                  ws.room = nf.room;
-                  ws._room = nf.room;
-                  ws.roomname = nf.room;
-                  ws.idtarget = next;
-                  att2.seatInfo = { room: nf.room, seat: nf.seat };
-                  this.wsActiveMulti.set(ws, { username: next, room: nf.room });
-                  this._setWsRoom(ws, nf.room);
-                } else {
-                  this.wsActiveMulti.delete(ws);
-                  ws.username = null;
-                  ws._username = null;
-                  ws.room = null;
-                  ws._room = null;
-                  ws.roomname = null;
-                  ws.idtarget = null;
-                  att2.seatInfo = null;
-                  this._setWsRoom(ws, null);
-                }
-              } else {
-                this.wsActiveMulti.delete(ws);
-                ws.username = null;
-                ws._username = null;
-                ws.room = null;
-                ws._room = null;
-                ws.roomname = null;
-                ws.idtarget = null;
-                att2.seatInfo = null;
-                this._setWsRoom(ws, null);
-              }
+              this.wsActiveMulti.delete(ws);
+              ws.username = null;
+              ws._username = null;
+              ws.room = null;
+              ws._room = null;
+              ws.roomname = null;
+              ws.idtarget = null;
+              att2.username = null;
+              att2.seatInfo = null;
+              this._setWsRoom(ws, null);
             }
+
             this._setAttachment(ws, att2);
             this.safeSend(ws, ["exitMultiResult", targetUsername2, true]);
           } catch(e) {}
           break;
         }
 
+        // ✅ v4.6.3: setActiveMulti — tetap seperti v4.6.2
+        //     Tentukan WS melekat ke multi username mana
         case "setActiveMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
