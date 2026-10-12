@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.6.3
+// VERSION: 4.6.4
 
 const C = {
   MAX_SEATS: 45,
@@ -234,7 +234,6 @@ export class ChatServer {
       const att = this._getAttachment(ws);
       if (!Array.isArray(att.multiUsers)) att.multiUsers = [];
       if (!att.multiUsers.includes(username)) att.multiUsers.push(username);
-      att.username = att.username || username;
       this._setAttachment(ws, att);
     } catch (e) {}
   }
@@ -2189,12 +2188,11 @@ export class ChatServer {
     }
   }
 
-  // ✅ v4.6.3: multiJoin hanya TAMBAH seat multi, TIDAK ubah ws.username/room/wsActiveMulti
+  // ✅ v4.6.4: multiJoin hanya TAMBAH seat multi, TIDAK ubah ws.username/room/wsActiveMulti
   async _handleMultiJoinInternal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
 
-      // Hapus seat multi lama user ini (kalau ada)
       await this._purgeAllSeatsOfUser(multiUsername, { includeMulti: true });
 
       let roomBucket = this._storageCache?.roomsData?.[multiRoomname];
@@ -2261,9 +2259,6 @@ export class ChatServer {
         try { _wsCleanupState.set(ws, { cleanupDone: false, cleaning: false }); } catch(e) {}
       }
 
-      // ✅ v4.6.3: TIDAK set ws.username/ws.room/wsActiveMulti di sini
-      // Multi aktif ditentukan oleh setActiveMulti
-
       try {
         const st = this._getMultyState(multiRoomname);
         if (st && st.running) {
@@ -2298,7 +2293,7 @@ export class ChatServer {
     }
   }
 
-  // ✅ v4.6.3: multiJoin2 hanya TAMBAH seat multi, TIDAK ubah ws.username/room/wsActiveMulti
+  // ✅ v4.6.4: multiJoin2 sama — hanya TAMBAH seat multi
   async _handleMultiJoin2Internal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
@@ -3881,7 +3876,7 @@ export class ChatServer {
           break;
         }
 
-        // ✅ v4.6.3: multiJoin hanya TAMBAH seat + tambah multiUsers, TIDAK pindah aktif
+        // ✅ v4.6.4: multiJoin — TIDAK auto melekat
         case "multiJoin": {
           const multiUsername = args[0];
           const multiRoomname = args[1];
@@ -3892,7 +3887,6 @@ export class ChatServer {
 
           const { room, seat } = result;
 
-          // Tambah userConnections
           let connections = this.userConnections?.get(multiUsername);
           if (!connections) connections = new Set();
           if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
@@ -3901,34 +3895,15 @@ export class ChatServer {
           // ✅ Tambah ke attachment.multiUsers
           this._addMultiUserToAttachment(ws, multiUsername);
 
-          // ✅ v4.6.3: Kalau WS BELUM punya multi aktif, otomatis melekat ke multi ini
-          const att2 = this._getAttachment(ws);
-          if (!att2.username) {
-            ws.username = multiUsername;
-            ws._username = multiUsername;
-            ws.room = room;
-            ws.roomname = room;
-            ws._room = room;
-            ws.idtarget = multiUsername;
-
-            att2.username = multiUsername;
-            att2.seatInfo = { room: room, seat: seat };
-            this._setAttachment(ws, att2);
-
-            try { this.wsActiveMulti?.set(ws, { username: multiUsername, room: room }); } catch(e) {}
-            this._setWsRoom(ws, room);
-          } else {
-            // Sudah ada aktif → cukup simpan seatInfo, tidak ubah ws.room
-            att2.seatInfo = att2.seatInfo || { room: room, seat: seat };
-            this._setAttachment(ws, att2);
-          }
+          // ✅ v4.6.4: TIDAK ubah ws.username/ws.room/wsActiveMulti
+          // WS tetap kosong sampai setActiveMulti dipanggil
 
           this.safeSend(ws, ["rooMasukMulti", seat, room]);
           await this.updateRoomCount(room);
           break;
         }
 
-        // ✅ v4.6.3: multiJoin2 sama seperti multiJoin
+        // ✅ v4.6.4: multiJoin2 — TIDAK auto melekat
         case "multiJoin2": {
           const multiUsername2 = args[0];
           const multiRoomname2 = args[1];
@@ -3946,25 +3921,7 @@ export class ChatServer {
 
           this._addMultiUserToAttachment(ws, multiUsername2);
 
-          const att2 = this._getAttachment(ws);
-          if (!att2.username) {
-            ws.username = multiUsername2;
-            ws._username = multiUsername2;
-            ws.room = room;
-            ws.roomname = room;
-            ws._room = room;
-            ws.idtarget = multiUsername2;
-
-            att2.username = multiUsername2;
-            att2.seatInfo = { room: room, seat: seat };
-            this._setAttachment(ws, att2);
-
-            try { this.wsActiveMulti?.set(ws, { username: multiUsername2, room: room }); } catch(e) {}
-            this._setWsRoom(ws, room);
-          } else {
-            att2.seatInfo = att2.seatInfo || { room: room, seat: seat };
-            this._setAttachment(ws, att2);
-          }
+          // ✅ v4.6.4: TIDAK ubah ws.username/ws.room/wsActiveMulti
 
           if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
 
@@ -3973,7 +3930,7 @@ export class ChatServer {
           break;
         }
 
-        // ✅ v4.6.3: exitMulti — reset total kalau target = username aktif
+        // ✅ v4.6.4: exitMulti — reset total kalau target = username aktif
         case "exitMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
@@ -3992,9 +3949,7 @@ export class ChatServer {
 
             const att2 = this._getAttachment(ws);
 
-            // ✅ v4.6.3: HANYA reset total kalau target = username aktif
             if (att2.username === targetUsername) {
-              // Reset total — WS jadi kosong
               this.wsActiveMulti.delete(ws);
               ws.username = null;
               ws._username = null;
@@ -4006,7 +3961,6 @@ export class ChatServer {
               att2.seatInfo = null;
               this._setWsRoom(ws, null);
             }
-            // Kalau target ≠ username aktif → tidak ubah WS (multi tetap melekat)
 
             this._setAttachment(ws, att2);
             this.safeSend(ws, ["exitMultiResult", targetUsername, true]);
@@ -4014,7 +3968,6 @@ export class ChatServer {
           break;
         }
 
-        // ✅ v4.6.3: exitMulti2 sama seperti exitMulti
         case "exitMulti2": {
           const targetUsername2 = args[0];
           if (!targetUsername2) break;
@@ -4052,8 +4005,7 @@ export class ChatServer {
           break;
         }
 
-        // ✅ v4.6.3: setActiveMulti — tetap seperti v4.6.2
-        //     Tentukan WS melekat ke multi username mana
+        // ✅ v4.6.4: setActiveMulti — yang menentukan WS melekat ke multi username mana
         case "setActiveMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
