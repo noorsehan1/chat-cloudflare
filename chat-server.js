@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.5.0 (NO FALLBACK TO GACOR)
+// VERSION: 4.5.1 (NO FALLBACK + UPDATEKURSI PERSIS INPUT CLIENT)
 
 const C = {
   MAX_SEATS: 45,
@@ -1840,6 +1840,9 @@ export class ChatServer {
     }
   }
 
+  // ============================================================
+  // ✅ _updateKursi — SIMPAN PERSIS APA YANG DIKIRIM CLIENT
+  // ============================================================
   async _updateKursi(roomName, seat, data) {
     try {
       if (!roomName || !ROOMS_SET.has(roomName)) {
@@ -1864,17 +1867,15 @@ export class ChatServer {
         return { success: false, error: 'You do not own this seat' };
       }
 
-      const finalIsMulti = (data.isMulti === true || currentSeatData.isMulti === true);
-
       const updatedSeat = {
-        noimageUrl: data.noimageUrl || currentSeatData.noimageUrl || "",
-        namauser: data.namauser || currentSeatData.namauser || "",
-        color: data.color || currentSeatData.color || "",
-        itembawah: typeof data.itembawah === 'number' ? data.itembawah : (parseInt(data.itembawah) || 0),
-        itematas: typeof data.itematas === 'number' ? data.itematas : (parseInt(data.itematas) || 0),
-        vip: typeof data.vip === 'number' ? data.vip : (parseInt(data.vip) || 0),
-        viptanda: typeof data.viptanda === 'number' ? data.viptanda : (parseInt(data.viptanda) || 0),
-        isMulti: finalIsMulti
+        noimageUrl: data.noimageUrl,
+        namauser: currentSeatData.namauser,
+        color: data.color,
+        itembawah: data.itembawah,
+        itematas: data.itematas,
+        vip: data.vip,
+        viptanda: data.viptanda,
+        isMulti: currentSeatData.isMulti === true
       };
 
       await this._updateSeatInRoom(roomName, seat, updatedSeat);
@@ -4060,7 +4061,6 @@ export class ChatServer {
           let found = allSeats.find(s => s.isMulti === true) || allSeats[0] || null;
 
           if (!found) {
-            // NO FALLBACK: tolak, jangan auto-join ke room manapun
             this.safeSend(ws, ["error", "User tidak punya seat multi"]);
             break;
           }
@@ -4112,6 +4112,9 @@ export class ChatServer {
           break;
         }
 
+        // ============================================================
+        // ✅ updateKursi — KIRIM PERSIS APA YANG CLIENT KIRIM
+        // ============================================================
         case "updateKursi": {
           const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
 
@@ -4132,13 +4135,13 @@ export class ChatServer {
               `kursi_${kursiRoom}_${kursiSeat}`,
               async () => {
                 const updateData = {
-                  noimageUrl: String(kursiNoimg || ""),
+                  noimageUrl: kursiNoimg,
                   namauser: seatData.namauser,
-                  color: String(kursiColor || ""),
-                  itembawah: typeof kursiBawah === 'number' ? kursiBawah : (parseInt(kursiBawah) || 0),
-                  itematas: typeof kursiAtas === 'number' ? kursiAtas : (parseInt(kursiAtas) || 0),
-                  vip: typeof kursiVip === 'number' ? kursiVip : (parseInt(kursiVip) || 0),
-                  viptanda: typeof kursiVt === 'number' ? kursiVt : (parseInt(kursiVt) || 0),
+                  color: kursiColor,
+                  itembawah: kursiBawah,
+                  itematas: kursiAtas,
+                  vip: kursiVip,
+                  viptanda: kursiVt,
                   isMulti: seatData.isMulti === true
                 };
                 const result = await this._updateKursi(kursiRoom, kursiSeat, updateData);
