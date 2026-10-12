@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.6.5
+// VERSION: 4.6.6
 
 const C = {
   MAX_SEATS: 45,
@@ -2105,7 +2105,6 @@ export class ChatServer {
 
         isNewSeat = true;
 
-        // ✅ v4.6.5: Broadcast kursi baru ke room supaya user lain lihat
         try {
           if (!this._isRestoring) {
             this.broadcast(roomName, ["kursiBatchUpdate", roomName, [[seat, newSeat]]]);
@@ -2199,7 +2198,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ v4.6.5: multiJoin — TIDAK auto melekat, TAPI broadcast kursi baru ke room
   async _handleMultiJoinInternal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
@@ -2266,7 +2264,6 @@ export class ChatServer {
         }
       } catch(e) {}
 
-      // ✅ v4.6.5: Broadcast kursi baru ke room supaya user lain lihat
       try {
         if (newSeatData && !this._isRestoring) {
           this.broadcast(multiRoomname, ["kursiBatchUpdate", multiRoomname, [[seat, newSeatData]]]);
@@ -2315,7 +2312,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ v4.6.5: multiJoin2 — sama, broadcast kursi baru ke room
   async _handleMultiJoin2Internal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
@@ -2382,7 +2378,6 @@ export class ChatServer {
         }
       } catch(e) {}
 
-      // ✅ v4.6.5: Broadcast kursi baru ke room
       try {
         if (newSeatData && !this._isRestoring) {
           this.broadcast(multiRoomname, ["kursiBatchUpdate", multiRoomname, [[seat, newSeatData]]]);
@@ -3909,7 +3904,7 @@ export class ChatServer {
           break;
         }
 
-        // ✅ v4.6.5: multiJoin — TIDAK auto melekat, TAPI kursi baru di-broadcast
+        // ✅ v4.6.6: multiJoin — sama persis seperti sebelumnya
         case "multiJoin": {
           const multiUsername = args[0];
           const multiRoomname = args[1];
@@ -3932,6 +3927,8 @@ export class ChatServer {
           break;
         }
 
+        // ✅ v4.6.6: multiJoin2 — SAMA PERSIS dengan multiJoin
+        //     Output event: rooMasukMulti (bukan rooMasukMulti2)
         case "multiJoin2": {
           const multiUsername2 = args[0];
           const multiRoomname2 = args[1];
@@ -3951,7 +3948,8 @@ export class ChatServer {
 
           if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
 
-          this.safeSend(ws, ["rooMasukMulti2", seat, room]);
+          // ✅ v4.6.6: pakai rooMasukMulti (sama seperti multiJoin)
+          this.safeSend(ws, ["rooMasukMulti", seat, room]);
           await this.updateRoomCount(room);
           break;
         }
