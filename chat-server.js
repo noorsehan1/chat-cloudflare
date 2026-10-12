@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.6.4
+// VERSION: 4.6.5
 
 const C = {
   MAX_SEATS: 45,
@@ -2065,6 +2065,8 @@ export class ChatServer {
         }
       }
 
+      let isNewSeat = false;
+
       if (!seat) {
         const seatCount = Object.values(roomBucket.seat).filter(s => s?.namauser).length;
         if (seatCount >= C.MAX_SEATS) {
@@ -2099,6 +2101,15 @@ export class ChatServer {
 
         try {
           await this._updatePointInRoom(roomName, seat, { x: 0, y: 0, fast: false });
+        } catch(e) {}
+
+        isNewSeat = true;
+
+        // ✅ v4.6.5: Broadcast kursi baru ke room supaya user lain lihat
+        try {
+          if (!this._isRestoring) {
+            this.broadcast(roomName, ["kursiBatchUpdate", roomName, [[seat, newSeat]]]);
+          }
         } catch(e) {}
       }
 
@@ -2188,7 +2199,7 @@ export class ChatServer {
     }
   }
 
-  // ✅ v4.6.4: multiJoin hanya TAMBAH seat multi, TIDAK ubah ws.username/room/wsActiveMulti
+  // ✅ v4.6.5: multiJoin — TIDAK auto melekat, TAPI broadcast kursi baru ke room
   async _handleMultiJoinInternal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
@@ -2211,6 +2222,8 @@ export class ChatServer {
           break;
         }
       }
+
+      let newSeatData = null;
 
       if (!seat) {
         const seatCount = Object.values(roomBucket.seat).filter(s => s?.namauser).length;
@@ -2239,6 +2252,8 @@ export class ChatServer {
         try {
           await this._updatePointInRoom(multiRoomname, seat, { x: 0, y: 0, fast: false });
         } catch(e) {}
+
+        newSeatData = newSeat;
       }
 
       try {
@@ -2248,6 +2263,13 @@ export class ChatServer {
           if (!isNaN(noimg) && noimg > 0) {
             await this._setUserNoimgCache(multiUsername, noimg);
           }
+        }
+      } catch(e) {}
+
+      // ✅ v4.6.5: Broadcast kursi baru ke room supaya user lain lihat
+      try {
+        if (newSeatData && !this._isRestoring) {
+          this.broadcast(multiRoomname, ["kursiBatchUpdate", multiRoomname, [[seat, newSeatData]]]);
         }
       } catch(e) {}
 
@@ -2293,7 +2315,7 @@ export class ChatServer {
     }
   }
 
-  // ✅ v4.6.4: multiJoin2 sama — hanya TAMBAH seat multi
+  // ✅ v4.6.5: multiJoin2 — sama, broadcast kursi baru ke room
   async _handleMultiJoin2Internal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
@@ -2316,6 +2338,8 @@ export class ChatServer {
           break;
         }
       }
+
+      let newSeatData = null;
 
       if (!seat) {
         const seatCount = Object.values(roomBucket.seat).filter(s => s?.namauser).length;
@@ -2344,6 +2368,8 @@ export class ChatServer {
         try {
           await this._updatePointInRoom(multiRoomname, seat, { x: 0, y: 0, fast: false });
         } catch(e) {}
+
+        newSeatData = newSeat;
       }
 
       try {
@@ -2353,6 +2379,13 @@ export class ChatServer {
           if (!isNaN(noimg) && noimg > 0) {
             await this._setUserNoimgCache(multiUsername, noimg);
           }
+        }
+      } catch(e) {}
+
+      // ✅ v4.6.5: Broadcast kursi baru ke room
+      try {
+        if (newSeatData && !this._isRestoring) {
+          this.broadcast(multiRoomname, ["kursiBatchUpdate", multiRoomname, [[seat, newSeatData]]]);
         }
       } catch(e) {}
 
@@ -3876,7 +3909,7 @@ export class ChatServer {
           break;
         }
 
-        // ✅ v4.6.4: multiJoin — TIDAK auto melekat
+        // ✅ v4.6.5: multiJoin — TIDAK auto melekat, TAPI kursi baru di-broadcast
         case "multiJoin": {
           const multiUsername = args[0];
           const multiRoomname = args[1];
@@ -3892,18 +3925,13 @@ export class ChatServer {
           if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
           try { this.userConnections?.set(multiUsername, connections); } catch(e) {}
 
-          // ✅ Tambah ke attachment.multiUsers
           this._addMultiUserToAttachment(ws, multiUsername);
-
-          // ✅ v4.6.4: TIDAK ubah ws.username/ws.room/wsActiveMulti
-          // WS tetap kosong sampai setActiveMulti dipanggil
 
           this.safeSend(ws, ["rooMasukMulti", seat, room]);
           await this.updateRoomCount(room);
           break;
         }
 
-        // ✅ v4.6.4: multiJoin2 — TIDAK auto melekat
         case "multiJoin2": {
           const multiUsername2 = args[0];
           const multiRoomname2 = args[1];
@@ -3921,8 +3949,6 @@ export class ChatServer {
 
           this._addMultiUserToAttachment(ws, multiUsername2);
 
-          // ✅ v4.6.4: TIDAK ubah ws.username/ws.room/wsActiveMulti
-
           if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
 
           this.safeSend(ws, ["rooMasukMulti2", seat, room]);
@@ -3930,7 +3956,6 @@ export class ChatServer {
           break;
         }
 
-        // ✅ v4.6.4: exitMulti — reset total kalau target = username aktif
         case "exitMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
@@ -4005,7 +4030,6 @@ export class ChatServer {
           break;
         }
 
-        // ✅ v4.6.4: setActiveMulti — yang menentukan WS melekat ke multi username mana
         case "setActiveMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
