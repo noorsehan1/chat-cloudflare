@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.6.0 (COLOR CACHE: NAMA + TEXT, DEFAULT 6/5)
+// VERSION: 4.7.0 (COLOR CACHE MULTY-AWARE)
 
 const C = {
   MAX_SEATS: 45,
@@ -299,7 +299,7 @@ export class ChatServer {
   }
 
   // ============================================================
-  // MULTY STATE — NO FALLBACK
+  // MULTY STATE
   // ============================================================
   _getMultyState(room) {
     const r = room;
@@ -511,7 +511,38 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  _resolveColor(sender, inputColorNama, inputColorText) {
+  // ============================================================
+  // CEK: apakah username ini user MULTY (isMulti === true)?
+  // ============================================================
+  async _isUserMulti(username) {
+    try {
+      if (!username) return false;
+
+      const idx = this._userIndex?.get(username);
+      if (idx && idx.isMulti === true) return true;
+
+      if (this._userNoimgCache?.has(username)) return true;
+
+      await this._ensureCacheInitialized();
+      const roomsData = this._storageCache?.roomsData || {};
+      for (const rBucket of Object.values(roomsData)) {
+        if (!rBucket?.seat) continue;
+        for (const seatData of Object.values(rBucket.seat)) {
+          if (seatData?.namauser === username && seatData.isMulti === true) {
+            return true;
+          }
+        }
+      }
+      return false;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  // ============================================================
+  // RESOLVE COLOR (nama + text) — VERSI MULTY-AWARE
+  // ============================================================
+  async _resolveColor(sender, inputColorNama, inputColorText) {
     const name = String(sender || "");
 
     const inColorNama = (inputColorNama !== undefined && inputColorNama !== null && inputColorNama !== "")
@@ -528,19 +559,31 @@ export class ChatServer {
 
     const cached = this._userColorCache?.get(name) || null;
 
-    const finalColorNama = inColorNama ?? cached?.color     ?? DEFAULT_COLOR_NAMA;
-    const finalColorText = inColorText ?? cached?.textColor ?? DEFAULT_COLOR_TEXT;
+    const isMultiUser = await this._isUserMulti(name);
 
-    const bedaNama = inColorNama !== null && inColorNama !== (cached?.color     ?? null);
-    const bedaText = inColorText !== null && inColorText !== (cached?.textColor ?? null);
+    if (isMultiUser) {
+      const finalColorNama = inColorNama ?? cached?.color     ?? DEFAULT_COLOR_NAMA;
+      const finalColorText = inColorText ?? cached?.textColor ?? DEFAULT_COLOR_TEXT;
 
-    if (bedaNama || bedaText) {
-      this._userColorCache.set(name, {
+      const bedaNama = inColorNama !== null && inColorNama !== (cached?.color     ?? null);
+      const bedaText = inColorText !== null && inColorText !== (cached?.textColor ?? null);
+
+      if (bedaNama || bedaText) {
+        this._userColorCache.set(name, {
+          color:     finalColorNama,
+          textColor: finalColorText
+        });
+        this._saveUserColorCache().catch(() => {});
+      }
+
+      return {
         color:     finalColorNama,
         textColor: finalColorText
-      });
-      this._saveUserColorCache().catch(() => {});
+      };
     }
+
+    const finalColorNama = cached?.color     ?? inColorNama ?? DEFAULT_COLOR_NAMA;
+    const finalColorText = cached?.textColor ?? inColorText ?? DEFAULT_COLOR_TEXT;
 
     return {
       color:     finalColorNama,
@@ -802,7 +845,7 @@ export class ChatServer {
     return Math.floor(Math.random() * (C.MULTY_MAX_MS - C.MULTY_MIN_MS + 1)) + C.MULTY_MIN_MS;
   }
 
-  _parseMultyRow(chatRaw, numberRaw, indexRaw) {
+  async _parseMultyRow(chatRaw, numberRaw, indexRaw) {
     let chatList = [];
 
     if (chatRaw) {
@@ -828,7 +871,7 @@ export class ChatServer {
             if (!item || typeof item !== 'object') continue;
             if (!item.sender || !item.text) continue;
 
-            const { color, textColor } = this._resolveColor(
+            const { color, textColor } = await this._resolveColor(
               item.sender,
               item.color,
               item.textColor
@@ -950,7 +993,7 @@ export class ChatServer {
 
       const out = new Map();
       for (const [room, raw] of bucket) {
-        const parsed = this._parseMultyRow(raw.chatRaw, raw.numberRaw, raw.indexRaw);
+        const parsed = await this._parseMultyRow(raw.chatRaw, raw.numberRaw, raw.indexRaw);
         parsed.running = raw.runningRaw === "1";
 
         const hasAny = parsed.chatList.length > 0
@@ -1008,7 +1051,7 @@ export class ChatServer {
           .first();
       } catch(e) {}
 
-      const parsed = this._parseMultyRow(
+      const parsed = await this._parseMultyRow(
         rowChat?.value ?? null,
         rowNum?.value ?? null,
         rowIdx?.value ?? null
@@ -1223,11 +1266,9 @@ export class ChatServer {
       const username = chat.sender || "";
       const chatMsg  = chat.text   || "";
 
-      // ✅ warna nama & warna text dari chatList (hasil _resolveColor)
       let chatColor     = chat.color     ? String(chat.color)     : null;
       let chatTextColor = chat.textColor ? String(chat.textColor) : null;
 
-      // fallback ke _userColorCache → default "6" / "5"
       if (!chatColor || !chatTextColor) {
         const cached = this._userColorCache?.get(username);
         if (!chatColor)     chatColor     = cached?.color     || DEFAULT_COLOR_NAMA;
@@ -2012,7 +2053,7 @@ export class ChatServer {
   }
 
   // ============================================================
-  // UPDATE KURSI — PERSIS INPUT CLIENT
+  // UPDATE KURSI
   // ============================================================
   async _updateKursi(roomName, seat, data) {
     try {
@@ -3929,7 +3970,7 @@ export class ChatServer {
               if (!item || typeof item !== 'object') continue;
               if (!item.sender || !item.text) continue;
 
-              const { color, textColor } = this._resolveColor(
+              const { color, textColor } = await this._resolveColor(
                 item.sender,
                 item.color,
                 item.textColor
@@ -4034,7 +4075,7 @@ export class ChatServer {
                 if (!item || typeof item !== 'object') continue;
                 if (!item.sender || !item.text) continue;
 
-                const { color, textColor } = this._resolveColor(
+                const { color, textColor } = await this._resolveColor(
                   item.sender,
                   item.color,
                   item.textColor
@@ -4357,7 +4398,21 @@ export class ChatServer {
           if (wsRoom !== chatRoom) break;
 
           if (chatUser) {
-            await this._setUserColorCache(chatUser, chatColor, chatTextColor);
+            const prev = this._userColorCache?.get(chatUser);
+            const newColor     = chatColor     ? String(chatColor)     : null;
+            const newTextColor = chatTextColor ? String(chatTextColor) : null;
+
+            if (newColor !== null || newTextColor !== null) {
+              const beda = (newColor     !== null && newColor     !== (prev?.color     ?? null)) ||
+                           (newTextColor !== null && newTextColor !== (prev?.textColor ?? null));
+              if (beda) {
+                await this._setUserColorCache(
+                  chatUser,
+                  newColor     ?? prev?.color     ?? DEFAULT_COLOR_NAMA,
+                  newTextColor ?? prev?.textColor ?? DEFAULT_COLOR_TEXT
+                );
+              }
+            }
           }
 
           const chatData = ["chat", chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor];
