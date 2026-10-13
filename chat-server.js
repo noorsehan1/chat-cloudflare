@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.5.1 (NO FALLBACK + UPDATEKURSI PERSIS INPUT CLIENT)
+// VERSION: 4.6.0 (COLOR CACHE: NAMA + TEXT, DEFAULT 6/5)
 
 const C = {
   MAX_SEATS: 45,
@@ -45,7 +45,11 @@ const K_NUMBER = (room) => `number_${room}`;
 const K_INDEX  = (room) => `index_${room}`;
 const K_RUNNING = (room) => `multy_running_${room}`;
 const K_MULTY_NOIMG_CACHE = 'multy_noimg_cache';
+const K_MULTY_COLOR_CACHE = 'multy_color_cache';
 const K_HISTORY_TABLE = (room) => `chat_history_${String(room).replace(/[^a-zA-Z0-9_]/g, '_')}`;
+
+const DEFAULT_COLOR_NAMA = "6";
+const DEFAULT_COLOR_TEXT = "5";
 
 const _wsCleanupState = new WeakMap();
 
@@ -81,6 +85,7 @@ export class ChatServer {
 
       this._userIndex = new Map();
       this._userNoimgCache = new Map();
+      this._userColorCache = new Map();
 
       this._globalLocks = new Map();
       this._roomLocks = new Map();
@@ -124,6 +129,7 @@ export class ChatServer {
         for (const room of ROOMS) {
           this.roomClients.set(room, new Set());
         }
+        this._userColorCache = new Map();
         return;
       }
 
@@ -195,6 +201,7 @@ export class ChatServer {
       this.wsActiveMulti = new Map();
       this._userIndex = new Map();
       this._userNoimgCache = new Map();
+      this._userColorCache = new Map();
       this._pendingEvents = [];
       this._eventQueue = [];
       this.db = null;
@@ -363,6 +370,9 @@ export class ChatServer {
     try { this._userIndex.delete(username); } catch(e) {}
   }
 
+  // ============================================================
+  // NOIMG CACHE
+  // ============================================================
   async _saveUserNoimgCache() {
     try {
       if (!this.db) return false;
@@ -429,6 +439,118 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ============================================================
+  // COLOR CACHE (NAMA + TEXT)
+  // ============================================================
+  async _saveUserColorCache() {
+    if (!this.db) return false;
+    try {
+      const obj = {};
+      for (const [username, c] of this._userColorCache) {
+        if (!username) continue;
+        obj[username] = {
+          color:     c?.color     ? String(c.color)     : DEFAULT_COLOR_NAMA,
+          textColor: c?.textColor ? String(c.textColor) : DEFAULT_COLOR_TEXT
+        };
+      }
+      await this.db.prepare(`
+        INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+      `).bind(K_MULTY_COLOR_CACHE, JSON.stringify(obj)).run();
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  async _loadUserColorCache() {
+    if (!this.db) return false;
+    try {
+      const row = await this.db
+        .prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
+        .bind(K_MULTY_COLOR_CACHE)
+        .first();
+
+      if (!row?.value) return false;
+
+      let obj = null;
+      try { obj = JSON.parse(row.value); } catch(e) {}
+      if (!obj || typeof obj !== 'object') return false;
+
+      this._userColorCache = new Map();
+      for (const [username, c] of Object.entries(obj)) {
+        if (!username || !c || typeof c !== 'object') continue;
+        this._userColorCache.set(String(username), {
+          color:     c.color     ? String(c.color)     : DEFAULT_COLOR_NAMA,
+          textColor: c.textColor ? String(c.textColor) : DEFAULT_COLOR_TEXT
+        });
+      }
+      return true;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  async _setUserColorCache(username, colorNama, colorText) {
+    if (!username) return;
+    try {
+      this._userColorCache.set(String(username), {
+        color:     colorNama ? String(colorNama) : DEFAULT_COLOR_NAMA,
+        textColor: colorText ? String(colorText) : DEFAULT_COLOR_TEXT
+      });
+      this._saveUserColorCache().catch(() => {});
+    } catch(e) {}
+  }
+
+  async _deleteUserColorCache(username) {
+    if (!username) return;
+    try {
+      if (this._userColorCache.delete(String(username))) {
+        this._saveUserColorCache().catch(() => {});
+      }
+    } catch(e) {}
+  }
+
+  _resolveColor(sender, inputColorNama, inputColorText) {
+    const name = String(sender || "");
+
+    const inColorNama = (inputColorNama !== undefined && inputColorNama !== null && inputColorNama !== "")
+                          ? String(inputColorNama) : null;
+    const inColorText = (inputColorText !== undefined && inputColorText !== null && inputColorText !== "")
+                          ? String(inputColorText) : null;
+
+    if (!name) {
+      return {
+        color:     inColorNama ?? DEFAULT_COLOR_NAMA,
+        textColor: inColorText ?? DEFAULT_COLOR_TEXT
+      };
+    }
+
+    const cached = this._userColorCache?.get(name) || null;
+
+    const finalColorNama = inColorNama ?? cached?.color     ?? DEFAULT_COLOR_NAMA;
+    const finalColorText = inColorText ?? cached?.textColor ?? DEFAULT_COLOR_TEXT;
+
+    const bedaNama = inColorNama !== null && inColorNama !== (cached?.color     ?? null);
+    const bedaText = inColorText !== null && inColorText !== (cached?.textColor ?? null);
+
+    if (bedaNama || bedaText) {
+      this._userColorCache.set(name, {
+        color:     finalColorNama,
+        textColor: finalColorText
+      });
+      this._saveUserColorCache().catch(() => {});
+    }
+
+    return {
+      color:     finalColorNama,
+      textColor: finalColorText
+    };
+  }
+
+  // ============================================================
+  // ALARM
+  // ============================================================
   async _ensureAlarm() {
     if (this.isDestroyed) return;
     try {
@@ -538,6 +660,9 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ============================================================
+  // HISTORY
+  // ============================================================
   async _ensureHistoryTable(room) {
     try {
       if (!this.db) return false;
@@ -572,8 +697,8 @@ export class ChatServer {
       const noimg     = chatDataArray[2] ?? 10000;
       const username  = chatDataArray[3] ?? "";
       const message   = chatDataArray[4] ?? "";
-      const color     = chatDataArray[5] ?? "1";
-      const textColor = chatDataArray[6] ?? "1";
+      const color     = chatDataArray[5] ?? DEFAULT_COLOR_NAMA;
+      const textColor = chatDataArray[6] ?? DEFAULT_COLOR_TEXT;
 
       const javaFormat = [
         Number(noimg) || 10000,
@@ -670,6 +795,9 @@ export class ChatServer {
     }
   }
 
+  // ============================================================
+  // MULTY LOAD/SAVE
+  // ============================================================
   _randMultyDelay() {
     return Math.floor(Math.random() * (C.MULTY_MAX_MS - C.MULTY_MIN_MS + 1)) + C.MULTY_MIN_MS;
   }
@@ -699,12 +827,19 @@ export class ChatServer {
           for (const item of arr) {
             if (!item || typeof item !== 'object') continue;
             if (!item.sender || !item.text) continue;
+
+            const { color, textColor } = this._resolveColor(
+              item.sender,
+              item.color,
+              item.textColor
+            );
+
             chatList.push({
               noimg: item.noimg ?? 10000,
               sender: String(item.sender),
               text: String(item.text),
-              color: item.color ? String(item.color) : "7",
-              textColor: item.textColor ? String(item.textColor) : "1"
+              color,
+              textColor
             });
           }
         }
@@ -747,6 +882,7 @@ export class ChatServer {
       }
 
       let noimgCacheRaw = null;
+      let colorCacheRaw = null;
 
       for (const row of rows) {
         const key = row?.key;
@@ -754,6 +890,7 @@ export class ChatServer {
         if (!key || value === undefined || value === null) continue;
 
         if (key === K_MULTY_NOIMG_CACHE) { noimgCacheRaw = value; continue; }
+        if (key === K_MULTY_COLOR_CACHE) { colorCacheRaw = value; continue; }
 
         if (key.startsWith('chat_multy_')) {
           const room = key.slice('chat_multy_'.length);
@@ -790,6 +927,22 @@ export class ChatServer {
               if (!isNaN(n) && n > 0) {
                 this._userNoimgCache.set(username, n);
               }
+            }
+          }
+        } catch(e) {}
+      }
+
+      if (colorCacheRaw) {
+        try {
+          const obj = JSON.parse(colorCacheRaw);
+          if (obj && typeof obj === 'object') {
+            this._userColorCache = new Map();
+            for (const [username, c] of Object.entries(obj)) {
+              if (!username || !c || typeof c !== 'object') continue;
+              this._userColorCache.set(String(username), {
+                color:     c.color     ? String(c.color)     : DEFAULT_COLOR_NAMA,
+                textColor: c.textColor ? String(c.textColor) : DEFAULT_COLOR_TEXT
+              });
             }
           }
         } catch(e) {}
@@ -956,6 +1109,9 @@ export class ChatServer {
     }
   }
 
+  // ============================================================
+  // MULTY LOOP
+  // ============================================================
   _startMultyLoop(room) {
     const r = room;
     if (!r || !ROOMS_SET.has(r)) return;
@@ -1065,16 +1221,26 @@ export class ChatServer {
       }
 
       const username = chat.sender || "";
-      const chatMsg = chat.text || "";
-      const chatColor = chat.color || "7";
-      const chatTextColor = chat.textColor || "1";
+      const chatMsg  = chat.text   || "";
+
+      // ✅ warna nama & warna text dari chatList (hasil _resolveColor)
+      let chatColor     = chat.color     ? String(chat.color)     : null;
+      let chatTextColor = chat.textColor ? String(chat.textColor) : null;
+
+      // fallback ke _userColorCache → default "6" / "5"
+      if (!chatColor || !chatTextColor) {
+        const cached = this._userColorCache?.get(username);
+        if (!chatColor)     chatColor     = cached?.color     || DEFAULT_COLOR_NAMA;
+        if (!chatTextColor) chatTextColor = cached?.textColor || DEFAULT_COLOR_TEXT;
+      }
+
+      chatColor     = String(chatColor);
+      chatTextColor = String(chatTextColor);
 
       let chatNoimg = 10000;
       try {
-        const cached = this._userNoimgCache?.get(username);
-        if (cached && cached > 0) {
-          chatNoimg = cached;
-        }
+        const cachedNoimg = this._userNoimgCache?.get(username);
+        if (cachedNoimg && cachedNoimg > 0) chatNoimg = cachedNoimg;
       } catch(e) {}
 
       if (chatMsg) {
@@ -1127,6 +1293,9 @@ export class ChatServer {
     }
   }
 
+  // ============================================================
+  // RESTORE
+  // ============================================================
   async _restoreWithRetry() {
     let attempts = 0;
     let lastError = null;
@@ -1568,6 +1737,7 @@ export class ChatServer {
             this._removeUserIndex(removedUsername);
             if (removedIsMulti) {
               await this._deleteUserNoimgCache(removedUsername);
+              await this._deleteUserColorCache(removedUsername);
             }
           }
 
@@ -1607,6 +1777,7 @@ export class ChatServer {
               this._removeUserIndex(oldUser);
               if (oldIsMulti) {
                 this._deleteUserNoimgCache(oldUser).catch(() => {});
+                this._deleteUserColorCache(oldUser).catch(() => {});
               }
             }
             return true;
@@ -1841,7 +2012,7 @@ export class ChatServer {
   }
 
   // ============================================================
-  // ✅ _updateKursi — SIMPAN PERSIS APA YANG DIKIRIM CLIENT
+  // UPDATE KURSI — PERSIS INPUT CLIENT
   // ============================================================
   async _updateKursi(roomName, seat, data) {
     try {
@@ -1940,6 +2111,9 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ============================================================
+  // JOIN
+  // ============================================================
   async _handleJoin(ws, roomName) {
     try {
       if (!ws?.username || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) {
@@ -2350,6 +2524,9 @@ export class ChatServer {
     }
   }
 
+  // ============================================================
+  // CLEANUP
+  // ============================================================
   async _cleanupUserCompletely(ws, options = {}) {
     const result = { removedSeats: [] };
 
@@ -2996,6 +3173,9 @@ export class ChatServer {
     }
   }
 
+  // ============================================================
+  // RESTORE ALL STATE
+  // ============================================================
   async _restoreAllState() {
     try {
       this._isRestoring = true;
@@ -3030,6 +3210,7 @@ export class ChatServer {
           st.running = running === true;
         }
 
+        await this._loadUserColorCache();
         this._multyRestored = true;
       } catch(e) {
         this._multyRestored = false;
@@ -3747,12 +3928,19 @@ export class ChatServer {
             for (const item of newArr) {
               if (!item || typeof item !== 'object') continue;
               if (!item.sender || !item.text) continue;
+
+              const { color, textColor } = this._resolveColor(
+                item.sender,
+                item.color,
+                item.textColor
+              );
+
               valid.push({
                 noimg: item.noimg ?? 10000,
                 sender: String(item.sender),
                 text: String(item.text),
-                color: item.color ? String(item.color) : "7",
-                textColor: item.textColor ? String(item.textColor) : "1"
+                color,
+                textColor
               });
             }
 
@@ -3845,12 +4033,19 @@ export class ChatServer {
               for (const item of newArr) {
                 if (!item || typeof item !== 'object') continue;
                 if (!item.sender || !item.text) continue;
+
+                const { color, textColor } = this._resolveColor(
+                  item.sender,
+                  item.color,
+                  item.textColor
+                );
+
                 valid.push({
                   noimg: item.noimg ?? 10000,
                   sender: String(item.sender),
                   text: String(item.text),
-                  color: item.color ? String(item.color) : "7",
-                  textColor: item.textColor ? String(item.textColor) : "1"
+                  color,
+                  textColor
                 });
               }
 
@@ -4112,9 +4307,6 @@ export class ChatServer {
           break;
         }
 
-        // ============================================================
-        // ✅ updateKursi — KIRIM PERSIS APA YANG CLIENT KIRIM
-        // ============================================================
         case "updateKursi": {
           const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
 
@@ -4163,6 +4355,10 @@ export class ChatServer {
           if (!found || found.room !== chatRoom) break;
           const wsRoom = ws.room || ws.roomname;
           if (wsRoom !== chatRoom) break;
+
+          if (chatUser) {
+            await this._setUserColorCache(chatUser, chatColor, chatTextColor);
+          }
 
           const chatData = ["chat", chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor];
 
@@ -4439,8 +4635,10 @@ export class ChatServer {
               if (removedMultiUsernames.length > 0) {
                 for (const u of removedMultiUsernames) {
                   this._userNoimgCache.delete(u);
+                  this._userColorCache.delete(u);
                 }
                 this._saveUserNoimgCache().catch(() => {});
+                this._saveUserColorCache().catch(() => {});
               }
 
               if (this.db) {
@@ -4565,6 +4763,11 @@ export class ChatServer {
             noimgCacheObj[u] = n;
           }
 
+          const colorCacheObj = {};
+          for (const [u, c] of this._userColorCache) {
+            colorCacheObj[u] = c;
+          }
+
           let totalSeats = 0;
           for (const room of ROOMS) {
             const rb = this._storageCache?.roomsData?.[room];
@@ -4582,6 +4785,8 @@ export class ChatServer {
             multyRestored: this._multyRestored,
             noimgCacheSize: this._userNoimgCache?.size || 0,
             noimgCache: noimgCacheObj,
+            colorCacheSize: this._userColorCache?.size || 0,
+            colorCache: colorCacheObj,
             historyTables: Array.from(this._historyTableReady),
             totalSeatsInCache: totalSeats,
             cacheInitialized: this._cacheInitialized,
@@ -4705,6 +4910,7 @@ export class ChatServer {
     this._hasBroadcastRemoveKursi = new Set();
     this._userIndex = new Map();
     this._userNoimgCache = new Map();
+    this._userColorCache = new Map();
 
     this._multyState = new Map();
     this._multyRestored = false;
