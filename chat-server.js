@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.7.0 (COLOR CACHE MULTY-AWARE)
+// VERSION: 4.7.1 (COLOR CACHE MULTY-ONLY SAVE)
 
 const C = {
   MAX_SEATS: 45,
@@ -540,7 +540,9 @@ export class ChatServer {
   }
 
   // ============================================================
-  // RESOLVE COLOR (nama + text) — VERSI MULTY-AWARE
+  // RESOLVE COLOR (nama + text) — VERSI READ-ONLY
+  // Color cache HANYA disimpan di case "chat" (khusus user MULTY).
+  // Di sini cukup baca cache → fallback input → fallback default (6/5).
   // ============================================================
   async _resolveColor(sender, inputColorNama, inputColorText) {
     const name = String(sender || "");
@@ -557,37 +559,13 @@ export class ChatServer {
       };
     }
 
+    // Baca dari cache (sudah disimpan di case "chat" untuk user MULTY)
     const cached = this._userColorCache?.get(name) || null;
 
-    const isMultiUser = await this._isUserMulti(name);
-
-    if (isMultiUser) {
-      const finalColorNama = inColorNama ?? cached?.color     ?? DEFAULT_COLOR_NAMA;
-      const finalColorText = inColorText ?? cached?.textColor ?? DEFAULT_COLOR_TEXT;
-
-      const bedaNama = inColorNama !== null && inColorNama !== (cached?.color     ?? null);
-      const bedaText = inColorText !== null && inColorText !== (cached?.textColor ?? null);
-
-      if (bedaNama || bedaText) {
-        this._userColorCache.set(name, {
-          color:     finalColorNama,
-          textColor: finalColorText
-        });
-        this._saveUserColorCache().catch(() => {});
-      }
-
-      return {
-        color:     finalColorNama,
-        textColor: finalColorText
-      };
-    }
-
-    const finalColorNama = cached?.color     ?? inColorNama ?? DEFAULT_COLOR_NAMA;
-    const finalColorText = cached?.textColor ?? inColorText ?? DEFAULT_COLOR_TEXT;
-
+    // Fallback: cache → input → default (6/5)
     return {
-      color:     finalColorNama,
-      textColor: finalColorText
+      color:     cached?.color     ?? inColorNama ?? DEFAULT_COLOR_NAMA,
+      textColor: cached?.textColor ?? inColorText ?? DEFAULT_COLOR_TEXT
     };
   }
 
@@ -4389,6 +4367,9 @@ export class ChatServer {
           break;
         }
 
+        // ============================================================
+        // CHAT — Color cache HANYA disimpan untuk user MULTY
+        // ============================================================
         case "chat": {
           const [chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor] = args;
           if (!chatMsg || !ROOMS_SET.has(chatRoom)) break;
@@ -4397,7 +4378,8 @@ export class ChatServer {
           const wsRoom = ws.room || ws.roomname;
           if (wsRoom !== chatRoom) break;
 
-          if (chatUser) {
+          // ✅ HANYA user MULTY yang disimpan color cache-nya
+          if (chatUser && await this._isUserMulti(chatUser)) {
             const prev = this._userColorCache?.get(chatUser);
             const newColor     = chatColor     ? String(chatColor)     : null;
             const newTextColor = chatTextColor ? String(chatTextColor) : null;
