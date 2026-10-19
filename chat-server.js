@@ -4506,87 +4506,81 @@ export class ChatServer {
           break;
         }
 
-        // ✅ PATCH v4.8.1: setActiveMulti TIDAK menghapus kursi
-        case "setActiveMulti": {
-          const targetUsername = args[0];
-          if (!targetUsername) break;
-
-          await this._withLock(
-            this._userJoinLock,
-            `join_user_${targetUsername}`,
-            async () => {
-              try {
-                const allSeats = await this._findAllSeatsForUser(targetUsername);
-                if (!allSeats || allSeats.length === 0) {
-                  this.safeSend(ws, ["error", "User tidak punya seat"]);
-                  return;
-                }
-
-                const found = await this._selectActiveSeatForUser(targetUsername, ws) || allSeats[0];
-                const roomName = found.room;
-                const seatNumber = found.seat;
-
-                try { this.wsActiveMulti?.set(ws, { username: targetUsername, room: roomName }); } catch(e) {}
-
-                for (const [otherRoom, clients] of (this.roomClients || new Map())) {
-                  if (otherRoom !== roomName && clients) {
-                    try { clients.delete(ws); } catch(e) {}
-                  }
-                }
-                const roomClients = this.roomClients?.get(roomName);
-                if (roomClients && !roomClients.has(ws)) {
-                  try { roomClients.add(ws); } catch(e) {}
-                }
-
-                ws.username = targetUsername;
-                ws.idtarget = targetUsername;
-                ws.room = roomName;
-                ws.roomname = roomName;
-                ws._username = targetUsername;
-                ws._room = roomName;
-
-                this._addMultiUserToAttachment(ws, targetUsername);
+     
+        // ✅ PATCH v4.8.2: setActiveMulti TIDAK menghapus kursi & TIDAK kirim sendAllStateTo
+          case "setActiveMulti": {
+            const targetUsername = args[0];
+            if (!targetUsername) break;
+          
+            await this._withLock(
+              this._userJoinLock,
+              `join_user_${targetUsername}`,
+              async () => {
                 try {
-                  const att2 = this._getAttachment(ws);
-                  att2.username = targetUsername;
-                  att2.seatInfo = { room: roomName, seat: seatNumber };
-                  this._setAttachment(ws, att2);
-                } catch(e) {}
-
-                let connections = this.userConnections?.get(targetUsername);
-                if (!connections) {
-                  connections = new Set();
-                  try { this.userConnections?.set(targetUsername, connections); } catch(e) {}
-                }
-                if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
-                if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
-
-                this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
-                this.safeSend(ws, ["rooMasuk", seatNumber, roomName]);
-                this.safeSend(ws, ["numberKursiSaya", seatNumber]);
-                this.safeSend(ws, ["currentNumber", this.currentNumber]);
-
-                this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
-
-                setTimeout(async () => {
-                  try {
-                    if (ws.readyState === 1) {
-                      await this.sendAllStateTo(ws, roomName, false);
+                  const allSeats = await this._findAllSeatsForUser(targetUsername);
+                  if (!allSeats || allSeats.length === 0) {
+                    this.safeSend(ws, ["error", "User tidak punya seat"]);
+                    return;
+                  }
+          
+                  const found = await this._selectActiveSeatForUser(targetUsername, ws) || allSeats[0];
+                  const roomName = found.room;
+                  const seatNumber = found.seat;
+          
+                  try { this.wsActiveMulti?.set(ws, { username: targetUsername, room: roomName }); } catch(e) {}
+          
+                  for (const [otherRoom, clients] of (this.roomClients || new Map())) {
+                    if (otherRoom !== roomName && clients) {
+                      try { clients.delete(ws); } catch(e) {}
                     }
+                  }
+                  const roomClients = this.roomClients?.get(roomName);
+                  if (roomClients && !roomClients.has(ws)) {
+                    try { roomClients.add(ws); } catch(e) {}
+                  }
+          
+                  ws.username = targetUsername;
+                  ws.idtarget = targetUsername;
+                  ws.room = roomName;
+                  ws.roomname = roomName;
+                  ws._username = targetUsername;
+                  ws._room = roomName;
+          
+                  this._addMultiUserToAttachment(ws, targetUsername);
+                  try {
+                    const att2 = this._getAttachment(ws);
+                    att2.username = targetUsername;
+                    att2.seatInfo = { room: roomName, seat: seatNumber };
+                    this._setAttachment(ws, att2);
                   } catch(e) {}
-                }, 200);
-
-                try { await this.updateRoomCount(roomName); } catch(e) {}
-
-              } catch(e) {
-                this._handleError('setActiveMulti', e);
-                this.safeSend(ws, ["error", "Gagal set active multi"]);
-              }
-            },
-            C.USER_JOIN_LOCK_TIMEOUT
-          );
-          break;
-        }
+          
+                  let connections = this.userConnections?.get(targetUsername);
+                  if (!connections) {
+                    connections = new Set();
+                    try { this.userConnections?.set(targetUsername, connections); } catch(e) {}
+                  }
+                  if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
+                  if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
+          
+                  // ✅ Cukup kirim event spesifik — TANPA sendAllStateTo
+                  this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
+                  this.safeSend(ws, ["rooMasuk", seatNumber, roomName]);
+                  this.safeSend(ws, ["numberKursiSaya", seatNumber]);
+                  this.safeSend(ws, ["currentNumber", this.currentNumber]);
+          
+                  this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
+          
+                  try { await this.updateRoomCount(roomName); } catch(e) {}
+          
+                } catch(e) {
+                  this._handleError('setActiveMulti', e);
+                  this.safeSend(ws, ["error", "Gagal set active multi"]);
+                }
+              },
+              C.USER_JOIN_LOCK_TIMEOUT
+            );
+            break;
+          }
 
         case "updateKursi": {
           const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
