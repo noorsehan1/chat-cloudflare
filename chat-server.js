@@ -1,9 +1,10 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.7.3 (COLOR CACHE MULTY-ONLY STRICT + MULTY NEXT PRIORITAS CACHE)
-// - Color cache HANYA disimpan untuk user MULTY (isMulti === true)
-// - User NORMAL (non-multy) TIDAK PERNAH simpan warna cache
-// - Guard berlapis: _setUserColorCache, _saveUserColorCache, _loadUserColorCache
-// - _nextMultyChat: PRIORITAS CACHE dulu (bukan chatList), baru fallback
+// VERSION: 4.8.0 (WRITE-THROUGH D1 + PENDING SYNC + RETRY)
+// - Setiap perubahan SEAT & POINT ditulis ke D1 dulu (write-through)
+// - Retry 3x dengan backoff jika D1 gagal
+// - Pending sync queue di-flush di alarm & destroy
+// - Cache memory hanya diupdate setelah D1 sukses (konsistensi)
+// - Color cache tetap MULTY-ONLY (dari v4.7.3)
 
 const C = {
   MAX_SEATS: 45,
@@ -32,6 +33,8 @@ const C = {
   HISTORY_LIMIT: 100,
   HISTORY_MAX_AGE_MS: 3 * 60 * 60 * 1000,
   ORPHAN_CLEANUP_GRACE_MS: 60000,
+  D1_SAVE_MAX_ATTEMPTS: 3,
+  D1_SAVE_RETRY_BASE_MS: 50,
 };
 
 const ROOMS = [
@@ -108,6 +111,11 @@ export class ChatServer {
       this._multyRestored = false;
 
       this._historyTableReady = new Set();
+
+      // ✅ PATCH v4.8.0: pending sync queue
+      this._pendingSeatSync = new Map();   // key -> seatData | null (null = delete)
+      this._pendingPointSync = new Map();  // key -> pointData | null (null = delete)
+      this._pendingSyncFlushing = false;
 
       this._requestCount = 0;
       this._lastResetTime = Date.now();
@@ -220,6 +228,10 @@ export class ChatServer {
       this._roomLocks = new Map();
       this._roomWriteLocks = new Map();
       this._joinCooldown = new Map();
+      // ✅ PATCH v4.8.0
+      this._pendingSeatSync = new Map();
+      this._pendingPointSync = new Map();
+      this._pendingSyncFlushing = false;
       for (const room of ROOMS) {
         this.roomClients.set(room, new Set());
       }
@@ -466,8 +478,6 @@ export class ChatServer {
   // ============================================================
   // COLOR CACHE (NAMA + TEXT) — MULTY ONLY
   // ============================================================
-
-  // Simpan ke D1 — HANYA username yang BENAR-BENAR MULTY
   async _saveUserColorCache() {
     if (!this.db) return false;
     try {
@@ -493,7 +503,6 @@ export class ChatServer {
     }
   }
 
-  // Muat dari D1 — HANYA username yang BENAR-BENAR MULTY
   async _loadUserColorCache() {
     if (!this.db) return false;
     try {
@@ -537,7 +546,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ PINTU TERAKHIR: tolak user non-multy
   async _setUserColorCache(username, colorNama, colorText) {
     if (!username) return;
     try {
@@ -561,9 +569,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ============================================================
-  // CEK: apakah username ini user MULTY (isMulti === true)?
-  // ============================================================
   async _isUserMulti(username) {
     try {
       if (!username) return false;
@@ -589,9 +594,6 @@ export class ChatServer {
     }
   }
 
-  // ============================================================
-  // RESOLVE COLOR (nama + text) — READ-ONLY
-  // ============================================================
   async _resolveColor(sender, inputColorNama, inputColorText) {
     const name = String(sender || "");
 
@@ -613,6 +615,61 @@ export class ChatServer {
       color:     cached?.color     ?? inColorNama ?? DEFAULT_COLOR_NAMA,
       textColor: cached?.textColor ?? inColorText ?? DEFAULT_COLOR_TEXT
     };
+  }
+
+  // ============================================================
+  // ✅ PATCH v4.8.0: PENDING SYNC FLUSH
+  // ============================================================
+  async _flushPendingSync() {
+    if (this._pendingSyncFlushing) return;
+    if (!this.db) return;
+
+    const hasSeat  = (this._pendingSeatSync?.size  || 0) > 0;
+    const hasPoint = (this._pendingPointSync?.size || 0) > 0;
+    if (!hasSeat && !hasPoint) return;
+
+    this._pendingSyncFlushing = true;
+    try {
+      if (hasSeat) {
+        const entries = Array.from(this._pendingSeatSync.entries());
+        for (const [key, data] of entries) {
+          try {
+            if (data === null) {
+              await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
+            } else {
+              await this.db
+                .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+                .bind(key, JSON.stringify(data))
+                .run();
+            }
+            this._pendingSeatSync.delete(key);
+          } catch(e) {
+            // biarkan di pending untuk alarm berikutnya
+          }
+        }
+      }
+
+      if (hasPoint) {
+        const entries = Array.from(this._pendingPointSync.entries());
+        for (const [key, data] of entries) {
+          try {
+            if (data === null) {
+              await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
+            } else {
+              await this.db
+                .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+                .bind(key, JSON.stringify(data))
+                .run();
+            }
+            this._pendingPointSync.delete(key);
+          } catch(e) {
+            // biarkan di pending
+          }
+        }
+      }
+    } finally {
+      this._pendingSyncFlushing = false;
+    }
   }
 
   // ============================================================
@@ -651,6 +708,9 @@ export class ChatServer {
           ]);
         } catch(e) {}
       }
+
+      // ✅ PATCH v4.8.0: flush pending sync dulu
+      try { await this._flushPendingSync(); } catch(e) {}
 
       await this._updateNumber();
 
@@ -1251,9 +1311,6 @@ export class ChatServer {
     }
   }
 
-  // ============================================================
-  // NEXT MULTY CHAT — PRIORITAS CACHE
-  // ============================================================
   async _nextMultyChat(room) {
     const r = room;
     if (!r || !ROOMS_SET.has(r)) return false;
@@ -1293,8 +1350,6 @@ export class ChatServer {
       const username = chat.sender || "";
       const chatMsg  = chat.text   || "";
 
-      // ✅ PRIORITAS: CACHE DULU (warna terbaru dari chat manual user MULTY)
-      //    baru fallback ke chat.color (chatList), baru default (6/5)
       const cached = this._userColorCache?.get(username);
 
       let chatColor     = cached?.color     || chat.color     || null;
@@ -1556,30 +1611,76 @@ export class ChatServer {
     }
   }
 
+  // ============================================================
+  // ✅ PATCH v4.8.0: _saveSeat — retry + pending sync
+  // ============================================================
   async _saveSeat(roomName, seatNumber, seatData) {
-    if (!this.db) return;
+    if (!this.db) return true; // mode tanpa D1: tidak bisa simpan
+
     const key = `seat_${roomName}_${seatNumber}`;
-    if (!seatData || !seatData.namauser || seatData.namauser.trim() === '') {
-      await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
-      return;
+    const isEmpty = !seatData || !seatData.namauser || String(seatData.namauser).trim() === '';
+
+    for (let attempt = 1; attempt <= C.D1_SAVE_MAX_ATTEMPTS; attempt++) {
+      try {
+        if (isEmpty) {
+          await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
+        } else {
+          await this.db
+            .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+            .bind(key, JSON.stringify(seatData))
+            .run();
+        }
+        try { this._pendingSeatSync.delete(key); } catch(e) {}
+        return true;
+      } catch(e) {
+        if (attempt < C.D1_SAVE_MAX_ATTEMPTS) {
+          await new Promise(r => setTimeout(r, C.D1_SAVE_RETRY_BASE_MS * attempt));
+          continue;
+        }
+        this._handleError('_saveSeat', e);
+        try {
+          this._pendingSeatSync.set(key, isEmpty ? null : seatData);
+        } catch(e2) {}
+        return false;
+      }
     }
-    await this.db
-      .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-      .bind(key, JSON.stringify(seatData))
-      .run();
+    return false;
   }
 
+  // ============================================================
+  // ✅ PATCH v4.8.0: _savePoint — retry + pending sync
+  // ============================================================
   async _savePoint(roomName, seatNumber, pointData) {
-    if (!this.db) return;
+    if (!this.db) return true;
+
     const key = `point_${roomName}_${seatNumber}`;
-    if (!pointData || (pointData.x === 0 && pointData.y === 0 && !pointData.fast)) {
-      await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
-      return;
+    const isEmpty = !pointData || (pointData.x === 0 && pointData.y === 0 && !pointData.fast);
+
+    for (let attempt = 1; attempt <= C.D1_SAVE_MAX_ATTEMPTS; attempt++) {
+      try {
+        if (isEmpty) {
+          await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
+        } else {
+          await this.db
+            .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+            .bind(key, JSON.stringify(pointData))
+            .run();
+        }
+        try { this._pendingPointSync.delete(key); } catch(e) {}
+        return true;
+      } catch(e) {
+        if (attempt < C.D1_SAVE_MAX_ATTEMPTS) {
+          await new Promise(r => setTimeout(r, C.D1_SAVE_RETRY_BASE_MS * attempt));
+          continue;
+        }
+        this._handleError('_savePoint', e);
+        try {
+          this._pendingPointSync.set(key, isEmpty ? null : pointData);
+        } catch(e2) {}
+        return false;
+      }
     }
-    await this.db
-      .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-      .bind(key, JSON.stringify(pointData))
-      .run();
+    return false;
   }
 
   async _saveMute(roomName, muted) {
@@ -1667,6 +1768,7 @@ export class ChatServer {
 
       if (seatsToDelete.length === 0) return 0;
 
+      // ✅ PATCH v4.8.0: gunakan _saveSeat/_savePoint supaya write-through + pending sync
       if (this.db) {
         if (!keepRoom && !keepSeat) {
           try {
@@ -1690,10 +1792,8 @@ export class ChatServer {
         } else {
           for (const item of seatsToDelete) {
             try {
-              await this.db
-                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
-                .bind(`seat_${item.roomName}_${item.seatNum}`, `point_${item.roomName}_${item.seatNum}`)
-                .run();
+              await this._saveSeat(item.roomName, item.seatNum, null);
+              await this._savePoint(item.roomName, item.seatNum, null);
             } catch(e) {}
           }
         }
@@ -1790,13 +1890,14 @@ export class ChatServer {
           const removedUsername = seatData?.namauser;
           const removedIsMulti = seatData?.isMulti === true;
 
-          if (this.db) {
-            try {
-              await this.db
-                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
-                .bind(`seat_${roomName}_${seatNumber}`, `point_${roomName}_${seatNumber}`)
-                .run();
-            } catch(e) {}
+          // ✅ PATCH v4.8.0: write-through dulu
+          const savedSeat = await this._saveSeat(roomName, seatNumber, null);
+          const savedPoint = await this._savePoint(roomName, seatNumber, null);
+
+          if ((!savedSeat || !savedPoint) && this.db) {
+            // D1 gagal → jangan update cache (biar konsisten), return false
+            this._handleError('_deleteSeatInRoom.d1fail', new Error('D1 delete failed'));
+            return false;
           }
 
           if (roomBucket.seat) delete roomBucket.seat[seatNumber];
@@ -1823,6 +1924,9 @@ export class ChatServer {
     );
   }
 
+  // ============================================================
+  // ✅ PATCH v4.8.0: _updateSeatInRoom — write-through
+  // ============================================================
   async _updateSeatInRoom(roomName, seatNumber, seatData) {
     return await this._withLock(
       this._roomWriteLocks,
@@ -1832,12 +1936,18 @@ export class ChatServer {
           const roomBucket = await this._getRoomBucket(roomName);
           if (!roomBucket) return false;
 
+          // ---- HAPUS SEAT ----
           if (!seatData || !seatData.namauser || seatData.namauser.trim() === '') {
             const oldSeat = roomBucket.seat?.[seatNumber];
             const oldUser = oldSeat?.namauser;
             const oldIsMulti = oldSeat?.isMulti === true;
 
-            try { await this._saveSeat(roomName, seatNumber, null); } catch(e) {}
+            // ✅ write-through
+            const saved = await this._saveSeat(roomName, seatNumber, null);
+            if (!saved && this.db) {
+              this._handleError('_updateSeatInRoom.delete.d1fail', new Error('D1 delete failed'));
+              return false;
+            }
 
             if (roomBucket.seat) delete roomBucket.seat[seatNumber];
             if (roomBucket.point) delete roomBucket.point[seatNumber];
@@ -1852,11 +1962,13 @@ export class ChatServer {
             return true;
           }
 
+          // ---- SIMPAN SEAT ----
           const username = seatData.namauser;
 
           await this._ensureCacheInitialized();
           const roomsData = this._storageCache?.roomsData || {};
 
+          // hapus seat lain (non-multi) milik user yang sama
           for (const [rName, rBucket] of Object.entries(roomsData)) {
             if (!rBucket?.seat) continue;
 
@@ -1870,14 +1982,11 @@ export class ChatServer {
 
               if (data.isMulti === true) continue;
 
-              if (this.db) {
-                try {
-                  await this.db
-                    .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
-                    .bind(`seat_${rName}_${sNum}`, `point_${rName}_${sNum}`)
-                    .run();
-                } catch(e) {}
-              }
+              // ✅ write-through
+              try {
+                await this._saveSeat(rName, sNum, null);
+                await this._savePoint(rName, sNum, null);
+              } catch(e) {}
 
               delete rBucket.seat[sNum];
               if (rBucket.point) delete rBucket.point[sNum];
@@ -1895,8 +2004,14 @@ export class ChatServer {
             finalSeatData.isMulti = true;
           }
 
-          try { await this._saveSeat(roomName, seatNumber, finalSeatData); } catch(e) {}
+          // ✅ WRITE-THROUGH: tulis ke D1 DULU
+          const saved = await this._saveSeat(roomName, seatNumber, finalSeatData);
+          if (!saved && this.db) {
+            this._handleError('_updateSeatInRoom.save.d1fail', new Error('D1 save failed'));
+            return false;
+          }
 
+          // baru update cache
           if (!roomBucket.seat) roomBucket.seat = {};
           roomBucket.seat[seatNumber] = finalSeatData;
           this._setUserIndex(finalSeatData.namauser, roomName, seatNumber, finalSeatData.isMulti);
@@ -1917,19 +2032,28 @@ export class ChatServer {
     );
   }
 
+  // ============================================================
+  // ✅ PATCH v4.8.0: _updatePointInRoom — write-through
+  // ============================================================
   async _updatePointInRoom(roomName, seatNumber, pointData) {
     try {
       const roomBucket = await this._getRoomBucket(roomName);
       if (!roomBucket) return false;
 
-      if (!pointData || (pointData.x === 0 && pointData.y === 0 && !pointData.fast)) {
-        if (roomBucket.point) delete roomBucket.point[seatNumber];
-        await this._savePoint(roomName, seatNumber, null);
-        return true;
+      const isEmpty = !pointData || (pointData.x === 0 && pointData.y === 0 && !pointData.fast);
+
+      const saved = await this._savePoint(roomName, seatNumber, pointData);
+      if (!saved && this.db) {
+        this._handleError('_updatePointInRoom.d1fail', new Error('D1 point save failed'));
+        return false;
       }
-      if (!roomBucket.point) roomBucket.point = {};
-      roomBucket.point[seatNumber] = pointData;
-      await this._savePoint(roomName, seatNumber, pointData);
+
+      if (isEmpty) {
+        if (roomBucket.point) delete roomBucket.point[seatNumber];
+      } else {
+        if (!roomBucket.point) roomBucket.point = {};
+        roomBucket.point[seatNumber] = pointData;
+      }
       return true;
     } catch(e) {
       return false;
@@ -2118,13 +2242,19 @@ export class ChatServer {
         isMulti: currentSeatData.isMulti === true
       };
 
-      await this._updateSeatInRoom(roomName, seat, updatedSeat);
+      const ok = await this._updateSeatInRoom(roomName, seat, updatedSeat);
+      if (!ok) {
+        return { success: false, error: 'Failed to persist seat' };
+      }
       return { success: true, data: updatedSeat };
     } catch(e) {
       return { success: false, error: e.message };
     }
   }
 
+  // ============================================================
+  // ✅ PATCH v4.8.0: _updatePointDirect — write-through
+  // ============================================================
   async _updatePointDirect(roomName, seat, x, y, fast) {
     try {
       await this._ensureCacheInitialized();
@@ -2134,9 +2264,23 @@ export class ChatServer {
       if (!this._storageCache.roomsData[roomName]) {
         this._storageCache.roomsData[roomName] = { seat: {}, point: {}, mute: false };
       }
+
       const pointData = { x: x || 0, y: y || 0, fast: !!fast };
-      this._storageCache.roomsData[roomName].point[seat] = pointData;
-      await this._savePoint(roomName, seat, pointData);
+      const isEmpty = pointData.x === 0 && pointData.y === 0 && !pointData.fast;
+
+      // ✅ write-through dulu
+      const saved = await this._savePoint(roomName, seat, pointData);
+      if (!saved && this.db) {
+        return false;
+      }
+
+      if (isEmpty) {
+        if (this._storageCache.roomsData[roomName].point) {
+          delete this._storageCache.roomsData[roomName].point[seat];
+        }
+      } else {
+        this._storageCache.roomsData[roomName].point[seat] = pointData;
+      }
       return true;
     } catch(e) {
       return false;
@@ -2325,7 +2469,11 @@ export class ChatServer {
           isMulti: wasMulti
         };
 
-        await this._updateSeatInRoom(roomName, seat, newSeat);
+        const ok = await this._updateSeatInRoom(roomName, seat, newSeat);
+        if (!ok) {
+          this.safeSend(ws, ["error", "Gagal simpan kursi"]);
+          return false;
+        }
       }
 
       ws.username = username;
@@ -2468,7 +2616,8 @@ export class ChatServer {
           viptanda: 0,
           isMulti: true
         };
-        await this._updateSeatInRoom(multiRoomname, seat, newSeat);
+        const ok = await this._updateSeatInRoom(multiRoomname, seat, newSeat);
+        if (!ok) return false;
       }
 
       try {
@@ -2559,7 +2708,8 @@ export class ChatServer {
           viptanda: 0,
           isMulti: true
         };
-        await this._updateSeatInRoom(multiRoomname, seat, newSeat);
+        const ok = await this._updateSeatInRoom(multiRoomname, seat, newSeat);
+        if (!ok) return false;
       }
 
       try {
@@ -3216,17 +3366,12 @@ export class ChatServer {
         }
       }
 
+      // ✅ PATCH v4.8.0: pakai _saveSeat/_savePoint supaya pending sync konsisten
       for (const orphan of orphanSeats) {
         const { room, seat, username } = orphan;
         try {
-          if (this.db) {
-            try {
-              await this.db
-                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
-                .bind(`seat_${room}_${seat}`, `point_${room}_${seat}`)
-                .run();
-            } catch(e) {}
-          }
+          await this._saveSeat(room, seat, null);
+          await this._savePoint(room, seat, null);
 
           const roomBucket = this._storageCache?.roomsData?.[room];
           if (roomBucket?.seat) delete roomBucket.seat[seat];
@@ -4408,6 +4553,9 @@ export class ChatServer {
                 const result = await this._updateKursi(kursiRoom, kursiSeat, updateData);
                 if (result.success) {
                   this.broadcast(kursiRoom, ["kursiBatchUpdate", kursiRoom, [[kursiSeat, result.data]]]);
+                } else {
+                  // ✅ PATCH v4.8.0: kabari client kalau gagal persist
+                  this.safeSend(ws, ["error", result.error || "Gagal simpan kursi"]);
                 }
                 return result;
               },
@@ -4417,9 +4565,6 @@ export class ChatServer {
           break;
         }
 
-        // ============================================================
-        // CHAT — Color cache HANYA untuk user MULTY
-        // ============================================================
         case "chat": {
           const [chatRoom, chatNoimg, chatUser, chatMsg, chatColor, chatTextColor] = args;
           if (!chatMsg || !ROOMS_SET.has(chatRoom)) break;
@@ -4428,7 +4573,6 @@ export class ChatServer {
           const wsRoom = ws.room || ws.roomname;
           if (wsRoom !== chatRoom) break;
 
-          // ✅ HANYA simpan color cache jika user BENAR-BENAR MULTY
           if (chatUser && await this._isUserMulti(chatUser)) {
             const prev = this._userColorCache?.get(chatUser);
             const newColor     = chatColor     ? String(chatColor)     : null;
@@ -4878,6 +5022,8 @@ export class ChatServer {
             totalSeatsInCache: totalSeats,
             cacheInitialized: this._cacheInitialized,
             restoreFailed: this._restoreFailed,
+            pendingSeatSync: this._pendingSeatSync?.size || 0,
+            pendingPointSync: this._pendingPointSync?.size || 0,
             uptimeMs: Date.now() - this._startTime,
           }), {
             status: 200,
@@ -4957,6 +5103,9 @@ export class ChatServer {
     if (this.isDestroyed) return;
     this.closing = true;
 
+    // ✅ PATCH v4.8.0: flush pending sync sebelum shutdown
+    try { await this._flushPendingSync(); } catch(e) {}
+
     this._stopAllMultyLoops();
 
     const wsCopy = Array.from(this.wsSet || new Set());
@@ -5007,6 +5156,11 @@ export class ChatServer {
     this._roomLocks = new Map();
     this._roomWriteLocks = new Map();
     this._joinCooldown = new Map();
+
+    // ✅ PATCH v4.8.0
+    this._pendingSeatSync = new Map();
+    this._pendingPointSync = new Map();
+    this._pendingSyncFlushing = false;
 
     this.isDestroyed = true;
   }
