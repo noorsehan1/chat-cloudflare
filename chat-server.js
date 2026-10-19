@@ -1,8 +1,8 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.8.3
-// - setActiveMulti: HANYA switch identitas aktif (tanpa hapus kursi, tanpa sendAllStateTo)
-// - WRITE-THROUGH D1 + PENDING SYNC + RETRY (seat & point)
-// - Color cache MULTY-ONLY
+// VERSION: 4.7.4 (SETACTIVEMULTI NO-DELETE + POINT DEBOUNCE SAVE)
+// - setActiveMulti HANYA mengaktifkan multi, TIDAK PERNAH hapus seat
+// - updatePoint: lock room-write + debounce save D1 (200ms) agar realtime & tidak overload
+// - updateKursi: save D1 langsung (via _updateSeatInRoom -> _saveSeat)
 
 const C = {
   MAX_SEATS: 45,
@@ -31,8 +31,7 @@ const C = {
   HISTORY_LIMIT: 100,
   HISTORY_MAX_AGE_MS: 3 * 60 * 60 * 1000,
   ORPHAN_CLEANUP_GRACE_MS: 60000,
-  D1_SAVE_MAX_ATTEMPTS: 3,
-  D1_SAVE_RETRY_BASE_MS: 50,
+  POINT_SAVE_DEBOUNCE_MS: 200,   // ✅ PATCH: debounce save point D1
 };
 
 const ROOMS = [
@@ -99,6 +98,9 @@ export class ChatServer {
       this._kursiLocks = new Map();
       this._wsLock = null;
 
+      // ✅ PATCH: timer debounce save point ke D1
+      this._pointSaveTimers = new Map();
+
       this._joinCooldown = new Map();
 
       this.currentNumber = 1;
@@ -109,10 +111,6 @@ export class ChatServer {
       this._multyRestored = false;
 
       this._historyTableReady = new Set();
-
-      this._pendingSeatSync = new Map();
-      this._pendingPointSync = new Map();
-      this._pendingSyncFlushing = false;
 
       this._requestCount = 0;
       this._lastResetTime = Date.now();
@@ -213,6 +211,7 @@ export class ChatServer {
       this._userColorCache = new Map();
       this._pendingEvents = [];
       this._eventQueue = [];
+      this._pointSaveTimers = new Map();
       this.db = null;
       this._onlineUsersCache = null;
       this._onlineUsersCacheTime = 0;
@@ -225,9 +224,6 @@ export class ChatServer {
       this._roomLocks = new Map();
       this._roomWriteLocks = new Map();
       this._joinCooldown = new Map();
-      this._pendingSeatSync = new Map();
-      this._pendingPointSync = new Map();
-      this._pendingSyncFlushing = false;
       for (const room of ROOMS) {
         this.roomClients.set(room, new Set());
       }
@@ -235,7 +231,7 @@ export class ChatServer {
   }
 
   // ============================================================
-  // HELPER ATTACHMENT
+  // HELPER: kelola multiUsers di attachment WS
   // ============================================================
   _getAttachment(ws) {
     try {
@@ -311,6 +307,51 @@ export class ChatServer {
   }
 
   // ============================================================
+  // ✅ PATCH: DEBOUNCE SAVE POINT KE D1
+  // ============================================================
+  _scheduleSavePoint(roomName, seat, pointData) {
+    try {
+      if (!this.db) return;
+      if (!roomName || typeof seat !== 'number') return;
+
+      const key = `${roomName}_${seat}`;
+      const existing = this._pointSaveTimers.get(key);
+      if (existing) {
+        try { clearTimeout(existing); } catch(e) {}
+      }
+
+      const timer = setTimeout(async () => {
+        this._pointSaveTimers.delete(key);
+        try {
+          await this._savePoint(roomName, seat, pointData);
+        } catch(e) {}
+      }, C.POINT_SAVE_DEBOUNCE_MS);
+
+      this._pointSaveTimers.set(key, timer);
+    } catch(e) {}
+  }
+
+  _flushPointSaveFor(roomName, seat) {
+    try {
+      const key = `${roomName}_${seat}`;
+      const timer = this._pointSaveTimers.get(key);
+      if (timer) {
+        try { clearTimeout(timer); } catch(e) {}
+        this._pointSaveTimers.delete(key);
+      }
+    } catch(e) {}
+  }
+
+  _flushAllPointSaves() {
+    try {
+      for (const timer of this._pointSaveTimers.values()) {
+        try { clearTimeout(timer); } catch(e) {}
+      }
+      this._pointSaveTimers.clear();
+    } catch(e) {}
+  }
+
+  // ============================================================
   // MULTY STATE
   // ============================================================
   _getMultyState(room) {
@@ -382,6 +423,9 @@ export class ChatServer {
     try { this._userIndex.delete(username); } catch(e) {}
   }
 
+  // ============================================================
+  // HELPER: kumpulkan username yang BENAR-BENAR MULTY
+  // ============================================================
   async _collectMultiUsernames() {
     const set = new Set();
     try {
@@ -469,8 +513,9 @@ export class ChatServer {
   }
 
   // ============================================================
-  // COLOR CACHE (MULTY ONLY)
+  // COLOR CACHE (NAMA + TEXT) — MULTY ONLY
   // ============================================================
+
   async _saveUserColorCache() {
     if (!this.db) return false;
     try {
@@ -611,57 +656,6 @@ export class ChatServer {
   }
 
   // ============================================================
-  // PENDING SYNC FLUSH
-  // ============================================================
-  async _flushPendingSync() {
-    if (this._pendingSyncFlushing) return;
-    if (!this.db) return;
-
-    const hasSeat  = (this._pendingSeatSync?.size  || 0) > 0;
-    const hasPoint = (this._pendingPointSync?.size || 0) > 0;
-    if (!hasSeat && !hasPoint) return;
-
-    this._pendingSyncFlushing = true;
-    try {
-      if (hasSeat) {
-        const entries = Array.from(this._pendingSeatSync.entries());
-        for (const [key, data] of entries) {
-          try {
-            if (data === null) {
-              await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
-            } else {
-              await this.db
-                .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-                .bind(key, JSON.stringify(data))
-                .run();
-            }
-            this._pendingSeatSync.delete(key);
-          } catch(e) {}
-        }
-      }
-
-      if (hasPoint) {
-        const entries = Array.from(this._pendingPointSync.entries());
-        for (const [key, data] of entries) {
-          try {
-            if (data === null) {
-              await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
-            } else {
-              await this.db
-                .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-                .bind(key, JSON.stringify(data))
-                .run();
-            }
-            this._pendingPointSync.delete(key);
-          } catch(e) {}
-        }
-      }
-    } finally {
-      this._pendingSyncFlushing = false;
-    }
-  }
-
-  // ============================================================
   // ALARM
   // ============================================================
   async _ensureAlarm() {
@@ -697,8 +691,6 @@ export class ChatServer {
           ]);
         } catch(e) {}
       }
-
-      try { await this._flushPendingSync(); } catch(e) {}
 
       await this._updateNumber();
 
@@ -1299,6 +1291,9 @@ export class ChatServer {
     }
   }
 
+  // ============================================================
+  // NEXT MULTY CHAT — PRIORITAS CACHE
+  // ============================================================
   async _nextMultyChat(room) {
     const r = room;
     if (!r || !ROOMS_SET.has(r)) return false;
@@ -1599,73 +1594,30 @@ export class ChatServer {
     }
   }
 
-  // ============================================================
-  // SAVE SEAT / POINT (WRITE-THROUGH + RETRY + PENDING)
-  // ============================================================
   async _saveSeat(roomName, seatNumber, seatData) {
-    if (!this.db) return true;
-
+    if (!this.db) return;
     const key = `seat_${roomName}_${seatNumber}`;
-    const isEmpty = !seatData || !seatData.namauser || String(seatData.namauser).trim() === '';
-
-    for (let attempt = 1; attempt <= C.D1_SAVE_MAX_ATTEMPTS; attempt++) {
-      try {
-        if (isEmpty) {
-          await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
-        } else {
-          await this.db
-            .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-            .bind(key, JSON.stringify(seatData))
-            .run();
-        }
-        try { this._pendingSeatSync.delete(key); } catch(e) {}
-        return true;
-      } catch(e) {
-        if (attempt < C.D1_SAVE_MAX_ATTEMPTS) {
-          await new Promise(r => setTimeout(r, C.D1_SAVE_RETRY_BASE_MS * attempt));
-          continue;
-        }
-        this._handleError('_saveSeat', e);
-        try {
-          this._pendingSeatSync.set(key, isEmpty ? null : seatData);
-        } catch(e2) {}
-        return false;
-      }
+    if (!seatData || !seatData.namauser || seatData.namauser.trim() === '') {
+      await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
+      return;
     }
-    return false;
+    await this.db
+      .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+      .bind(key, JSON.stringify(seatData))
+      .run();
   }
 
   async _savePoint(roomName, seatNumber, pointData) {
-    if (!this.db) return true;
-
+    if (!this.db) return;
     const key = `point_${roomName}_${seatNumber}`;
-    const isEmpty = !pointData || (pointData.x === 0 && pointData.y === 0 && !pointData.fast);
-
-    for (let attempt = 1; attempt <= C.D1_SAVE_MAX_ATTEMPTS; attempt++) {
-      try {
-        if (isEmpty) {
-          await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
-        } else {
-          await this.db
-            .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-            .bind(key, JSON.stringify(pointData))
-            .run();
-        }
-        try { this._pendingPointSync.delete(key); } catch(e) {}
-        return true;
-      } catch(e) {
-        if (attempt < C.D1_SAVE_MAX_ATTEMPTS) {
-          await new Promise(r => setTimeout(r, C.D1_SAVE_RETRY_BASE_MS * attempt));
-          continue;
-        }
-        this._handleError('_savePoint', e);
-        try {
-          this._pendingPointSync.set(key, isEmpty ? null : pointData);
-        } catch(e2) {}
-        return false;
-      }
+    if (!pointData || (pointData.x === 0 && pointData.y === 0 && !pointData.fast)) {
+      await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
+      return;
     }
-    return false;
+    await this.db
+      .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+      .bind(key, JSON.stringify(pointData))
+      .run();
   }
 
   async _saveMute(roomName, muted) {
@@ -1726,7 +1678,6 @@ export class ChatServer {
     const keepRoom = options.keepRoom || null;
     const keepSeat = options.keepSeat || null;
     const forceMulti = options.forceMulti === true;
-    const alsoOtherRooms = options.alsoOtherRooms !== false;
 
     const seatsToDelete = [];
 
@@ -1741,10 +1692,6 @@ export class ChatServer {
           if (isNaN(seatNum)) continue;
 
           if (keepRoom && keepSeat && roomName === keepRoom && seatNum === keepSeat) {
-            continue;
-          }
-
-          if (keepRoom && !alsoOtherRooms && roomName !== keepRoom) {
             continue;
           }
 
@@ -1781,8 +1728,10 @@ export class ChatServer {
         } else {
           for (const item of seatsToDelete) {
             try {
-              await this._saveSeat(item.roomName, item.seatNum, null);
-              await this._savePoint(item.roomName, item.seatNum, null);
+              await this.db
+                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
+                .bind(`seat_${item.roomName}_${item.seatNum}`, `point_${item.roomName}_${item.seatNum}`)
+                .run();
             } catch(e) {}
           }
         }
@@ -1796,6 +1745,9 @@ export class ChatServer {
 
         delete roomBucket.seat[seatStr];
         if (roomBucket.point) delete roomBucket.point[seatStr];
+
+        // ✅ PATCH: flush debounce point untuk seat yang dihapus
+        this._flushPointSaveFor(roomName, seatNum);
 
         if (!this._isRestoring) {
           this.broadcast(roomName, ["removeKursi", roomName, seatNum]);
@@ -1864,38 +1816,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ Helper pilih seat aktif (untuk attachment saja)
-  async _selectActiveSeatForUser(username, ws = null) {
-    if (!username) return null;
-
-    const allSeats = await this._findAllSeatsForUser(username);
-    if (!allSeats || allSeats.length === 0) return null;
-
-    if (ws) {
-      try {
-        const att = this._getAttachment(ws);
-        const info = att?.seatInfo;
-        if (info?.room && info?.seat) {
-          const same = allSeats.find(
-            s => s.room === info.room && s.seat === info.seat
-          );
-          if (same) return same;
-        }
-      } catch(e) {}
-
-      const currentRoom = ws.room || ws.roomname || ws._room;
-      if (currentRoom) {
-        const inRoom = allSeats.find(s => s.room === currentRoom);
-        if (inRoom) return inRoom;
-      }
-    }
-
-    const multiSeat = allSeats.find(s => s.isMulti === true);
-    if (multiSeat) return multiSeat;
-
-    return allSeats[0];
-  }
-
   async _deleteSeatInRoom(roomName, seatNumber, force = false) {
     return await this._withLock(
       this._roomWriteLocks,
@@ -1911,16 +1831,20 @@ export class ChatServer {
           const removedUsername = seatData?.namauser;
           const removedIsMulti = seatData?.isMulti === true;
 
-          const savedSeat = await this._saveSeat(roomName, seatNumber, null);
-          const savedPoint = await this._savePoint(roomName, seatNumber, null);
-
-          if ((!savedSeat || !savedPoint) && this.db) {
-            this._handleError('_deleteSeatInRoom.d1fail', new Error('D1 delete failed'));
-            return false;
+          if (this.db) {
+            try {
+              await this.db
+                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
+                .bind(`seat_${roomName}_${seatNumber}`, `point_${roomName}_${seatNumber}`)
+                .run();
+            } catch(e) {}
           }
 
           if (roomBucket.seat) delete roomBucket.seat[seatNumber];
           if (roomBucket.point) delete roomBucket.point[seatNumber];
+
+          // ✅ PATCH: flush debounce point
+          this._flushPointSaveFor(roomName, seatNumber);
 
           if (removedUsername) {
             this._removeUserIndex(removedUsername);
@@ -1957,14 +1881,13 @@ export class ChatServer {
             const oldUser = oldSeat?.namauser;
             const oldIsMulti = oldSeat?.isMulti === true;
 
-            const saved = await this._saveSeat(roomName, seatNumber, null);
-            if (!saved && this.db) {
-              this._handleError('_updateSeatInRoom.delete.d1fail', new Error('D1 delete failed'));
-              return false;
-            }
+            try { await this._saveSeat(roomName, seatNumber, null); } catch(e) {}
 
             if (roomBucket.seat) delete roomBucket.seat[seatNumber];
             if (roomBucket.point) delete roomBucket.point[seatNumber];
+
+            // ✅ PATCH: flush debounce point
+            this._flushPointSaveFor(roomName, seatNumber);
 
             if (oldUser) {
               this._removeUserIndex(oldUser);
@@ -1994,13 +1917,20 @@ export class ChatServer {
 
               if (data.isMulti === true) continue;
 
-              try {
-                await this._saveSeat(rName, sNum, null);
-                await this._savePoint(rName, sNum, null);
-              } catch(e) {}
+              if (this.db) {
+                try {
+                  await this.db
+                    .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
+                    .bind(`seat_${rName}_${sNum}`, `point_${rName}_${sNum}`)
+                    .run();
+                } catch(e) {}
+              }
 
               delete rBucket.seat[sNum];
               if (rBucket.point) delete rBucket.point[sNum];
+
+              // ✅ PATCH: flush debounce point
+              this._flushPointSaveFor(rName, sNum);
 
               if (!this._isRestoring) {
                 this.broadcast(rName, ["removeKursi", rName, sNum]);
@@ -2015,11 +1945,7 @@ export class ChatServer {
             finalSeatData.isMulti = true;
           }
 
-          const saved = await this._saveSeat(roomName, seatNumber, finalSeatData);
-          if (!saved && this.db) {
-            this._handleError('_updateSeatInRoom.save.d1fail', new Error('D1 save failed'));
-            return false;
-          }
+          try { await this._saveSeat(roomName, seatNumber, finalSeatData); } catch(e) {}
 
           if (!roomBucket.seat) roomBucket.seat = {};
           roomBucket.seat[seatNumber] = finalSeatData;
@@ -2046,20 +1972,14 @@ export class ChatServer {
       const roomBucket = await this._getRoomBucket(roomName);
       if (!roomBucket) return false;
 
-      const isEmpty = !pointData || (pointData.x === 0 && pointData.y === 0 && !pointData.fast);
-
-      const saved = await this._savePoint(roomName, seatNumber, pointData);
-      if (!saved && this.db) {
-        this._handleError('_updatePointInRoom.d1fail', new Error('D1 point save failed'));
-        return false;
-      }
-
-      if (isEmpty) {
+      if (!pointData || (pointData.x === 0 && pointData.y === 0 && !pointData.fast)) {
         if (roomBucket.point) delete roomBucket.point[seatNumber];
-      } else {
-        if (!roomBucket.point) roomBucket.point = {};
-        roomBucket.point[seatNumber] = pointData;
+        await this._savePoint(roomName, seatNumber, null);
+        return true;
       }
+      if (!roomBucket.point) roomBucket.point = {};
+      roomBucket.point[seatNumber] = pointData;
+      await this._savePoint(roomName, seatNumber, pointData);
       return true;
     } catch(e) {
       return false;
@@ -2248,16 +2168,14 @@ export class ChatServer {
         isMulti: currentSeatData.isMulti === true
       };
 
-      const ok = await this._updateSeatInRoom(roomName, seat, updatedSeat);
-      if (!ok) {
-        return { success: false, error: 'Failed to persist seat' };
-      }
+      await this._updateSeatInRoom(roomName, seat, updatedSeat);
       return { success: true, data: updatedSeat };
     } catch(e) {
       return { success: false, error: e.message };
     }
   }
 
+  // ✅ PATCH: updatePointDirect sekarang pakai debounce save D1
   async _updatePointDirect(roomName, seat, x, y, fast) {
     try {
       await this._ensureCacheInitialized();
@@ -2267,22 +2185,12 @@ export class ChatServer {
       if (!this._storageCache.roomsData[roomName]) {
         this._storageCache.roomsData[roomName] = { seat: {}, point: {}, mute: false };
       }
-
       const pointData = { x: x || 0, y: y || 0, fast: !!fast };
-      const isEmpty = pointData.x === 0 && pointData.y === 0 && !pointData.fast;
+      this._storageCache.roomsData[roomName].point[seat] = pointData;
 
-      const saved = await this._savePoint(roomName, seat, pointData);
-      if (!saved && this.db) {
-        return false;
-      }
+      // ✅ PATCH: debounce save ke D1 (bukan await langsung)
+      this._scheduleSavePoint(roomName, seat, pointData);
 
-      if (isEmpty) {
-        if (this._storageCache.roomsData[roomName].point) {
-          delete this._storageCache.roomsData[roomName].point[seat];
-        }
-      } else {
-        this._storageCache.roomsData[roomName].point[seat] = pointData;
-      }
       return true;
     } catch(e) {
       return false;
@@ -2471,11 +2379,7 @@ export class ChatServer {
           isMulti: wasMulti
         };
 
-        const ok = await this._updateSeatInRoom(roomName, seat, newSeat);
-        if (!ok) {
-          this.safeSend(ws, ["error", "Gagal simpan kursi"]);
-          return false;
-        }
+        await this._updateSeatInRoom(roomName, seat, newSeat);
       }
 
       ws.username = username;
@@ -2618,8 +2522,7 @@ export class ChatServer {
           viptanda: 0,
           isMulti: true
         };
-        const ok = await this._updateSeatInRoom(multiRoomname, seat, newSeat);
-        if (!ok) return false;
+        await this._updateSeatInRoom(multiRoomname, seat, newSeat);
       }
 
       try {
@@ -2710,8 +2613,7 @@ export class ChatServer {
           viptanda: 0,
           isMulti: true
         };
-        const ok = await this._updateSeatInRoom(multiRoomname, seat, newSeat);
-        if (!ok) return false;
+        await this._updateSeatInRoom(multiRoomname, seat, newSeat);
       }
 
       try {
@@ -3371,12 +3273,21 @@ export class ChatServer {
       for (const orphan of orphanSeats) {
         const { room, seat, username } = orphan;
         try {
-          await this._saveSeat(room, seat, null);
-          await this._savePoint(room, seat, null);
+          if (this.db) {
+            try {
+              await this.db
+                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
+                .bind(`seat_${room}_${seat}`, `point_${room}_${seat}`)
+                .run();
+            } catch(e) {}
+          }
 
           const roomBucket = this._storageCache?.roomsData?.[room];
           if (roomBucket?.seat) delete roomBucket.seat[seat];
           if (roomBucket?.point) delete roomBucket.point[seat];
+
+          // ✅ PATCH: flush debounce point
+          this._flushPointSaveFor(room, seat);
 
           if (username) this._removeUserIndex(username);
         } catch(e) {}
@@ -4463,76 +4374,65 @@ export class ChatServer {
           break;
         }
 
-        // ✅ setActiveMulti: HANYA switch identitas aktif.
-        //    TIDAK hapus kursi. TIDAK sendAllStateTo. TIDAK setTimeout. TIDAK updateRoomCount.
+        // ✅ PATCH: setActiveMulti HANYA mengaktifkan multi, TIDAK PERNAH hapus seat
         case "setActiveMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
 
-          await this._withLock(
-            this._userJoinLock,
-            `join_user_${targetUsername}`,
-            async () => {
-              try {
-                const allSeats = await this._findAllSeatsForUser(targetUsername);
-                if (!allSeats || allSeats.length === 0) {
-                  this.safeSend(ws, ["error", "User tidak punya seat"]);
-                  return;
-                }
+          const allSeats = await this._findAllSeatsForUser(targetUsername);
+          if (allSeats.length === 0) {
+            this.safeSend(ws, ["error", "User tidak punya seat"]);
+            break;
+          }
 
-                const found = await this._selectActiveSeatForUser(targetUsername, ws) || allSeats[0];
-                const roomName = found.room;
-                const seatNumber = found.seat;
+          // ✅ PRIORITAS seat MULTI. Jika tidak ada multi, pakai seat apa pun
+          //    TANPA menghapus/mengubah seat tersebut.
+          const multiSeats = allSeats.filter(s => s.isMulti === true);
+          const found = multiSeats[0] || allSeats[0] || null;
 
-                try { this.wsActiveMulti?.set(ws, { username: targetUsername, room: roomName }); } catch(e) {}
+          if (!found) {
+            this.safeSend(ws, ["error", "User tidak punya seat"]);
+            break;
+          }
 
-                for (const [otherRoom, clients] of (this.roomClients || new Map())) {
-                  if (otherRoom !== roomName && clients) {
-                    try { clients.delete(ws); } catch(e) {}
-                  }
-                }
-                const roomClients = this.roomClients?.get(roomName);
-                if (roomClients && !roomClients.has(ws)) {
-                  try { roomClients.add(ws); } catch(e) {}
-                }
+          const roomName = found.room;
+          const seatNumber = found.seat;
 
-                ws.username = targetUsername;
-                ws.idtarget = targetUsername;
-                ws.room = roomName;
-                ws.roomname = roomName;
-                ws._username = targetUsername;
-                ws._room = roomName;
+          // ✅ TIDAK ADA operasi delete di sini.
 
-                this._addMultiUserToAttachment(ws, targetUsername);
-                try {
-                  const att2 = this._getAttachment(ws);
-                  att2.username = targetUsername;
-                  att2.seatInfo = { room: roomName, seat: seatNumber };
-                  this._setAttachment(ws, att2);
-                } catch(e) {}
+          try { this.wsActiveMulti?.set(ws, { username: targetUsername, room: roomName }); } catch(e) {}
+          for (const [otherRoom, clients] of (this.roomClients || new Map())) {
+            if (otherRoom !== roomName && clients) {
+              try { clients.delete(ws); } catch(e) {}
+            }
+          }
+          const roomClients = this.roomClients?.get(roomName);
+          if (roomClients && !roomClients.has(ws)) try { roomClients.add(ws); } catch(e) {}
+          ws.username = targetUsername;
+          ws.idtarget = targetUsername;
+          ws.room = roomName;
+          ws.roomname = roomName;
+          ws._username = targetUsername;
+          ws._room = roomName;
 
-                let connections = this.userConnections?.get(targetUsername);
-                if (!connections) {
-                  connections = new Set();
-                  try { this.userConnections?.set(targetUsername, connections); } catch(e) {}
-                }
-                if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
-                if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
+          this._addMultiUserToAttachment(ws, targetUsername);
+          try {
+            const att2 = this._getAttachment(ws);
+            att2.username = targetUsername;
+            att2.seatInfo = found;
+            this._setAttachment(ws, att2);
+          } catch(e) {}
 
-                this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
-                this.safeSend(ws, ["rooMasuk", seatNumber, roomName]);
-                this.safeSend(ws, ["numberKursiSaya", seatNumber]);
-                this.safeSend(ws, ["currentNumber", this.currentNumber]);
+          let connections = this.userConnections?.get(targetUsername);
+          if (!connections) {
+            connections = new Set();
+            try { this.userConnections?.set(targetUsername, connections); } catch(e) {}
+          }
+          if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
+          if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
 
-                this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
-
-              } catch(e) {
-                this._handleError('setActiveMulti', e);
-                this.safeSend(ws, ["error", "Gagal set active multi"]);
-              }
-            },
-            C.USER_JOIN_LOCK_TIMEOUT
-          );
+          this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
+          this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
           break;
         }
 
@@ -4568,8 +4468,6 @@ export class ChatServer {
                 const result = await this._updateKursi(kursiRoom, kursiSeat, updateData);
                 if (result.success) {
                   this.broadcast(kursiRoom, ["kursiBatchUpdate", kursiRoom, [[kursiSeat, result.data]]]);
-                } else {
-                  this.safeSend(ws, ["error", result.error || "Gagal simpan kursi"]);
                 }
                 return result;
               },
@@ -4613,6 +4511,7 @@ export class ChatServer {
           break;
         }
 
+        // ✅ PATCH: updatePoint — lock room write + debounce save D1
         case "updatePoint": {
           const [pointRoom, pointSeat, pointX, pointY, pointFast] = args;
 
@@ -4622,8 +4521,15 @@ export class ChatServer {
           const currentUser = ws.username || ws._username;
           if (!currentUser) break;
 
-          const updated = await this._updatePointDirect(
-            pointRoom, pointSeat, pointX, pointY, pointFast === 1
+          const updated = await this._withLock(
+            this._roomWriteLocks,
+            `write_${pointRoom}`,
+            async () => {
+              return await this._updatePointDirect(
+                pointRoom, pointSeat, pointX, pointY, pointFast === 1
+              );
+            },
+            C.LOCK_TIMEOUT
           );
 
           if (updated) {
@@ -4873,6 +4779,13 @@ export class ChatServer {
                   if (isMulti) removedMultiUsernames.push(uname);
                 }
               }
+
+              // ✅ PATCH: flush semua debounce point di room ini
+              for (const seatStr in roomBucket.point) {
+                const seatNum = parseInt(seatStr);
+                if (!isNaN(seatNum)) this._flushPointSaveFor(resetRoomName, seatNum);
+              }
+
               roomBucket.seat = {};
               roomBucket.point = {};
               roomBucket.mute = false;
@@ -5036,9 +4949,8 @@ export class ChatServer {
             totalSeatsInCache: totalSeats,
             cacheInitialized: this._cacheInitialized,
             restoreFailed: this._restoreFailed,
-            pendingSeatSync: this._pendingSeatSync?.size || 0,
-            pendingPointSync: this._pendingPointSync?.size || 0,
             uptimeMs: Date.now() - this._startTime,
+            pendingPointSaves: this._pointSaveTimers?.size || 0,
           }), {
             status: 200,
             headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" }
@@ -5117,9 +5029,10 @@ export class ChatServer {
     if (this.isDestroyed) return;
     this.closing = true;
 
-    try { await this._flushPendingSync(); } catch(e) {}
-
     this._stopAllMultyLoops();
+
+    // ✅ PATCH: flush semua debounce point save sebelum shutdown
+    this._flushAllPointSaves();
 
     const wsCopy = Array.from(this.wsSet || new Set());
     for (const ws of wsCopy) {
@@ -5169,10 +5082,7 @@ export class ChatServer {
     this._roomLocks = new Map();
     this._roomWriteLocks = new Map();
     this._joinCooldown = new Map();
-
-    this._pendingSeatSync = new Map();
-    this._pendingPointSync = new Map();
-    this._pendingSyncFlushing = false;
+    this._pointSaveTimers = new Map();
 
     this.isDestroyed = true;
   }
