@@ -4317,7 +4317,7 @@ export class ChatServer {
           break;
         }
 
-                case "setActiveMulti": {
+        case "setActiveMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
 
@@ -4410,6 +4410,48 @@ export class ChatServer {
           //    (dihapus — tidak boleh ke seluruh room)
           break;
         }
+
+        case "updateKursi": {
+          const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
+
+          if (!kursiRoom || typeof kursiSeat !== 'number' || kursiSeat < 1 || kursiSeat > C.MAX_SEATS) {
+            break;
+          }
+          if (!ROOMS_SET.has(kursiRoom)) break;
+
+          const currentUser = ws.username || ws._username;
+          if (!currentUser) break;
+
+          const seatData = await this._getSeatData(kursiRoom, kursiSeat);
+          if (!seatData || seatData.namauser !== currentUser) break;
+
+          try {
+            await this._withLock(
+              this._kursiLocks,
+              `kursi_${kursiRoom}_${kursiSeat}`,
+              async () => {
+                const updateData = {
+                  noimageUrl: kursiNoimg,
+                  namauser: seatData.namauser,
+                  color: kursiColor,
+                  itembawah: kursiBawah,
+                  itematas: kursiAtas,
+                  vip: kursiVip,
+                  viptanda: kursiVt,
+                  isMulti: seatData.isMulti === true
+                };
+                const result = await this._updateKursi(kursiRoom, kursiSeat, updateData);
+                if (result.success) {
+                  this.broadcast(kursiRoom, ["kursiBatchUpdate", kursiRoom, [[kursiSeat, result.data]]]);
+                }
+                return result;
+              },
+              C.LOCK_TIMEOUT
+            );
+          } catch(e) {}
+          break;
+        }
+
         // ============================================================
         // CHAT — Color cache HANYA untuk user MULTY
         // ============================================================
