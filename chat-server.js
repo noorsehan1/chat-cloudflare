@@ -1,9 +1,8 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.8.2
+// VERSION: 4.8.3
+// - setActiveMulti: HANYA switch identitas aktif (tanpa hapus kursi, tanpa sendAllStateTo)
 // - WRITE-THROUGH D1 + PENDING SYNC + RETRY (seat & point)
-// - setActiveMulti TIDAK menghapus kursi & TIDAK kirim sendAllStateTo
 // - Color cache MULTY-ONLY
-// - Semua perubahan kursi/point tersimpan ke D1 & bisa direstore
 
 const C = {
   MAX_SEATS: 45,
@@ -1895,48 +1894,6 @@ export class ChatServer {
     if (multiSeat) return multiSeat;
 
     return allSeats[0];
-  }
-
-  // ✅ Helper ini tetap ada, tapi TIDAK dipanggil dari setActiveMulti
-  async _cleanupDuplicateSeatsSafely(username, keepRoom, keepSeat, options = {}) {
-    if (!username || !keepRoom || !keepSeat) return 0;
-
-    const forceMulti = options.forceMulti === true;
-    const alsoOtherRooms = options.alsoOtherRooms === true;
-
-    await this._ensureCacheInitialized();
-    const roomsData = this._storageCache?.roomsData || {};
-
-    const toDelete = [];
-
-    for (const [roomName, roomBucket] of Object.entries(roomsData)) {
-      if (!roomBucket?.seat) continue;
-
-      for (const [seatStr, data] of Object.entries(roomBucket.seat)) {
-        if (data?.namauser !== username) continue;
-
-        const seatNum = parseInt(seatStr);
-        if (isNaN(seatNum)) continue;
-
-        if (roomName === keepRoom && seatNum === keepSeat) continue;
-        if (!alsoOtherRooms && roomName !== keepRoom) continue;
-        if (!forceMulti && data.isMulti === true) continue;
-
-        toDelete.push({ roomName, seatNum });
-      }
-    }
-
-    if (toDelete.length === 0) return 0;
-
-    let removed = 0;
-    for (const item of toDelete) {
-      try {
-        const ok = await this._deleteSeatInRoom(item.roomName, item.seatNum, true);
-        if (ok) removed++;
-      } catch(e) {}
-    }
-
-    return removed;
   }
 
   async _deleteSeatInRoom(roomName, seatNumber, force = false) {
@@ -4506,7 +4463,8 @@ export class ChatServer {
           break;
         }
 
-        // ✅ setActiveMulti TIDAK menghapus kursi & TIDAK kirim sendAllStateTo
+        // ✅ setActiveMulti: HANYA switch identitas aktif.
+        //    TIDAK hapus kursi. TIDAK sendAllStateTo. TIDAK setTimeout. TIDAK updateRoomCount.
         case "setActiveMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
@@ -4567,8 +4525,6 @@ export class ChatServer {
                 this.safeSend(ws, ["currentNumber", this.currentNumber]);
 
                 this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
-
-                try { await this.updateRoomCount(roomName); } catch(e) {}
 
               } catch(e) {
                 this._handleError('setActiveMulti', e);
