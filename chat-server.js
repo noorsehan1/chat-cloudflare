@@ -4317,37 +4317,32 @@ export class ChatServer {
           break;
         }
 
-        case "setActiveMulti": {
+                case "setActiveMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
 
+          // 1. Cari semua seat user
           const allSeats = await this._findAllSeatsForUser(targetUsername);
-          let found = allSeats.find(s => s.isMulti === true) || allSeats[0] || null;
+          if (allSeats.length === 0) {
+            this.safeSend(ws, ["error", "User tidak punya seat"]);
+            break;
+          }
 
+          // 2. Prioritas seat MULTI; fallback ke seat apa pun (tanpa mengubahnya)
+          const multiSeats = allSeats.filter(s => s.isMulti === true);
+          const found = multiSeats[0] || allSeats[0] || null;
           if (!found) {
-            this.safeSend(ws, ["error", "User tidak punya seat multi"]);
+            this.safeSend(ws, ["error", "User tidak punya seat"]);
             break;
           }
 
           const roomName = found.room;
           const seatNumber = found.seat;
 
-          if (allSeats.length > 1) {
-            await this._lightDeleteAllSeatsForUser(targetUsername, {
-              keepRoom: roomName,
-              keepSeat: seatNumber,
-              forceMulti: true
-            });
-          }
-
+          // 3. Aktifkan multi di koneksi WS (HANYA ini)
           try { this.wsActiveMulti?.set(ws, { username: targetUsername, room: roomName }); } catch(e) {}
-          for (const [otherRoom, clients] of (this.roomClients || new Map())) {
-            if (otherRoom !== roomName && clients) {
-              try { clients.delete(ws); } catch(e) {}
-            }
-          }
-          const roomClients = this.roomClients?.get(roomName);
-          if (roomClients && !roomClients.has(ws)) try { roomClients.add(ws); } catch(e) {}
+
+          // 4. Set metadata ws (tanpa hapus seat apa pun)
           ws.username = targetUsername;
           ws.idtarget = targetUsername;
           ws.room = roomName;
@@ -4355,14 +4350,16 @@ export class ChatServer {
           ws._username = targetUsername;
           ws._room = roomName;
 
+          // 5. Simpan di attachment (seatInfo = nomor kursi yang sudah ada)
           this._addMultiUserToAttachment(ws, targetUsername);
           try {
             const att2 = this._getAttachment(ws);
             att2.username = targetUsername;
-            att2.seatInfo = found;
+            att2.seatInfo = found;   // { room, seat, isMulti }
             this._setAttachment(ws, att2);
           } catch(e) {}
 
+          // 6. Update koneksi
           let connections = this.userConnections?.get(targetUsername);
           if (!connections) {
             connections = new Set();
@@ -4371,52 +4368,48 @@ export class ChatServer {
           if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
           if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
 
-          this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
-          this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
-          break;
-        }
-
-        case "updateKursi": {
-          const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
-
-          if (!kursiRoom || typeof kursiSeat !== 'number' || kursiSeat < 1 || kursiSeat > C.MAX_SEATS) {
-            break;
+          for (const [otherRoom, clients] of (this.roomClients || new Map())) {
+            if (otherRoom !== roomName && clients) {
+              try { clients.delete(ws); } catch(e) {}
+            }
           }
-          if (!ROOMS_SET.has(kursiRoom)) break;
+          const roomClients = this.roomClients?.get(roomName);
+          if (roomClients && !roomClients.has(ws)) try { roomClients.add(ws); } catch(e) {}
 
-          const currentUser = ws.username || ws._username;
-          if (!currentUser) break;
+          // ============================================================
+          // 7. BERI TAHU EVENT — HANYA KE USER PRIBADI (BUKAN BROADCAST ROOM)
+          // ============================================================
+          // Kumpulkan SEMUA WS milik targetUsername (bisa lebih dari 1 koneksi)
+          const targetConns = this.userConnections?.get(targetUsername) || new Set();
+          const notified = new Set();
 
-          const seatData = await this._getSeatData(kursiRoom, kursiSeat);
-          if (!seatData || seatData.namauser !== currentUser) break;
+          // Event utama: activeChangedMulti + nomor kursi
+          for (const targetWs of targetConns) {
+            if (!targetWs || targetWs.readyState !== 1) continue;
+            try {
+              this.safeSend(targetWs, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
+              notified.add(targetWs);
+            } catch(e) {}
+          }
 
-          try {
-            await this._withLock(
-              this._kursiLocks,
-              `kursi_${kursiRoom}_${kursiSeat}`,
-              async () => {
-                const updateData = {
-                  noimageUrl: kursiNoimg,
-                  namauser: seatData.namauser,
-                  color: kursiColor,
-                  itembawah: kursiBawah,
-                  itematas: kursiAtas,
-                  vip: kursiVip,
-                  viptanda: kursiVt,
-                  isMulti: seatData.isMulti === true
-                };
-                const result = await this._updateKursi(kursiRoom, kursiSeat, updateData);
-                if (result.success) {
-                  this.broadcast(kursiRoom, ["kursiBatchUpdate", kursiRoom, [[kursiSeat, result.data]]]);
-                }
-                return result;
-              },
-              C.LOCK_TIMEOUT
-            );
-          } catch(e) {}
+          // Fallback: pastikan WS pemanggil juga menerima (kalau belum masuk set)
+          if (!notified.has(ws)) {
+            this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
+            notified.add(ws);
+          }
+
+          // Event sekunder: userActiveChanged + nomor kursi — juga HANYA ke user pribadi
+          for (const targetWs of notified) {
+            if (!targetWs || targetWs.readyState !== 1) continue;
+            try {
+              this.safeSend(targetWs, ["userActiveChanged", targetUsername, seatNumber]);
+            } catch(e) {}
+          }
+
+          // ❌ TIDAK ADA: this.broadcast(roomName, ["userActiveChanged", ...])
+          //    (dihapus — tidak boleh ke seluruh room)
           break;
         }
-
         // ============================================================
         // CHAT — Color cache HANYA untuk user MULTY
         // ============================================================
