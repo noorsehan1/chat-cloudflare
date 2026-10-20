@@ -8,6 +8,7 @@
 // - _wipeUserEverywhere: hapus seat + point + cache user (dipakai saat multi pindah room)
 // - _joinInternal: multi pindah room lewat joinRoom = wipe total
 
+ 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
