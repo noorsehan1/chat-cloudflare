@@ -1,6 +1,6 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.5.6
-// - updateKursi + _updateKursi: tanpa validasi, simpan input apa adanya (noimageUrl tetap)
+// VERSION: 4.5.7
+// - updateKursi + _updateKursi: tanpa validasi, simpan input apa adanya (isMulti & noimageUrl ikut)
 // - setActiveMulti: hanya aktivasi
 // - _handleMultiJoinInternal: forceMulti true (kode awal) + seat baru isMulti:true
 // - _handleMultiJoin2Internal: seat baru isMulti:true
@@ -1581,8 +1581,6 @@ export class ChatServer {
 
   // ============================================================
   // ✅ WIPE: hapus SEMUA data user (seat multi & non-multi + point)
-  //    di semua room, plus cache noimg/color/index + wsActiveMulti.
-  //    Sama seperti user biasa pindah room.
   // ============================================================
   async _wipeUserEverywhere(username) {
     if (!username) return 0;
@@ -2115,10 +2113,10 @@ export class ChatServer {
   }
 
   // ============================================================
-  // ✅ updateKursi: simpan SEMUA input user apa adanya
+  // ✅ updateKursi: simpan SEMUA input user apa adanya (multi & non-multi)
   //    - TANPA validasi
-  //    - TANPA syarat "seat harus sudah ada"
   //    - TANPA fallback
+  //    - isMulti & noimageUrl ikut disimpan
   //    - Simpan ke cache (room + kursi) & D1 (seat_<room>_<seat>)
   // ============================================================
   async _updateKursi(roomName, seat, data) {
@@ -2134,7 +2132,7 @@ export class ChatServer {
       const roomBucket = this._storageCache.roomsData[roomName];
       if (!roomBucket.seat) roomBucket.seat = {};
 
-      // ✅ Simpan input user apa adanya — tanpa validasi, tanpa default
+      // ✅ Simpan input user apa adanya
       const updatedSeat = {
         namauser: data.namauser,
         isMulti: data.isMulti,
@@ -2146,10 +2144,8 @@ export class ChatServer {
         viptanda: data.viptanda
       };
 
-      // ✅ Simpan ke cache berdasarkan room + kursi
       roomBucket.seat[seat] = updatedSeat;
 
-      // ✅ Simpan ke D1: key = seat_<room>_<seat>
       try { await this._saveSeat(roomName, seat, updatedSeat); } catch(e) {}
 
       return { success: true, data: updatedSeat, room: roomName, seat };
@@ -2289,7 +2285,6 @@ export class ChatServer {
       }
 
       if (existing) {
-        // ✅ Multi pindah room lewat joinRoom = hapus SEMUA data sebelumnya
         await this._wipeUserEverywhere(username);
 
         try {
@@ -2480,7 +2475,6 @@ export class ChatServer {
         }
         if (!seat) return false;
 
-        // ✅ WAJIB isMulti: true
         const newSeat = {
           noimageUrl: "",
           namauser: multiUsername,
@@ -2538,7 +2532,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ seat baru isMulti:true
   async _handleMultiJoin2Internal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
@@ -2571,7 +2564,6 @@ export class ChatServer {
         }
         if (!seat) return false;
 
-        // ✅ WAJIB isMulti: true
         const newSeat = {
           noimageUrl: "",
           namauser: multiUsername,
@@ -4388,10 +4380,22 @@ export class ChatServer {
           break;
         }
 
+        // ✅ updateKursi: TANPA validasi — semua input user disimpan apa adanya (multi & non-multi)
         case "updateKursi": {
           const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
 
           const currentUser = ws.username || ws._username || kursiName || "";
+
+          // ✅ isMulti: dari wsActiveMulti, atau dari seat saat ini di cache
+          let isMultiVal = false;
+          try {
+            if (this.wsActiveMulti?.has(ws)) {
+              isMultiVal = true;
+            } else {
+              const existingSeat = this._storageCache?.roomsData?.[kursiRoom]?.seat?.[kursiSeat];
+              if (existingSeat?.isMulti === true) isMultiVal = true;
+            }
+          } catch(e) {}
 
           try {
             await this._withLock(
@@ -4400,6 +4404,7 @@ export class ChatServer {
               async () => {
                 const updateData = {
                   namauser: currentUser,
+                  isMulti: isMultiVal,
                   noimageUrl: kursiNoimg,
                   color: kursiColor,
                   itembawah: kursiBawah,
