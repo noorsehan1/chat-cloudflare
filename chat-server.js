@@ -1,9 +1,13 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.5.6
-// - updateKursi tanpa validasi (simpan input apa adanya)
-// - noimageUrl per username HANYA untuk multi; normal per kursi
-// - setActiveMulti hanya aktivasi
-// - multi pindah room lewat joinRoom = wipe SEMUA data (seat + point) sebelumnya
+// VERSION: 4.5.7
+// Base: 4.5.1 (default multy color=6, textColor=5)
+// Perubahan minimal hanya pada keluhan:
+// 1) setActiveMulti hanya aktivasi (tidak join, tidak hapus seat, tidak removeKursi)
+// 2) updateKursi tanpa validasi & tanpa fallback (simpan input apa adanya)
+// 3) noimageUrl per username HANYA untuk multi (cek dulu sebelum simpan ke D1)
+// 4) multi pindah room lewat joinRoom = wipe semua data lama (seat + point)
+// 5) _handleMultiJoinInternal tanpa forceMulti
+// 6) _handleSetId skip hapus seat kalau user punya seat multi
 
 const C = {
   MAX_SEATS: 45,
@@ -1578,7 +1582,7 @@ export class ChatServer {
 
   // ============================================================
   // ✅ WIPE: hapus SEMUA data user (seat multi & non-multi + point)
-  //    di semua room, plus cache noimg/color/index + wsActiveMulti.
+  //    saat multi pindah room lewat joinRoom
   // ============================================================
   async _wipeUserEverywhere(username) {
     if (!username) return 0;
@@ -1590,13 +1594,10 @@ export class ChatServer {
 
     for (const [roomName, roomBucket] of Object.entries(roomsData)) {
       if (!roomBucket?.seat) continue;
-
       for (const [seatStr, data] of Object.entries(roomBucket.seat)) {
         if (data?.namauser !== username) continue;
-
         const seatNum = parseInt(seatStr);
         if (isNaN(seatNum)) continue;
-
         removedSeats.push({ roomName, seatNum, seatStr });
       }
     }
@@ -1633,10 +1634,8 @@ export class ChatServer {
       const { roomName, seatNum, seatStr } = item;
       const roomBucket = this._storageCache?.roomsData?.[roomName];
       if (!roomBucket) continue;
-
       if (roomBucket.seat) delete roomBucket.seat[seatStr];
       if (roomBucket.point) delete roomBucket.point[seatStr];
-
       if (!this._isRestoring) {
         this.broadcast(roomName, ["removeKursi", roomName, seatNum]);
       }
@@ -1650,10 +1649,8 @@ export class ChatServer {
     this._saveUserColorCache().catch(() => {});
 
     try {
-      for (const [w, data] of (this.wsActiveMulti || new Map())) {
-        if (data?.username === username) {
-          this.wsActiveMulti.delete(w);
-        }
+      for (const [w, d] of (this.wsActiveMulti || new Map())) {
+        if (d?.username === username) this.wsActiveMulti.delete(w);
       }
     } catch(e) {}
 
@@ -2111,11 +2108,10 @@ export class ChatServer {
   }
 
   // ============================================================
-  // ✅ updateKursi: simpan SEMUA input user apa adanya
-  //    - TANPA validasi
-  //    - noimageUrl per username HANYA untuk multi
+  // ✅ updateKursi: simpan input apa adanya
+  //    - noimageUrl per username HANYA untuk multi (cek dulu sebelum simpan)
   //    - item kursi disimpan per room + seat
-  //    - Simpan ke cache & D1 (chat_data + chat_multy)
+  //    - cek isSameSeat sebelum tulis D1
   // ============================================================
   async _updateKursi(roomName, seat, data) {
     try {
@@ -2133,30 +2129,26 @@ export class ChatServer {
       const username = data.namauser;
       const isMulti = data.isMulti === true;
 
-      // ============================================================
-      // 1) noimageUrl
-      //    - multi  → simpan ke cache username (multy_noimg_cache)
-      //    - normal → simpan per kursi saja
-      // ============================================================
       let noimageUrl = data.noimageUrl;
 
       if (isMulti && username) {
-        if (data.noimageUrl !== undefined && data.noimageUrl !== null && data.noimageUrl !== "") {
-          const n = parseInt(data.noimageUrl);
-          if (!isNaN(n) && n > 0) {
-            this._userNoimgCache.set(username, n);
+        const incoming = (data.noimageUrl !== undefined && data.noimageUrl !== null && data.noimageUrl !== "")
+          ? parseInt(data.noimageUrl) : null;
+
+        const cached = this._userNoimgCache.get(username);
+        const cachedNum = (cached && cached > 0) ? cached : null;
+
+        if (incoming && !isNaN(incoming) && incoming > 0) {
+          if (cachedNum !== incoming) {
+            this._userNoimgCache.set(username, incoming);
             this._saveUserNoimgCache().catch(() => {});
           }
-          noimageUrl = data.noimageUrl;
+          noimageUrl = incoming;
         } else {
-          const cached = this._userNoimgCache.get(username);
-          noimageUrl = (cached && cached > 0) ? cached : undefined;
+          noimageUrl = cachedNum !== null ? cachedNum : undefined;
         }
       }
 
-      // ============================================================
-      // 2) Item kursi → simpan per room + seat
-      // ============================================================
       const updatedSeat = {
         namauser: username,
         isMulti: isMulti,
@@ -2168,11 +2160,24 @@ export class ChatServer {
         viptanda: data.viptanda
       };
 
+      const prevSeat = roomBucket.seat[seat];
+      const isSameSeat = prevSeat &&
+        prevSeat.namauser === updatedSeat.namauser &&
+        prevSeat.isMulti === updatedSeat.isMulti &&
+        prevSeat.noimageUrl === updatedSeat.noimageUrl &&
+        prevSeat.color === updatedSeat.color &&
+        prevSeat.itembawah === updatedSeat.itembawah &&
+        prevSeat.itematas === updatedSeat.itematas &&
+        prevSeat.vip === updatedSeat.vip &&
+        prevSeat.viptanda === updatedSeat.viptanda;
+
       roomBucket.seat[seat] = updatedSeat;
 
-      try { await this._saveSeat(roomName, seat, updatedSeat); } catch(e) {}
+      if (!isSameSeat) {
+        try { await this._saveSeat(roomName, seat, updatedSeat); } catch(e) {}
+      }
 
-      return { success: true, data: updatedSeat, room: roomName, seat };
+      return { success: true, data: updatedSeat, room: roomName, seat, changed: !isSameSeat };
     } catch(e) {
       return { success: false, error: e.message };
     }
@@ -2309,7 +2314,6 @@ export class ChatServer {
       }
 
       if (existing) {
-        // ✅ Multi pindah room lewat joinRoom = hapus SEMUA data sebelumnya
         await this._wipeUserEverywhere(username);
 
         try {
@@ -4339,16 +4343,14 @@ export class ChatServer {
           break;
         }
 
+        // ✅ setActiveMulti: HANYA aktivasi
         case "setActiveMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
 
           try {
             const allSeats = await this._findAllSeatsForUser(targetUsername);
-            const found =
-              allSeats.find(s => s.isMulti === true) ||
-              allSeats[0] ||
-              null;
+            const found = allSeats.find(s => s.isMulti === true) || allSeats[0] || null;
 
             if (!found) {
               this.safeSend(ws, ["error", "User tidak punya kursi untuk diaktifkan"]);
@@ -4358,9 +4360,7 @@ export class ChatServer {
             const roomName = found.room;
             const seatNumber = found.seat;
 
-            try {
-              this.wsActiveMulti?.set(ws, { username: targetUsername, room: roomName });
-            } catch (e) {}
+            try { this.wsActiveMulti?.set(ws, { username: targetUsername, room: roomName }); } catch (e) {}
 
             for (const [otherRoom, clients] of (this.roomClients || new Map())) {
               if (otherRoom !== roomName && clients) {
@@ -4397,13 +4397,13 @@ export class ChatServer {
 
             this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
             this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
-
           } catch (e) {
             this.safeSend(ws, ["error", "Gagal mengaktifkan multi"]);
           }
           break;
         }
 
+        // ✅ updateKursi: tanpa validasi
         case "updateKursi": {
           const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
 
