@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.5.1 (default multy color=6, textColor=5)
+// VERSION: 4.5.2 (setActiveMulti = aktivasi saja, default multy color=6, textColor=5)
 
 const C = {
   MAX_SEATS: 45,
@@ -42,7 +42,6 @@ const TABLE_MULTY = 'chat_multy';
 
 const DEFAULT_MULTY_ROOM = "Gacor";
 
-// ✅ Default color/textColor untuk MULTY chat
 const DEFAULT_MULTY_COLOR = "6";
 const DEFAULT_MULTY_TEXT_COLOR = "5";
 
@@ -56,7 +55,6 @@ const K_HISTORY_TABLE = (room) => `chat_history_${String(room).replace(/[^a-zA-Z
 
 const _wsCleanupState = new WeakMap();
 
-// Helper: parse color/textColor tanpa memaksa 0 jadi default
 function _parseColorVal(v, def) {
   if (v === undefined || v === null || v === "") return def;
   const n = parseInt(v);
@@ -95,7 +93,7 @@ export class ChatServer {
 
       this._userIndex = new Map();
       this._userNoimgCache = new Map();
-      this._userColorCache = new Map(); // username -> { color, textColor }
+      this._userColorCache = new Map();
 
       this._globalLocks = new Map();
       this._roomLocks = new Map();
@@ -671,7 +669,6 @@ export class ChatServer {
       const color     = chatDataArray[5];
       const textColor = chatDataArray[6];
 
-      // ✅ history tetap default 1/1 (untuk semua chat)
       const javaFormat = [
         Number(noimg) || 10000,
         _parseColorVal(color, 1),
@@ -795,7 +792,6 @@ export class ChatServer {
             if (!item || typeof item !== 'object') continue;
             if (!item.sender || !item.text) continue;
 
-            // ✅ default 6 / 5
             const color = (item.color !== undefined && item.color !== null && item.color !== "")
               ? String(item.color) : DEFAULT_MULTY_COLOR;
             const textColor = (item.textColor !== undefined && item.textColor !== null && item.textColor !== "")
@@ -1190,7 +1186,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ Default color 6 / textColor 5
   async _nextMultyChat(room) {
     const r = room || DEFAULT_MULTY_ROOM;
     const st = this._getMultyState(r);
@@ -1228,7 +1223,6 @@ export class ChatServer {
       const username = chat.sender || "";
       const chatMsg = chat.text || "";
 
-      // ✅ default 6 / 5
       let chatColor = DEFAULT_MULTY_COLOR;
       let chatTextColor = DEFAULT_MULTY_TEXT_COLOR;
 
@@ -2362,11 +2356,13 @@ export class ChatServer {
     }
   }
 
+  // ✅ FIX: tidak forceMulti (hanya hapus seat non-multi duplikat)
   async _handleMultiJoinInternal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
 
-      await this._lightDeleteAllSeatsForUser(multiUsername, { forceMulti: true });
+      // Hanya hapus seat NON-MULTI user ini (jangan hapus seat multi yang sudah ada)
+      await this._lightDeleteAllSeatsForUser(multiUsername);
 
       let roomBucket = this._storageCache?.roomsData?.[multiRoomname];
       if (!roomBucket) {
@@ -3563,6 +3559,7 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ✅ FIX: skip hapus seat kalau user punya seat multi
   async _handleSetId(ws, username, isNewUser) {
     try {
       if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
@@ -3594,7 +3591,26 @@ export class ChatServer {
             return { skip: true };
           }
 
-          await this._lightDeleteAllSeatsForUser(username);
+          // ✅ Cek apakah user sudah punya seat multi — kalau iya, jangan hapus
+          let hasMultiSeat = false;
+          try {
+            await this._ensureCacheInitialized();
+            const roomsData = this._storageCache?.roomsData || {};
+            for (const rBucket of Object.values(roomsData)) {
+              if (!rBucket?.seat) continue;
+              for (const sd of Object.values(rBucket.seat)) {
+                if (sd?.namauser === username && sd.isMulti === true) {
+                  hasMultiSeat = true;
+                  break;
+                }
+              }
+              if (hasMultiSeat) break;
+            }
+          } catch(e) {}
+
+          if (!hasMultiSeat) {
+            await this._lightDeleteAllSeatsForUser(username);
+          }
 
           return { skip: false };
         },
@@ -3916,7 +3932,6 @@ export class ChatServer {
                 noimg: item.noimg ?? 10000,
                 sender: String(item.sender),
                 text: String(item.text),
-                // ✅ default 6 / 5
                 color: (item.color !== undefined && item.color !== null && item.color !== "")
                   ? String(item.color) : DEFAULT_MULTY_COLOR,
                 textColor: (item.textColor !== undefined && item.textColor !== null && item.textColor !== "")
@@ -4015,7 +4030,6 @@ export class ChatServer {
                   noimg: item.noimg ?? 10000,
                   sender: String(item.sender),
                   text: String(item.text),
-                  // ✅ default 6 / 5
                   color: (item.color !== undefined && item.color !== null && item.color !== "")
                     ? String(item.color) : DEFAULT_MULTY_COLOR,
                   textColor: (item.textColor !== undefined && item.textColor !== null && item.textColor !== "")
@@ -4220,63 +4234,77 @@ export class ChatServer {
           break;
         }
 
+        // ✅ FIX: setActiveMulti HANYA aktivasi — tidak join, tidak hapus seat, tidak removeKursi
         case "setActiveMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
 
-          const allSeats = await this._findAllSeatsForUser(targetUsername);
-          let found = allSeats.find(s => s.isMulti === true) || allSeats[0] || null;
-
-          if (!found) {
-            const joined = await this._handleMultiJoin(ws, targetUsername, DEFAULT_MULTY_ROOM);
-            if (!joined) break;
-            found = { room: joined.room, seat: joined.seat, isMulti: true };
-          }
-
-          const roomName = found.room;
-          const seatNumber = found.seat;
-
-          if (allSeats.length > 1) {
-            await this._lightDeleteAllSeatsForUser(targetUsername, {
-              keepRoom: roomName,
-              keepSeat: seatNumber,
-              forceMulti: true
-            });
-          }
-
-          try { this.wsActiveMulti?.set(ws, { username: targetUsername, room: roomName }); } catch(e) {}
-          for (const [otherRoom, clients] of (this.roomClients || new Map())) {
-            if (otherRoom !== roomName && clients) {
-              try { clients.delete(ws); } catch(e) {}
-            }
-          }
-          const roomClients = this.roomClients?.get(roomName);
-          if (roomClients && !roomClients.has(ws)) try { roomClients.add(ws); } catch(e) {}
-          ws.username = targetUsername;
-          ws.idtarget = targetUsername;
-          ws.room = roomName;
-          ws.roomname = roomName;
-          ws._username = targetUsername;
-          ws._room = roomName;
-
-          this._addMultiUserToAttachment(ws, targetUsername);
           try {
-            const att2 = this._getAttachment(ws);
-            att2.username = targetUsername;
-            att2.seatInfo = found;
-            this._setAttachment(ws, att2);
-          } catch(e) {}
+            // 1. Cari seat yang SUDAH ada (prioritas multi) — jangan buat/join baru
+            const allSeats = await this._findAllSeatsForUser(targetUsername);
+            const found =
+              allSeats.find(s => s.isMulti === true) ||
+              allSeats[0] ||
+              null;
 
-          let connections = this.userConnections?.get(targetUsername);
-          if (!connections) {
-            connections = new Set();
-            try { this.userConnections?.set(targetUsername, connections); } catch(e) {}
+            // 2. Tidak ada seat → gagal, JANGAN auto-join
+            if (!found) {
+              this.safeSend(ws, ["error", "User tidak punya kursi untuk diaktifkan"]);
+              break;
+            }
+
+            const roomName = found.room;
+            const seatNumber = found.seat;
+
+            // 3. Tandai WS sebagai multi aktif (tanpa menyentuh D1 / cache seat)
+            try {
+              this.wsActiveMulti?.set(ws, { username: targetUsername, room: roomName });
+            } catch (e) {}
+
+            // 4. Pindahkan tracking client ke room seat multi (hanya tracking, bukan seat)
+            for (const [otherRoom, clients] of (this.roomClients || new Map())) {
+              if (otherRoom !== roomName && clients) {
+                try { clients.delete(ws); } catch (e) {}
+              }
+            }
+            const roomClients = this.roomClients?.get(roomName);
+            if (roomClients && !roomClients.has(ws)) {
+              try { roomClients.add(ws); } catch (e) {}
+            }
+
+            // 5. Set property WS (tanpa delete seat)
+            ws.username = targetUsername;
+            ws.idtarget = targetUsername;
+            ws.room = roomName;
+            ws.roomname = roomName;
+            ws._username = targetUsername;
+            ws._room = roomName;
+
+            // 6. Attachment
+            this._addMultiUserToAttachment(ws, targetUsername);
+            try {
+              const att2 = this._getAttachment(ws);
+              att2.username = targetUsername;
+              att2.seatInfo = { room: roomName, seat: seatNumber };
+              this._setAttachment(ws, att2);
+            } catch (e) {}
+
+            // 7. userConnections & wsSet
+            let connections = this.userConnections?.get(targetUsername);
+            if (!connections) {
+              connections = new Set();
+              try { this.userConnections?.set(targetUsername, connections); } catch (e) {}
+            }
+            if (!connections.has(ws)) try { connections.add(ws); } catch (e) {}
+            if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch (e) {}
+
+            // 8. Hanya broadcast aktivasi — TIDAK ada removeKursi
+            this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
+            this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
+
+          } catch (e) {
+            this.safeSend(ws, ["error", "Gagal mengaktifkan multi"]);
           }
-          if (!connections.has(ws)) try { connections.add(ws); } catch(e) {}
-          if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch(e) {}
-
-          this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
-          this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
           break;
         }
 
@@ -4329,7 +4357,6 @@ export class ChatServer {
           const wsRoom = ws.room || ws.roomname;
           if (wsRoom !== chatRoom) break;
 
-          // ✅ Kalau username ini multi → simpan color/textColor per username
           if (found.isMulti === true) {
             await this._setUserColorCache(chatUser, chatColor, chatTextColor);
           }
