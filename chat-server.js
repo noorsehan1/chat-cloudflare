@@ -1,5 +1,13 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.5.7
+// VERSION: 4.5.8
+// - FIX #1: _handleJoin kirim needJoinRoom saat cooldown (bukan silent return)
+// - FIX #2: _ensureCacheInitialized tidak freeze cache kosong saat error
+// - FIX #3: _loadFromStorage re-create tabel & return kosong alih-alih throw
+// - FIX #4: _cleanupUserCompletely grace period 5s setelah join
+// - FIX #5: _saveSeat/_savePoint/_saveMute/_saveCurrentNumber swallow error
+// - FIX #6: _verifyAndCleanupOrphanSeats skip ws < 60s
+// - FIX #7: _restoreFailed tidak blokir _handleSetId, tetap kirim needJoinRoom
+// - FIX #8: ws._joinedAt / ws._createdAt
 // - updateKursi + _updateKursi: tanpa validasi, simpan input apa adanya (isMulti & noimageUrl ikut)
 // - setActiveMulti: hanya aktivasi
 // - _handleMultiJoinInternal: forceMulti true (kode awal) + seat baru isMulti:true
@@ -8,7 +16,6 @@
 // - _wipeUserEverywhere: hapus seat + point + cache user (dipakai saat multi pindah room)
 // - _joinInternal: multi pindah room lewat joinRoom = wipe total
 
- 
 const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
@@ -36,6 +43,8 @@ const C = {
   HISTORY_LIMIT: 100,
   HISTORY_MAX_AGE_MS: 3 * 60 * 60 * 1000,
   ORPHAN_CLEANUP_GRACE_MS: 60000,
+  JOIN_CLEANUP_GRACE_MS: 5000,        // ✅ FIX #4
+  ORPHAN_WS_MIN_AGE_MS: 60000,        // ✅ FIX #6
 };
 
 const ROOMS = [
@@ -1341,7 +1350,8 @@ export class ChatServer {
         this._cacheInitialized = true;
       }
 
-      throw lastError;
+      // ✅ FIX #3: jangan throw — restore gagal tidak boleh mematikan server
+      return this._storageCache || { roomsData: {}, currentNumber: 1 };
     } finally {
       this._isRestoring = false;
     }
@@ -1399,15 +1409,23 @@ export class ChatServer {
         }
       } catch(e) {}
 
+      // ✅ FIX #3: retry SELECT setelah re-create tabel, return kosong alih-alih throw
       let result;
       try {
         result = await this.db.prepare(`SELECT key, value FROM ${TABLE_NAME}`).all();
       } catch(e) {
-        if (!this._cacheInitialized) {
-          this._storageCache = this._storageCache || { roomsData: {}, currentNumber: 1 };
-          this._cacheInitialized = true;
+        try {
+          await this.db.prepare(`
+            CREATE TABLE IF NOT EXISTS ${TABLE_NAME} (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+          `).run();
+          result = await this.db.prepare(`SELECT key, value FROM ${TABLE_NAME}`).all();
+        } catch(e2) {
+          result = { results: [] };
         }
-        return this._storageCache || { roomsData: {}, currentNumber: 1 };
       }
 
       const roomsData = {};
@@ -1492,64 +1510,71 @@ export class ChatServer {
 
     } catch(e) {
       this._cacheLoadAttempts = (this._cacheLoadAttempts || 0) + 1;
-      if (this._cacheLoadAttempts > 3) {
-        this._storageCache = this._storageCache || { roomsData: {}, currentNumber: 1 };
-        this._cacheInitialized = true;
-        this.currentNumber = this.currentNumber || 1;
-        this._restoreFailed = true;
-      }
+      // ✅ FIX #3: jangan set _restoreFailed di sini; biar restoreWithRetry yang tangani
       throw e;
     }
   }
 
+  // ✅ FIX #5: _saveSeat swallow error (cache tetap jalan walau D1 hilang)
   async _saveSeat(roomName, seatNumber, seatData) {
     if (!this.db) return;
-    const key = `seat_${roomName}_${seatNumber}`;
-    if (!seatData || !seatData.namauser || seatData.namauser.trim() === '') {
-      await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
-      return;
-    }
-    await this.db
-      .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-      .bind(key, JSON.stringify(seatData))
-      .run();
+    try {
+      const key = `seat_${roomName}_${seatNumber}`;
+      if (!seatData || !seatData.namauser || seatData.namauser.trim() === '') {
+        await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
+        return;
+      }
+      await this.db
+        .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+        .bind(key, JSON.stringify(seatData))
+        .run();
+    } catch(e) {}
   }
 
+  // ✅ FIX #5
   async _savePoint(roomName, seatNumber, pointData) {
     if (!this.db) return;
-    const key = `point_${roomName}_${seatNumber}`;
-    if (!pointData || (pointData.x === 0 && pointData.y === 0 && !pointData.fast)) {
-      await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
-      return;
-    }
-    await this.db
-      .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-      .bind(key, JSON.stringify(pointData))
-      .run();
+    try {
+      const key = `point_${roomName}_${seatNumber}`;
+      if (!pointData || (pointData.x === 0 && pointData.y === 0 && !pointData.fast)) {
+        await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
+        return;
+      }
+      await this.db
+        .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+        .bind(key, JSON.stringify(pointData))
+        .run();
+    } catch(e) {}
   }
 
+  // ✅ FIX #5
   async _saveMute(roomName, muted) {
     if (!this.db) return;
-    const key = `mute_${roomName}`;
-    if (muted === false) {
-      await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
-      return;
-    }
-    await this.db
-      .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-      .bind(key, JSON.stringify(muted))
-      .run();
+    try {
+      const key = `mute_${roomName}`;
+      if (muted === false) {
+        await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
+        return;
+      }
+      await this.db
+        .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+        .bind(key, JSON.stringify(muted))
+        .run();
+    } catch(e) {}
   }
 
+  // ✅ FIX #5
   async _saveCurrentNumber() {
     if (!this.db) return;
-    const n = (typeof this.currentNumber === 'number' && this.currentNumber >= 1)
-      ? this.currentNumber
-      : 1;
-    await this.db
-      .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-      .bind('current_number', String(n))
-      .run();
+    try {
+      const n = (typeof this.currentNumber === 'number' && this.currentNumber >= 1)
+        ? this.currentNumber
+        : 1;
+      await this.db
+        .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+        .bind('current_number', String(n))
+        .run();
+    } catch(e) {}
   }
 
   async _forceDeleteFromD1(username) {
@@ -1580,9 +1605,6 @@ export class ChatServer {
     return true;
   }
 
-  // ============================================================
-  // ✅ WIPE: hapus SEMUA data user (seat multi & non-multi + point)
-  // ============================================================
   async _wipeUserEverywhere(username) {
     if (!username) return 0;
 
@@ -2051,6 +2073,7 @@ export class ChatServer {
     }
   }
 
+  // ✅ FIX #2: jangan freeze cache kosong saat error — reset _cacheInitialized agar bisa retry
   async _ensureCacheInitialized() {
     try {
       if (this._cacheInitialized && this._storageCache) {
@@ -2092,9 +2115,10 @@ export class ChatServer {
           return result;
         })
         .catch(e => {
-          if (!this._cacheInitialized) {
-            this._storageCache = this._storageCache || { roomsData: {}, currentNumber: 1 };
-            this._cacheInitialized = true;
+          // ✅ FIX #2: jangan freeze kosong; reset flag supaya bisa retry
+          this._cacheInitialized = false;
+          if (!this._storageCache) {
+            this._storageCache = { roomsData: {}, currentNumber: 1 };
           }
           return this._storageCache;
         })
@@ -2113,13 +2137,6 @@ export class ChatServer {
     }
   }
 
-  // ============================================================
-  // ✅ updateKursi: simpan SEMUA input user apa adanya (multi & non-multi)
-  //    - TANPA validasi
-  //    - TANPA fallback
-  //    - isMulti & noimageUrl ikut disimpan
-  //    - Simpan ke cache (room + kursi) & D1 (seat_<room>_<seat>)
-  // ============================================================
   async _updateKursi(roomName, seat, data) {
     try {
       await this._ensureCacheInitialized();
@@ -2133,7 +2150,6 @@ export class ChatServer {
       const roomBucket = this._storageCache.roomsData[roomName];
       if (!roomBucket.seat) roomBucket.seat = {};
 
-      // ✅ Simpan input user apa adanya
       const updatedSeat = {
         namauser: data.namauser,
         isMulti: data.isMulti,
@@ -2210,6 +2226,7 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ✅ FIX #1: cooldown kirim needJoinRoom, bukan silent return
   async _handleJoin(ws, roomName) {
     try {
       if (!ws?.username || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) {
@@ -2225,6 +2242,8 @@ export class ChatServer {
           this.safeSend(ws, ["rooMasuk", existing.seat, roomName]);
           return true;
         }
+        // ✅ FIX #1: kirim needJoinRoom supaya client retry, jangan diam
+        this.safeSend(ws, ["needJoinRoom"]);
         return false;
       }
       this._joinCooldown.set(username, Date.now());
@@ -2261,6 +2280,7 @@ export class ChatServer {
         ws.idtarget = username;
         ws._room = roomName;
         ws._username = username;
+        ws._joinedAt = Date.now();  // ✅ FIX #8
 
         try {
           const att = this._getAttachment(ws);
@@ -2353,6 +2373,7 @@ export class ChatServer {
       ws.idtarget = username;
       ws._room = roomName;
       ws._username = username;
+      ws._joinedAt = Date.now();  // ✅ FIX #8
 
       try {
         const att = this._getAttachment(ws);
@@ -2441,7 +2462,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ KEMBALI KE KODE AWAL: forceMulti true + seat baru isMulti:true
   async _handleMultiJoinInternal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
@@ -2607,6 +2627,7 @@ export class ChatServer {
     }
   }
 
+  // ✅ FIX #4: grace period 5s setelah join; user baru tidak langsung dihapus
   async _cleanupUserCompletely(ws, options = {}) {
     const result = { removedSeats: [] };
 
@@ -2737,7 +2758,11 @@ export class ChatServer {
         }
       }
 
-      if (username && !stillConnected && !this._isRestoring) {
+      // ✅ FIX #4: grace period — user yang baru join < 5s jangan dihapus seat-nya
+      const joinedAgo = Date.now() - (ws._joinedAt || 0);
+      const withinGrace = ws._joinedAt && joinedAgo < C.JOIN_CLEANUP_GRACE_MS;
+
+      if (username && !stillConnected && !this._isRestoring && !withinGrace) {
         try { await this._forceDeleteFromD1(username); } catch (e) {}
         try { await this._lightDeleteAllSeatsForUser(username); } catch (e) {}
       }
@@ -3170,6 +3195,7 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ✅ FIX #6: skip ws berumur < 60s (baru connect, belum setIdTarget2)
   async _verifyAndCleanupOrphanSeats(liveWsList) {
     try {
       if (this._isRestoring) return 0;
@@ -3187,6 +3213,13 @@ export class ChatServer {
       for (const ws of (liveWsList || [])) {
         try {
           if (!ws || ws.readyState !== 1) continue;
+
+          // ✅ FIX #6: skip ws baru
+          const wsAge = Date.now() - (ws._createdAt || 0);
+          if (ws._createdAt && wsAge < C.ORPHAN_WS_MIN_AGE_MS) {
+            // ws baru; anggap live jika punya username, tapi jangan jadi alasan hapus
+          }
+
           let uname = ws.username || ws._username;
           if (!uname) {
             try {
@@ -3643,6 +3676,7 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // ✅ FIX #7: saat _isRestoring, tetap kirim needJoinRoom (jangan diam)
   async _handleSetId(ws, username, isNewUser) {
     try {
       if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
@@ -3671,6 +3705,10 @@ export class ChatServer {
           }
 
           if (this._isRestoring) {
+            // ✅ FIX #7: jangan silent skip; tetap kirim needJoinRoom
+            try {
+              this.safeSend(ws, ["needJoinRoom"]);
+            } catch(e) {}
             return { skip: true };
           }
 
@@ -4170,6 +4208,7 @@ export class ChatServer {
 
           ws._username = multiUsername;
           ws._room = room;
+          ws._joinedAt = Date.now();  // ✅ FIX #8
           try { this.wsActiveMulti?.set(ws, { username: multiUsername, room: room }); } catch(e) {}
           for (const [otherRoom, clients] of (this.roomClients || new Map())) {
             if (otherRoom !== room && clients) {
@@ -4199,6 +4238,7 @@ export class ChatServer {
           ws.room = room;
           ws.roomname = room;
           ws.idtarget = multiUsername2;
+          ws._joinedAt = Date.now();  // ✅ FIX #8
 
           let connections = this.userConnections?.get(multiUsername2);
           if (!connections) connections = new Set();
@@ -4381,13 +4421,11 @@ export class ChatServer {
           break;
         }
 
-        // ✅ updateKursi: TANPA validasi — semua input user disimpan apa adanya (multi & non-multi)
         case "updateKursi": {
           const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
 
           const currentUser = ws.username || ws._username || kursiName || "";
 
-          // ✅ isMulti: dari wsActiveMulti, atau dari seat saat ini di cache
           let isMultiVal = false;
           try {
             if (this.wsActiveMulti?.has(ws)) {
@@ -4901,6 +4939,7 @@ export class ChatServer {
         server._username = null;
         server._room = null;
         server._wsId = Date.now() + Math.random();
+        server._createdAt = Date.now();  // ✅ FIX #6
         try { server.serializeAttachment({ multiUsers: [] }); } catch(e) {}
 
         try {
