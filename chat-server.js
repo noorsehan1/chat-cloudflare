@@ -1,9 +1,9 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.5.5
-// - updateKursi tanpa validasi (simpan input apa adanya ke cache + D1)
+// VERSION: 4.5.6
+// - updateKursi tanpa validasi (simpan input apa adanya)
+// - noimageUrl per username HANYA untuk multi; normal per kursi
 // - setActiveMulti hanya aktivasi
 // - multi pindah room lewat joinRoom = wipe SEMUA data (seat + point) sebelumnya
-//   di semua room, sama seperti user biasa pindah room
 
 const C = {
   MAX_SEATS: 45,
@@ -378,7 +378,7 @@ export class ChatServer {
   }
 
   // ============================================================
-  // NOIMG CACHE
+  // NOIMG CACHE (per username)
   // ============================================================
   async _saveUserNoimgCache() {
     try {
@@ -1579,7 +1579,6 @@ export class ChatServer {
   // ============================================================
   // ✅ WIPE: hapus SEMUA data user (seat multi & non-multi + point)
   //    di semua room, plus cache noimg/color/index + wsActiveMulti.
-  //    Sama seperti user biasa pindah room.
   // ============================================================
   async _wipeUserEverywhere(username) {
     if (!username) return 0;
@@ -1589,7 +1588,6 @@ export class ChatServer {
     const removedSeats = [];
     const affectedRooms = new Set();
 
-    // Kumpulkan seat milik user dari cache
     for (const [roomName, roomBucket] of Object.entries(roomsData)) {
       if (!roomBucket?.seat) continue;
 
@@ -1603,7 +1601,6 @@ export class ChatServer {
       }
     }
 
-    // Hapus dari D1: seat_% DAN point_% untuk user ini
     if (this.db) {
       try {
         await this.db.prepare(`
@@ -1622,7 +1619,6 @@ export class ChatServer {
         } catch(e2) {}
       }
 
-      // Hapus point_% untuk setiap seat user
       for (const item of removedSeats) {
         try {
           await this.db
@@ -1633,7 +1629,6 @@ export class ChatServer {
       }
     }
 
-    // Hapus dari cache + broadcast removeKursi
     for (const item of removedSeats) {
       const { roomName, seatNum, seatStr } = item;
       const roomBucket = this._storageCache?.roomsData?.[roomName];
@@ -1648,14 +1643,12 @@ export class ChatServer {
       affectedRooms.add(roomName);
     }
 
-    // Bersihkan cache user
     this._removeUserIndex(username);
     this._userNoimgCache.delete(username);
     this._userColorCache.delete(username);
     this._saveUserNoimgCache().catch(() => {});
     this._saveUserColorCache().catch(() => {});
 
-    // Bersihkan wsActiveMulti untuk user ini
     try {
       for (const [w, data] of (this.wsActiveMulti || new Map())) {
         if (data?.username === username) {
@@ -1664,7 +1657,6 @@ export class ChatServer {
       }
     } catch(e) {}
 
-    // Update count semua room terpengaruh
     for (const roomName of affectedRooms) {
       try { await this.updateRoomCount(roomName); } catch(e) {}
     }
@@ -2121,9 +2113,9 @@ export class ChatServer {
   // ============================================================
   // ✅ updateKursi: simpan SEMUA input user apa adanya
   //    - TANPA validasi
-  //    - TANPA syarat "seat harus sudah ada"
-  //    - TANPA fallback
-  //    - Simpan ke cache (room + kursi) & D1 (seat_<room>_<seat>)
+  //    - noimageUrl per username HANYA untuk multi
+  //    - item kursi disimpan per room + seat
+  //    - Simpan ke cache & D1 (chat_data + chat_multy)
   // ============================================================
   async _updateKursi(roomName, seat, data) {
     try {
@@ -2138,11 +2130,37 @@ export class ChatServer {
       const roomBucket = this._storageCache.roomsData[roomName];
       if (!roomBucket.seat) roomBucket.seat = {};
 
-      // ✅ Simpan input user apa adanya — tanpa validasi, tanpa default
+      const username = data.namauser;
+      const isMulti = data.isMulti === true;
+
+      // ============================================================
+      // 1) noimageUrl
+      //    - multi  → simpan ke cache username (multy_noimg_cache)
+      //    - normal → simpan per kursi saja
+      // ============================================================
+      let noimageUrl = data.noimageUrl;
+
+      if (isMulti && username) {
+        if (data.noimageUrl !== undefined && data.noimageUrl !== null && data.noimageUrl !== "") {
+          const n = parseInt(data.noimageUrl);
+          if (!isNaN(n) && n > 0) {
+            this._userNoimgCache.set(username, n);
+            this._saveUserNoimgCache().catch(() => {});
+          }
+          noimageUrl = data.noimageUrl;
+        } else {
+          const cached = this._userNoimgCache.get(username);
+          noimageUrl = (cached && cached > 0) ? cached : undefined;
+        }
+      }
+
+      // ============================================================
+      // 2) Item kursi → simpan per room + seat
+      // ============================================================
       const updatedSeat = {
-        namauser: data.namauser,
-        isMulti: data.isMulti,
-        noimageUrl: data.noimageUrl,
+        namauser: username,
+        isMulti: isMulti,
+        noimageUrl: noimageUrl,
         color: data.color,
         itembawah: data.itembawah,
         itematas: data.itematas,
@@ -2150,10 +2168,8 @@ export class ChatServer {
         viptanda: data.viptanda
       };
 
-      // ✅ Simpan ke cache berdasarkan room + kursi
       roomBucket.seat[seat] = updatedSeat;
 
-      // ✅ Simpan ke D1: key = seat_<room>_<seat>
       try { await this._saveSeat(roomName, seat, updatedSeat); } catch(e) {}
 
       return { success: true, data: updatedSeat, room: roomName, seat };
@@ -2294,8 +2310,6 @@ export class ChatServer {
 
       if (existing) {
         // ✅ Multi pindah room lewat joinRoom = hapus SEMUA data sebelumnya
-        //    (seat + point di semua room, cache noimg/color/index, wsActiveMulti)
-        //    sama seperti user biasa pindah room.
         await this._wipeUserEverywhere(username);
 
         try {
@@ -4325,7 +4339,6 @@ export class ChatServer {
           break;
         }
 
-        // ✅ setActiveMulti: HANYA aktivasi — tidak join, tidak hapus seat, tidak removeKursi
         case "setActiveMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
@@ -4391,7 +4404,6 @@ export class ChatServer {
           break;
         }
 
-        // ✅ updateKursi: TANPA validasi — semua input user disimpan apa adanya
         case "updateKursi": {
           const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
 
@@ -4409,7 +4421,8 @@ export class ChatServer {
                   itembawah: kursiBawah,
                   itematas: kursiAtas,
                   vip: kursiVip,
-                  viptanda: kursiVt
+                  viptanda: kursiVt,
+                  isMulti: wsActiveMulti?.has(ws) === true
                 };
 
                 const result = await this._updateKursi(kursiRoom, kursiSeat, updateData);
