@@ -1,5 +1,5 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.5.2 (setActiveMulti = aktivasi saja, default multy color=6, textColor=5)
+// VERSION: 4.5.3 (updateKursi tanpa validasi, setActiveMulti aktivasi saja)
 
 const C = {
   MAX_SEATS: 45,
@@ -2018,45 +2018,45 @@ export class ChatServer {
     }
   }
 
+  // ============================================================
+  // ✅ updateKursi: simpan SEMUA input user apa adanya
+  //    - TANPA validasi
+  //    - TANPA syarat "seat harus sudah ada"
+  //    - TANPA fallback
+  //    - Simpan ke cache (room + kursi) & D1 (seat_<room>_<seat>)
+  // ============================================================
   async _updateKursi(roomName, seat, data) {
     try {
-      if (!roomName || !ROOMS_SET.has(roomName)) {
-        return { success: false, error: 'Invalid room' };
-      }
-      if (typeof seat !== 'number' || seat < 1 || seat > C.MAX_SEATS) {
-        return { success: false, error: 'Invalid seat number' };
-      }
-      if (!data?.namauser) {
-        return { success: false, error: 'Username is required' };
-      }
-
       await this._ensureCacheInitialized();
 
-      const roomBucket = this._storageCache?.roomsData?.[roomName];
-      if (!roomBucket?.seat?.[seat]) {
-        return { success: false, error: 'Seat not found' };
+      if (!this._storageCache) {
+        this._storageCache = { roomsData: {}, currentNumber: 1 };
       }
-
-      const currentSeatData = roomBucket.seat[seat];
-      if (currentSeatData.namauser !== data.namauser) {
-        return { success: false, error: 'You do not own this seat' };
+      if (!this._storageCache.roomsData[roomName]) {
+        this._storageCache.roomsData[roomName] = { seat: {}, point: {}, mute: false };
       }
+      const roomBucket = this._storageCache.roomsData[roomName];
+      if (!roomBucket.seat) roomBucket.seat = {};
 
-      const finalIsMulti = (data.isMulti === true || currentSeatData.isMulti === true);
-
+      // ✅ Simpan input user apa adanya — tanpa validasi, tanpa default
       const updatedSeat = {
-        noimageUrl: data.noimageUrl || currentSeatData.noimageUrl || "",
-        namauser: data.namauser || currentSeatData.namauser || "",
-        color: data.color || currentSeatData.color || "",
-        itembawah: typeof data.itembawah === 'number' ? data.itembawah : (parseInt(data.itembawah) || 0),
-        itematas: typeof data.itematas === 'number' ? data.itematas : (parseInt(data.itematas) || 0),
-        vip: typeof data.vip === 'number' ? data.vip : (parseInt(data.vip) || 0),
-        viptanda: typeof data.viptanda === 'number' ? data.viptanda : (parseInt(data.viptanda) || 0),
-        isMulti: finalIsMulti
+        namauser: data.namauser,
+        isMulti: data.isMulti,
+        noimageUrl: data.noimageUrl,
+        color: data.color,
+        itembawah: data.itembawah,
+        itematas: data.itematas,
+        vip: data.vip,
+        viptanda: data.viptanda
       };
 
-      await this._updateSeatInRoom(roomName, seat, updatedSeat);
-      return { success: true, data: updatedSeat };
+      // ✅ Simpan ke cache berdasarkan room + kursi
+      roomBucket.seat[seat] = updatedSeat;
+
+      // ✅ Simpan ke D1: key = seat_<room>_<seat>
+      try { await this._saveSeat(roomName, seat, updatedSeat); } catch(e) {}
+
+      return { success: true, data: updatedSeat, room: roomName, seat };
     } catch(e) {
       return { success: false, error: e.message };
     }
@@ -2356,12 +2356,10 @@ export class ChatServer {
     }
   }
 
-  // ✅ FIX: tidak forceMulti (hanya hapus seat non-multi duplikat)
   async _handleMultiJoinInternal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
 
-      // Hanya hapus seat NON-MULTI user ini (jangan hapus seat multi yang sudah ada)
       await this._lightDeleteAllSeatsForUser(multiUsername);
 
       let roomBucket = this._storageCache?.roomsData?.[multiRoomname];
@@ -3559,7 +3557,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX: skip hapus seat kalau user punya seat multi
   async _handleSetId(ws, username, isNewUser) {
     try {
       if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
@@ -3591,7 +3588,6 @@ export class ChatServer {
             return { skip: true };
           }
 
-          // ✅ Cek apakah user sudah punya seat multi — kalau iya, jangan hapus
           let hasMultiSeat = false;
           try {
             await this._ensureCacheInitialized();
@@ -4234,20 +4230,18 @@ export class ChatServer {
           break;
         }
 
-        // ✅ FIX: setActiveMulti HANYA aktivasi — tidak join, tidak hapus seat, tidak removeKursi
+        // ✅ setActiveMulti: HANYA aktivasi — tidak join, tidak hapus seat, tidak removeKursi
         case "setActiveMulti": {
           const targetUsername = args[0];
           if (!targetUsername) break;
 
           try {
-            // 1. Cari seat yang SUDAH ada (prioritas multi) — jangan buat/join baru
             const allSeats = await this._findAllSeatsForUser(targetUsername);
             const found =
               allSeats.find(s => s.isMulti === true) ||
               allSeats[0] ||
               null;
 
-            // 2. Tidak ada seat → gagal, JANGAN auto-join
             if (!found) {
               this.safeSend(ws, ["error", "User tidak punya kursi untuk diaktifkan"]);
               break;
@@ -4256,12 +4250,10 @@ export class ChatServer {
             const roomName = found.room;
             const seatNumber = found.seat;
 
-            // 3. Tandai WS sebagai multi aktif (tanpa menyentuh D1 / cache seat)
             try {
               this.wsActiveMulti?.set(ws, { username: targetUsername, room: roomName });
             } catch (e) {}
 
-            // 4. Pindahkan tracking client ke room seat multi (hanya tracking, bukan seat)
             for (const [otherRoom, clients] of (this.roomClients || new Map())) {
               if (otherRoom !== roomName && clients) {
                 try { clients.delete(ws); } catch (e) {}
@@ -4272,7 +4264,6 @@ export class ChatServer {
               try { roomClients.add(ws); } catch (e) {}
             }
 
-            // 5. Set property WS (tanpa delete seat)
             ws.username = targetUsername;
             ws.idtarget = targetUsername;
             ws.room = roomName;
@@ -4280,7 +4271,6 @@ export class ChatServer {
             ws._username = targetUsername;
             ws._room = roomName;
 
-            // 6. Attachment
             this._addMultiUserToAttachment(ws, targetUsername);
             try {
               const att2 = this._getAttachment(ws);
@@ -4289,7 +4279,6 @@ export class ChatServer {
               this._setAttachment(ws, att2);
             } catch (e) {}
 
-            // 7. userConnections & wsSet
             let connections = this.userConnections?.get(targetUsername);
             if (!connections) {
               connections = new Set();
@@ -4298,7 +4287,6 @@ export class ChatServer {
             if (!connections.has(ws)) try { connections.add(ws); } catch (e) {}
             if (!this.wsSet?.has(ws)) try { this.wsSet?.add(ws); } catch (e) {}
 
-            // 8. Hanya broadcast aktivasi — TIDAK ada removeKursi
             this.safeSend(ws, ["activeChangedMulti", targetUsername, seatNumber, roomName]);
             this.broadcast(roomName, ["userActiveChanged", targetUsername, seatNumber]);
 
@@ -4308,19 +4296,11 @@ export class ChatServer {
           break;
         }
 
+        // ✅ updateKursi: TANPA validasi — semua input user disimpan apa adanya
         case "updateKursi": {
           const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
 
-          if (!kursiRoom || typeof kursiSeat !== 'number' || kursiSeat < 1 || kursiSeat > C.MAX_SEATS) {
-            break;
-          }
-          if (!ROOMS_SET.has(kursiRoom)) break;
-
-          const currentUser = ws.username || ws._username;
-          if (!currentUser) break;
-
-          const seatData = await this._getSeatData(kursiRoom, kursiSeat);
-          if (!seatData || seatData.namauser !== currentUser) break;
+          const currentUser = ws.username || ws._username || kursiName || "";
 
           try {
             await this._withLock(
@@ -4328,19 +4308,25 @@ export class ChatServer {
               `kursi_${kursiRoom}_${kursiSeat}`,
               async () => {
                 const updateData = {
-                  noimageUrl: String(kursiNoimg || ""),
-                  namauser: seatData.namauser,
-                  color: String(kursiColor || ""),
-                  itembawah: typeof kursiBawah === 'number' ? kursiBawah : (parseInt(kursiBawah) || 0),
-                  itematas: typeof kursiAtas === 'number' ? kursiAtas : (parseInt(kursiAtas) || 0),
-                  vip: typeof kursiVip === 'number' ? kursiVip : (parseInt(kursiVip) || 0),
-                  viptanda: typeof kursiVt === 'number' ? kursiVt : (parseInt(kursiVt) || 0),
-                  isMulti: seatData.isMulti === true
+                  namauser: currentUser,
+                  noimageUrl: kursiNoimg,
+                  color: kursiColor,
+                  itembawah: kursiBawah,
+                  itematas: kursiAtas,
+                  vip: kursiVip,
+                  viptanda: kursiVt
                 };
+
                 const result = await this._updateKursi(kursiRoom, kursiSeat, updateData);
+
                 if (result.success) {
-                  this.broadcast(kursiRoom, ["kursiBatchUpdate", kursiRoom, [[kursiSeat, result.data]]]);
+                  this.broadcast(kursiRoom, [
+                    "kursiBatchUpdate",
+                    kursiRoom,
+                    [[kursiSeat, result.data]]
+                  ]);
                 }
+
                 return result;
               },
               C.LOCK_TIMEOUT
