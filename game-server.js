@@ -21,7 +21,7 @@
 // true  = game berjalan normal
 // false = semua percobaan start/join/submit game ditolak
 // ============================================================
-const GAME_ENABLED = true;
+const GAME_ENABLED = false;
 const GAME_DISABLED_MESSAGE = "Game is currently disabled";
 
 const CONSTANTS = {
@@ -78,8 +78,8 @@ const CONSTANTS = {
 
 const QUIZ_SCHEDULE = {
   SESSIONS: [
-   
-    { start: "13:00", end: "14:00" },
+    { start: "01:00", end: "02:00" },
+    
     { start: "22:00", end: "23:00" }
   ],
   TIMEZONE_OFFSET: 8,
