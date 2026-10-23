@@ -21,7 +21,7 @@
 // true  = game berjalan normal
 // false = semua percobaan start/join/submit game ditolak
 // ============================================================
-const GAME_ENABLED = false;
+const GAME_ENABLED = true;
 const GAME_DISABLED_MESSAGE = "Game is currently disabled";
 
 const CONSTANTS = {
