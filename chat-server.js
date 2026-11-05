@@ -1,20 +1,14 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.5.8
-// - FIX #1: _handleJoin kirim needJoinRoom saat cooldown (bukan silent return)
-// - FIX #2: _ensureCacheInitialized tidak freeze cache kosong saat error
-// - FIX #3: _loadFromStorage re-create tabel & return kosong alih-alih throw
-// - FIX #4: _cleanupUserCompletely grace period 5s setelah join
-// - FIX #5: _saveSeat/_savePoint/_saveMute/_saveCurrentNumber swallow error
-// - FIX #6: _verifyAndCleanupOrphanSeats skip ws < 60s
-// - FIX #7: _restoreFailed tidak blokir _handleSetId, tetap kirim needJoinRoom
-// - FIX #8: ws._joinedAt / ws._createdAt
-// - updateKursi + _updateKursi: tanpa validasi, simpan input apa adanya (isMulti & noimageUrl ikut)
-// - setActiveMulti: hanya aktivasi
-// - _handleMultiJoinInternal: forceMulti true (kode awal) + seat baru isMulti:true
-// - _handleMultiJoin2Internal: seat baru isMulti:true
-// - _handleSetId: skip hapus seat kalau user punya seat multi
-// - _wipeUserEverywhere: hapus seat + point + cache user (dipakai saat multi pindah room)
-// - _joinInternal: multi pindah room lewat joinRoom = wipe total
+// VERSION: 4.5.8-RESTORE-FIX
+// - KODE AWAL v4.5.8 DIPERTAHANKAN 100%
+// - Hanya perbaiki FREEZE SAAT RESTORE:
+//   [R1] _restoreAllState: timeout internal 25s + batch + yield
+//   [R2] _loadFromStorage: timeout D1 5s per query
+//   [R3] _loadAllMultyFromTable: timeout D1 5s
+//   [R4] _processPendingEvents: timeout 3s + yield
+//   [R5] Constructor: hapus timeout 15s (race condition)
+//   [R6] webSocketMessage: timeout 12s per event
+//   [R7] fetch: proses pending event setelah cache init
 
 const C = {
   MAX_SEATS: 45,
@@ -43,8 +37,14 @@ const C = {
   HISTORY_LIMIT: 100,
   HISTORY_MAX_AGE_MS: 3 * 60 * 60 * 1000,
   ORPHAN_CLEANUP_GRACE_MS: 60000,
-  JOIN_CLEANUP_GRACE_MS: 5000,        // ✅ FIX #4
-  ORPHAN_WS_MIN_AGE_MS: 60000,        // ✅ FIX #6
+  JOIN_CLEANUP_GRACE_MS: 5000,
+  ORPHAN_WS_MIN_AGE_MS: 60000,
+  // ✅ RESTORE FIX
+  D1_QUERY_TIMEOUT_MS: 5000,           // timeout per query D1
+  RESTORE_TOTAL_TIMEOUT_MS: 25000,     // timeout total restore
+  RESTORE_BATCH_SIZE: 10,              // batch restore ws
+  PENDING_PROCESS_TIMEOUT_MS: 3000,    // timeout proses pending
+  WS_MSG_TIMEOUT_MS: 12000,            // timeout per event ws
 };
 
 const ROOMS = [
@@ -71,6 +71,16 @@ const K_MULTY_COLOR_CACHE = 'multy_color_cache';
 const K_HISTORY_TABLE = (room) => `chat_history_${String(room).replace(/[^a-zA-Z0-9_]/g, '_')}`;
 
 const _wsCleanupState = new WeakMap();
+
+// ✅ RESTORE FIX: timeout helper
+function _withTimeout(promise, ms, label = 'operation') {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms)
+    )
+  ]);
+}
 
 function _parseColorVal(v, def) {
   if (v === undefined || v === null || v === "") return def;
@@ -172,39 +182,15 @@ export class ChatServer {
         this.roomClients.set(room, new Set());
       }
 
+      // ✅ RESTORE FIX R5: hapus timeout 15s — biarkan _restoreAllState handle state sendiri
       this._restorePromise = this._restoreWithRetry();
-
-      const restoreTimeout = setTimeout(() => {
-        if (!this._restoreDone) {
-          this._restored = true;
-          this._restoreDone = true;
-          this._restoreFailed = true;
-          this._isRestoring = false;
-          if (!this._cacheInitialized) {
-            this._storageCache = this._storageCache || { roomsData: {}, currentNumber: 1 };
-            this._cacheInitialized = true;
-          }
-        }
-      }, C.CACHE_LOAD_TIMEOUT);
 
       this._restorePromise
         .then(() => {
-          clearTimeout(restoreTimeout);
-          this._restored = true;
-          this._restoreDone = true;
-          this._isRestoring = false;
-          this._restoreFailed = false;
+          // _restoreAllState sudah set _restored/_restoreDone/_restoreFailed/_isRestoring
         })
         .catch(() => {
-          clearTimeout(restoreTimeout);
-          this._restored = true;
-          this._restoreDone = true;
-          this._restoreFailed = true;
-          this._isRestoring = false;
-          if (!this._cacheInitialized) {
-            this._storageCache = this._storageCache || { roomsData: {}, currentNumber: 1 };
-            this._cacheInitialized = true;
-          }
+          // _restoreAllState sudah set state
         });
 
     } catch(e) {
@@ -841,13 +827,16 @@ export class ChatServer {
     return { chatList, numberNext, index };
   }
 
+  // ✅ RESTORE FIX R3: timeout D1 5s
   async _loadAllMultyFromTable() {
     try {
       if (!this.db) return new Map();
 
-      const result = await this.db
-        .prepare(`SELECT key, value FROM ${TABLE_MULTY}`)
-        .all();
+      const result = await _withTimeout(
+        this.db.prepare(`SELECT key, value FROM ${TABLE_MULTY}`).all(),
+        C.D1_QUERY_TIMEOUT_MS,
+        'loadAllMulty'
+      );
 
       const rows = result?.results || [];
 
@@ -1350,13 +1339,13 @@ export class ChatServer {
         this._cacheInitialized = true;
       }
 
-      // ✅ FIX #3: jangan throw — restore gagal tidak boleh mematikan server
       return this._storageCache || { roomsData: {}, currentNumber: 1 };
     } finally {
       this._isRestoring = false;
     }
   }
 
+  // ✅ RESTORE FIX R2: timeout per query D1
   async _loadFromStorage() {
     try {
       if (!this.db) {
@@ -1368,29 +1357,39 @@ export class ChatServer {
       }
 
       try {
-        await this.db.prepare(`
-          CREATE TABLE IF NOT EXISTS ${TABLE_NAME} (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-          )
-        `).run();
+        await _withTimeout(
+          this.db.prepare(`
+            CREATE TABLE IF NOT EXISTS ${TABLE_NAME} (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+          `).run(),
+          C.D1_QUERY_TIMEOUT_MS,
+          'createTable'
+        );
       } catch(e) {}
 
       try {
-        await this.db.prepare(`
-          CREATE TABLE IF NOT EXISTS ${TABLE_MULTY} (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-          )
-        `).run();
+        await _withTimeout(
+          this.db.prepare(`
+            CREATE TABLE IF NOT EXISTS ${TABLE_MULTY} (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+          `).run(),
+          C.D1_QUERY_TIMEOUT_MS,
+          'createMultyTable'
+        );
       } catch(e) {}
 
       try {
-        const existingRows = await this.db
-          .prepare(`SELECT key FROM ${TABLE_MULTY} WHERE key LIKE 'multy_running_%'`)
-          .all();
+        const existingRows = await _withTimeout(
+          this.db.prepare(`SELECT key FROM ${TABLE_MULTY} WHERE key LIKE 'multy_running_%'`).all(),
+          C.D1_QUERY_TIMEOUT_MS,
+          'selectRunning'
+        );
 
         const existingKeys = new Set(
           (existingRows?.results || []).map(r => r.key)
@@ -1400,29 +1399,44 @@ export class ChatServer {
           const key = K_RUNNING(room);
           if (!existingKeys.has(key)) {
             try {
-              await this.db.prepare(`
-                INSERT OR IGNORE INTO ${TABLE_MULTY} (key, value, updated_at)
-                VALUES (?, '0', CURRENT_TIMESTAMP)
-              `).bind(key).run();
+              await _withTimeout(
+                this.db.prepare(`
+                  INSERT OR IGNORE INTO ${TABLE_MULTY} (key, value, updated_at)
+                  VALUES (?, '0', CURRENT_TIMESTAMP)
+                `).bind(key).run(),
+                C.D1_QUERY_TIMEOUT_MS,
+                'insertRunning'
+              );
             } catch(e) {}
           }
         }
       } catch(e) {}
 
-      // ✅ FIX #3: retry SELECT setelah re-create tabel, return kosong alih-alih throw
       let result;
       try {
-        result = await this.db.prepare(`SELECT key, value FROM ${TABLE_NAME}`).all();
+        result = await _withTimeout(
+          this.db.prepare(`SELECT key, value FROM ${TABLE_NAME}`).all(),
+          C.D1_QUERY_TIMEOUT_MS,
+          'selectAll'
+        );
       } catch(e) {
         try {
-          await this.db.prepare(`
-            CREATE TABLE IF NOT EXISTS ${TABLE_NAME} (
-              key TEXT PRIMARY KEY,
-              value TEXT NOT NULL,
-              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-          `).run();
-          result = await this.db.prepare(`SELECT key, value FROM ${TABLE_NAME}`).all();
+          await _withTimeout(
+            this.db.prepare(`
+              CREATE TABLE IF NOT EXISTS ${TABLE_NAME} (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+              )
+            `).run(),
+            C.D1_QUERY_TIMEOUT_MS,
+            'recreateTable'
+          );
+          result = await _withTimeout(
+            this.db.prepare(`SELECT key, value FROM ${TABLE_NAME}`).all(),
+            C.D1_QUERY_TIMEOUT_MS,
+            'reselectAll'
+          );
         } catch(e2) {
           result = { results: [] };
         }
@@ -1510,12 +1524,10 @@ export class ChatServer {
 
     } catch(e) {
       this._cacheLoadAttempts = (this._cacheLoadAttempts || 0) + 1;
-      // ✅ FIX #3: jangan set _restoreFailed di sini; biar restoreWithRetry yang tangani
       throw e;
     }
   }
 
-  // ✅ FIX #5: _saveSeat swallow error (cache tetap jalan walau D1 hilang)
   async _saveSeat(roomName, seatNumber, seatData) {
     if (!this.db) return;
     try {
@@ -1531,7 +1543,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX #5
   async _savePoint(roomName, seatNumber, pointData) {
     if (!this.db) return;
     try {
@@ -1547,7 +1558,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX #5
   async _saveMute(roomName, muted) {
     if (!this.db) return;
     try {
@@ -1563,7 +1573,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX #5
   async _saveCurrentNumber() {
     if (!this.db) return;
     try {
@@ -2073,7 +2082,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ FIX #2: jangan freeze cache kosong saat error — reset _cacheInitialized agar bisa retry
   async _ensureCacheInitialized() {
     try {
       if (this._cacheInitialized && this._storageCache) {
@@ -2115,7 +2123,6 @@ export class ChatServer {
           return result;
         })
         .catch(e => {
-          // ✅ FIX #2: jangan freeze kosong; reset flag supaya bisa retry
           this._cacheInitialized = false;
           if (!this._storageCache) {
             this._storageCache = { roomsData: {}, currentNumber: 1 };
@@ -2226,7 +2233,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX #1: cooldown kirim needJoinRoom, bukan silent return
   async _handleJoin(ws, roomName) {
     try {
       if (!ws?.username || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) {
@@ -2242,7 +2248,6 @@ export class ChatServer {
           this.safeSend(ws, ["rooMasuk", existing.seat, roomName]);
           return true;
         }
-        // ✅ FIX #1: kirim needJoinRoom supaya client retry, jangan diam
         this.safeSend(ws, ["needJoinRoom"]);
         return false;
       }
@@ -2280,7 +2285,7 @@ export class ChatServer {
         ws.idtarget = username;
         ws._room = roomName;
         ws._username = username;
-        ws._joinedAt = Date.now();  // ✅ FIX #8
+        ws._joinedAt = Date.now();
 
         try {
           const att = this._getAttachment(ws);
@@ -2373,7 +2378,7 @@ export class ChatServer {
       ws.idtarget = username;
       ws._room = roomName;
       ws._username = username;
-      ws._joinedAt = Date.now();  // ✅ FIX #8
+      ws._joinedAt = Date.now();
 
       try {
         const att = this._getAttachment(ws);
@@ -2627,7 +2632,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ FIX #4: grace period 5s setelah join; user baru tidak langsung dihapus
   async _cleanupUserCompletely(ws, options = {}) {
     const result = { removedSeats: [] };
 
@@ -2758,7 +2762,6 @@ export class ChatServer {
         }
       }
 
-      // ✅ FIX #4: grace period — user yang baru join < 5s jangan dihapus seat-nya
       const joinedAgo = Date.now() - (ws._joinedAt || 0);
       const withinGrace = ws._joinedAt && joinedAgo < C.JOIN_CLEANUP_GRACE_MS;
 
@@ -2819,6 +2822,7 @@ export class ChatServer {
     } catch (e) {}
   }
 
+  // ✅ RESTORE FIX R6: timeout per event
   async webSocketMessage(ws, msg) {
     try {
       if (!ws) return;
@@ -2826,7 +2830,12 @@ export class ChatServer {
       if (!ws._msgQueue) ws._msgQueue = Promise.resolve();
 
       ws._msgQueue = ws._msgQueue
-        .then(() => this._webSocketMessageInternal(ws, msg))
+        .then(() => Promise.race([
+          this._webSocketMessageInternal(ws, msg),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('WS message timeout')), C.WS_MSG_TIMEOUT_MS)
+          )
+        ]))
         .catch(e => {
           this._handleError('wsQueue', e);
         });
@@ -2918,15 +2927,29 @@ export class ChatServer {
     }
   }
 
+  // ✅ RESTORE FIX R4: timeout 3s + yield
   async _processPendingEvents() {
     try {
       if (!this._pendingEvents || this._pendingEvents.length === 0) return;
       if (this._processingPending) return;
 
       this._processingPending = true;
+      const startTime = Date.now();
+
       try {
         while (this._pendingEvents.length > 0 && !this.closing && !this.isDestroyed) {
-          const events = this._pendingEvents.splice(0, 20);
+          // ✅ Timeout: jangan block DO > 3 detik
+          if (Date.now() - startTime > C.PENDING_PROCESS_TIMEOUT_MS) {
+            // Sisa event diproses nanti via setTimeout (tidak block DO)
+            if (this._pendingEvents.length > 0 && !this.closing && !this.isDestroyed) {
+              setTimeout(() => {
+                this._processPendingEvents().catch(() => {});
+              }, 100);
+            }
+            break;
+          }
+
+          const events = this._pendingEvents.splice(0, 10);
           if (events.length === 0) break;
 
           for (const evt of events) {
@@ -2975,6 +2998,9 @@ export class ChatServer {
               this._handleError('processPendingEvent', e);
             }
           }
+
+          // ✅ Yield ke event loop
+          await new Promise(resolve => setTimeout(resolve, 0));
         }
       } finally {
         this._processingPending = false;
@@ -3195,7 +3221,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX #6: skip ws berumur < 60s (baru connect, belum setIdTarget2)
   async _verifyAndCleanupOrphanSeats(liveWsList) {
     try {
       if (this._isRestoring) return 0;
@@ -3214,10 +3239,8 @@ export class ChatServer {
         try {
           if (!ws || ws.readyState !== 1) continue;
 
-          // ✅ FIX #6: skip ws baru
           const wsAge = Date.now() - (ws._createdAt || 0);
           if (ws._createdAt && wsAge < C.ORPHAN_WS_MIN_AGE_MS) {
-            // ws baru; anggap live jika punya username, tapi jangan jadi alasan hapus
           }
 
           let uname = ws.username || ws._username;
@@ -3286,19 +3309,27 @@ export class ChatServer {
     }
   }
 
+  // ✅ RESTORE FIX R1: timeout internal 25s + batch + yield + state konsisten
   async _restoreAllState() {
+    const startTime = Date.now();
+    const MAX_RESTORE_TIME = C.RESTORE_TOTAL_TIMEOUT_MS;
+
     try {
       this._isRestoring = true;
       this._restoreRemovedSeats = [];
       this._hasBroadcastRemoveKursi = new Set();
 
       try {
-        await this._loadFromStorage();
-        await this._ensureCacheInitialized();
+        await _withTimeout(this._loadFromStorage(), 10000, 'loadFromStorage');
+        await _withTimeout(this._ensureCacheInitialized(), 10000, 'ensureCache');
       } catch(e) {}
 
       try {
-        const allMulty = await this._loadAllMultyFromTable();
+        const allMulty = await _withTimeout(
+          this._loadAllMultyFromTable(),
+          C.D1_QUERY_TIMEOUT_MS,
+          'loadAllMulty'
+        );
 
         for (const room of ROOMS) {
           const data = allMulty.get(room);
@@ -3348,7 +3379,7 @@ export class ChatServer {
       } catch(e) {}
 
       try {
-        await this._loadUserColorCache();
+        await _withTimeout(this._loadUserColorCache(), C.D1_QUERY_TIMEOUT_MS, 'loadColorCache');
       } catch(e) {}
 
       for (const room of ROOMS) {
@@ -3375,15 +3406,25 @@ export class ChatServer {
           }
         }
 
-        const batchSize = 10;
+        // ✅ Batch + yield + timeout per batch
+        const batchSize = C.RESTORE_BATCH_SIZE;
         for (let i = 0; i < liveWebSockets.length; i += batchSize) {
+          if (Date.now() - startTime > MAX_RESTORE_TIME) break;
+
           const batch = liveWebSockets.slice(i, i + batchSize);
           await Promise.allSettled(
-            batch.map(ws => this._restoreLiveWebSocket(ws))
+            batch.map(ws => _withTimeout(
+              this._restoreLiveWebSocket(ws),
+              3000,
+              'restoreLiveWs'
+            ))
           );
+
+          await new Promise(resolve => setTimeout(resolve, 0));
         }
 
         for (const ws of deadWebSockets) {
+          if (Date.now() - startTime > MAX_RESTORE_TIME) break;
           try {
             try {
               const att = ws.deserializeAttachment?.();
@@ -3399,7 +3440,11 @@ export class ChatServer {
               }
             } catch(e) {}
 
-            await this._cleanupUserCompletely(ws, { skipBroadcast: true });
+            await _withTimeout(
+              this._cleanupUserCompletely(ws, { skipBroadcast: true }),
+              3000,
+              'cleanupDeadWs'
+            );
             try { ws.serializeAttachment({}); } catch(e) {}
           } catch(e) {}
         }
@@ -3459,12 +3504,20 @@ export class ChatServer {
         } catch(e) {}
       }
 
+      // ✅ Set state SEBELUM proses pending
       this._restored = true;
       this._restoreDone = true;
       this._restoreFailed = false;
       this._isRestoring = false;
 
-      await this._processPendingEvents();
+      // ✅ Proses pending event dengan timeout
+      try {
+        await _withTimeout(
+          this._processPendingEvents(),
+          5000,
+          'processPending'
+        );
+      } catch(e) {}
 
       return true;
 
@@ -3497,7 +3550,10 @@ export class ChatServer {
         } catch(e2) {}
       }
 
-      await this._processPendingEvents();
+      try {
+        await this._processPendingEvents();
+      } catch(e) {}
+
       throw e;
     }
   }
@@ -3676,7 +3732,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX #7: saat _isRestoring, tetap kirim needJoinRoom (jangan diam)
   async _handleSetId(ws, username, isNewUser) {
     try {
       if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
@@ -3705,7 +3760,6 @@ export class ChatServer {
           }
 
           if (this._isRestoring) {
-            // ✅ FIX #7: jangan silent skip; tetap kirim needJoinRoom
             try {
               this.safeSend(ws, ["needJoinRoom"]);
             } catch(e) {}
@@ -4208,7 +4262,7 @@ export class ChatServer {
 
           ws._username = multiUsername;
           ws._room = room;
-          ws._joinedAt = Date.now();  // ✅ FIX #8
+          ws._joinedAt = Date.now();
           try { this.wsActiveMulti?.set(ws, { username: multiUsername, room: room }); } catch(e) {}
           for (const [otherRoom, clients] of (this.roomClients || new Map())) {
             if (otherRoom !== room && clients) {
@@ -4238,7 +4292,7 @@ export class ChatServer {
           ws.room = room;
           ws.roomname = room;
           ws.idtarget = multiUsername2;
-          ws._joinedAt = Date.now();  // ✅ FIX #8
+          ws._joinedAt = Date.now();
 
           let connections = this.userConnections?.get(multiUsername2);
           if (!connections) connections = new Set();
@@ -4798,6 +4852,7 @@ export class ChatServer {
     }
   }
 
+  // ✅ RESTORE FIX R7: proses pending event setelah cache init
   async fetch(req) {
     try {
       if (!this._restored && !this._restorePromise) {
@@ -4862,6 +4917,11 @@ export class ChatServer {
       }
 
       await this._ensureCacheInitialized();
+
+      // ✅ RESTORE FIX R7: proses pending event meski restore gagal
+      if (this._restored && this._pendingEvents?.length > 0) {
+        this._processPendingEvents().catch(() => {});
+      }
 
       try {
         const upgrade = req.headers.get("Upgrade");
@@ -4939,7 +4999,7 @@ export class ChatServer {
         server._username = null;
         server._room = null;
         server._wsId = Date.now() + Math.random();
-        server._createdAt = Date.now();  // ✅ FIX #6
+        server._createdAt = Date.now();
         try { server.serializeAttachment({ multiUsers: [] }); } catch(e) {}
 
         try {
