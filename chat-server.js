@@ -1,14 +1,16 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.5.8-RESTORE-FIX
+// VERSION: 4.5.8-RESTORE-FIX-FULL
 // - KODE AWAL v4.5.8 DIPERTAHANKAN 100%
-// - Hanya perbaiki FREEZE SAAT RESTORE:
-//   [R1] _restoreAllState: timeout internal 25s + batch + yield
+// - Hanya perbaiki FREEZE SAAT RESTORE (9 fix):
+//   [R1] _restoreAllState: timeout internal 25s + cek timeout per ws + batch + yield
 //   [R2] _loadFromStorage: timeout D1 5s per query
 //   [R3] _loadAllMultyFromTable: timeout D1 5s
-//   [R4] _processPendingEvents: timeout 3s + yield
+//   [R4] _processPendingEvents: timeout 3s + yield + batch 10
 //   [R5] Constructor: hapus timeout 15s (race condition)
 //   [R6] webSocketMessage: timeout 12s per event
 //   [R7] fetch: proses pending event setelah cache init
+//   [R8] _findUserInCacheOnly: cegah D1 read saat restore (anti lambat)
+//   [R9] _restoreAllState: cek timeout DI DALAM loop ws (bukan hanya per batch)
 
 const C = {
   MAX_SEATS: 45,
@@ -40,11 +42,12 @@ const C = {
   JOIN_CLEANUP_GRACE_MS: 5000,
   ORPHAN_WS_MIN_AGE_MS: 60000,
   // ✅ RESTORE FIX
-  D1_QUERY_TIMEOUT_MS: 5000,           // timeout per query D1
-  RESTORE_TOTAL_TIMEOUT_MS: 25000,     // timeout total restore
-  RESTORE_BATCH_SIZE: 10,              // batch restore ws
-  PENDING_PROCESS_TIMEOUT_MS: 3000,    // timeout proses pending
-  WS_MSG_TIMEOUT_MS: 12000,            // timeout per event ws
+  D1_QUERY_TIMEOUT_MS: 5000,
+  RESTORE_TOTAL_TIMEOUT_MS: 25000,
+  RESTORE_BATCH_SIZE: 10,
+  RESTORE_WS_TIMEOUT_MS: 3000,
+  PENDING_PROCESS_TIMEOUT_MS: 3000,
+  WS_MSG_TIMEOUT_MS: 12000,
 };
 
 const ROOMS = [
@@ -72,7 +75,6 @@ const K_HISTORY_TABLE = (room) => `chat_history_${String(room).replace(/[^a-zA-Z
 
 const _wsCleanupState = new WeakMap();
 
-// ✅ RESTORE FIX: timeout helper
 function _withTimeout(promise, ms, label = 'operation') {
   return Promise.race([
     promise,
@@ -182,16 +184,12 @@ export class ChatServer {
         this.roomClients.set(room, new Set());
       }
 
-      // ✅ RESTORE FIX R5: hapus timeout 15s — biarkan _restoreAllState handle state sendiri
+      // ✅ R5: hapus timeout 15s
       this._restorePromise = this._restoreWithRetry();
 
       this._restorePromise
-        .then(() => {
-          // _restoreAllState sudah set _restored/_restoreDone/_restoreFailed/_isRestoring
-        })
-        .catch(() => {
-          // _restoreAllState sudah set state
-        });
+        .then(() => {})
+        .catch(() => {});
 
     } catch(e) {
       this._restored = true;
@@ -374,6 +372,28 @@ export class ChatServer {
   _removeUserIndex(username) {
     if (!username) return;
     try { this._userIndex.delete(username); } catch(e) {}
+  }
+
+  // ✅ R8: cari user di cache saja (tanpa D1 read) — untuk restore
+  _findUserInCacheOnly(username) {
+    try {
+      if (!username) return null;
+      const cached = this._userIndex?.get(username);
+      if (cached) {
+        const roomBucket = this._storageCache?.roomsData?.[cached.room];
+        const seatData = roomBucket?.seat?.[cached.seat];
+        if (seatData?.namauser === username) {
+          return {
+            room: cached.room,
+            seat: cached.seat,
+            isMulti: seatData.isMulti === true
+          };
+        }
+      }
+      return null;
+    } catch(e) {
+      return null;
+    }
   }
 
   // ============================================================
@@ -827,7 +847,6 @@ export class ChatServer {
     return { chatList, numberNext, index };
   }
 
-  // ✅ RESTORE FIX R3: timeout D1 5s
   async _loadAllMultyFromTable() {
     try {
       if (!this.db) return new Map();
@@ -1345,7 +1364,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ RESTORE FIX R2: timeout per query D1
   async _loadFromStorage() {
     try {
       if (!this.db) {
@@ -2822,7 +2840,6 @@ export class ChatServer {
     } catch (e) {}
   }
 
-  // ✅ RESTORE FIX R6: timeout per event
   async webSocketMessage(ws, msg) {
     try {
       if (!ws) return;
@@ -2927,7 +2944,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ RESTORE FIX R4: timeout 3s + yield
   async _processPendingEvents() {
     try {
       if (!this._pendingEvents || this._pendingEvents.length === 0) return;
@@ -2938,9 +2954,7 @@ export class ChatServer {
 
       try {
         while (this._pendingEvents.length > 0 && !this.closing && !this.isDestroyed) {
-          // ✅ Timeout: jangan block DO > 3 detik
           if (Date.now() - startTime > C.PENDING_PROCESS_TIMEOUT_MS) {
-            // Sisa event diproses nanti via setTimeout (tidak block DO)
             if (this._pendingEvents.length > 0 && !this.closing && !this.isDestroyed) {
               setTimeout(() => {
                 this._processPendingEvents().catch(() => {});
@@ -2999,7 +3013,6 @@ export class ChatServer {
             }
           }
 
-          // ✅ Yield ke event loop
           await new Promise(resolve => setTimeout(resolve, 0));
         }
       } finally {
@@ -3239,10 +3252,6 @@ export class ChatServer {
         try {
           if (!ws || ws.readyState !== 1) continue;
 
-          const wsAge = Date.now() - (ws._createdAt || 0);
-          if (ws._createdAt && wsAge < C.ORPHAN_WS_MIN_AGE_MS) {
-          }
-
           let uname = ws.username || ws._username;
           if (!uname) {
             try {
@@ -3309,7 +3318,7 @@ export class ChatServer {
     }
   }
 
-  // ✅ RESTORE FIX R1: timeout internal 25s + batch + yield + state konsisten
+  // ✅ R1 + R9: timeout internal + cek per ws + batch + yield + state konsisten
   async _restoreAllState() {
     const startTime = Date.now();
     const MAX_RESTORE_TIME = C.RESTORE_TOTAL_TIMEOUT_MS;
@@ -3406,21 +3415,24 @@ export class ChatServer {
           }
         }
 
-        // ✅ Batch + yield + timeout per batch
+        // ✅ R1 + R9: cek timeout SEBELUM setiap ws (bukan hanya per batch)
         const batchSize = C.RESTORE_BATCH_SIZE;
-        for (let i = 0; i < liveWebSockets.length; i += batchSize) {
+        for (let i = 0; i < liveWebSockets.length; i++) {
           if (Date.now() - startTime > MAX_RESTORE_TIME) break;
 
-          const batch = liveWebSockets.slice(i, i + batchSize);
-          await Promise.allSettled(
-            batch.map(ws => _withTimeout(
+          const ws = liveWebSockets[i];
+          try {
+            await _withTimeout(
               this._restoreLiveWebSocket(ws),
-              3000,
+              C.RESTORE_WS_TIMEOUT_MS,
               'restoreLiveWs'
-            ))
-          );
+            );
+          } catch(e) {}
 
-          await new Promise(resolve => setTimeout(resolve, 0));
+          // Yield setiap batchSize ws
+          if ((i + 1) % batchSize === 0) {
+            await new Promise(resolve => setTimeout(resolve, 0));
+          }
         }
 
         for (const ws of deadWebSockets) {
@@ -3442,7 +3454,7 @@ export class ChatServer {
 
             await _withTimeout(
               this._cleanupUserCompletely(ws, { skipBroadcast: true }),
-              3000,
+              C.RESTORE_WS_TIMEOUT_MS,
               'cleanupDeadWs'
             );
             try { ws.serializeAttachment({}); } catch(e) {}
@@ -3510,13 +3522,8 @@ export class ChatServer {
       this._restoreFailed = false;
       this._isRestoring = false;
 
-      // ✅ Proses pending event dengan timeout
       try {
-        await _withTimeout(
-          this._processPendingEvents(),
-          5000,
-          'processPending'
-        );
+        await _withTimeout(this._processPendingEvents(), 5000, 'processPending');
       } catch(e) {}
 
       return true;
@@ -3558,6 +3565,7 @@ export class ChatServer {
     }
   }
 
+  // ✅ R8: pakai _findUserInCacheOnly (tanpa D1 read saat restore)
   async _restoreLiveWebSocket(ws) {
     try {
       if (!ws) return;
@@ -3583,8 +3591,9 @@ export class ChatServer {
       let finalUser = null;
       let finalIsMulti = false;
 
+      // ✅ R8: pakai cache-only (tanpa D1 read)
       for (const u of multiUsers) {
-        const f = await this._findUserInAnyRoom(u);
+        const f = this._findUserInCacheOnly(u);
         if (f) {
           finalUser = u;
           finalRoom = f.room;
@@ -3595,7 +3604,7 @@ export class ChatServer {
       }
 
       if (!finalRoom && attachment.username) {
-        const f = await this._findUserInAnyRoom(attachment.username);
+        const f = this._findUserInCacheOnly(attachment.username);
         if (f) {
           finalUser = attachment.username;
           finalRoom = f.room;
@@ -4852,7 +4861,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ RESTORE FIX R7: proses pending event setelah cache init
   async fetch(req) {
     try {
       if (!this._restored && !this._restorePromise) {
@@ -4918,7 +4926,6 @@ export class ChatServer {
 
       await this._ensureCacheInitialized();
 
-      // ✅ RESTORE FIX R7: proses pending event meski restore gagal
       if (this._restored && this._pendingEvents?.length > 0) {
         this._processPendingEvents().catch(() => {});
       }
