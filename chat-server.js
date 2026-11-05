@@ -1,31 +1,16 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.5.9
-// - FIX #1: _handleJoin cooldown tidak bikin loop (kirim rooMasuk jika seat ada)
-// - FIX #2: _pendingEvents diproses meski restore gagal + kirim serverReady
-// - FIX #3: _loadFromStorage re-create tabel & return kosong alih-alih throw
-// - FIX #4: _cleanupUserCompletely grace period 5s setelah join
-// - FIX #5: _saveSeat/_savePoint/_saveMute/_saveCurrentNumber swallow error
-// - FIX #6: _verifyAndCleanupOrphanSeats skip ws < 60s + cek semua seat (tanpa counter %3)
-// - FIX #7: _restoreFailed tidak blokir _handleSetId, tetap kirim needJoinRoom
-// - FIX #8: ws._joinedAt / ws._createdAt
-// - FIX #9: _handleSetId multi user tetap kirim needJoinRoom (tidak silent)
-// - FIX #10: sendAllStateTo kirim rooMasuk + numberKursiSaya + currentNumber
-// - FIX #11: _joinInternal kirim state langsung (hapus setTimeout 1s)
-// - FIX #12: _updateKursi normalisasi field (tidak simpan undefined)
-// - FIX #13: broadcast skip ws yang sedang _sending (anti buffer penuh)
-// - FIX #14: webSocketMessage timeout per event (anti 1 event block queue)
-// - FIX #15: _cleanupUserCompletely tidak matikan ws multi lain
-// - FIX #16: _nextMultyChat hapus double-write number
-// - FIX #17: fetch() non-ws limit cache output
-// - FIX #18: _handleMultiJoinInternal & _handleMultiJoin2Internal digabung
-// - FIX #19: destroy() urutan aman
-// - updateKursi + _updateKursi: tanpa validasi, simpan input apa adanya (isMulti & noimageUrl ikut)
-// - setActiveMulti: hanya aktivasi
-// - _handleMultiJoinInternal: forceMulti true (kode awal) + seat baru isMulti:true
-// - _handleMultiJoin2Internal: seat baru isMulti:true
-// - _handleSetId: skip hapus seat kalau user punya seat multi
-// - _wipeUserEverywhere: hapus seat + point + cache user (dipakai saat multi pindah room)
-// - _joinInternal: multi pindah room lewat joinRoom = wipe total
+// VERSION: 4.5.11
+// - KODE AWAL v4.5.8 DIPERTAHANKAN (join room, cooldown 800, event, dll)
+// - TIDAK ADA EVENT BARU
+// - Hanya perbaikan FREEZE:
+//   [1] webSocketMessage: timeout 12s per event
+//   [2] fetch: proses _pendingEvents setelah cache init
+//   [3] _ensureCacheInitialized: retry saat error (tidak freeze kosong)
+//   [4] _cleanupUserCompletely: grace period 5s (reconnect cepat)
+//   [5] ws._joinedAt / ws._createdAt (untuk grace period & orphan)
+//   [6] _saveSeat/_savePoint/_saveMute/_saveCurrentNumber: swallow error
+//   [7] _loadFromStorage: anti-throw (return kosong saat D1 error)
+//   [8] _verifyAndCleanupOrphanSeats: skip ws baru < 60s
 
 const C = {
   MAX_SEATS: 45,
@@ -37,7 +22,7 @@ const C = {
   USER_JOIN_LOCK_TIMEOUT: 10000,
   ROOM_LOCK_TIMEOUT: 15000,
   GLOBAL_LOCK_TIMEOUT: 20000,
-  JOIN_COOLDOWN_MS: 800,
+  JOIN_COOLDOWN_MS: 800,              // ✅ TETAP 800 (kode awal)
   CACHE_LOAD_TIMEOUT: 15000,
   MAX_PENDING_EVENTS: 100,
   MAX_EVENT_QUEUE_SIZE: 50,
@@ -54,10 +39,9 @@ const C = {
   HISTORY_LIMIT: 100,
   HISTORY_MAX_AGE_MS: 3 * 60 * 60 * 1000,
   ORPHAN_CLEANUP_GRACE_MS: 60000,
-  JOIN_CLEANUP_GRACE_MS: 5000,        // ✅ FIX #4
-  ORPHAN_WS_MIN_AGE_MS: 60000,        // ✅ FIX #6
-  WS_MSG_TIMEOUT_MS: 12000,           // ✅ FIX #14
-  CACHE_FETCH_LIMIT: 500,             // ✅ FIX #17
+  JOIN_CLEANUP_GRACE_MS: 5000,        // ✅ FREEZE FIX #4
+  ORPHAN_WS_MIN_AGE_MS: 60000,        // ✅ FREEZE FIX #8
+  WS_MSG_TIMEOUT_MS: 12000,           // ✅ FREEZE FIX #1
 };
 
 const ROOMS = [
@@ -87,16 +71,6 @@ const _wsCleanupState = new WeakMap();
 
 function _parseColorVal(v, def) {
   if (v === undefined || v === null || v === "") return def;
-  const n = parseInt(v);
-  return isNaN(n) ? def : n;
-}
-
-function _safeStr(v, def = "") {
-  if (v === undefined || v === null) return def;
-  return String(v);
-}
-
-function _safeNum(v, def = 0) {
   const n = parseInt(v);
   return isNaN(n) ? def : n;
 }
@@ -1302,13 +1276,23 @@ export class ChatServer {
         this._saveHistoryChat(r, chatData).catch(() => {});
       }
 
-      // ✅ FIX #16: hapus double-write number (cukup setelah increment)
+      try {
+        if (this.db) {
+          const num = st.numberNext;
+          await this.db.prepare(`
+            INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+          `).bind(K_NUMBER(r), String(num)).run();
+        }
+      } catch(e) {}
+
       st.numberNext++;
       if (st.numberNext > C.MAX_MULTY_NUMBER) st.numberNext = 1;
 
       this._saveMultyNumberToTable(r, st.numberNext).catch(() => {});
 
       st.index++;
+
       this._saveMultyIndexToTable(r, st.index).catch(() => {});
 
       if (st.index >= st.chatList.length) {
@@ -1363,13 +1347,13 @@ export class ChatServer {
         this._cacheInitialized = true;
       }
 
-      // ✅ FIX #3: jangan throw — restore gagal tidak boleh mematikan server
       return this._storageCache || { roomsData: {}, currentNumber: 1 };
     } finally {
       this._isRestoring = false;
     }
   }
 
+  // ✅ FREEZE FIX #7: anti-throw saat D1 error (re-create tabel & return kosong)
   async _loadFromStorage() {
     try {
       if (!this.db) {
@@ -1422,7 +1406,7 @@ export class ChatServer {
         }
       } catch(e) {}
 
-      // ✅ FIX #3: retry SELECT setelah re-create tabel, return kosong alih-alih throw
+      // ✅ FREEZE FIX #7: retry SELECT; kalau gagal, return kosong (jangan throw)
       let result;
       try {
         result = await this.db.prepare(`SELECT key, value FROM ${TABLE_NAME}`).all();
@@ -1523,12 +1507,11 @@ export class ChatServer {
 
     } catch(e) {
       this._cacheLoadAttempts = (this._cacheLoadAttempts || 0) + 1;
-      // ✅ FIX #3: jangan set _restoreFailed di sini; biar restoreWithRetry yang tangani
       throw e;
     }
   }
 
-  // ✅ FIX #5: _saveSeat swallow error (cache tetap jalan walau D1 hilang)
+  // ✅ FREEZE FIX #6: swallow error (D1 down tidak crash server)
   async _saveSeat(roomName, seatNumber, seatData) {
     if (!this.db) return;
     try {
@@ -1544,7 +1527,7 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX #5
+  // ✅ FREEZE FIX #6
   async _savePoint(roomName, seatNumber, pointData) {
     if (!this.db) return;
     try {
@@ -1560,7 +1543,7 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX #5
+  // ✅ FREEZE FIX #6
   async _saveMute(roomName, muted) {
     if (!this.db) return;
     try {
@@ -1576,7 +1559,7 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX #5
+  // ✅ FREEZE FIX #6
   async _saveCurrentNumber() {
     if (!this.db) return;
     try {
@@ -2086,7 +2069,7 @@ export class ChatServer {
     }
   }
 
-  // ✅ FIX #2: jangan freeze cache kosong saat error — reset _cacheInitialized agar bisa retry
+  // ✅ FREEZE FIX #3: retry saat error (tidak freeze cache kosong)
   async _ensureCacheInitialized() {
     try {
       if (this._cacheInitialized && this._storageCache) {
@@ -2128,7 +2111,7 @@ export class ChatServer {
           return result;
         })
         .catch(e => {
-          // ✅ FIX #2: jangan freeze kosong; reset flag supaya bisa retry
+          // ✅ FREEZE FIX #3: jangan freeze kosong; reset flag supaya bisa retry
           this._cacheInitialized = false;
           if (!this._storageCache) {
             this._storageCache = { roomsData: {}, currentNumber: 1 };
@@ -2150,7 +2133,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ FIX #12: normalisasi field (tidak simpan undefined)
   async _updateKursi(roomName, seat, data) {
     try {
       await this._ensureCacheInitialized();
@@ -2165,14 +2147,14 @@ export class ChatServer {
       if (!roomBucket.seat) roomBucket.seat = {};
 
       const updatedSeat = {
-        namauser: _safeStr(data.namauser, ""),
-        isMulti: data.isMulti === true,
-        noimageUrl: data.noimageUrl === undefined || data.noimageUrl === null ? "" : data.noimageUrl,
-        color: data.color === undefined || data.color === null ? "" : data.color,
-        itembawah: _safeNum(data.itembawah, 0),
-        itematas: _safeNum(data.itematas, 0),
-        vip: _safeNum(data.vip, 0),
-        viptanda: _safeNum(data.viptanda, 0)
+        namauser: data.namauser,
+        isMulti: data.isMulti,
+        noimageUrl: data.noimageUrl,
+        color: data.color,
+        itembawah: data.itembawah,
+        itematas: data.itematas,
+        vip: data.vip,
+        viptanda: data.viptanda
       };
 
       roomBucket.seat[seat] = updatedSeat;
@@ -2240,7 +2222,9 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX #1: cooldown kirim rooMasuk jika seat sudah ada (tidak bikin client loop)
+  // ============================================================
+  // ✅ LOGIKA MASUK ROOM = KODE AWAL v4.5.8 (TIDAK DIUBAH)
+  // ============================================================
   async _handleJoin(ws, roomName) {
     try {
       if (!ws?.username || !roomName || !ROOMS_SET.has(roomName) || this.closing || this.isDestroyed) {
@@ -2253,13 +2237,9 @@ export class ChatServer {
       if (Date.now() - lastJoin < C.JOIN_COOLDOWN_MS) {
         const existing = await this._findUserInAnyRoom(username);
         if (existing && existing.room === roomName) {
-          // ✅ FIX #1: user sudah di room ini — kirim state lengkap, jangan retry
           this.safeSend(ws, ["rooMasuk", existing.seat, roomName]);
-          this.safeSend(ws, ["numberKursiSaya", existing.seat]);
-          this.safeSend(ws, ["currentNumber", this.currentNumber]);
           return true;
         }
-        // Kirim needJoinRoom supaya client retry (bukan silent)
         this.safeSend(ws, ["needJoinRoom"]);
         return false;
       }
@@ -2297,7 +2277,7 @@ export class ChatServer {
         ws.idtarget = username;
         ws._room = roomName;
         ws._username = username;
-        ws._joinedAt = Date.now();  // ✅ FIX #8
+        ws._joinedAt = Date.now();  // ✅ FREEZE FIX #5
 
         try {
           const att = this._getAttachment(ws);
@@ -2318,9 +2298,6 @@ export class ChatServer {
         this.safeSend(ws, ["rooMasuk", existing.seat, roomName]);
         this.safeSend(ws, ["numberKursiSaya", existing.seat]);
         this.safeSend(ws, ["currentNumber", this.currentNumber]);
-
-        // ✅ FIX #11: kirim state lengkap langsung
-        this.sendAllStateTo(ws, roomName, true).catch(() => {});
 
         return true;
       }
@@ -2393,7 +2370,7 @@ export class ChatServer {
       ws.idtarget = username;
       ws._room = roomName;
       ws._username = username;
-      ws._joinedAt = Date.now();  // ✅ FIX #8
+      ws._joinedAt = Date.now();  // ✅ FREEZE FIX #5
 
       try {
         const att = this._getAttachment(ws);
@@ -2440,10 +2417,26 @@ export class ChatServer {
 
       await this.updateRoomCount(roomName);
 
-      // ✅ FIX #11: kirim state lengkap langsung (bukan setTimeout 1s)
       try {
-        await this.sendAllStateTo(ws, roomName, true);
+        const att = this._getAttachment(ws);
+        att.pendingStateSend = Date.now();
+        att.pendingStateRoom = roomName;
+        att.pendingStateUsername = username;
+        this._setAttachment(ws, att);
       } catch(e) {}
+
+      setTimeout(async () => {
+        try {
+          if (!ws || ws.readyState !== 1) return;
+          const att = this._getAttachment(ws);
+          if (!att.pendingStateSend) return;
+          att.pendingStateSend = null;
+          att.pendingStateRoom = null;
+          att.pendingStateUsername = null;
+          this._setAttachment(ws, att);
+          await this.sendAllStateTo(ws, roomName, true);
+        } catch(e) {}
+      }, 1000);
 
       return true;
     } catch(e) {
@@ -2458,7 +2451,7 @@ export class ChatServer {
       return await this._withLock(
         this._userJoinLock,
         `join_user_${multiUsername}`,
-        () => this._handleMultiJoinInternal(ws, multiUsername, multiRoomname, true),
+        () => this._handleMultiJoinInternal(ws, multiUsername, multiRoomname),
         C.USER_JOIN_LOCK_TIMEOUT
       );
     } catch(e) {
@@ -2466,29 +2459,11 @@ export class ChatServer {
     }
   }
 
-  async _handleMultiJoin2(ws, multiUsername, multiRoomname) {
-    try {
-      if (!multiUsername || !multiRoomname || !ROOMS_SET.has(multiRoomname)) return false;
-
-      return await this._withLock(
-        this._userJoinLock,
-        `join_user_${multiUsername}`,
-        () => this._handleMultiJoinInternal(ws, multiUsername, multiRoomname, false),
-        C.USER_JOIN_LOCK_TIMEOUT
-      );
-    } catch(e) {
-      return false;
-    }
-  }
-
-  // ✅ FIX #18: gabung _handleMultiJoinInternal & _handleMultiJoin2Internal
-  async _handleMultiJoinInternal(ws, multiUsername, multiRoomname, forceMulti = true) {
+  async _handleMultiJoinInternal(ws, multiUsername, multiRoomname) {
     try {
       await this._ensureCacheInitialized();
 
-      if (forceMulti) {
-        await this._lightDeleteAllSeatsForUser(multiUsername, { forceMulti: true });
-      }
+      await this._lightDeleteAllSeatsForUser(multiUsername, { forceMulti: true });
 
       let roomBucket = this._storageCache?.roomsData?.[multiRoomname];
       if (!roomBucket) {
@@ -2560,8 +2535,96 @@ export class ChatServer {
     }
   }
 
-  // ✅ FIX #4: grace period 5s setelah join; user baru tidak langsung dihapus
-  // ✅ FIX #15: tidak matikan ws multi lain
+  async _handleMultiJoin2(ws, multiUsername, multiRoomname) {
+    try {
+      if (!multiUsername || !multiRoomname || !ROOMS_SET.has(multiRoomname)) return false;
+
+      return await this._withLock(
+        this._userJoinLock,
+        `join_user_${multiUsername}`,
+        () => this._handleMultiJoin2Internal(ws, multiUsername, multiRoomname),
+        C.USER_JOIN_LOCK_TIMEOUT
+      );
+    } catch(e) {
+      return false;
+    }
+  }
+
+  async _handleMultiJoin2Internal(ws, multiUsername, multiRoomname) {
+    try {
+      await this._ensureCacheInitialized();
+
+      let roomBucket = this._storageCache?.roomsData?.[multiRoomname];
+      if (!roomBucket) {
+        roomBucket = { seat: {}, point: {}, mute: false };
+        if (!this._storageCache) this._storageCache = { roomsData: {}, currentNumber: 1 };
+        this._storageCache.roomsData[multiRoomname] = roomBucket;
+      }
+      if (!roomBucket.seat) roomBucket.seat = {};
+
+      let seat = null;
+      for (const [s, data] of Object.entries(roomBucket.seat)) {
+        if (data?.namauser === multiUsername && data.isMulti === true) {
+          seat = parseInt(s);
+          break;
+        }
+      }
+
+      if (!seat) {
+        const seatCount = Object.values(roomBucket.seat).filter(s => s?.namauser).length;
+        if (seatCount >= C.MAX_SEATS) return false;
+
+        for (let s = 1; s <= C.MAX_SEATS; s++) {
+          if (!roomBucket.seat[s]) {
+            seat = s;
+            break;
+          }
+        }
+        if (!seat) return false;
+
+        const newSeat = {
+          noimageUrl: "",
+          namauser: multiUsername,
+          color: "",
+          itembawah: 0,
+          itematas: 0,
+          vip: 0,
+          viptanda: 0,
+          isMulti: true
+        };
+        await this._updateSeatInRoom(multiRoomname, seat, newSeat);
+      }
+
+      try {
+        const currentSeat = roomBucket.seat?.[seat];
+        if (currentSeat?.namauser === multiUsername) {
+          const noimg = parseInt(currentSeat.noimageUrl);
+          if (!isNaN(noimg) && noimg > 0) {
+            await this._setUserNoimgCache(multiUsername, noimg);
+          }
+        }
+      } catch(e) {}
+
+      try {
+        const st = this._getMultyState(multiRoomname);
+        if (st.running) {
+          if (!st.loopTimer) {
+            this._startMultyLoop(multiRoomname);
+          }
+          this.broadcast(multiRoomname, ["multyStatus", true, st.index, st.chatList.length, multiRoomname]);
+          this.broadcast(multiRoomname, ["multyNumber", st.numberNext, multiRoomname]);
+        }
+      } catch(e) {}
+
+      try { await this.updateRoomCount(multiRoomname); } catch(e) {}
+
+      return { room: multiRoomname, seat: seat };
+    } catch(e) {
+      return false;
+    }
+  }
+
+  // ✅ FREEZE FIX #4: grace period 5s (user reconnect cepat tidak kehilangan seat)
   async _cleanupUserCompletely(ws, options = {}) {
     const result = { removedSeats: [] };
 
@@ -2672,16 +2735,8 @@ export class ChatServer {
           const clients = this.roomClients?.get(roomName);
           if (clients) try { clients.delete(ws); } catch (e) {}
         }
-
-        // ✅ FIX #15: cek apakah ws masih punya multi user lain
-        const att = this._getAttachment(ws);
-        const multiUsers = Array.isArray(att.multiUsers) ? att.multiUsers : [];
-        const stillHasMulti = multiUsers.some(u => u !== username) || this.wsActiveMulti?.has(ws);
-
-        if (!stillHasMulti) {
-          try { this.wsSet?.delete(ws); } catch (e) {}
-          try { this.wsActiveMulti?.delete(ws); } catch (e) {}
-        }
+        try { this.wsSet?.delete(ws); } catch (e) {}
+        try { this.wsActiveMulti?.delete(ws); } catch (e) {}
 
         state.cleanupDone = true;
         return result;
@@ -2700,7 +2755,7 @@ export class ChatServer {
         }
       }
 
-      // ✅ FIX #4: grace period — user yang baru join < 5s jangan dihapus seat-nya
+      // ✅ FREEZE FIX #4: grace period 5s
       const joinedAgo = Date.now() - (ws._joinedAt || 0);
       const withinGrace = ws._joinedAt && joinedAgo < C.JOIN_CLEANUP_GRACE_MS;
 
@@ -2761,7 +2816,7 @@ export class ChatServer {
     } catch (e) {}
   }
 
-  // ✅ FIX #14: timeout per event (anti 1 event block queue)
+  // ✅ FREEZE FIX #1: timeout 12s per event (1 event berat tidak block queue)
   async webSocketMessage(ws, msg) {
     try {
       if (!ws) return;
@@ -2965,7 +3020,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ FIX #13: skip ws yang sedang _sending (anti buffer penuh)
   broadcast(room, msg) {
     try {
       if (this.closing || this.isDestroyed || !room || !msg) return 0;
@@ -3010,24 +3064,15 @@ export class ChatServer {
           continue;
         }
 
-        // ✅ FIX #13: skip ws yang sedang sibuk kirim
-        if (ws._sending) continue;
-
         try {
           if (ws.readyState === 1 && !ws._closing && !ws._cleaning) {
-            ws._sending = true;
-            try {
-              ws.send(msgStr);
-              sentCount++;
-            } finally {
-              ws._sending = false;
-            }
+            ws.send(msgStr);
+            sentCount++;
           } else {
             try { toRemove.add(ws); } catch(e) {}
           }
         } catch(e) {
-          try { ws._sending = false; } catch(e2) {}
-          try { toRemove.add(ws); } catch(e2) {}
+          try { toRemove.add(ws); } catch(e) {}
         }
       }
 
@@ -3051,15 +3096,9 @@ export class ChatServer {
       if (ws.readyState !== 1 || ws._closing || ws._cleaning || this.closing || this.isDestroyed) {
         return false;
       }
-      ws._sending = true;
-      try {
-        ws.send(JSON.stringify(msg));
-      } finally {
-        ws._sending = false;
-      }
+      ws.send(JSON.stringify(msg));
       return true;
     } catch(e) {
-      try { ws._sending = false; } catch(e2) {}
       return false;
     }
   }
@@ -3081,7 +3120,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ FIX #10: kirim rooMasuk + numberKursiSaya + currentNumber
   async sendAllStateTo(ws, room, excludeSelf = false) {
     try {
       if (!ws?.username) return;
@@ -3115,13 +3153,6 @@ export class ChatServer {
           if (s?.namauser && String(s.namauser).trim() !== '') count++;
         }
         this.safeSend(ws, ["roomUserCount", room, count]);
-
-        // ✅ FIX #10: pastikan client tahu seat sendiri
-        if (selfSeat) {
-          this.safeSend(ws, ["rooMasuk", selfSeat, room]);
-          this.safeSend(ws, ["numberKursiSaya", selfSeat]);
-        }
-        this.safeSend(ws, ["currentNumber", this.currentNumber]);
 
         if (allSeats && Object.keys(allSeats).length > 0) {
           if (excludeSelf && selfSeat && allSeats[selfSeat]) {
@@ -3167,7 +3198,7 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX #6: skip ws berumur < 60s + cek semua seat (tanpa counter %3)
+  // ✅ FREEZE FIX #8: skip ws baru < 60s
   async _verifyAndCleanupOrphanSeats(liveWsList) {
     try {
       if (this._isRestoring) return 0;
@@ -3186,7 +3217,7 @@ export class ChatServer {
         try {
           if (!ws || ws.readyState !== 1) continue;
 
-          // ✅ FIX #6: skip ws baru
+          // ✅ FREEZE FIX #8: skip ws baru dari pembersihan
           const wsAge = Date.now() - (ws._createdAt || 0);
           if (ws._createdAt && wsAge < C.ORPHAN_WS_MIN_AGE_MS) {
             // ws baru; tetap anggap live jika punya username
@@ -3209,13 +3240,15 @@ export class ChatServer {
       }
 
       const orphanSeats = [];
+      let counter = 0;
 
       for (const [roomName, roomBucket] of Object.entries(roomsData)) {
         if (!ROOMS_SET.has(roomName)) continue;
         if (!roomBucket?.seat) continue;
 
-        // ✅ FIX #6: cek semua seat (tanpa counter %3)
         for (const [seatStr, seatData] of Object.entries(roomBucket.seat)) {
+          if (counter++ % 3 !== 0) continue;
+
           if (!seatData?.namauser) continue;
           const seatNum = parseInt(seatStr);
           if (isNaN(seatNum) || seatNum < 1 || seatNum > C.MAX_SEATS) continue;
@@ -3436,11 +3469,6 @@ export class ChatServer {
 
       await this._processPendingEvents();
 
-      // ✅ FIX #2: kirim serverReady ke semua ws
-      for (const ws of (this.wsSet || new Set())) {
-        this.safeSend(ws, ["serverReady"]);
-      }
-
       return true;
 
     } catch(e) {
@@ -3472,11 +3500,7 @@ export class ChatServer {
         } catch(e2) {}
       }
 
-      // ✅ FIX #2: proses pending meski restore gagal + kirim serverReady
       await this._processPendingEvents();
-      for (const ws of (this.wsSet || new Set())) {
-        this.safeSend(ws, ["serverReady"]);
-      }
       throw e;
     }
   }
@@ -3655,8 +3679,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX #7: saat _isRestoring, tetap kirim needJoinRoom (jangan diam)
-  // ✅ FIX #9: multi user tetap kirim needJoinRoom (tidak silent)
   async _handleSetId(ws, username, isNewUser) {
     try {
       if (!ws || !username || typeof username !== 'string' || username.length === 0 || this.closing || this.isDestroyed) {
@@ -3681,16 +3703,10 @@ export class ChatServer {
               if (!att.multiUsers.includes(username)) att.multiUsers.push(username);
               this._setAttachment(ws, att);
             } catch(e) {}
-            // ✅ FIX #9: kirim needJoinRoom
-            this.safeSend(ws, ["needJoinRoom"]);
             return { skip: true };
           }
 
           if (this._isRestoring) {
-            // ✅ FIX #7: jangan silent skip; tetap kirim needJoinRoom
-            try {
-              this.safeSend(ws, ["needJoinRoom"]);
-            } catch(e) {}
             return { skip: true };
           }
 
@@ -4190,7 +4206,7 @@ export class ChatServer {
 
           ws._username = multiUsername;
           ws._room = room;
-          ws._joinedAt = Date.now();  // ✅ FIX #8
+          ws._joinedAt = Date.now();  // ✅ FREEZE FIX #5
           try { this.wsActiveMulti?.set(ws, { username: multiUsername, room: room }); } catch(e) {}
           for (const [otherRoom, clients] of (this.roomClients || new Map())) {
             if (otherRoom !== room && clients) {
@@ -4220,7 +4236,7 @@ export class ChatServer {
           ws.room = room;
           ws.roomname = room;
           ws.idtarget = multiUsername2;
-          ws._joinedAt = Date.now();  // ✅ FIX #8
+          ws._joinedAt = Date.now();  // ✅ FREEZE FIX #5
 
           let connections = this.userConnections?.get(multiUsername2);
           if (!connections) connections = new Set();
@@ -4780,7 +4796,6 @@ export class ChatServer {
     }
   }
 
-  // ✅ FIX #17: limit cache output di fetch non-ws
   async fetch(req) {
     try {
       if (!this._restored && !this._restorePromise) {
@@ -4846,7 +4861,7 @@ export class ChatServer {
 
       await this._ensureCacheInitialized();
 
-      // ✅ FIX #2: proses pending event meski restore gagal
+      // ✅ FREEZE FIX #2: proses pending event meski restore gagal
       if (this._restored && this._pendingEvents?.length > 0) {
         this._processPendingEvents().catch(() => {});
       }
@@ -4867,18 +4882,13 @@ export class ChatServer {
             };
           }
 
-          // ✅ FIX #17: limit cache output
           const noimgCacheObj = {};
-          let i = 0;
           for (const [u, n] of this._userNoimgCache) {
-            if (++i > C.CACHE_FETCH_LIMIT) break;
             noimgCacheObj[u] = n;
           }
 
           const colorCacheObj = {};
-          i = 0;
           for (const [u, c] of this._userColorCache) {
-            if (++i > C.CACHE_FETCH_LIMIT) break;
             colorCacheObj[u] = c;
           }
 
@@ -4932,7 +4942,7 @@ export class ChatServer {
         server._username = null;
         server._room = null;
         server._wsId = Date.now() + Math.random();
-        server._createdAt = Date.now();  // ✅ FIX #6
+        server._createdAt = Date.now();  // ✅ FREEZE FIX #5
         try { server.serializeAttachment({ multiUsers: [] }); } catch(e) {}
 
         try {
@@ -4983,7 +4993,6 @@ export class ChatServer {
     } catch(e) {}
   }
 
-  // ✅ FIX #19: urutan destroy aman
   async destroy() {
     if (this.isDestroyed) return;
     this.closing = true;
