@@ -12,7 +12,7 @@
 //   [R8] _findUserInCacheOnly: cegah D1 read saat restore (anti lambat)
 //   [R9] _restoreAllState: cek timeout DI DALAM loop ws (bukan hanya per batch)
 
-const C = {
+ const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 500000,
