@@ -51,9 +51,9 @@
 };
 
 const ROOMS = [
-  "LowCard", "Quiz", "Gacor", "General", "LOVE BIRDS", "Relax & Chat",
-  "Sweet Memories", "Lounge Talk", "Noxxeliverothcifsa", "BESTIES",
-  "Happy Vibes", "The Chatter Room"
+  "LowCard", "Quiz", "General", "BESTIES","Sweet Memories", "Noxxeliverothcifsa","Lounge Talk", "Happy Vibes","LOVE BIRDS","India Mahal", "Relax & Chat",
+  
+  "The Chatter Room"
 ];
 
 const ROOMS_SET = new Set(ROOMS);
