@@ -51,7 +51,8 @@
 };
 
 const ROOMS = [
-  "LowCard", "Quiz", "General", "BESTIES","Sweet Memories", "Noxxeliverothcifsa","Lounge Talk", "Happy Vibes","LOVE BIRDS","India Mahal", "Relax & Chat",
+  "LowCard", "Quiz", "General", "BESTIES","Sweet Memories", "Noxxeliverothcifsa","Lounge Talk"
+ , "Happy Vibes","LOVE BIRDS","Desi Mahal", "Relax & Chat",
   
   "The Chatter Room"
 ];
