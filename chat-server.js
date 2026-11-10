@@ -1,18 +1,33 @@
 // ==================== CHAT-SERVER.JS ====================
-// VERSION: 4.5.8-RESTORE-FIX-FULL
-// - KODE AWAL v4.5.8 DIPERTAHANKAN 100%
-// - Hanya perbaiki FREEZE SAAT RESTORE (9 fix):
-//   [R1] _restoreAllState: timeout internal 25s + cek timeout per ws + batch + yield
-//   [R2] _loadFromStorage: timeout D1 5s per query
-//   [R3] _loadAllMultyFromTable: timeout D1 5s
-//   [R4] _processPendingEvents: timeout 3s + yield + batch 10
-//   [R5] Constructor: hapus timeout 15s (race condition)
-//   [R6] webSocketMessage: timeout 12s per event
-//   [R7] fetch: proses pending event setelah cache init
-//   [R8] _findUserInCacheOnly: cegah D1 read saat restore (anti lambat)
-//   [R9] _restoreAllState: cek timeout DI DALAM loop ws (bukan hanya per batch)
+// VERSION: 4.6.0-FULL-HARDENED
+// - KODE v4.5.9 DIPERTAHANKAN 100%
+// - Fix 100% (tambahan dari v4.5.9):
+//   [H1]  _cleanupUserCompletely: timeout D1 (forceDelete + lightDelete)
+//   [H2]  _updateNumber: batch broadcast + yield (anti CPU spike)
+//   [H3]  broadcast: JSON.stringify aman (anti circular/BigInt throw)
+//   [H4]  _restoreAllState: batch broadcast akhir + yield
+//   [H5]  _nextMultyChat: hapus double D1 write number (redundan)
+//   [H6]  _ensureHistoryTable: guard D1 error (anti retry spam)
+//   [H7]  _saveHistoryChat: timeout D1 (anti hang)
+//   [H8]  _loadHistoryChat: timeout D1
+//   [H9]  _checkAndResetHistory: timeout D1
+//   [H10] _loadMultyFromTable: timeout D1 per query
+//   [H11] _forceDeleteFromD1: timeout D1
+//   [H12] _lightDeleteAllSeatsForUser: timeout D1
+//   [H13] _wipeUserEverywhere: timeout D1
+//   [H14] _saveSeat/_savePoint/_saveMute/_saveCurrentNumber: timeout D1
+//   [H15] _updateSeatInRoom: timeout D1 delete loop
+//   [H16] _deleteSeatInRoom: timeout D1
+//   [H17] _verifyAndCleanupOrphanSeats: timeout D1
+//   [H18] _saveUserNoimgCache/_saveUserColorCache: timeout D1
+//   [H19] _loadUserNoimgCache/_loadUserColorCache: timeout D1
+//   [H20] _saveMultyChatToTable/_saveMultyNumberToTable/_saveMultyIndexToTable/_saveMultyRunningToTable/_deleteMultyChatFromTable: timeout D1
+//   [H21] _restoreAllState: getAlarm optional chain aman
+//   [H22] fetch: guard isDestroyed tambahan
+//   [H23] _withLock: cleanup lock jika fn throw (anti deadlock)
+//   [H24] _cleanupUserCompletely: guard isDestroyed di close
 
- const C = {
+const C = {
   MAX_SEATS: 45,
   MAX_GLOBAL_CONNECTIONS: 150,
   MAX_MESSAGE_SIZE: 500000,
@@ -41,13 +56,23 @@
   ORPHAN_CLEANUP_GRACE_MS: 60000,
   JOIN_CLEANUP_GRACE_MS: 5000,
   ORPHAN_WS_MIN_AGE_MS: 60000,
-  // ✅ RESTORE FIX
+  // RESTORE FIX
   D1_QUERY_TIMEOUT_MS: 5000,
   RESTORE_TOTAL_TIMEOUT_MS: 25000,
   RESTORE_BATCH_SIZE: 10,
   RESTORE_WS_TIMEOUT_MS: 3000,
   PENDING_PROCESS_TIMEOUT_MS: 3000,
   WS_MSG_TIMEOUT_MS: 12000,
+  // FIX v4.5.9
+  MAX_WS_MSG_QUEUE: 50,
+  JOIN_COOLDOWN_TTL_MS: 60000,
+  HISTORY_COLLISION_MAX: 100,
+  // FIX v4.6.0
+  D1_WRITE_TIMEOUT_MS: 5000,
+  D1_DELETE_TIMEOUT_MS: 5000,
+  HISTORY_TIMEOUT_MS: 5000,
+  BROADCAST_BATCH_YIELD: 4,
+  MULTY_HISTORY_TIMEOUT_MS: 3000,
 };
 
 const ROOMS = [
@@ -76,19 +101,33 @@ const K_HISTORY_TABLE = (room) => `chat_history_${String(room).replace(/[^a-zA-Z
 
 const _wsCleanupState = new WeakMap();
 
+// FIX F1: _withTimeout clear timer di finally (anti timer leak)
 function _withTimeout(promise, ms, label = 'operation') {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms)
-    )
-  ]);
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  });
 }
 
 function _parseColorVal(v, def) {
   if (v === undefined || v === null || v === "") return def;
   const n = parseInt(v);
   return isNaN(n) ? def : n;
+}
+
+// FIX H3: safe stringify
+function _safeStringify(obj) {
+  try {
+    return JSON.stringify(obj);
+  } catch (e) {
+    return null;
+  }
 }
 
 export class ChatServer {
@@ -142,6 +181,7 @@ export class ChatServer {
       this._multyRestored = false;
 
       this._historyTableReady = new Set();
+      this._historyTableFailed = new Set();
 
       this._requestCount = 0;
       this._lastResetTime = Date.now();
@@ -185,7 +225,6 @@ export class ChatServer {
         this.roomClients.set(room, new Set());
       }
 
-      // ✅ R5: hapus timeout 15s
       this._restorePromise = this._restoreWithRetry();
 
       this._restorePromise
@@ -221,6 +260,7 @@ export class ChatServer {
       this._multyState = new Map();
       this._multyRestored = false;
       this._historyTableReady = new Set();
+      this._historyTableFailed = new Set();
       this._globalLocks = new Map();
       this._roomLocks = new Map();
       this._roomWriteLocks = new Map();
@@ -281,15 +321,23 @@ export class ChatServer {
     }
   }
 
+  // FIX F6: _withLock backoff acak + guard isDestroyed
+  // FIX H23: cleanup lock jika fn throw (anti deadlock)
   async _withLock(lockMap, key, fn, timeout = C.LOCK_TIMEOUT) {
     try {
       if (!lockMap) return await fn();
+      if (this.isDestroyed || this.closing) {
+        try { return await fn(); } catch(e) { throw e; }
+      }
 
       const token = Symbol('lock_' + key);
       const start = Date.now();
 
       while (lockMap.has(key) && (Date.now() - start) < timeout) {
-        await new Promise(resolve => setTimeout(resolve, 15));
+        if (this.isDestroyed || this.closing) {
+          return null;
+        }
+        await new Promise(resolve => setTimeout(resolve, 5 + Math.random() * 20));
       }
 
       if (lockMap.has(key)) {
@@ -299,6 +347,8 @@ export class ChatServer {
       lockMap.set(key, token);
       try {
         return await fn();
+      } catch(e) {
+        throw e;
       } finally {
         if (lockMap.get(key) === token) lockMap.delete(key);
       }
@@ -375,7 +425,6 @@ export class ChatServer {
     try { this._userIndex.delete(username); } catch(e) {}
   }
 
-  // ✅ R8: cari user di cache saja (tanpa D1 read) — untuk restore
   _findUserInCacheOnly(username) {
     try {
       if (!username) return null;
@@ -400,6 +449,7 @@ export class ChatServer {
   // ============================================================
   // NOIMG CACHE
   // ============================================================
+  // FIX H18: timeout D1
   async _saveUserNoimgCache() {
     try {
       if (!this.db) return false;
@@ -407,23 +457,32 @@ export class ChatServer {
       for (const [username, noimg] of this._userNoimgCache) {
         obj[username] = noimg;
       }
-      await this.db.prepare(`
-        INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-      `).bind(K_MULTY_NOIMG_CACHE, JSON.stringify(obj)).run();
+      await _withTimeout(
+        this.db.prepare(`
+          INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
+          VALUES (?, ?, CURRENT_TIMESTAMP)
+        `).bind(K_MULTY_NOIMG_CACHE, JSON.stringify(obj)).run(),
+        C.D1_WRITE_TIMEOUT_MS,
+        'saveNoimgCache'
+      );
       return true;
     } catch(e) {
       return false;
     }
   }
 
+  // FIX H19: timeout D1
   async _loadUserNoimgCache() {
     try {
       if (!this.db) return false;
-      const row = await this.db
-        .prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
-        .bind(K_MULTY_NOIMG_CACHE)
-        .first();
+      const row = await _withTimeout(
+        this.db
+          .prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
+          .bind(K_MULTY_NOIMG_CACHE)
+          .first(),
+        C.D1_QUERY_TIMEOUT_MS,
+        'loadNoimgCache'
+      );
 
       if (!row?.value) return false;
 
@@ -467,8 +526,9 @@ export class ChatServer {
   }
 
   // ============================================================
-  // COLOR CACHE per username
+  // COLOR CACHE
   // ============================================================
+  // FIX H18: timeout D1
   async _saveUserColorCache() {
     try {
       if (!this.db) return false;
@@ -476,23 +536,32 @@ export class ChatServer {
       for (const [username, c] of this._userColorCache) {
         obj[username] = c;
       }
-      await this.db.prepare(`
-        INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-      `).bind(K_MULTY_COLOR_CACHE, JSON.stringify(obj)).run();
+      await _withTimeout(
+        this.db.prepare(`
+          INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
+          VALUES (?, ?, CURRENT_TIMESTAMP)
+        `).bind(K_MULTY_COLOR_CACHE, JSON.stringify(obj)).run(),
+        C.D1_WRITE_TIMEOUT_MS,
+        'saveColorCache'
+      );
       return true;
     } catch(e) {
       return false;
     }
   }
 
+  // FIX H19: timeout D1
   async _loadUserColorCache() {
     try {
       if (!this.db) return false;
-      const row = await this.db
-        .prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
-        .bind(K_MULTY_COLOR_CACHE)
-        .first();
+      const row = await _withTimeout(
+        this.db
+          .prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
+          .bind(K_MULTY_COLOR_CACHE)
+          .first(),
+        C.D1_QUERY_TIMEOUT_MS,
+        'loadColorCache'
+      );
 
       if (!row?.value) return false;
 
@@ -567,9 +636,10 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // FIX F3 + F5: guard isDestroyed/closing + cleanup _joinCooldown
   async alarm() {
     try {
-      if (this.isDestroyed) return;
+      if (this.isDestroyed || this.closing) return;
 
       this._isNumberUpdating = false;
       this._numberUpdateStart = null;
@@ -582,6 +652,15 @@ export class ChatServer {
           ]);
         } catch(e) {}
       }
+
+      try {
+        const now = Date.now();
+        for (const [u, ts] of this._joinCooldown) {
+          if (now - ts > C.JOIN_COOLDOWN_TTL_MS) {
+            this._joinCooldown.delete(u);
+          }
+        }
+      } catch(e) {}
 
       await this._updateNumber();
 
@@ -600,19 +679,24 @@ export class ChatServer {
     } catch(e) {
       this._handleError('alarm', e);
     } finally {
-      try {
-        if (this.ctx && this.ctx.storage && typeof this.ctx.storage.setAlarm === 'function') {
-          const next = Date.now() + C.NUMBER_INTERVAL_MS;
-          await this.ctx.storage.setAlarm(next);
-        }
-      } catch(e) {
+      if (!this.isDestroyed && !this.closing) {
         try {
-          await this.ctx.storage.setAlarm(Date.now() + 60000);
-        } catch(e2) {}
+          if (this.ctx && this.ctx.storage && typeof this.ctx.storage.setAlarm === 'function') {
+            const next = Date.now() + C.NUMBER_INTERVAL_MS;
+            await this.ctx.storage.setAlarm(next);
+          }
+        } catch(e) {
+          try {
+            if (!this.isDestroyed && !this.closing) {
+              await this.ctx.storage.setAlarm(Date.now() + 60000);
+            }
+          } catch(e2) {}
+        }
       }
     }
   }
 
+  // FIX H2: batch broadcast + yield (anti CPU spike)
   async _updateNumber() {
     try {
       if (this.isDestroyed) return;
@@ -641,10 +725,15 @@ export class ChatServer {
 
         await this._saveCurrentNumber();
 
-        if (!this._isRestoring) {
+        if (!this._isRestoring && !this.isDestroyed && !this.closing) {
+          let i = 0;
           for (const [room, clients] of (this.roomClients || new Map())) {
+            if (this.isDestroyed || this.closing) break;
             if (clients?.size > 0) {
               this.broadcast(room, ["currentNumber", this.currentNumber]);
+            }
+            if (++i % C.BROADCAST_BATCH_YIELD === 0) {
+              await new Promise(resolve => setTimeout(resolve, 0));
             }
           }
         }
@@ -658,34 +747,45 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // FIX H6: guard D1 error (anti retry spam)
   async _ensureHistoryTable(room) {
     try {
       if (!this.db) return false;
       const tableName = K_HISTORY_TABLE(room);
 
       if (this._historyTableReady.has(tableName)) return true;
+      if (this._historyTableFailed.has(tableName)) return false;
 
-      await this.db.prepare(`
-        CREATE TABLE IF NOT EXISTS ${tableName} (
-          timestamp INTEGER PRIMARY KEY,
-          chat_data TEXT NOT NULL,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-      `).run();
+      await _withTimeout(
+        this.db.prepare(`
+          CREATE TABLE IF NOT EXISTS ${tableName} (
+            timestamp INTEGER PRIMARY KEY,
+            chat_data TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          )
+        `).run(),
+        C.D1_QUERY_TIMEOUT_MS,
+        'createHistoryTable'
+      );
 
       this._historyTableReady.add(tableName);
+      this._historyTableFailed.delete(tableName);
       return true;
     } catch(e) {
+      this._historyTableFailed.add(K_HISTORY_TABLE(room));
       return false;
     }
   }
 
+  // FIX F11: loop anti timestamp collision
+  // FIX H7: timeout D1
   async _saveHistoryChat(room, chatDataArray) {
     try {
       if (!this.db) return false;
       if (!room || !Array.isArray(chatDataArray)) return false;
 
-      await this._ensureHistoryTable(room);
+      const tableOk = await this._ensureHistoryTable(room);
+      if (!tableOk) return false;
 
       const noimg     = chatDataArray[2] ?? 10000;
       const username  = chatDataArray[3] ?? "";
@@ -706,22 +806,35 @@ export class ChatServer {
 
       try {
         const tableName = K_HISTORY_TABLE(room);
-        const existing = await this.db.prepare(
-          `SELECT timestamp FROM ${tableName} WHERE timestamp = ? LIMIT 1`
-        ).bind(timestamp).first();
-        if (existing) timestamp = timestamp + 1;
+        let attempts = 0;
+        while (attempts < C.HISTORY_COLLISION_MAX) {
+          const existing = await _withTimeout(
+            this.db.prepare(
+              `SELECT timestamp FROM ${tableName} WHERE timestamp = ? LIMIT 1`
+            ).bind(timestamp).first(),
+            C.D1_QUERY_TIMEOUT_MS,
+            'checkHistoryCollision'
+          );
+          if (!existing) break;
+          timestamp = timestamp + 1;
+          attempts++;
+        }
       } catch(e) {}
 
       const tableName = K_HISTORY_TABLE(room);
 
-      await this.db.prepare(`
-        INSERT OR REPLACE INTO ${tableName}
-        (timestamp, chat_data)
-        VALUES (?, ?)
-      `).bind(
-        timestamp,
-        JSON.stringify(javaFormat)
-      ).run();
+      await _withTimeout(
+        this.db.prepare(`
+          INSERT OR REPLACE INTO ${tableName}
+          (timestamp, chat_data)
+          VALUES (?, ?)
+        `).bind(
+          timestamp,
+          JSON.stringify(javaFormat)
+        ).run(),
+        C.HISTORY_TIMEOUT_MS,
+        'saveHistory'
+      );
 
       return timestamp;
     } catch(e) {
@@ -729,10 +842,12 @@ export class ChatServer {
     }
   }
 
+  // FIX H8: timeout D1
   async _loadHistoryChat(room) {
     try {
       if (!this.db) return [];
-      await this._ensureHistoryTable(room);
+      const tableOk = await this._ensureHistoryTable(room);
+      if (!tableOk) return [];
 
       const tableName = K_HISTORY_TABLE(room);
 
@@ -743,7 +858,11 @@ export class ChatServer {
         LIMIT ${C.HISTORY_LIMIT}
       `;
 
-      const result = await this.db.prepare(query).all();
+      const result = await _withTimeout(
+        this.db.prepare(query).all(),
+        C.HISTORY_TIMEOUT_MS,
+        'loadHistory'
+      );
       const rows = result?.results || [];
 
       return rows.reverse().map(r => {
@@ -760,14 +879,22 @@ export class ChatServer {
     }
   }
 
+  // FIX H9: timeout D1
   async _checkAndResetHistory(room) {
     try {
       if (!this.db) return false;
+      const tableOk = await this._ensureHistoryTable(room);
+      if (!tableOk) return false;
+
       const tableName = K_HISTORY_TABLE(room);
 
-      const row = await this.db.prepare(`
-        SELECT MIN(timestamp) AS first_ts FROM ${tableName}
-      `).first();
+      const row = await _withTimeout(
+        this.db.prepare(`
+          SELECT MIN(timestamp) AS first_ts FROM ${tableName}
+        `).first(),
+        C.D1_QUERY_TIMEOUT_MS,
+        'checkHistoryAge'
+      );
 
       if (!row || !row.first_ts) return false;
 
@@ -775,8 +902,13 @@ export class ChatServer {
       const age = nowTs - row.first_ts;
 
       if (age > C.HISTORY_MAX_AGE_MS) {
-        await this.db.prepare(`DROP TABLE IF EXISTS ${tableName}`).run();
+        await _withTimeout(
+          this.db.prepare(`DROP TABLE IF EXISTS ${tableName}`).run(),
+          C.D1_QUERY_TIMEOUT_MS,
+          'dropHistoryTable'
+        );
         this._historyTableReady.delete(tableName);
+        this._historyTableFailed.delete(tableName);
         return true;
       }
 
@@ -914,17 +1046,21 @@ export class ChatServer {
       if (defBucket) {
         if (!defBucket.chatRaw && legacyChatRaw) {
           defBucket.chatRaw = legacyChatRaw;
-          this.db.prepare(`
-            INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
-          `).bind(K_CHAT(DEFAULT_MULTY_ROOM), legacyChatRaw).run().catch(() => {});
+          Promise.resolve().then(() =>
+            this.db.prepare(`
+              INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
+              VALUES (?, ?, CURRENT_TIMESTAMP)
+            `).bind(K_CHAT(DEFAULT_MULTY_ROOM), legacyChatRaw).run()
+          ).catch(() => {});
         }
         if (!defBucket.numberRaw && legacyNumberRaw) {
           defBucket.numberRaw = legacyNumberRaw;
-          this.db.prepare(`
-            INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
-          `).bind(K_NUMBER(DEFAULT_MULTY_ROOM), legacyNumberRaw).run().catch(() => {});
+          Promise.resolve().then(() =>
+            this.db.prepare(`
+              INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
+              VALUES (?, ?, CURRENT_TIMESTAMP)
+            `).bind(K_NUMBER(DEFAULT_MULTY_ROOM), legacyNumberRaw).run()
+          ).catch(() => {});
         }
       }
 
@@ -981,6 +1117,7 @@ export class ChatServer {
     }
   }
 
+  // FIX H10: timeout D1 per query
   async _loadMultyFromTable(room) {
     const r = room || DEFAULT_MULTY_ROOM;
     try {
@@ -992,59 +1129,69 @@ export class ChatServer {
       let rowRunning = null;
 
       try {
-        rowChat = await this.db
-          .prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
-          .bind(K_CHAT(r))
-          .first();
+        rowChat = await _withTimeout(
+          this.db.prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
+            .bind(K_CHAT(r)).first(),
+          C.D1_QUERY_TIMEOUT_MS, 'loadMultyChat'
+        );
       } catch(e) {}
 
       try {
-        rowNum = await this.db
-          .prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
-          .bind(K_NUMBER(r))
-          .first();
+        rowNum = await _withTimeout(
+          this.db.prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
+            .bind(K_NUMBER(r)).first(),
+          C.D1_QUERY_TIMEOUT_MS, 'loadMultyNumber'
+        );
       } catch(e) {}
 
       try {
-        rowIdx = await this.db
-          .prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
-          .bind(K_INDEX(r))
-          .first();
+        rowIdx = await _withTimeout(
+          this.db.prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
+            .bind(K_INDEX(r)).first(),
+          C.D1_QUERY_TIMEOUT_MS, 'loadMultyIndex'
+        );
       } catch(e) {}
 
       try {
-        rowRunning = await this.db
-          .prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
-          .bind(K_RUNNING(r))
-          .first();
+        rowRunning = await _withTimeout(
+          this.db.prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
+            .bind(K_RUNNING(r)).first(),
+          C.D1_QUERY_TIMEOUT_MS, 'loadMultyRunning'
+        );
       } catch(e) {}
 
       if ((!rowChat || !rowChat.value) && r === DEFAULT_MULTY_ROOM) {
         try {
-          const oldChat = await this.db
-            .prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = 'chat_multy'`)
-            .first();
+          const oldChat = await _withTimeout(
+            this.db.prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = 'chat_multy'`).first(),
+            C.D1_QUERY_TIMEOUT_MS, 'loadLegacyChat'
+          );
           if (oldChat?.value) {
             rowChat = oldChat;
-            await this.db.prepare(`
-              INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
-              VALUES (?, ?, CURRENT_TIMESTAMP)
-            `).bind(K_CHAT(r), oldChat.value).run();
+            Promise.resolve().then(() =>
+              this.db.prepare(`
+                INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+              `).bind(K_CHAT(r), oldChat.value).run()
+            ).catch(() => {});
           }
         } catch(e) {}
       }
 
       if ((!rowNum || !rowNum.value) && r === DEFAULT_MULTY_ROOM) {
         try {
-          const oldNum = await this.db
-            .prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = 'number'`)
-            .first();
+          const oldNum = await _withTimeout(
+            this.db.prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = 'number'`).first(),
+            C.D1_QUERY_TIMEOUT_MS, 'loadLegacyNumber'
+          );
           if (oldNum?.value) {
             rowNum = oldNum;
-            await this.db.prepare(`
-              INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
-              VALUES (?, ?, CURRENT_TIMESTAMP)
-            `).bind(K_NUMBER(r), oldNum.value).run();
+            Promise.resolve().then(() =>
+              this.db.prepare(`
+                INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+              `).bind(K_NUMBER(r), oldNum.value).run()
+            ).catch(() => {});
           }
         } catch(e) {}
       }
@@ -1061,14 +1208,18 @@ export class ChatServer {
     }
   }
 
+  // FIX H20: timeout D1
   async _saveMultyChatToTable(room, chatList) {
     const r = room || DEFAULT_MULTY_ROOM;
     try {
       if (!this.db) return false;
-      await this.db.prepare(`
-        INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-      `).bind(K_CHAT(r), JSON.stringify(chatList)).run();
+      await _withTimeout(
+        this.db.prepare(`
+          INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
+          VALUES (?, ?, CURRENT_TIMESTAMP)
+        `).bind(K_CHAT(r), JSON.stringify(chatList)).run(),
+        C.D1_WRITE_TIMEOUT_MS, 'saveMultyChat'
+      );
       return true;
     } catch(e) {
       return false;
@@ -1079,10 +1230,13 @@ export class ChatServer {
     const r = room || DEFAULT_MULTY_ROOM;
     try {
       if (!this.db) return false;
-      await this.db.prepare(`
-        INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-      `).bind(K_NUMBER(r), String(numberNext)).run();
+      await _withTimeout(
+        this.db.prepare(`
+          INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
+          VALUES (?, ?, CURRENT_TIMESTAMP)
+        `).bind(K_NUMBER(r), String(numberNext)).run(),
+        C.D1_WRITE_TIMEOUT_MS, 'saveMultyNumber'
+      );
       return true;
     } catch(e) {
       return false;
@@ -1093,10 +1247,13 @@ export class ChatServer {
     const r = room || DEFAULT_MULTY_ROOM;
     try {
       if (!this.db) return false;
-      await this.db.prepare(`
-        INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-      `).bind(K_INDEX(r), String(indexNext)).run();
+      await _withTimeout(
+        this.db.prepare(`
+          INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
+          VALUES (?, ?, CURRENT_TIMESTAMP)
+        `).bind(K_INDEX(r), String(indexNext)).run(),
+        C.D1_WRITE_TIMEOUT_MS, 'saveMultyIndex'
+      );
       return true;
     } catch(e) {
       return false;
@@ -1107,10 +1264,13 @@ export class ChatServer {
     const r = room || DEFAULT_MULTY_ROOM;
     try {
       if (!this.db) return false;
-      await this.db.prepare(`
-        INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-      `).bind(K_RUNNING(r), running ? "1" : "0").run();
+      await _withTimeout(
+        this.db.prepare(`
+          INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
+          VALUES (?, ?, CURRENT_TIMESTAMP)
+        `).bind(K_RUNNING(r), running ? "1" : "0").run(),
+        C.D1_WRITE_TIMEOUT_MS, 'saveMultyRunning'
+      );
       return true;
     } catch(e) {
       return false;
@@ -1121,10 +1281,11 @@ export class ChatServer {
     const r = room || DEFAULT_MULTY_ROOM;
     try {
       if (!this.db) return false;
-      const row = await this.db
-        .prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
-        .bind(K_RUNNING(r))
-        .first();
+      const row = await _withTimeout(
+        this.db.prepare(`SELECT value FROM ${TABLE_MULTY} WHERE key = ?`)
+          .bind(K_RUNNING(r)).first(),
+        C.D1_QUERY_TIMEOUT_MS, 'loadMultyRunning'
+      );
       return row?.value === "1";
     } catch(e) {
       return false;
@@ -1135,9 +1296,10 @@ export class ChatServer {
     const r = room || DEFAULT_MULTY_ROOM;
     try {
       if (!this.db) return false;
-      await this.db.prepare(`
-        DELETE FROM ${TABLE_MULTY} WHERE key = ?
-      `).bind(K_CHAT(r)).run();
+      await _withTimeout(
+        this.db.prepare(`DELETE FROM ${TABLE_MULTY} WHERE key = ?`).bind(K_CHAT(r)).run(),
+        C.D1_DELETE_TIMEOUT_MS, 'deleteMultyChat'
+      );
       return true;
     } catch(e) {
       return false;
@@ -1212,11 +1374,14 @@ export class ChatServer {
     }
   }
 
+  // FIX F15: await saveHistory dengan timeout
+  // FIX H5: hapus double D1 write number (redundan)
   async _nextMultyChat(room) {
     const r = room || DEFAULT_MULTY_ROOM;
     const st = this._getMultyState(r);
     try {
       if (!st.running) return false;
+      if (this.isDestroyed || this.closing) return false;
 
       const clients = this.roomClients?.get(r);
       if (!clients || clients.size === 0) {
@@ -1285,22 +1450,19 @@ export class ChatServer {
         this.broadcast(r, chatData);
         this.broadcast(r, ["multyNumber", st.numberNext, r]);
 
-        this._saveHistoryChat(r, chatData).catch(() => {});
+        try {
+          await _withTimeout(
+            this._saveHistoryChat(r, chatData),
+            C.MULTY_HISTORY_TIMEOUT_MS,
+            'saveHistoryMulty'
+          );
+        } catch(e) {}
       }
-
-      try {
-        if (this.db) {
-          const num = st.numberNext;
-          await this.db.prepare(`
-            INSERT OR REPLACE INTO ${TABLE_MULTY} (key, value, updated_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP)
-          `).bind(K_NUMBER(r), String(num)).run();
-        }
-      } catch(e) {}
 
       st.numberNext++;
       if (st.numberNext > C.MAX_MULTY_NUMBER) st.numberNext = 1;
 
+      // FIX H5: single save (tidak double)
       this._saveMultyNumberToTable(r, st.numberNext).catch(() => {});
 
       st.index++;
@@ -1329,12 +1491,14 @@ export class ChatServer {
     }
   }
 
+  // FIX F4: break jika destroy/closing
   async _restoreWithRetry() {
     let attempts = 0;
     let lastError = null;
 
     try {
       while (attempts < C.MAX_RESTORE_ATTEMPTS) {
+        if (this.isDestroyed || this.closing) break;
         try {
           attempts++;
           const result = await this._restoreAllState();
@@ -1344,7 +1508,7 @@ export class ChatServer {
           lastError = e;
           this._restoreAttempts = attempts;
 
-          if (attempts < C.MAX_RESTORE_ATTEMPTS) {
+          if (attempts < C.MAX_RESTORE_ATTEMPTS && !this.isDestroyed && !this.closing) {
             await new Promise(resolve => setTimeout(resolve, C.RESTORE_RETRY_DELAY_MS));
             this._isRestoring = true;
           }
@@ -1547,18 +1711,25 @@ export class ChatServer {
     }
   }
 
+  // FIX H14: timeout D1
   async _saveSeat(roomName, seatNumber, seatData) {
     if (!this.db) return;
     try {
       const key = `seat_${roomName}_${seatNumber}`;
       if (!seatData || !seatData.namauser || seatData.namauser.trim() === '') {
-        await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
+        await _withTimeout(
+          this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run(),
+          C.D1_DELETE_TIMEOUT_MS, 'deleteSeat'
+        );
         return;
       }
-      await this.db
-        .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-        .bind(key, JSON.stringify(seatData))
-        .run();
+      await _withTimeout(
+        this.db
+          .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+          .bind(key, JSON.stringify(seatData))
+          .run(),
+        C.D1_WRITE_TIMEOUT_MS, 'saveSeat'
+      );
     } catch(e) {}
   }
 
@@ -1567,13 +1738,19 @@ export class ChatServer {
     try {
       const key = `point_${roomName}_${seatNumber}`;
       if (!pointData || (pointData.x === 0 && pointData.y === 0 && !pointData.fast)) {
-        await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
+        await _withTimeout(
+          this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run(),
+          C.D1_DELETE_TIMEOUT_MS, 'deletePoint'
+        );
         return;
       }
-      await this.db
-        .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-        .bind(key, JSON.stringify(pointData))
-        .run();
+      await _withTimeout(
+        this.db
+          .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+          .bind(key, JSON.stringify(pointData))
+          .run(),
+        C.D1_WRITE_TIMEOUT_MS, 'savePoint'
+      );
     } catch(e) {}
   }
 
@@ -1582,13 +1759,19 @@ export class ChatServer {
     try {
       const key = `mute_${roomName}`;
       if (muted === false) {
-        await this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run();
+        await _withTimeout(
+          this.db.prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`).bind(key).run(),
+          C.D1_DELETE_TIMEOUT_MS, 'deleteMute'
+        );
         return;
       }
-      await this.db
-        .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-        .bind(key, JSON.stringify(muted))
-        .run();
+      await _withTimeout(
+        this.db
+          .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+          .bind(key, JSON.stringify(muted))
+          .run(),
+        C.D1_WRITE_TIMEOUT_MS, 'saveMute'
+      );
     } catch(e) {}
   }
 
@@ -1598,13 +1781,17 @@ export class ChatServer {
       const n = (typeof this.currentNumber === 'number' && this.currentNumber >= 1)
         ? this.currentNumber
         : 1;
-      await this.db
-        .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
-        .bind('current_number', String(n))
-        .run();
+      await _withTimeout(
+        this.db
+          .prepare(`INSERT OR REPLACE INTO ${TABLE_NAME} (key, value) VALUES (?, ?)`)
+          .bind('current_number', String(n))
+          .run(),
+        C.D1_WRITE_TIMEOUT_MS, 'saveCurrentNumber'
+      );
     } catch(e) {}
   }
 
+  // FIX H11: timeout D1
   async _forceDeleteFromD1(username) {
     if (!this.db) return true;
     if (!username) return true;
@@ -1612,27 +1799,34 @@ export class ChatServer {
     const u = String(username);
 
     try {
-      await this.db.prepare(`
-        DELETE FROM ${TABLE_NAME}
-        WHERE key LIKE 'seat_%'
-        AND json_valid(value)
-        AND json_extract(value, '$.namauser') = ?
-        AND (json_extract(value, '$.isMulti') IS NULL OR json_extract(value, '$.isMulti') != 1)
-      `).bind(u).run();
-    } catch(e) {
-      try {
-        await this.db.prepare(`
+      await _withTimeout(
+        this.db.prepare(`
           DELETE FROM ${TABLE_NAME}
           WHERE key LIKE 'seat_%'
-          AND value LIKE ?
-          AND value NOT LIKE '%"isMulti":true%'
-        `).bind(`%"namauser":"${u}"%`).run();
+          AND json_valid(value)
+          AND json_extract(value, '$.namauser') = ?
+          AND (json_extract(value, '$.isMulti') IS NULL OR json_extract(value, '$.isMulti') != 1)
+        `).bind(u).run(),
+        C.D1_DELETE_TIMEOUT_MS, 'forceDeleteJson'
+      );
+    } catch(e) {
+      try {
+        await _withTimeout(
+          this.db.prepare(`
+            DELETE FROM ${TABLE_NAME}
+            WHERE key LIKE 'seat_%'
+            AND value LIKE ?
+            AND value NOT LIKE '%"isMulti":true%'
+          `).bind(`%"namauser":"${u}"%`).run(),
+          C.D1_DELETE_TIMEOUT_MS, 'forceDeleteLike'
+        );
       } catch(e2) {}
     }
 
     return true;
   }
 
+  // FIX H13: timeout D1
   async _wipeUserEverywhere(username) {
     if (!username) return 0;
 
@@ -1656,28 +1850,37 @@ export class ChatServer {
 
     if (this.db) {
       try {
-        await this.db.prepare(`
-          DELETE FROM ${TABLE_NAME}
-          WHERE key LIKE 'seat_%'
-          AND json_valid(value)
-          AND json_extract(value, '$.namauser') = ?
-        `).bind(username).run();
-      } catch(e) {
-        try {
-          await this.db.prepare(`
+        await _withTimeout(
+          this.db.prepare(`
             DELETE FROM ${TABLE_NAME}
             WHERE key LIKE 'seat_%'
-            AND value LIKE ?
-          `).bind(`%"namauser":"${username}"%`).run();
+            AND json_valid(value)
+            AND json_extract(value, '$.namauser') = ?
+          `).bind(username).run(),
+          C.D1_DELETE_TIMEOUT_MS, 'wipeUserJson'
+        );
+      } catch(e) {
+        try {
+          await _withTimeout(
+            this.db.prepare(`
+              DELETE FROM ${TABLE_NAME}
+              WHERE key LIKE 'seat_%'
+              AND value LIKE ?
+            `).bind(`%"namauser":"${username}"%`).run(),
+            C.D1_DELETE_TIMEOUT_MS, 'wipeUserLike'
+          );
         } catch(e2) {}
       }
 
       for (const item of removedSeats) {
         try {
-          await this.db
-            .prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`)
-            .bind(`point_${item.roomName}_${item.seatNum}`)
-            .run();
+          await _withTimeout(
+            this.db
+              .prepare(`DELETE FROM ${TABLE_NAME} WHERE key = ?`)
+              .bind(`point_${item.roomName}_${item.seatNum}`)
+              .run(),
+            C.D1_DELETE_TIMEOUT_MS, 'wipePoint'
+          );
         } catch(e) {}
       }
     }
@@ -1717,6 +1920,7 @@ export class ChatServer {
     return removedSeats.length;
   }
 
+  // FIX H12: timeout D1
   async _lightDeleteAllSeatsForUser(username, options = {}) {
     if (!username) return 0;
 
@@ -1753,30 +1957,39 @@ export class ChatServer {
       if (this.db) {
         if (!keepRoom && !keepSeat) {
           try {
-            await this.db.prepare(`
-              DELETE FROM ${TABLE_NAME}
-              WHERE key LIKE 'seat_%'
-              AND json_valid(value)
-              AND json_extract(value, '$.namauser') = ?
-              AND (json_extract(value, '$.isMulti') IS NULL OR json_extract(value, '$.isMulti') != 1)
-            `).bind(username).run();
-          } catch(e) {
-            try {
-              await this.db.prepare(`
+            await _withTimeout(
+              this.db.prepare(`
                 DELETE FROM ${TABLE_NAME}
                 WHERE key LIKE 'seat_%'
-                AND value LIKE ?
-                AND value NOT LIKE '%"isMulti":true%'
-              `).bind(`%"namauser":"${username}"%`).run();
+                AND json_valid(value)
+                AND json_extract(value, '$.namauser') = ?
+                AND (json_extract(value, '$.isMulti') IS NULL OR json_extract(value, '$.isMulti') != 1)
+              `).bind(username).run(),
+              C.D1_DELETE_TIMEOUT_MS, 'lightDeleteJson'
+            );
+          } catch(e) {
+            try {
+              await _withTimeout(
+                this.db.prepare(`
+                  DELETE FROM ${TABLE_NAME}
+                  WHERE key LIKE 'seat_%'
+                  AND value LIKE ?
+                  AND value NOT LIKE '%"isMulti":true%'
+                `).bind(`%"namauser":"${username}"%`).run(),
+                C.D1_DELETE_TIMEOUT_MS, 'lightDeleteLike'
+              );
             } catch(e2) {}
           }
         } else {
           for (const item of seatsToDelete) {
             try {
-              await this.db
-                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
-                .bind(`seat_${item.roomName}_${item.seatNum}`, `point_${item.roomName}_${item.seatNum}`)
-                .run();
+              await _withTimeout(
+                this.db
+                  .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
+                  .bind(`seat_${item.roomName}_${item.seatNum}`, `point_${item.roomName}_${item.seatNum}`)
+                  .run(),
+                C.D1_DELETE_TIMEOUT_MS, 'lightDeleteSeatPoint'
+              );
             } catch(e) {}
           }
         }
@@ -1858,6 +2071,7 @@ export class ChatServer {
     }
   }
 
+  // FIX H16: timeout D1
   async _deleteSeatInRoom(roomName, seatNumber, force = false) {
     return await this._withLock(
       this._roomWriteLocks,
@@ -1875,10 +2089,13 @@ export class ChatServer {
 
           if (this.db) {
             try {
-              await this.db
-                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
-                .bind(`seat_${roomName}_${seatNumber}`, `point_${roomName}_${seatNumber}`)
-                .run();
+              await _withTimeout(
+                this.db
+                  .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
+                  .bind(`seat_${roomName}_${seatNumber}`, `point_${roomName}_${seatNumber}`)
+                  .run(),
+                C.D1_DELETE_TIMEOUT_MS, 'deleteSeatPoint'
+              );
             } catch(e) {}
           }
 
@@ -1906,6 +2123,7 @@ export class ChatServer {
     );
   }
 
+  // FIX H15: timeout D1 delete loop
   async _updateSeatInRoom(roomName, seatNumber, seatData) {
     return await this._withLock(
       this._roomWriteLocks,
@@ -1955,10 +2173,13 @@ export class ChatServer {
 
               if (this.db) {
                 try {
-                  await this.db
-                    .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
-                    .bind(`seat_${rName}_${sNum}`, `point_${rName}_${sNum}`)
-                    .run();
+                  await _withTimeout(
+                    this.db
+                      .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
+                      .bind(`seat_${rName}_${sNum}`, `point_${rName}_${sNum}`)
+                      .run(),
+                    C.D1_DELETE_TIMEOUT_MS, 'deleteOtherSeat'
+                  );
                 } catch(e) {}
               }
 
@@ -2651,6 +2872,8 @@ export class ChatServer {
     }
   }
 
+  // FIX H1: timeout D1 (forceDelete + lightDelete)
+  // FIX H24: guard isDestroyed di close
   async _cleanupUserCompletely(ws, options = {}) {
     const result = { removedSeats: [] };
 
@@ -2785,8 +3008,21 @@ export class ChatServer {
       const withinGrace = ws._joinedAt && joinedAgo < C.JOIN_CLEANUP_GRACE_MS;
 
       if (username && !stillConnected && !this._isRestoring && !withinGrace) {
-        try { await this._forceDeleteFromD1(username); } catch (e) {}
-        try { await this._lightDeleteAllSeatsForUser(username); } catch (e) {}
+        // FIX H1: timeout D1
+        try {
+          await _withTimeout(
+            this._forceDeleteFromD1(username),
+            C.D1_DELETE_TIMEOUT_MS,
+            'cleanupForceDelete'
+          );
+        } catch (e) {}
+        try {
+          await _withTimeout(
+            this._lightDeleteAllSeatsForUser(username),
+            C.D1_DELETE_TIMEOUT_MS,
+            'cleanupLightDelete'
+          );
+        } catch (e) {}
       }
 
       if (this.userConnections && username) {
@@ -2813,9 +3049,12 @@ export class ChatServer {
       this._roomCountsCache = null;
       this._roomCountsCacheTime = 0;
 
-      try {
-        if (ws.readyState === 1) ws.close(1000, "Cleanup");
-      } catch (e) {}
+      // FIX H24: guard isDestroyed
+      if (!this.isDestroyed) {
+        try {
+          if (ws.readyState === 1) ws.close(1000, "Cleanup");
+        } catch (e) {}
+      }
 
       state.cleanupDone = true;
     } catch (e) {
@@ -2841,12 +3080,20 @@ export class ChatServer {
     } catch (e) {}
   }
 
+  // FIX F7: cap ws._msgQueueLen (anti OOM)
   async webSocketMessage(ws, msg) {
     try {
       if (!ws) return;
 
+      if (!ws._msgQueueLen) ws._msgQueueLen = 0;
+      if (ws._msgQueueLen >= C.MAX_WS_MSG_QUEUE) {
+        this.safeSend(ws, ["error", "Too many messages"]);
+        return;
+      }
+
       if (!ws._msgQueue) ws._msgQueue = Promise.resolve();
 
+      ws._msgQueueLen++;
       ws._msgQueue = ws._msgQueue
         .then(() => Promise.race([
           this._webSocketMessageInternal(ws, msg),
@@ -2856,6 +3103,9 @@ export class ChatServer {
         ]))
         .catch(e => {
           this._handleError('wsQueue', e);
+        })
+        .finally(() => {
+          ws._msgQueueLen = Math.max(0, (ws._msgQueueLen || 1) - 1);
         });
 
       return ws._msgQueue;
@@ -2958,7 +3208,9 @@ export class ChatServer {
           if (Date.now() - startTime > C.PENDING_PROCESS_TIMEOUT_MS) {
             if (this._pendingEvents.length > 0 && !this.closing && !this.isDestroyed) {
               setTimeout(() => {
-                this._processPendingEvents().catch(() => {});
+                if (!this.isDestroyed && !this.closing) {
+                  this._processPendingEvents().catch(() => {});
+                }
               }, 100);
             }
             break;
@@ -3047,7 +3299,11 @@ export class ChatServer {
         }
 
         if (this._eventQueue.length > 0 && !this.closing && !this.isDestroyed) {
-          setTimeout(() => this._processEventQueue(), 10);
+          setTimeout(() => {
+            if (!this.isDestroyed && !this.closing) {
+              this._processEventQueue();
+            }
+          }, 10);
         }
       } finally {
         this._processingQueue = false;
@@ -3057,13 +3313,16 @@ export class ChatServer {
     }
   }
 
+  // FIX H3: safe stringify
   broadcast(room, msg) {
     try {
       if (this.closing || this.isDestroyed || !room || !msg) return 0;
       const clients = this.roomClients?.get(room);
       if (!clients || clients.size === 0) return 0;
 
-      const msgStr = JSON.stringify(msg);
+      const msgStr = _safeStringify(msg);
+      if (msgStr === null) return 0;
+
       const toRemove = new Set();
       let sentCount = 0;
 
@@ -3133,7 +3392,9 @@ export class ChatServer {
       if (ws.readyState !== 1 || ws._closing || ws._cleaning || this.closing || this.isDestroyed) {
         return false;
       }
-      ws.send(JSON.stringify(msg));
+      const str = _safeStringify(msg);
+      if (str === null) return false;
+      ws.send(str);
       return true;
     } catch(e) {
       return false;
@@ -3235,6 +3496,7 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // FIX H17: timeout D1
   async _verifyAndCleanupOrphanSeats(liveWsList) {
     try {
       if (this._isRestoring) return 0;
@@ -3298,10 +3560,13 @@ export class ChatServer {
         try {
           if (this.db) {
             try {
-              await this.db
-                .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
-                .bind(`seat_${room}_${seat}`, `point_${room}_${seat}`)
-                .run();
+              await _withTimeout(
+                this.db
+                  .prepare(`DELETE FROM ${TABLE_NAME} WHERE key IN (?, ?)`)
+                  .bind(`seat_${room}_${seat}`, `point_${room}_${seat}`)
+                  .run(),
+                C.D1_DELETE_TIMEOUT_MS, 'orphanDelete'
+              );
             } catch(e) {}
           }
 
@@ -3319,7 +3584,9 @@ export class ChatServer {
     }
   }
 
-  // ✅ R1 + R9: timeout internal + cek per ws + batch + yield + state konsisten
+  // FIX F8: pastikan _cacheInitialized sebelum _processPendingEvents
+  // FIX H4: batch broadcast akhir + yield
+  // FIX H21: getAlarm optional chain aman
   async _restoreAllState() {
     const startTime = Date.now();
     const MAX_RESTORE_TIME = C.RESTORE_TOTAL_TIMEOUT_MS;
@@ -3416,10 +3683,10 @@ export class ChatServer {
           }
         }
 
-        // ✅ R1 + R9: cek timeout SEBELUM setiap ws (bukan hanya per batch)
         const batchSize = C.RESTORE_BATCH_SIZE;
         for (let i = 0; i < liveWebSockets.length; i++) {
           if (Date.now() - startTime > MAX_RESTORE_TIME) break;
+          if (this.isDestroyed || this.closing) break;
 
           const ws = liveWebSockets[i];
           try {
@@ -3430,7 +3697,6 @@ export class ChatServer {
             );
           } catch(e) {}
 
-          // Yield setiap batchSize ws
           if ((i + 1) % batchSize === 0) {
             await new Promise(resolve => setTimeout(resolve, 0));
           }
@@ -3438,6 +3704,7 @@ export class ChatServer {
 
         for (const ws of deadWebSockets) {
           if (Date.now() - startTime > MAX_RESTORE_TIME) break;
+          if (this.isDestroyed || this.closing) break;
           try {
             try {
               const att = ws.deserializeAttachment?.();
@@ -3497,19 +3764,32 @@ export class ChatServer {
 
       this._rebuildUserIndex();
 
-      for (const room of ROOMS) {
-        try {
-          const count = await this._getRoomCount(room);
-          this.broadcast(room, ["roomUserCount", room, count]);
-        } catch (e) {}
+      // FIX H4: batch broadcast + yield
+      {
+        let i = 0;
+        for (const room of ROOMS) {
+          if (this.isDestroyed || this.closing) break;
+          try {
+            const count = await this._getRoomCount(room);
+            this.broadcast(room, ["roomUserCount", room, count]);
+          } catch (e) {}
+          if (++i % C.BROADCAST_BATCH_YIELD === 0) {
+            await new Promise(resolve => setTimeout(resolve, 0));
+          }
+        }
       }
 
       if (!this.isDestroyed) {
         try {
           if (this.ctx && this.ctx.storage && typeof this.ctx.storage.setAlarm === 'function') {
-            const existing = typeof this.ctx.storage.getAlarm === 'function'
-              ? await this.ctx.storage.getAlarm().catch(() => null)
-              : null;
+            // FIX H21: optional chain aman
+            let existing = null;
+            try {
+              const alarmFn = this.ctx.storage.getAlarm;
+              if (typeof alarmFn === 'function') {
+                existing = await Promise.resolve(alarmFn.call(this.ctx.storage)).catch(() => null);
+              }
+            } catch(e) {}
             if (existing === null || existing === undefined) {
               await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
             }
@@ -3517,11 +3797,15 @@ export class ChatServer {
         } catch(e) {}
       }
 
-      // ✅ Set state SEBELUM proses pending
       this._restored = true;
       this._restoreDone = true;
       this._restoreFailed = false;
       this._isRestoring = false;
+
+      if (!this._cacheInitialized) {
+        this._cacheInitialized = true;
+        this._storageCache = this._storageCache || { roomsData: {}, currentNumber: 1 };
+      }
 
       try {
         await _withTimeout(this._processPendingEvents(), 5000, 'processPending');
@@ -3539,6 +3823,7 @@ export class ChatServer {
       this._hasBroadcastRemoveKursi = new Set();
 
       for (const room of ROOMS) {
+        if (this.isDestroyed || this.closing) break;
         try {
           const count = await this._getRoomCount(room);
           this.broadcast(room, ["roomUserCount", room, count]);
@@ -3548,9 +3833,13 @@ export class ChatServer {
       if (!this.isDestroyed) {
         try {
           if (this.ctx && this.ctx.storage && typeof this.ctx.storage.setAlarm === 'function') {
-            const existing = typeof this.ctx.storage.getAlarm === 'function'
-              ? await this.ctx.storage.getAlarm().catch(() => null)
-              : null;
+            let existing = null;
+            try {
+              const alarmFn = this.ctx.storage.getAlarm;
+              if (typeof alarmFn === 'function') {
+                existing = await Promise.resolve(alarmFn.call(this.ctx.storage)).catch(() => null);
+              }
+            } catch(e) {}
             if (existing === null || existing === undefined) {
               await this.ctx.storage.setAlarm(Date.now() + C.NUMBER_INTERVAL_MS);
             }
@@ -3566,7 +3855,7 @@ export class ChatServer {
     }
   }
 
-  // ✅ R8: pakai _findUserInCacheOnly (tanpa D1 read saat restore)
+  // FIX F14: validasi anyValid user sebelum anggap multi
   async _restoreLiveWebSocket(ws) {
     try {
       if (!ws) return;
@@ -3591,11 +3880,12 @@ export class ChatServer {
       let finalSeat = null;
       let finalUser = null;
       let finalIsMulti = false;
+      let anyValid = false;
 
-      // ✅ R8: pakai cache-only (tanpa D1 read)
       for (const u of multiUsers) {
         const f = this._findUserInCacheOnly(u);
         if (f) {
+          anyValid = true;
           finalUser = u;
           finalRoom = f.room;
           finalSeat = f.seat;
@@ -3607,6 +3897,7 @@ export class ChatServer {
       if (!finalRoom && attachment.username) {
         const f = this._findUserInCacheOnly(attachment.username);
         if (f) {
+          anyValid = true;
           finalUser = attachment.username;
           finalRoom = f.room;
           finalSeat = f.seat;
@@ -3615,9 +3906,9 @@ export class ChatServer {
       }
 
       if (!finalRoom) {
-        const wasMulti = this.wsActiveMulti?.has(ws) || multiUsers.length > 0;
+        const wasMulti = anyValid || (this.wsActiveMulti?.has(ws) && multiUsers.length > 0);
 
-        if (wasMulti) {
+        if (wasMulti && anyValid) {
           ws.username = attachment.username || null;
           ws._username = ws.username;
           ws.room = null;
@@ -4488,6 +4779,9 @@ export class ChatServer {
         case "updateKursi": {
           const [kursiRoom, kursiSeat, kursiNoimg, kursiName, kursiColor, kursiBawah, kursiAtas, kursiVip, kursiVt] = args;
 
+          if (!kursiRoom || !ROOMS_SET.has(kursiRoom)) break;
+          if (typeof kursiSeat !== 'number' || kursiSeat < 1 || kursiSeat > C.MAX_SEATS) break;
+
           const currentUser = ws.username || ws._username || kursiName || "";
 
           let isMultiVal = false;
@@ -4829,10 +5123,13 @@ export class ChatServer {
 
               if (this.db) {
                 try {
-                  await this.db
-                    .prepare(`DELETE FROM ${TABLE_NAME} WHERE key LIKE ? OR key LIKE ? OR key = ?`)
-                    .bind(`seat_${resetRoomName}_%`, `point_${resetRoomName}_%`, `mute_${resetRoomName}`)
-                    .run();
+                  await _withTimeout(
+                    this.db
+                      .prepare(`DELETE FROM ${TABLE_NAME} WHERE key LIKE ? OR key LIKE ? OR key = ?`)
+                      .bind(`seat_${resetRoomName}_%`, `point_${resetRoomName}_%`, `mute_${resetRoomName}`)
+                      .run(),
+                    C.D1_DELETE_TIMEOUT_MS, 'resetRoom'
+                  );
                 } catch(e) {}
               }
               this.broadcast(resetRoomName, ["resetRoom", resetRoomName]);
@@ -4862,13 +5159,15 @@ export class ChatServer {
     }
   }
 
+  // FIX F9: getAlarm optional chain aman
+  // FIX H22: guard isDestroyed tambahan
   async fetch(req) {
     try {
       if (!this._restored && !this._restorePromise) {
         this._restorePromise = this._restoreWithRetry();
       }
 
-      if (this.closing) {
+      if (this.closing || this.isDestroyed) {
         return new Response("Shutting down", { status: 503 });
       }
 
@@ -4965,9 +5264,18 @@ export class ChatServer {
             }
           }
 
+          let alarmActive = false;
+          try {
+            const alarmFn = this.ctx?.storage?.getAlarm;
+            if (typeof alarmFn === 'function') {
+              const val = await Promise.resolve(alarmFn.call(this.ctx.storage)).catch(() => null);
+              alarmActive = !!val;
+            }
+          } catch(e) {}
+
           return new Response(JSON.stringify({
             currentNumber: this.currentNumber,
-            alarmActive: !!(await this.ctx?.storage?.getAlarm().catch(() => null)),
+            alarmActive: alarmActive,
             intervalMin: C.NUMBER_INTERVAL_MS / 60000,
             multyRooms: multyStatus,
             runningRooms: runningRooms,
@@ -4982,6 +5290,8 @@ export class ChatServer {
             totalSeatsInCache: totalSeats,
             cacheInitialized: this._cacheInitialized,
             restoreFailed: this._restoreFailed,
+            joinCooldownSize: this._joinCooldown?.size || 0,
+            wsSetSize: this.wsSet?.size || 0,
             uptimeMs: Date.now() - this._startTime,
           }), {
             status: 200,
@@ -5008,6 +5318,7 @@ export class ChatServer {
         server._room = null;
         server._wsId = Date.now() + Math.random();
         server._createdAt = Date.now();
+        server._msgQueueLen = 0;
         try { server.serializeAttachment({ multiUsers: [] }); } catch(e) {}
 
         try {
@@ -5058,8 +5369,10 @@ export class ChatServer {
     } catch(e) {}
   }
 
+  // FIX F2: isDestroyed = true di AWAL (anti race)
   async destroy() {
     if (this.isDestroyed) return;
+    this.isDestroyed = true;
     this.closing = true;
 
     this._stopAllMultyLoops();
@@ -5107,13 +5420,15 @@ export class ChatServer {
     this._multyState = new Map();
     this._multyRestored = false;
     this._historyTableReady = new Set();
+    this._historyTableFailed = new Set();
 
     this._globalLocks = new Map();
     this._roomLocks = new Map();
     this._roomWriteLocks = new Map();
     this._joinCooldown = new Map();
-
-    this.isDestroyed = true;
+    this._kursiLocks = new Map();
+    this._pendingEvents = [];
+    this._eventQueue = [];
   }
 }
 
